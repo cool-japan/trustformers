@@ -129,12 +129,36 @@ pub enum PostProcessingType {
 }
 
 /// Custom format tokenizer implementation
-#[derive(Debug, Clone)]
 pub struct CustomFormatTokenizer {
     format: CustomTokenizerFormat,
     token_to_id: HashMap<String, u32>,
     id_to_token: HashMap<u32, String>,
     max_length: Option<usize>,
+    /// Handlers registered via [`Self::with_custom_normalizer`] for
+    /// `NormalizationType::Custom(name)` rules.
+    custom_normalizers: HashMap<String, Box<dyn Fn(&str) -> String + Send + Sync>>,
+    /// Handlers registered via [`Self::with_custom_pre_tokenizer`] for
+    /// `PreTokenizationType::Custom(name)` rules.
+    custom_pre_tokenizers: HashMap<String, Box<dyn Fn(&str) -> Vec<String> + Send + Sync>>,
+}
+
+impl std::fmt::Debug for CustomFormatTokenizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomFormatTokenizer")
+            .field("format", &self.format)
+            .field("token_to_id", &self.token_to_id)
+            .field("id_to_token", &self.id_to_token)
+            .field("max_length", &self.max_length)
+            .field(
+                "custom_normalizers",
+                &format!("[{} registered]", self.custom_normalizers.len()),
+            )
+            .field(
+                "custom_pre_tokenizers",
+                &format!("[{} registered]", self.custom_pre_tokenizers.len()),
+            )
+            .finish()
+    }
 }
 
 impl CustomFormatTokenizer {
@@ -160,7 +184,35 @@ impl CustomFormatTokenizer {
             token_to_id,
             id_to_token,
             max_length: Some(512),
+            custom_normalizers: HashMap::new(),
+            custom_pre_tokenizers: HashMap::new(),
         })
+    }
+
+    /// Register a handler for `NormalizationType::Custom(name)` rules.
+    /// Without a registered handler, encountering that rule is a
+    /// configuration error (see [`Self::normalize_text`]) rather than a
+    /// silent no-op.
+    pub fn with_custom_normalizer(
+        mut self,
+        name: impl Into<String>,
+        handler: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> Self {
+        self.custom_normalizers.insert(name.into(), Box::new(handler));
+        self
+    }
+
+    /// Register a handler for `PreTokenizationType::Custom(name)` rules.
+    /// Without a registered handler, encountering that rule is a
+    /// configuration error (see [`Self::pre_tokenize`]) rather than a
+    /// silent no-op.
+    pub fn with_custom_pre_tokenizer(
+        mut self,
+        name: impl Into<String>,
+        handler: impl Fn(&str) -> Vec<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.custom_pre_tokenizers.insert(name.into(), Box::new(handler));
+        self
     }
 
     /// Load tokenizer from custom format file
@@ -213,8 +265,13 @@ impl CustomFormatTokenizer {
         &self.token_to_id
     }
 
-    /// Apply normalization rules
-    fn normalize_text(&self, text: &str) -> String {
+    /// Apply normalization rules.
+    ///
+    /// A `Regex` rule with an invalid pattern, or a `Custom` rule with no
+    /// handler registered via [`Self::with_custom_normalizer`], is an error:
+    /// misconfiguration must be visible to the caller rather than silently
+    /// leaving the text unchanged.
+    fn normalize_text(&self, text: &str) -> Result<String> {
         let mut normalized = text.to_string();
 
         for rule in &self.format.normalization_rules {
@@ -235,24 +292,37 @@ impl CustomFormatTokenizer {
                     normalized.chars().filter(|c| !c.is_ascii_punctuation()).collect()
                 },
                 NormalizationType::Regex(_pattern) => {
-                    if let (Some(pattern), Some(replacement)) = (&rule.pattern, &rule.replacement) {
-                        if let Ok(re) = regex::Regex::new(pattern) {
-                            re.replace_all(&normalized, replacement).to_string()
-                        } else {
-                            normalized
-                        }
-                    } else {
-                        normalized
-                    }
+                    let (pattern, replacement) = match (&rule.pattern, &rule.replacement) {
+                        (Some(pattern), Some(replacement)) => (pattern, replacement),
+                        _ => {
+                            return Err(TrustformersError::invalid_config(
+                                "Regex normalization rule is missing pattern/replacement"
+                                    .to_string(),
+                            ));
+                        },
+                    };
+                    let re = regex::Regex::new(pattern).map_err(|e| {
+                        TrustformersError::invalid_config(format!(
+                            "Invalid normalization regex {:?}: {}",
+                            pattern, e
+                        ))
+                    })?;
+                    re.replace_all(&normalized, replacement.as_str()).to_string()
                 },
-                NormalizationType::Custom(_) => {
-                    // Custom normalization would be implemented based on specific needs
-                    normalized
+                NormalizationType::Custom(name) => {
+                    let handler = self.custom_normalizers.get(name).ok_or_else(|| {
+                        TrustformersError::invalid_config(format!(
+                            "Custom normalization rule {:?} has no registered handler \
+                             (register one via CustomFormatTokenizer::with_custom_normalizer)",
+                            name
+                        ))
+                    })?;
+                    handler(&normalized)
                 },
             };
         }
 
-        normalized
+        Ok(normalized)
     }
 
     /// Remove accents from text
@@ -263,8 +333,13 @@ impl CustomFormatTokenizer {
             .collect()
     }
 
-    /// Apply pre-tokenization rules
-    fn pre_tokenize(&self, text: &str) -> Vec<String> {
+    /// Apply pre-tokenization rules.
+    ///
+    /// A `Regex` rule with an invalid pattern, or a `Custom` rule with no
+    /// handler registered via [`Self::with_custom_pre_tokenizer`], is an
+    /// error: misconfiguration must be visible to the caller rather than
+    /// silently passing the token through unsplit.
+    fn pre_tokenize(&self, text: &str) -> Result<Vec<String>> {
         let mut tokens = vec![text.to_string()];
 
         for rule in &self.format.pre_tokenization_rules {
@@ -305,27 +380,36 @@ impl CustomFormatTokenizer {
                         new_tokens.extend(words);
                     },
                     PreTokenizationType::Regex(pattern) => {
-                        if let Ok(re) = regex::Regex::new(pattern) {
-                            let splits: Vec<String> = re
-                                .split(&token)
-                                .filter(|s| !s.is_empty())
-                                .map(|s| s.to_string())
-                                .collect();
-                            new_tokens.extend(splits);
-                        } else {
-                            new_tokens.push(token);
-                        }
+                        let re = regex::Regex::new(pattern).map_err(|e| {
+                            TrustformersError::invalid_config(format!(
+                                "Invalid pre-tokenization regex {:?}: {}",
+                                pattern, e
+                            ))
+                        })?;
+                        let splits: Vec<String> = re
+                            .split(&token)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .collect();
+                        new_tokens.extend(splits);
                     },
-                    PreTokenizationType::Custom(_) => {
-                        // Custom pre-tokenization would be implemented based on specific needs
-                        new_tokens.push(token);
+                    PreTokenizationType::Custom(name) => {
+                        let handler = self.custom_pre_tokenizers.get(name).ok_or_else(|| {
+                            TrustformersError::invalid_config(format!(
+                                "Custom pre-tokenization rule {:?} has no registered handler \
+                                 (register one via \
+                                 CustomFormatTokenizer::with_custom_pre_tokenizer)",
+                                name
+                            ))
+                        })?;
+                        new_tokens.extend(handler(&token));
                     },
                 }
             }
             tokens = new_tokens;
         }
 
-        tokens
+        Ok(tokens)
     }
 
     /// Tokenize text into subwords
@@ -363,8 +447,8 @@ impl CustomFormatTokenizer {
 
 impl Tokenizer for CustomFormatTokenizer {
     fn encode(&self, text: &str) -> Result<TokenizedInput> {
-        let normalized = self.normalize_text(text);
-        let pre_tokens = self.pre_tokenize(&normalized);
+        let normalized = self.normalize_text(text)?;
+        let pre_tokens = self.pre_tokenize(&normalized)?;
         let subwords = self.tokenize_subwords(pre_tokens);
 
         let mut input_ids = Vec::new();
@@ -857,6 +941,163 @@ mod tests {
         let result = tokenizer.encode("hello world").expect("Encoding failed");
         assert_eq!(result.input_ids, vec![0, 1]);
         assert_eq!(result.attention_mask, vec![1, 1]);
+    }
+
+    /// Build a minimal single-word-vocab format with the given
+    /// normalization/pre-tokenization rules, for the `Custom`/regex tests
+    /// below.
+    fn minimal_format(
+        normalization_rules: Vec<NormalizationRule>,
+        pre_tokenization_rules: Vec<PreTokenizationRule>,
+    ) -> CustomTokenizerFormat {
+        CustomTokenizerFormat {
+            format_name: "TestFormat".to_string(),
+            format_version: "1.0".to_string(),
+            vocabulary: CustomVocabulary {
+                vocab_type: VocabularyType::WordLevel,
+                tokens: vec![CustomToken {
+                    text: "hello".to_string(),
+                    id: 0,
+                    frequency: None,
+                    is_special: false,
+                    metadata: HashMap::new(),
+                }],
+                size: 1,
+                unk_token: None,
+                special_token_mapping: HashMap::new(),
+            },
+            special_tokens: vec![],
+            normalization_rules,
+            pre_tokenization_rules,
+            post_processing_rules: vec![],
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Regression test: a `NormalizationType::Custom` rule with no
+    /// registered handler used to silently leave the text unchanged. It
+    /// must now be an error.
+    #[test]
+    fn test_custom_normalization_without_handler_is_error() {
+        let format = minimal_format(
+            vec![NormalizationRule {
+                rule_type: NormalizationType::Custom("my_rule".to_string()),
+                pattern: None,
+                replacement: None,
+                enabled: true,
+            }],
+            vec![],
+        );
+        let tokenizer =
+            CustomFormatTokenizer::from_format(format).expect("Operation failed in test");
+        assert!(tokenizer.encode("hello").is_err());
+    }
+
+    /// A registered custom normalization handler must actually run.
+    #[test]
+    fn test_custom_normalization_dispatches_to_registered_handler() {
+        let format = minimal_format(
+            vec![NormalizationRule {
+                rule_type: NormalizationType::Custom("shout".to_string()),
+                pattern: None,
+                replacement: None,
+                enabled: true,
+            }],
+            vec![PreTokenizationRule {
+                rule_type: PreTokenizationType::WhitespaceSplit,
+                pattern: None,
+                enabled: true,
+            }],
+        );
+        let tokenizer = CustomFormatTokenizer::from_format(format)
+            .expect("Operation failed in test")
+            .with_custom_normalizer("shout", |s: &str| format!("{}!!!", s.to_uppercase()));
+
+        // "hello" -> "HELLO!!!", which does not match the single-word vocab
+        // ("hello", id 0) and has no unk_token configured, so it decodes to
+        // an empty token stream -- proving the handler actually ran rather
+        // than being a no-op (which would have kept "hello" -> id 0).
+        let result = tokenizer.encode("hello").expect("Operation failed in test");
+        assert!(result.input_ids.is_empty());
+    }
+
+    /// Regression test: a `PreTokenizationType::Custom` rule with no
+    /// registered handler used to silently pass the token through
+    /// unsplit. It must now be an error.
+    #[test]
+    fn test_custom_pre_tokenization_without_handler_is_error() {
+        let format = minimal_format(
+            vec![],
+            vec![PreTokenizationRule {
+                rule_type: PreTokenizationType::Custom("my_splitter".to_string()),
+                pattern: None,
+                enabled: true,
+            }],
+        );
+        let tokenizer =
+            CustomFormatTokenizer::from_format(format).expect("Operation failed in test");
+        assert!(tokenizer.encode("hello").is_err());
+    }
+
+    /// A registered custom pre-tokenization handler must actually run.
+    #[test]
+    fn test_custom_pre_tokenization_dispatches_to_registered_handler() {
+        let format = minimal_format(
+            vec![],
+            vec![PreTokenizationRule {
+                rule_type: PreTokenizationType::Custom("splitter".to_string()),
+                pattern: None,
+                enabled: true,
+            }],
+        );
+        let tokenizer = CustomFormatTokenizer::from_format(format)
+            .expect("Operation failed in test")
+            .with_custom_pre_tokenizer("splitter", |s: &str| {
+                s.chars().map(|c| c.to_string()).collect()
+            });
+
+        // Character-splitting "hello" (h,e,l,l,o) means none of those
+        // single-character pieces match the "hello" vocab entry, so the
+        // result must be empty -- proving the handler ran (a no-op would
+        // have kept the whole "hello" token, matching vocab id 0).
+        let result = tokenizer.encode("hello").expect("Operation failed in test");
+        assert!(result.input_ids.is_empty());
+    }
+
+    /// Regression test: an invalid regex normalization pattern used to be
+    /// silently ignored (leaving text unchanged); it must now be an error.
+    #[test]
+    fn test_invalid_regex_normalization_is_error() {
+        let format = minimal_format(
+            vec![NormalizationRule {
+                rule_type: NormalizationType::Regex("[unterminated".to_string()),
+                pattern: Some("[unterminated".to_string()),
+                replacement: Some("x".to_string()),
+                enabled: true,
+            }],
+            vec![],
+        );
+        let tokenizer =
+            CustomFormatTokenizer::from_format(format).expect("Operation failed in test");
+        assert!(tokenizer.encode("hello").is_err());
+    }
+
+    /// Regression test: an invalid regex pre-tokenization pattern used to
+    /// be silently ignored (passing the token through whole); it must now
+    /// be an error.
+    #[test]
+    fn test_invalid_regex_pre_tokenization_is_error() {
+        let format = minimal_format(
+            vec![],
+            vec![PreTokenizationRule {
+                rule_type: PreTokenizationType::Regex("[unterminated".to_string()),
+                pattern: None,
+                enabled: true,
+            }],
+        );
+        let tokenizer =
+            CustomFormatTokenizer::from_format(format).expect("Operation failed in test");
+        assert!(tokenizer.encode("hello").is_err());
     }
 
     #[test]

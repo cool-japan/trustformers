@@ -1,9 +1,12 @@
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod tests {
-    use crate::qwen::config::QwenConfig;
-    use crate::qwen::model::{QwenForCausalLM, QwenModel, QwenRMSNorm};
-    use trustformers_core::traits::Config;
+    use crate::qwen::config::{QwenConfig, RopeScaling};
+    use crate::qwen::model::{
+        QwenAttention, QwenForCausalLM, QwenModel, QwenRMSNorm, QwenRotaryEmbedding,
+    };
+    use trustformers_core::tensor::Tensor;
+    use trustformers_core::traits::{Config, Layer};
 
     // ── LCG ───────────────────────────────────────────────────────────────────
     struct Lcg {
@@ -357,6 +360,348 @@ mod tests {
         for _ in 0..200 {
             let v = rng.next_f32();
             assert!((0.0..1.0).contains(&v));
+        }
+    }
+
+    // ── Real attention / RoPE regression tests ────────────────────────────────
+    //
+    // These exercise the real RoPE (including "linear" and "dynamic" NTK
+    // rope_scaling) and real scaled dot-product attention that replaced a
+    // no-op RoPE and `o_proj(scale*Q + V)` fake attention. Every test below
+    // would have FAILED against that old code.
+
+    fn qwen_lcg_vec(n: usize, seed: u64) -> Vec<f32> {
+        let mut rng = Lcg::new(seed);
+        (0..n).map(|_| rng.next_f32() * 2.0 - 1.0).collect()
+    }
+
+    fn qwen_f32_data(t: &Tensor) -> Vec<f32> {
+        match t {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32 tensor"),
+        }
+    }
+
+    #[test]
+    fn test_qwen_rope_position_zero_is_identity() {
+        let rope = QwenRotaryEmbedding::new(4, 32, 10000.0, None);
+        let data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let q = Tensor::from_vec(data.clone(), &[1, 4]).expect("tensor");
+        let k = q.clone();
+        let (q_out, _) = rope.apply_rotary_emb(&q, &k, &[0]).expect("rope");
+        let out = qwen_f32_data(&q_out);
+        for (a, b) in data.iter().zip(out.iter()) {
+            assert!((a - b).abs() < 1e-5, "position 0 must be identity");
+        }
+    }
+
+    #[test]
+    fn test_qwen_rope_rotates_every_head() {
+        let head_dim = 4;
+        let rope = QwenRotaryEmbedding::new(head_dim, 32, 10000.0, None);
+        let data = vec![1.0f32; 8]; // seq_len=1, num_heads=2
+        let q = Tensor::from_vec(data.clone(), &[1, 8]).expect("tensor");
+        let k = q.clone();
+        let (q_out, _) = rope.apply_rotary_emb(&q, &k, &[7]).expect("rope");
+        let out = qwen_f32_data(&q_out);
+        let head0_changed = out[0..4].iter().zip(&data[0..4]).any(|(a, b)| (a - b).abs() > 1e-4);
+        let head1_changed = out[4..8].iter().zip(&data[4..8]).any(|(a, b)| (a - b).abs() > 1e-4);
+        assert!(head0_changed, "head 0 must rotate");
+        assert!(head1_changed, "head 1 must ALSO rotate, not just head 0");
+    }
+
+    /// Hand-verifiable property of "linear" (position-interpolation) RoPE
+    /// scaling: rotating at position `P` with `scaling_factor = F` must be
+    /// numerically identical to rotating the SAME vector, unscaled, at
+    /// position `P / F` (both are exactly representable here: P=4, F=2).
+    #[test]
+    fn test_qwen_rope_linear_scaling_matches_unscaled_at_divided_position() {
+        let head_dim = 8;
+        let data = vec![0.3f32, -0.7, 1.1, 0.4, -0.2, 0.9, -1.3, 0.6];
+
+        let scaled_rope = QwenRotaryEmbedding::new(
+            head_dim,
+            64,
+            10000.0,
+            Some(RopeScaling {
+                scaling_type: "linear".to_string(),
+                scaling_factor: 2.0,
+            }),
+        );
+        let unscaled_rope = QwenRotaryEmbedding::new(head_dim, 64, 10000.0, None);
+
+        let q = Tensor::from_vec(data.clone(), &[1, head_dim]).expect("tensor");
+        let k = q.clone();
+        let (scaled_out, _) = scaled_rope.apply_rotary_emb(&q, &k, &[4]).expect("rope scaled");
+        let (unscaled_out, _) =
+            unscaled_rope.apply_rotary_emb(&q, &k, &[2]).expect("rope unscaled");
+
+        let a = qwen_f32_data(&scaled_out);
+        let b = qwen_f32_data(&unscaled_out);
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert!(
+                (x - y).abs() < 1e-4,
+                "linear scaling(factor=2) at pos=4 must equal unscaled at pos=2: {x} vs {y}"
+            );
+        }
+    }
+
+    /// Hand-verifiable property of "dynamic" NTK RoPE scaling (matches HF
+    /// transformers' `_compute_dynamic_ntk_parameters`): it is a no-op while
+    /// the sequence length stays within `max_position_embeddings`, and must
+    /// diverge from unscaled RoPE once positions exceed it.
+    #[test]
+    fn test_qwen_rope_dynamic_scaling_is_noop_within_max_position() {
+        let head_dim = 8;
+        let max_seq_len = 16;
+        let data = vec![0.3f32, -0.7, 1.1, 0.4, -0.2, 0.9, -1.3, 0.6];
+
+        let dynamic_rope = QwenRotaryEmbedding::new(
+            head_dim,
+            max_seq_len,
+            10000.0,
+            Some(RopeScaling {
+                scaling_type: "dynamic".to_string(),
+                scaling_factor: 4.0,
+            }),
+        );
+        let unscaled_rope = QwenRotaryEmbedding::new(head_dim, max_seq_len, 10000.0, None);
+
+        let q = Tensor::from_vec(data.clone(), &[1, head_dim]).expect("tensor");
+        let k = q.clone();
+        // Position 5 is well within max_seq_len=16, so the dynamic factor's
+        // seq_len clamp keeps it a no-op.
+        let (dyn_out, _) = dynamic_rope.apply_rotary_emb(&q, &k, &[5]).expect("rope dynamic");
+        let (base_out, _) = unscaled_rope.apply_rotary_emb(&q, &k, &[5]).expect("rope base");
+        let a = qwen_f32_data(&dyn_out);
+        let b = qwen_f32_data(&base_out);
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert!(
+                (x - y).abs() < 1e-4,
+                "dynamic scaling must be a no-op within max_position_embeddings: {x} vs {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_qwen_rope_dynamic_scaling_diverges_beyond_max_position() {
+        let head_dim = 8;
+        let max_seq_len = 16;
+        let data = vec![0.3f32, -0.7, 1.1, 0.4, -0.2, 0.9, -1.3, 0.6];
+
+        let dynamic_rope = QwenRotaryEmbedding::new(
+            head_dim,
+            max_seq_len,
+            10000.0,
+            Some(RopeScaling {
+                scaling_type: "dynamic".to_string(),
+                scaling_factor: 4.0,
+            }),
+        );
+        let unscaled_rope = QwenRotaryEmbedding::new(head_dim, max_seq_len, 10000.0, None);
+
+        let q = Tensor::from_vec(data.clone(), &[1, head_dim]).expect("tensor");
+        let k = q.clone();
+        // Position 31 exceeds max_seq_len=16, so the NTK base adjustment
+        // must kick in and diverge from plain unscaled RoPE.
+        let (dyn_out, _) = dynamic_rope.apply_rotary_emb(&q, &k, &[31]).expect("rope dynamic");
+        let (base_out, _) = unscaled_rope.apply_rotary_emb(&q, &k, &[31]).expect("rope base");
+        let a = qwen_f32_data(&dyn_out);
+        let b = qwen_f32_data(&base_out);
+        let differs = a.iter().zip(b.iter()).any(|(x, y)| (x - y).abs() > 1e-4);
+        assert!(
+            differs,
+            "dynamic scaling must diverge from unscaled RoPE beyond max_position_embeddings"
+        );
+    }
+
+    #[test]
+    fn test_qwen_rope_unsupported_scaling_type_is_a_structured_error() {
+        let rope = QwenRotaryEmbedding::new(
+            8,
+            32,
+            10000.0,
+            Some(RopeScaling {
+                scaling_type: "yarn".to_string(),
+                scaling_factor: 2.0,
+            }),
+        );
+        let q = Tensor::from_vec(vec![0.0f32; 8], &[1, 8]).expect("tensor");
+        let k = q.clone();
+        let result = rope.apply_rotary_emb(&q, &k, &[1]);
+        assert!(
+            result.is_err(),
+            "an unrecognized rope_scaling.scaling_type must return an error, not silently apply a guessed formula"
+        );
+    }
+
+    fn qwen_attn_config() -> QwenConfig {
+        minimal_qwen_config()
+    }
+
+    #[test]
+    fn test_qwen_attention_output_shape() {
+        let config = qwen_attn_config();
+        let attn = QwenAttention::new(&config).expect("attention");
+        let seq_len = 4;
+        let hidden = config.hidden_size;
+        let input =
+            Tensor::from_vec(qwen_lcg_vec(seq_len * hidden, 1), &[seq_len, hidden]).expect("t");
+        let out = attn.forward(input).expect("forward");
+        assert_eq!(out.shape(), vec![seq_len, hidden]);
+    }
+
+    /// Changing an EARLY token must change a LATER position's output — the
+    /// discriminating test that only real QK^T/softmax/V attention passes;
+    /// the old `o_proj(scale*Q + V)` fake path is purely position-local.
+    #[test]
+    fn test_qwen_attention_early_token_change_propagates_forward() {
+        let config = qwen_attn_config();
+        let attn = QwenAttention::new(&config).expect("attention");
+        let seq_len = 4;
+        let hidden = config.hidden_size;
+
+        let base = qwen_lcg_vec(seq_len * hidden, 31);
+        let mut modified = base.clone();
+        for x in modified[0..hidden].iter_mut() {
+            *x += 5.0;
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+        let out_mod = attn
+            .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+
+        let a = qwen_f32_data(&out_base);
+        let b = qwen_f32_data(&out_mod);
+        let last_a = &a[3 * hidden..4 * hidden];
+        let last_b = &b[3 * hidden..4 * hidden];
+        let differs = last_a.iter().zip(last_b.iter()).any(|(x, y)| (x - y).abs() > 1e-5);
+        assert!(differs, "changing token 0 must change token 3's output");
+    }
+
+    #[test]
+    fn test_qwen_attention_causal_mask_future_does_not_leak_backward() {
+        let config = qwen_attn_config();
+        let attn = QwenAttention::new(&config).expect("attention");
+        let seq_len = 4;
+        let hidden = config.hidden_size;
+
+        let base = qwen_lcg_vec(seq_len * hidden, 32);
+        let mut modified = base.clone();
+        for x in modified[3 * hidden..4 * hidden].iter_mut() {
+            *x += 5.0;
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+        let out_mod = attn
+            .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+
+        let a = qwen_f32_data(&out_base);
+        let b = qwen_f32_data(&out_mod);
+        for row in 0..3 {
+            let ra = &a[row * hidden..(row + 1) * hidden];
+            let rb = &b[row * hidden..(row + 1) * hidden];
+            for (x, y) in ra.iter().zip(rb.iter()) {
+                assert!(
+                    (x - y).abs() < 1e-6,
+                    "row {row} must be unaffected by a later change"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_qwen_attention_sliding_window_excludes_distant_tokens() {
+        let mut config = qwen_attn_config();
+        config.use_sliding_window = true;
+        config.sliding_window = Some(1);
+        let attn = QwenAttention::new(&config).expect("attention");
+        let seq_len = 4;
+        let hidden = config.hidden_size;
+
+        let base = qwen_lcg_vec(seq_len * hidden, 33);
+        let mut modified = base.clone();
+        for x in modified[0..hidden].iter_mut() {
+            *x += 5.0;
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+        let out_mod = attn
+            .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+
+        let a = qwen_f32_data(&out_base);
+        let b = qwen_f32_data(&out_mod);
+        let last_a = &a[3 * hidden..4 * hidden];
+        let last_b = &b[3 * hidden..4 * hidden];
+        for (x, y) in last_a.iter().zip(last_b.iter()) {
+            assert!(
+                (x - y).abs() < 1e-6,
+                "token 3 with sliding_window=1 must not see token 0 at all"
+            );
+        }
+    }
+
+    /// Causal property with a growing sequence: forwarding a prefix of
+    /// length N and then forwarding that same prefix plus one appended
+    /// token must leave rows `0..N` of the output bit-identical. This is
+    /// the variable-length analogue of "appending a token to the KV cache
+    /// does not change earlier positions' outputs" for this crate's
+    /// stateless `Layer::forward` (there is no incremental KV cache in the
+    /// `Layer` API; `seq_len` and `position_ids` are recomputed fresh from
+    /// the input on every call, so this is the correctness property an
+    /// incremental cache would need to preserve).
+    ///
+    /// This complements (and is stronger than) the fixed-length
+    /// "modify a token, check earlier rows" tests above: it also catches
+    /// bugs where a per-row computation leaks *total* sequence length
+    /// rather than depending only on each row's own position (e.g. a mask
+    /// or RoPE base computed from `seq_len` instead of `position_ids[row]`).
+    ///
+    /// Uses `rope_scaling: None` (via `qwen_attn_config`/`minimal_qwen_config`)
+    /// so RoPE angles depend only on each row's absolute position, not on
+    /// `seq_len`. Qwen's `"dynamic"` NTK scaling deliberately recomputes the
+    /// RoPE base from `max_position_seen` once the sequence exceeds
+    /// `max_position_embeddings` (see `effective_base_and_scale`), which
+    /// would legitimately change earlier rows too — that is correct
+    /// architecture behavior, not a bug, so this test does not exercise it.
+    #[test]
+    fn test_qwen_attention_prefix_extension_preserves_earlier_outputs() {
+        let config = qwen_attn_config();
+        let attn = QwenAttention::new(&config).expect("attention");
+        let hidden = config.hidden_size;
+        let prefix_len = 3;
+
+        let prefix = qwen_lcg_vec(prefix_len * hidden, 71);
+        let mut extended = prefix.clone();
+        extended.extend(qwen_lcg_vec(hidden, 72));
+
+        let out_prefix = attn
+            .forward(Tensor::from_vec(prefix, &[prefix_len, hidden]).expect("t"))
+            .expect("fwd prefix");
+        let out_extended = attn
+            .forward(Tensor::from_vec(extended, &[prefix_len + 1, hidden]).expect("t"))
+            .expect("fwd extended");
+
+        let a = qwen_f32_data(&out_prefix);
+        let b = qwen_f32_data(&out_extended);
+        for row in 0..prefix_len {
+            let ra = &a[row * hidden..(row + 1) * hidden];
+            let rb = &b[row * hidden..(row + 1) * hidden];
+            for (x, y) in ra.iter().zip(rb.iter()) {
+                assert!(
+                    (x - y).abs() < 1e-5,
+                    "row {row} must be unchanged when a new token is appended after it"
+                );
+            }
         }
     }
 }

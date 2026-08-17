@@ -220,12 +220,9 @@ pub use export::{
     GGUFExporter, ModelExporter, ONNXExporter, TensorRTExporter, UniversalExporter,
 };
 pub use generation::{
-    FinishReason,
-    GenerationConfig,
-    GenerationStrategy,
-    GenerationStream,
-    // KVCache, // Now exported from cache module
-    // SpeculativeDecoder, TextGenerator,  // Temporarily disabled due to missing modules
+    BeamSearchConfig, BeamSearchDecoder, CFGGenerator, ConstraintValidator, FinishReason,
+    GenerationConfig, GenerationStrategy, GenerationStream, Grammar, GrammarValidator, JsonSchema,
+    JsonSchemaValidator, SamplingConfig, SamplingMethod, TextGenerator,
 };
 #[cfg(not(feature = "cuda"))]
 pub use gpu_accelerated::{GpuAcceleratedOps, GpuOpsConfig, GpuPrecision};

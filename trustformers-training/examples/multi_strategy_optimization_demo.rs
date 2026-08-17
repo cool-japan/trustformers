@@ -404,6 +404,9 @@ fn build_search_space() -> SearchSpace {
         .continuous("warmup_ratio", 0.0, 0.2)
         .continuous("max_grad_norm", 0.5, 2.0)
         .build()
+        // reason: every bound above is a literal constant satisfying the parameter
+        // invariants, so the build cannot fail.
+        .expect("demo search space definition is valid by construction")
 }
 
 /// Load configuration from config.json file

@@ -595,7 +595,11 @@ mod tests {
         let model = default_model();
         let s = model.score("Hello, world!");
         assert!(s.is_finite());
-        assert!(s >= -2.0 && s <= 2.0, "score {} should be in [-2, 2]", s);
+        assert!(
+            (-2.0..=2.0).contains(&s),
+            "score {} should be in [-2, 2]",
+            s
+        );
     }
 
     // ── Test 3: score_batch length ────────────────────────────────────────
@@ -1031,7 +1035,7 @@ mod tests {
             .collect();
         let acc = model.pairwise_accuracy(&pairs);
         assert!(
-            acc >= 0.0 && acc <= 1.0,
+            (0.0..=1.0).contains(&acc),
             "accuracy should be in [0,1], got {acc}"
         );
     }
@@ -1077,7 +1081,7 @@ mod tests {
         let avg = scores.iter().sum::<f64>() / scores.len() as f64;
         // average should be in [-2, 2]
         assert!(
-            avg >= -2.0 && avg <= 2.0,
+            (-2.0..=2.0).contains(&avg),
             "ensemble average should be in [-2,2], got {avg}"
         );
     }
@@ -1111,7 +1115,7 @@ mod tests {
         for text in &texts {
             let s = model.score(text);
             assert!(
-                s >= -2.0 && s <= 2.0,
+                (-2.0..=2.0).contains(&s),
                 "score for '{text}' = {s} should be in [-2,2]"
             );
         }

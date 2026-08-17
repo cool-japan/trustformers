@@ -1,237 +1,33 @@
-// Enhanced GGUF export functionality with comprehensive format support
-#![allow(unused_variables)] // Enhanced GGUF export
+//! Enhanced GGUF export: explicit quantization choice and caller-supplied metadata.
+//!
+//! This exporter shares the binary implementation in [`super::gguf_format`] with
+//! [`super::gguf`]; it adds an explicit [`GGUFTensorType`] selection and a builder
+//! for extra metadata keys.
+//!
+//! Like every exporter in this crate it writes the model's **real** parameters,
+//! taken from [`Model::named_tensors`](crate::traits::Model::named_tensors). A
+//! previous revision of this file ignored the model and emitted a hard-coded
+//! 12-block GPT-2 skeleton of `0.1f32` weights; that code is gone.
 
-use super::{ExportConfig, ExportFormat, ExportPrecision, ModelExporter};
-use crate::tensor::Tensor;
-use crate::traits::Model;
+use super::gguf_format::{
+    dequantize, payload_from_tensors, quantize, read_gguf_file, write_gguf_file, GGUFPayload,
+    GGUF_DEFAULT_ALIGNMENT, GGUF_VERSION,
+};
+use super::{collect_model_tensors, ExportConfig, ExportFormat, ModelExporter};
+use crate::traits::{Config, Model};
 use anyhow::{anyhow, Result};
-use byteorder::{LittleEndian, WriteBytesExt};
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufWriter, Seek, Write};
+use std::collections::BTreeMap;
+use std::path::Path;
 
-/// GGUF file format constants
-const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" in ASCII
-const GGUF_VERSION: u32 = 3;
+pub use super::gguf_format::{
+    GGUFHeader, GGUFTensorInfo, GGUFTensorType, GGUFValue, GGUFValueType,
+};
 
-/// GGUF value types for metadata
-#[derive(Debug, Clone, Copy)]
-pub enum GGUFValueType {
-    UInt8 = 0,
-    Int8 = 1,
-    UInt16 = 2,
-    Int16 = 3,
-    UInt32 = 4,
-    Int32 = 5,
-    Float32 = 6,
-    Bool = 7,
-    String = 8,
-    Array = 9,
-    UInt64 = 10,
-    Int64 = 11,
-    Float64 = 12,
-}
-
-/// GGUF tensor types with quantization support
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum GGUFTensorType {
-    F32 = 0,
-    F16 = 1,
-    Q4_0 = 2,
-    Q4_1 = 3,
-    Q5_0 = 6,
-    Q5_1 = 7,
-    Q8_0 = 8,
-    Q8_1 = 9,
-    Q2K = 10,
-    Q3K = 11,
-    Q4K = 12,
-    Q5K = 13,
-    Q6K = 14,
-    Q8K = 15,
-    Iq2Xxs = 16,
-    Iq2Xs = 17,
-    Iq3Xxs = 18,
-    Iq1S = 19,
-    Iq4Nl = 20,
-    Iq3S = 21,
-    Iq2S = 22,
-    Iq4Xs = 23,
-    I8 = 24,
-    I16 = 25,
-    I32 = 26,
-    I64 = 27,
-    F64 = 28,
-    Iq1M = 29,
-}
-
-impl GGUFTensorType {
-    /// Get the size of a single element in bytes
-    pub fn element_size(&self) -> usize {
-        match self {
-            GGUFTensorType::F32 => 4,
-            GGUFTensorType::F16 => 2,
-            GGUFTensorType::F64 => 8,
-            GGUFTensorType::I8 => 1,
-            GGUFTensorType::I16 => 2,
-            GGUFTensorType::I32 => 4,
-            GGUFTensorType::I64 => 8,
-            GGUFTensorType::Q4_0 => 2, // Approximation for quantized types
-            GGUFTensorType::Q4_1 => 2,
-            GGUFTensorType::Q5_0 => 3,
-            GGUFTensorType::Q5_1 => 3,
-            GGUFTensorType::Q8_0 => 1,
-            GGUFTensorType::Q8_1 => 1,
-            GGUFTensorType::Q2K => 1,
-            GGUFTensorType::Q3K => 1,
-            GGUFTensorType::Q4K => 1,
-            GGUFTensorType::Q5K => 1,
-            GGUFTensorType::Q6K => 1,
-            GGUFTensorType::Q8K => 1,
-            GGUFTensorType::Iq2Xxs => 1,
-            GGUFTensorType::Iq2Xs => 1,
-            GGUFTensorType::Iq3Xxs => 1,
-            GGUFTensorType::Iq1S => 1,
-            GGUFTensorType::Iq4Nl => 1,
-            GGUFTensorType::Iq3S => 1,
-            GGUFTensorType::Iq2S => 1,
-            GGUFTensorType::Iq4Xs => 1,
-            GGUFTensorType::Iq1M => 1,
-        }
-    }
-
-    /// Get block size for quantized types
-    pub fn block_size(&self) -> usize {
-        match self {
-            GGUFTensorType::Q4_0 | GGUFTensorType::Q4_1 => 32,
-            GGUFTensorType::Q5_0 | GGUFTensorType::Q5_1 => 32,
-            GGUFTensorType::Q8_0 | GGUFTensorType::Q8_1 => 32,
-            GGUFTensorType::Q2K => 256,
-            GGUFTensorType::Q3K => 256,
-            GGUFTensorType::Q4K => 256,
-            GGUFTensorType::Q5K => 256,
-            GGUFTensorType::Q6K => 256,
-            GGUFTensorType::Q8K => 256,
-            _ => 1,
-        }
-    }
-
-    /// Convert from export precision
-    pub fn from_precision(precision: ExportPrecision) -> Self {
-        match precision {
-            ExportPrecision::FP32 => GGUFTensorType::F32,
-            ExportPrecision::FP16 => GGUFTensorType::F16,
-            ExportPrecision::INT8 => GGUFTensorType::Q8_0,
-            ExportPrecision::INT4 => GGUFTensorType::Q4_0,
-        }
-    }
-
-    /// Check if this is a quantized type
-    pub fn is_quantized(&self) -> bool {
-        !matches!(
-            self,
-            GGUFTensorType::F32
-                | GGUFTensorType::F16
-                | GGUFTensorType::F64
-                | GGUFTensorType::I8
-                | GGUFTensorType::I16
-                | GGUFTensorType::I32
-                | GGUFTensorType::I64
-        )
-    }
-}
-
-/// GGUF metadata value
-#[derive(Debug, Clone)]
-pub enum GGUFValue {
-    UInt8(u8),
-    Int8(i8),
-    UInt16(u16),
-    Int16(i16),
-    UInt32(u32),
-    Int32(i32),
-    Float32(f32),
-    Bool(bool),
-    String(String),
-    Array(GGUFValueType, Vec<GGUFValue>),
-    UInt64(u64),
-    Int64(i64),
-    Float64(f64),
-}
-
-impl GGUFValue {
-    /// Get the value type
-    pub fn value_type(&self) -> GGUFValueType {
-        match self {
-            GGUFValue::UInt8(_) => GGUFValueType::UInt8,
-            GGUFValue::Int8(_) => GGUFValueType::Int8,
-            GGUFValue::UInt16(_) => GGUFValueType::UInt16,
-            GGUFValue::Int16(_) => GGUFValueType::Int16,
-            GGUFValue::UInt32(_) => GGUFValueType::UInt32,
-            GGUFValue::Int32(_) => GGUFValueType::Int32,
-            GGUFValue::Float32(_) => GGUFValueType::Float32,
-            GGUFValue::Bool(_) => GGUFValueType::Bool,
-            GGUFValue::String(_) => GGUFValueType::String,
-            GGUFValue::Array(_, _) => GGUFValueType::Array,
-            GGUFValue::UInt64(_) => GGUFValueType::UInt64,
-            GGUFValue::Int64(_) => GGUFValueType::Int64,
-            GGUFValue::Float64(_) => GGUFValueType::Float64,
-        }
-    }
-
-    /// Write value to buffer
-    pub fn write_to_buffer<W: Write>(&self, writer: &mut W) -> Result<()> {
-        match self {
-            GGUFValue::UInt8(v) => writer.write_u8(*v)?,
-            GGUFValue::Int8(v) => writer.write_i8(*v)?,
-            GGUFValue::UInt16(v) => writer.write_u16::<LittleEndian>(*v)?,
-            GGUFValue::Int16(v) => writer.write_i16::<LittleEndian>(*v)?,
-            GGUFValue::UInt32(v) => writer.write_u32::<LittleEndian>(*v)?,
-            GGUFValue::Int32(v) => writer.write_i32::<LittleEndian>(*v)?,
-            GGUFValue::Float32(v) => writer.write_f32::<LittleEndian>(*v)?,
-            GGUFValue::Bool(v) => writer.write_u8(if *v { 1 } else { 0 })?,
-            GGUFValue::String(s) => {
-                writer.write_u64::<LittleEndian>(s.len() as u64)?;
-                writer.write_all(s.as_bytes())?;
-            },
-            GGUFValue::Array(elem_type, values) => {
-                writer.write_u32::<LittleEndian>(*elem_type as u32)?;
-                writer.write_u64::<LittleEndian>(values.len() as u64)?;
-                for value in values {
-                    value.write_to_buffer(writer)?;
-                }
-            },
-            GGUFValue::UInt64(v) => writer.write_u64::<LittleEndian>(*v)?,
-            GGUFValue::Int64(v) => writer.write_i64::<LittleEndian>(*v)?,
-            GGUFValue::Float64(v) => writer.write_f64::<LittleEndian>(*v)?,
-        }
-        Ok(())
-    }
-}
-
-/// GGUF tensor information
-#[derive(Debug, Clone)]
-pub struct GGUFTensorInfo {
-    pub name: String,
-    pub dimensions: Vec<u64>,
-    pub tensor_type: GGUFTensorType,
-    pub offset: u64,
-}
-
-/// GGUF file header
-#[derive(Debug)]
-pub struct GGUFHeader {
-    pub magic: u32,
-    pub version: u32,
-    pub tensor_count: u64,
-    pub metadata_kv_count: u64,
-}
-
-/// Enhanced GGUF exporter with comprehensive model support
-#[derive(Clone)]
+/// GGUF exporter with an explicit quantization type and extensible metadata.
+#[derive(Clone, Debug)]
 pub struct GGUFExporter {
     quantization_type: GGUFTensorType,
-    metadata: HashMap<String, GGUFValue>,
+    metadata: BTreeMap<String, GGUFValue>,
 }
 
 impl Default for GGUFExporter {
@@ -241,19 +37,20 @@ impl Default for GGUFExporter {
 }
 
 impl GGUFExporter {
-    /// Create a new GGUF exporter
+    /// Create an exporter that writes `F32` tensors.
     pub fn new() -> Self {
-        let mut metadata = HashMap::new();
-
-        // Add default metadata
+        let mut metadata = BTreeMap::new();
         metadata.insert(
-            "general.architecture".to_string(),
-            GGUFValue::String("llama".to_string()),
+            "general.alignment".to_string(),
+            GGUFValue::UInt32(GGUF_DEFAULT_ALIGNMENT as u32),
         );
-        metadata.insert("general.file_type".to_string(), GGUFValue::UInt32(1));
         metadata.insert(
             "general.quantization_version".to_string(),
             GGUFValue::UInt32(2),
+        );
+        metadata.insert(
+            "general.file_type".to_string(),
+            GGUFValue::UInt32(GGUFTensorType::F32.file_type()),
         );
 
         Self {
@@ -262,34 +59,38 @@ impl GGUFExporter {
         }
     }
 
-    /// Set quantization type
+    /// Select the tensor type used for every exported weight.
     pub fn with_quantization(mut self, tensor_type: GGUFTensorType) -> Self {
         self.quantization_type = tensor_type;
-        // Update metadata to reflect quantization
-        let file_type = match tensor_type {
-            GGUFTensorType::F32 => 0,
-            GGUFTensorType::F16 => 1,
-            GGUFTensorType::Q4_0 => 2,
-            GGUFTensorType::Q4_1 => 3,
-            GGUFTensorType::Q5_0 => 8,
-            GGUFTensorType::Q5_1 => 9,
-            GGUFTensorType::Q8_0 => 7,
-            _ => 15, // Custom/other
-        };
         self.metadata.insert(
             "general.file_type".to_string(),
-            GGUFValue::UInt32(file_type),
+            GGUFValue::UInt32(tensor_type.file_type()),
         );
         self
     }
 
-    /// Add custom metadata
+    /// The tensor type this exporter will write.
+    pub fn quantization_type(&self) -> GGUFTensorType {
+        self.quantization_type
+    }
+
+    /// Add or replace a metadata key.
     pub fn add_metadata(mut self, key: String, value: GGUFValue) -> Self {
         self.metadata.insert(key, value);
         self
     }
 
-    /// Set model architecture metadata
+    /// Read-only view of the metadata that will be written.
+    pub fn metadata(&self) -> &BTreeMap<String, GGUFValue> {
+        &self.metadata
+    }
+
+    /// Declare llama-family architecture metadata.
+    ///
+    /// These values come from the caller; nothing here is measured from a model.
+    /// No tokenizer keys are written, because this exporter has no tokenizer: a
+    /// consumer that needs `tokenizer.ggml.*` must add it with [`Self::add_metadata`].
+    #[allow(clippy::too_many_arguments)]
     pub fn set_architecture_metadata(
         mut self,
         context_length: u64,
@@ -320,374 +121,33 @@ impl GGUFExporter {
             "llama.attention.head_count".to_string(),
             GGUFValue::UInt64(head_count),
         );
-
         if let Some(kv_heads) = head_count_kv {
             self.metadata.insert(
                 "llama.attention.head_count_kv".to_string(),
                 GGUFValue::UInt64(kv_heads),
             );
         }
-
         self.metadata.insert(
-            "tokenizer.ggml.model".to_string(),
-            GGUFValue::String("llama".to_string()),
+            "llama.vocab_size".to_string(),
+            GGUFValue::UInt64(vocab_size),
         );
-        self.metadata.insert(
-            "tokenizer.ggml.tokens".to_string(),
-            GGUFValue::Array(GGUFValueType::String, vec![]),
-        ); // Would be populated with actual tokens
-
         self
     }
 
-    /// Export model to GGUF format
-    fn export_to_gguf<M: Model>(&self, model: &M, config: &ExportConfig) -> Result<()> {
-        let output_path = format!("{}.gguf", config.output_path);
-        let file = File::create(&output_path)?;
-        let mut writer = BufWriter::new(file);
+    /// Build the in-memory payload for `model`, using only its real parameters.
+    pub fn build_payload<M: Model>(&self, model: &M) -> Result<GGUFPayload> {
+        let tensors = collect_model_tensors(model)?;
 
-        // Get model weights (this would need to be implemented based on the actual model structure)
-        let tensors = self.extract_model_tensors(model)?;
+        let mut metadata = self.metadata.clone();
+        metadata
+            .entry("general.architecture".to_string())
+            .or_insert_with(|| GGUFValue::String(model.get_config().architecture().to_string()));
+        metadata.insert(
+            "general.parameter_count".to_string(),
+            GGUFValue::UInt64(model.num_parameters() as u64),
+        );
 
-        // Write GGUF header
-        self.write_header(&mut writer, tensors.len())?;
-
-        // Write metadata
-        self.write_metadata(&mut writer)?;
-
-        // Write tensor info
-        let tensor_data_offset = self.calculate_tensor_data_offset(&tensors)?;
-        let tensor_infos = self.write_tensor_info(&mut writer, &tensors, tensor_data_offset)?;
-
-        // Align to tensor data
-        self.align_to_tensor_data(&mut writer)?;
-
-        // Write tensor data
-        self.write_tensor_data(&mut writer, &tensors, &tensor_infos)?;
-
-        writer.flush()?;
-        println!("Model exported to GGUF format: {}", output_path);
-        Ok(())
-    }
-
-    /// Extract tensors from model (placeholder implementation)
-    fn extract_model_tensors<M: Model>(&self, _model: &M) -> Result<Vec<(String, Tensor)>> {
-        // This would need to be implemented based on the actual model structure
-        // For now, create some dummy tensors as an example
-        let mut tensors = Vec::new();
-
-        // Example tensors for a transformer model
-        let embedding_weights = Tensor::from_vec(vec![0.1f32; 50257 * 768], &[50257, 768])?;
-        tensors.push(("token_embd.weight".to_string(), embedding_weights));
-
-        // Add transformer layer weights
-        for layer in 0..12 {
-            // Attention weights
-            let attn_q = Tensor::from_vec(vec![0.1f32; 768 * 768], &[768, 768])?;
-            let attn_k = Tensor::from_vec(vec![0.1f32; 768 * 768], &[768, 768])?;
-            let attn_v = Tensor::from_vec(vec![0.1f32; 768 * 768], &[768, 768])?;
-            let attn_out = Tensor::from_vec(vec![0.1f32; 768 * 768], &[768, 768])?;
-
-            tensors.push((format!("blk.{}.attn_q.weight", layer), attn_q));
-            tensors.push((format!("blk.{}.attn_k.weight", layer), attn_k));
-            tensors.push((format!("blk.{}.attn_v.weight", layer), attn_v));
-            tensors.push((format!("blk.{}.attn_output.weight", layer), attn_out));
-
-            // Feed-forward weights
-            let ffn_up = Tensor::from_vec(vec![0.1f32; 768 * 3072], &[768, 3072])?;
-            let ffn_down = Tensor::from_vec(vec![0.1f32; 3072 * 768], &[3072, 768])?;
-
-            tensors.push((format!("blk.{}.ffn_up.weight", layer), ffn_up));
-            tensors.push((format!("blk.{}.ffn_down.weight", layer), ffn_down));
-
-            // Layer norm weights
-            let ln1 = Tensor::from_vec(vec![1.0f32; 768], &[768])?;
-            let ln2 = Tensor::from_vec(vec![1.0f32; 768], &[768])?;
-
-            tensors.push((format!("blk.{}.attn_norm.weight", layer), ln1));
-            tensors.push((format!("blk.{}.ffn_norm.weight", layer), ln2));
-        }
-
-        // Final layer norm and output projection
-        let final_norm = Tensor::from_vec(vec![1.0f32; 768], &[768])?;
-        let output_weights = Tensor::from_vec(vec![0.1f32; 768 * 50257], &[768, 50257])?;
-
-        tensors.push(("output_norm.weight".to_string(), final_norm));
-        tensors.push(("output.weight".to_string(), output_weights));
-
-        Ok(tensors)
-    }
-
-    /// Write GGUF header
-    fn write_header<W: Write>(&self, writer: &mut W, tensor_count: usize) -> Result<()> {
-        writer.write_u32::<LittleEndian>(GGUF_MAGIC)?;
-        writer.write_u32::<LittleEndian>(GGUF_VERSION)?;
-        writer.write_u64::<LittleEndian>(tensor_count as u64)?;
-        writer.write_u64::<LittleEndian>(self.metadata.len() as u64)?;
-        Ok(())
-    }
-
-    /// Write metadata key-value pairs
-    fn write_metadata<W: Write>(&self, writer: &mut W) -> Result<()> {
-        for (key, value) in &self.metadata {
-            // Write key
-            writer.write_u64::<LittleEndian>(key.len() as u64)?;
-            writer.write_all(key.as_bytes())?;
-
-            // Write value type
-            writer.write_u32::<LittleEndian>(value.value_type() as u32)?;
-
-            // Write value
-            value.write_to_buffer(writer)?;
-        }
-        Ok(())
-    }
-
-    /// Calculate tensor data offset
-    fn calculate_tensor_data_offset(&self, tensors: &[(String, Tensor)]) -> Result<u64> {
-        let mut offset = 0u64;
-
-        // Header size
-        offset += 4 + 4 + 8 + 8; // magic + version + tensor_count + kv_count
-
-        // Metadata size
-        for (key, value) in &self.metadata {
-            offset += 8; // key length
-            offset += key.len() as u64; // key data
-            offset += 4; // value type
-            offset += self.calculate_value_size(value)?; // value data
-        }
-
-        // Tensor info size
-        for (name, tensor) in tensors {
-            offset += 8; // name length
-            offset += name.len() as u64; // name data
-            offset += 4; // dimension count
-            offset += tensor.shape().len() as u64 * 8; // dimensions
-            offset += 4; // tensor type
-            offset += 8; // offset
-        }
-
-        // Align to 32 bytes
-        offset = (offset + 31) & !31;
-
-        Ok(offset)
-    }
-
-    /// Calculate the size of a GGUF value in bytes
-    fn calculate_value_size(&self, value: &GGUFValue) -> Result<u64> {
-        Ok(match value {
-            GGUFValue::UInt8(_) | GGUFValue::Int8(_) | GGUFValue::Bool(_) => 1,
-            GGUFValue::UInt16(_) | GGUFValue::Int16(_) => 2,
-            GGUFValue::UInt32(_) | GGUFValue::Int32(_) | GGUFValue::Float32(_) => 4,
-            GGUFValue::UInt64(_) | GGUFValue::Int64(_) | GGUFValue::Float64(_) => 8,
-            GGUFValue::String(s) => 8 + s.len() as u64, // length + data
-            GGUFValue::Array(_, values) => {
-                let mut size = 4 + 8; // type + count
-                for value in values {
-                    size += Self::calculate_value_size_helper(value)?;
-                }
-                size
-            },
-        })
-    }
-
-    /// Helper for recursive value size calculation
-    fn calculate_value_size_helper(value: &GGUFValue) -> Result<u64> {
-        Ok(match value {
-            GGUFValue::UInt8(_) | GGUFValue::Int8(_) | GGUFValue::Bool(_) => 1,
-            GGUFValue::UInt16(_) | GGUFValue::Int16(_) => 2,
-            GGUFValue::UInt32(_) | GGUFValue::Int32(_) | GGUFValue::Float32(_) => 4,
-            GGUFValue::UInt64(_) | GGUFValue::Int64(_) | GGUFValue::Float64(_) => 8,
-            GGUFValue::String(s) => 8 + s.len() as u64, // length + data
-            GGUFValue::Array(_, values) => {
-                let mut size = 4 + 8; // type + count
-                for value in values {
-                    size += Self::calculate_value_size_helper(value)?;
-                }
-                size
-            },
-        })
-    }
-
-    /// Write tensor information
-    fn write_tensor_info<W: Write>(
-        &self,
-        writer: &mut W,
-        tensors: &[(String, Tensor)],
-        mut data_offset: u64,
-    ) -> Result<Vec<GGUFTensorInfo>> {
-        let mut tensor_infos = Vec::new();
-
-        for (name, tensor) in tensors {
-            // Write tensor name
-            writer.write_u64::<LittleEndian>(name.len() as u64)?;
-            writer.write_all(name.as_bytes())?;
-
-            // Write dimension count
-            writer.write_u32::<LittleEndian>(tensor.shape().len() as u32)?;
-
-            // Write dimensions
-            let dimensions: Vec<u64> = tensor.shape().iter().map(|&d| d as u64).collect();
-            for &dim in &dimensions {
-                writer.write_u64::<LittleEndian>(dim)?;
-            }
-
-            // Write tensor type
-            writer.write_u32::<LittleEndian>(self.quantization_type as u32)?;
-
-            // Write offset
-            writer.write_u64::<LittleEndian>(data_offset)?;
-
-            // Calculate tensor size
-            let tensor_size = self.calculate_tensor_size(tensor)?;
-
-            tensor_infos.push(GGUFTensorInfo {
-                name: name.clone(),
-                dimensions,
-                tensor_type: self.quantization_type,
-                offset: data_offset,
-            });
-
-            data_offset += tensor_size;
-        }
-
-        Ok(tensor_infos)
-    }
-
-    /// Calculate tensor size in bytes
-    fn calculate_tensor_size(&self, tensor: &Tensor) -> Result<u64> {
-        let element_count = tensor.shape().iter().product::<usize>() as u64;
-        let element_size = self.quantization_type.element_size() as u64;
-
-        if self.quantization_type.is_quantized() {
-            let block_size = self.quantization_type.block_size() as u64;
-            let num_blocks = element_count.div_ceil(block_size);
-            Ok(num_blocks * element_size)
-        } else {
-            Ok(element_count * element_size)
-        }
-    }
-
-    /// Align writer to tensor data boundary
-    fn align_to_tensor_data<W: Write + Seek>(&self, writer: &mut W) -> Result<()> {
-        let current_pos = writer.stream_position()?;
-        let aligned_pos = (current_pos + 31) & !31; // Align to 32 bytes
-        let padding = aligned_pos - current_pos;
-
-        for _ in 0..padding {
-            writer.write_u8(0)?;
-        }
-
-        Ok(())
-    }
-
-    /// Write tensor data
-    fn write_tensor_data<W: Write>(
-        &self,
-        writer: &mut W,
-        tensors: &[(String, Tensor)],
-        _tensor_infos: &[GGUFTensorInfo],
-    ) -> Result<()> {
-        for (_name, tensor) in tensors {
-            match self.quantization_type {
-                GGUFTensorType::F32 => {
-                    for value in tensor.data()? {
-                        writer.write_f32::<LittleEndian>(value)?;
-                    }
-                },
-                GGUFTensorType::F16 => {
-                    for value in tensor.data()? {
-                        let half_value = half::f16::from_f32(value);
-                        writer.write_u16::<LittleEndian>(half_value.to_bits())?;
-                    }
-                },
-                GGUFTensorType::Q8_0 => {
-                    // Simplified Q8_0 quantization
-                    self.write_q8_0_tensor(writer, tensor)?;
-                },
-                GGUFTensorType::Q4_0 => {
-                    // Simplified Q4_0 quantization
-                    self.write_q4_0_tensor(writer, tensor)?;
-                },
-                _ => {
-                    return Err(anyhow!(
-                        "Unsupported quantization type: {:?}",
-                        self.quantization_type
-                    ));
-                },
-            }
-        }
-        Ok(())
-    }
-
-    /// Write Q8_0 quantized tensor
-    fn write_q8_0_tensor<W: Write>(&self, writer: &mut W, tensor: &Tensor) -> Result<()> {
-        let data = tensor.data()?;
-        let block_size = 32;
-
-        for chunk in data.chunks(block_size) {
-            // Find scale (max absolute value / 127)
-            let max_abs = chunk.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
-            let scale = max_abs / 127.0;
-
-            // Write scale
-            writer.write_f32::<LittleEndian>(scale)?;
-
-            // Quantize and write values
-            for &value in chunk {
-                let quantized = if scale > 0.0 {
-                    (value / scale).round().clamp(-128.0, 127.0) as i8
-                } else {
-                    0i8
-                };
-                writer.write_i8(quantized)?;
-            }
-
-            // Pad if chunk is smaller than block size
-            for _ in chunk.len()..block_size {
-                writer.write_i8(0)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Write Q4_0 quantized tensor
-    fn write_q4_0_tensor<W: Write>(&self, writer: &mut W, tensor: &Tensor) -> Result<()> {
-        let data = tensor.data()?;
-        let block_size = 32;
-
-        for chunk in data.chunks(block_size) {
-            // Find scale (max absolute value / 7)
-            let max_abs = chunk.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
-            let scale = max_abs / 7.0;
-
-            // Write scale
-            writer.write_f32::<LittleEndian>(scale)?;
-
-            // Quantize values to 4-bit and pack
-            let mut quantized_values = Vec::new();
-            for &value in chunk {
-                let quantized =
-                    if scale > 0.0 { (value / scale).round().clamp(-8.0, 7.0) as i8 } else { 0i8 };
-                quantized_values.push(quantized);
-            }
-
-            // Pad if chunk is smaller than block size
-            while quantized_values.len() < block_size {
-                quantized_values.push(0);
-            }
-
-            // Pack two 4-bit values into each byte
-            for pair in quantized_values.chunks(2) {
-                let byte =
-                    ((pair[0] & 0xF) as u8) | (((pair.get(1).unwrap_or(&0) & 0xF) as u8) << 4);
-                writer.write_u8(byte)?;
-            }
-        }
-
-        Ok(())
+        payload_from_tensors(metadata, &tensors, self.quantization_type)
     }
 }
 
@@ -697,87 +157,136 @@ impl ModelExporter for GGUFExporter {
             return Err(anyhow!("GGUFExporter only supports GGUF format"));
         }
 
-        self.export_to_gguf(model, config)
+        let payload = self.build_payload(model)?;
+        let output_path = format!("{}.gguf", config.output_path);
+        write_gguf_file(&output_path, &payload)?;
+
+        log::info!(
+            "wrote {} tensors as {:?} to {}",
+            payload.tensors.len(),
+            self.quantization_type,
+            output_path
+        );
+        Ok(())
     }
 
     fn supported_formats(&self) -> Vec<ExportFormat> {
         vec![ExportFormat::GGUF]
     }
 
-    fn validate_model<M: Model>(&self, _model: &M, format: ExportFormat) -> Result<()> {
+    fn validate_model<M: Model>(&self, model: &M, format: ExportFormat) -> Result<()> {
         if format != ExportFormat::GGUF {
             return Err(anyhow!("GGUFExporter only supports GGUF format"));
         }
+        collect_model_tensors(model)?;
         Ok(())
     }
 }
 
-/// GGUF model converter utility
+/// GGUF file utilities.
 pub struct GGUFConverter;
 
 impl GGUFConverter {
-    /// Convert between different GGUF quantization types
-    pub fn convert_quantization(
-        input_path: &str,
-        output_path: &str,
+    /// Requantize every tensor of a GGUF file into `target_type`.
+    ///
+    /// This performs the real conversion: each tensor is decoded to `f32` with the
+    /// codec its directory entry declares, re-encoded into `target_type`, and the
+    /// file is rebuilt with fresh offsets and an updated `general.file_type`.
+    /// Metadata other than `general.file_type` is preserved verbatim.
+    ///
+    /// A previous revision of this function copied the input file byte for byte
+    /// while printing that it had requantized the model.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the source uses a codec this crate cannot decode, if `target_type`
+    /// has no encoder here, or if a tensor's element count is not a multiple of the
+    /// target block size. In every case no output file is written.
+    pub fn convert_quantization<P: AsRef<Path>, Q: AsRef<Path>>(
+        input_path: P,
+        output_path: Q,
         target_type: GGUFTensorType,
     ) -> Result<()> {
-        println!(
-            "Converting GGUF model from {} to {} with {:?} quantization",
-            input_path, output_path, target_type
+        let input_path = input_path.as_ref();
+        let output_path = output_path.as_ref();
+
+        if !target_type.is_supported_codec() {
+            return Err(crate::errors::unsupported_operation(
+                format!("GGUF requantization to {target_type:?}"),
+                "TrustformeRS implements the F32, F16, F64, Q8_0 and Q4_0 GGUF codecs",
+            )
+            .into());
+        }
+
+        let source = read_gguf_file(input_path)?;
+
+        let mut metadata = source.metadata.clone();
+        metadata.insert(
+            "general.file_type".to_string(),
+            GGUFValue::UInt32(target_type.file_type()),
         );
+        let alignment = source.alignment();
 
-        // In a real implementation, this would:
-        // 1. Read the input GGUF file
-        // 2. Parse tensors and metadata
-        // 3. Requantize tensors to target type
-        // 4. Write new GGUF file
+        let mut converted = GGUFPayload {
+            metadata,
+            tensors: Vec::with_capacity(source.tensors.len()),
+        };
 
-        // For now, just copy the file
-        std::fs::copy(input_path, output_path)?;
+        let mut offset = 0u64;
+        for (info, data) in &source.tensors {
+            let element_count = info.element_count() as usize;
+            let values = dequantize(data, info.tensor_type, element_count)
+                .map_err(|e| anyhow!("tensor '{}': {e}", info.name))?;
+            let encoded = quantize(&values, target_type)
+                .map_err(|e| anyhow!("tensor '{}': {e}", info.name))?;
 
+            let mut new_info = info.clone();
+            new_info.tensor_type = target_type;
+            new_info.offset = offset;
+            offset = super::gguf_format::align_up(offset + encoded.len() as u64, alignment);
+            converted.tensors.push((new_info, encoded));
+        }
+
+        write_gguf_file(output_path, &converted)?;
         Ok(())
     }
 
-    /// Validate GGUF file integrity
-    pub fn validate_file(path: &str) -> Result<GGUFValidationReport> {
-        let file = File::open(path)?;
-        let mut reader = std::io::BufReader::new(file);
+    /// Validate a GGUF file by parsing it in full.
+    ///
+    /// Every tensor's declared extent is checked against the file length, so a
+    /// truncated or corrupt file fails here rather than at load time.
+    pub fn validate_file<P: AsRef<Path>>(path: P) -> Result<GGUFValidationReport> {
+        let path = path.as_ref();
+        let file_size = std::fs::metadata(path)?.len();
+        let payload = read_gguf_file(path)?;
 
-        // Read and validate header
-        let mut magic = [0u8; 4];
-        std::io::Read::read_exact(&mut reader, &mut magic)?;
-
-        if u32::from_le_bytes(magic) != GGUF_MAGIC {
-            return Err(anyhow!("Invalid GGUF magic number"));
+        let mut warnings = Vec::new();
+        for (info, _) in &payload.tensors {
+            if !info.tensor_type.is_supported_codec() {
+                warnings.push(format!(
+                    "tensor '{}' uses {:?}, which this build cannot decode",
+                    info.name, info.tensor_type
+                ));
+            }
         }
-
-        let mut version = [0u8; 4];
-        std::io::Read::read_exact(&mut reader, &mut version)?;
-        let version = u32::from_le_bytes(version);
-
-        let mut tensor_count = [0u8; 8];
-        std::io::Read::read_exact(&mut reader, &mut tensor_count)?;
-        let tensor_count = u64::from_le_bytes(tensor_count);
-
-        let mut kv_count = [0u8; 8];
-        std::io::Read::read_exact(&mut reader, &mut kv_count)?;
-        let kv_count = u64::from_le_bytes(kv_count);
+        if !payload.metadata.contains_key("general.architecture") {
+            warnings.push("missing 'general.architecture' metadata key".to_string());
+        }
 
         Ok(GGUFValidationReport {
             is_valid: true,
-            version,
-            tensor_count,
-            metadata_count: kv_count,
-            file_size: std::fs::metadata(path)?.len(),
+            version: GGUF_VERSION,
+            tensor_count: payload.tensors.len() as u64,
+            metadata_count: payload.metadata.len() as u64,
+            file_size,
             errors: Vec::new(),
-            warnings: Vec::new(),
+            warnings,
         })
     }
 }
 
-/// GGUF file validation report
-#[derive(Debug)]
+/// Result of [`GGUFConverter::validate_file`].
+#[derive(Debug, Clone)]
 pub struct GGUFValidationReport {
     pub is_valid: bool,
     pub version: u32,
@@ -791,42 +300,66 @@ pub struct GGUFValidationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use crate::export::test_support::{TestConfig, TestModel};
+    use crate::tensor::Tensor;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// A model whose single tensor fills whole 32-element quantization blocks.
+    fn block_aligned_model(seed: f32) -> TestModel {
+        let values: Vec<f32> = (0..64).map(|i| seed + (i as f32 - 32.0) * 0.125).collect();
+        TestModel::new(
+            TestConfig::default(),
+            vec![(
+                "blk.0.attn_q.weight".to_string(),
+                Tensor::from_vec(values, &[2, 32]).expect("tensor"),
+            )],
+        )
+    }
 
     #[test]
     fn test_gguf_tensor_type_properties() {
-        assert_eq!(GGUFTensorType::F32.element_size(), 4);
-        assert_eq!(GGUFTensorType::F16.element_size(), 2);
+        assert_eq!(GGUFTensorType::F32.type_size(), 4);
+        assert_eq!(GGUFTensorType::F16.type_size(), 2);
         assert_eq!(GGUFTensorType::Q4_0.block_size(), 32);
+        assert_eq!(GGUFTensorType::Q4_0.type_size(), 18);
+        assert_eq!(GGUFTensorType::Q8_0.type_size(), 34);
         assert!(GGUFTensorType::Q8_0.is_quantized());
         assert!(!GGUFTensorType::F32.is_quantized());
     }
 
     #[test]
     fn test_gguf_value_types() {
-        let int_val = GGUFValue::Int32(42);
-        let str_val = GGUFValue::String("test".to_string());
-        let array_val = GGUFValue::Array(
-            GGUFValueType::Int32,
-            vec![GGUFValue::Int32(1), GGUFValue::Int32(2)],
-        );
-
-        assert!(matches!(int_val.value_type(), GGUFValueType::Int32));
-        assert!(matches!(str_val.value_type(), GGUFValueType::String));
-        assert!(matches!(array_val.value_type(), GGUFValueType::Array));
+        assert!(matches!(
+            GGUFValue::Int32(42).value_type(),
+            GGUFValueType::Int32
+        ));
+        assert!(matches!(
+            GGUFValue::String("test".to_string()).value_type(),
+            GGUFValueType::String
+        ));
+        assert!(matches!(
+            GGUFValue::Array(GGUFValueType::Int32, vec![GGUFValue::Int32(1)]).value_type(),
+            GGUFValueType::Array
+        ));
     }
 
     #[test]
     fn test_gguf_exporter_creation() {
         let exporter = GGUFExporter::new();
-        assert_eq!(exporter.quantization_type, GGUFTensorType::F32);
-        assert!(!exporter.metadata.is_empty());
+        assert_eq!(exporter.quantization_type(), GGUFTensorType::F32);
+        assert!(!exporter.metadata().is_empty());
     }
 
     #[test]
     fn test_gguf_exporter_with_quantization() {
         let exporter = GGUFExporter::new().with_quantization(GGUFTensorType::Q4_0);
-        assert_eq!(exporter.quantization_type, GGUFTensorType::Q4_0);
+        assert_eq!(exporter.quantization_type(), GGUFTensorType::Q4_0);
     }
 
     #[test]
@@ -838,50 +371,208 @@ mod tests {
             )
             .set_architecture_metadata(2048, 768, 12, 3072, 12, Some(12), 50257);
 
-        assert!(exporter.metadata.contains_key("custom.key"));
-        assert!(exporter.metadata.contains_key("llama.context_length"));
+        assert!(exporter.metadata().contains_key("custom.key"));
+        assert!(exporter.metadata().contains_key("llama.context_length"));
+        assert!(
+            !exporter.metadata().contains_key("tokenizer.ggml.tokens"),
+            "no empty tokenizer vocabulary may be claimed"
+        );
     }
 
     #[test]
     fn test_gguf_value_serialization() -> Result<()> {
         let mut buffer = Vec::new();
-
-        let value = GGUFValue::String("test".to_string());
-        value.write_to_buffer(&mut buffer)?;
-
-        // Should contain: length (8 bytes) + "test" (4 bytes)
-        assert_eq!(buffer.len(), 12);
-
+        GGUFValue::String("test".to_string()).write_to_buffer(&mut buffer)?;
+        assert_eq!(buffer.len(), 12, "u64 length prefix plus four bytes");
         Ok(())
     }
 
     #[test]
     fn test_supported_formats() {
-        let exporter = GGUFExporter::new();
-        let formats = exporter.supported_formats();
-        assert_eq!(formats.len(), 1);
-        assert_eq!(formats[0], ExportFormat::GGUF);
+        assert_eq!(
+            GGUFExporter::new().supported_formats(),
+            vec![ExportFormat::GGUF]
+        );
+    }
+
+    #[test]
+    fn export_writes_real_weights_and_varies_with_them() {
+        let dir = temp_dir("trustformers_gguf_enhanced_export");
+
+        let write = |seed: f32, name: &str| {
+            let output = dir.join(name);
+            let config = ExportConfig {
+                format: ExportFormat::GGUF,
+                output_path: output.to_string_lossy().to_string(),
+                ..Default::default()
+            };
+            GGUFExporter::new().export(&block_aligned_model(seed), &config).expect("export");
+            output.with_extension("gguf")
+        };
+
+        let path_a = write(0.0, "a");
+        let path_b = write(5.0, "b");
+
+        let bytes_a = std::fs::read(&path_a).expect("read a");
+        let bytes_b = std::fs::read(&path_b).expect("read b");
+        assert_ne!(
+            bytes_a, bytes_b,
+            "different weights must give different files"
+        );
+
+        let parsed = read_gguf_file(&path_a).expect("parse");
+        let expected: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) * 0.125).collect();
+        assert_eq!(
+            parsed.tensor_f32("blk.0.attn_q.weight").expect("tensor"),
+            expected
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_refuses_a_model_without_named_tensors() {
+        let dir = temp_dir("trustformers_gguf_enhanced_empty");
+        let output = dir.join("model");
+        let config = ExportConfig {
+            format: ExportFormat::GGUF,
+            output_path: output.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let err = GGUFExporter::new()
+            .export(&TestModel::empty(), &config)
+            .expect_err("must not invent weights");
+        assert!(err.to_string().contains("named_tensors"), "{err}");
+        assert!(!output.with_extension("gguf").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression test for the converter that used to `std::fs::copy` the input.
+    #[test]
+    fn convert_quantization_actually_requantizes() {
+        let dir = temp_dir("trustformers_gguf_requantize");
+        let source = dir.join("f32");
+        let target = dir.join("q8.gguf");
+
+        let config = ExportConfig {
+            format: ExportFormat::GGUF,
+            output_path: source.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        GGUFExporter::new().export(&block_aligned_model(0.0), &config).expect("export");
+        let source_path = source.with_extension("gguf");
+
+        GGUFConverter::convert_quantization(&source_path, &target, GGUFTensorType::Q8_0)
+            .expect("requantize");
+
+        let original_bytes = std::fs::read(&source_path).expect("read source");
+        let converted_bytes = std::fs::read(&target).expect("read target");
+        assert_ne!(
+            original_bytes, converted_bytes,
+            "a requantized file must not be a byte copy of the input"
+        );
+        assert!(
+            converted_bytes.len() < original_bytes.len(),
+            "Q8_0 must be smaller than F32: {} vs {}",
+            converted_bytes.len(),
+            original_bytes.len()
+        );
+
+        let parsed = read_gguf_file(&target).expect("parse target");
+        assert_eq!(parsed.tensors[0].0.tensor_type, GGUFTensorType::Q8_0);
+        assert_eq!(
+            parsed.metadata.get("general.file_type"),
+            Some(&GGUFValue::UInt32(GGUFTensorType::Q8_0.file_type()))
+        );
+
+        let expected: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) * 0.125).collect();
+        let recovered = parsed.tensor_f32("blk.0.attn_q.weight").expect("tensor");
+        for (original, actual) in expected.iter().zip(recovered.iter()) {
+            assert!(
+                (original - actual).abs() < 4.0 / 127.0,
+                "{original} -> {actual}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn convert_quantization_refuses_unimplemented_targets() {
+        let dir = temp_dir("trustformers_gguf_requantize_unsupported");
+        let source = dir.join("f32");
+        let target = dir.join("q6k.gguf");
+
+        let config = ExportConfig {
+            format: ExportFormat::GGUF,
+            output_path: source.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        GGUFExporter::new().export(&block_aligned_model(0.0), &config).expect("export");
+
+        let err = GGUFConverter::convert_quantization(
+            source.with_extension("gguf"),
+            &target,
+            GGUFTensorType::Q6K,
+        )
+        .expect_err("no Q6_K encoder exists");
+        assert!(err.to_string().contains("Unsupported operation"), "{err}");
+        assert!(!target.exists(), "no output file may be produced");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_gguf_converter_validation() -> Result<()> {
-        let temp_dir = tempdir()?;
-        let temp_file = temp_dir.path().join("test.gguf");
+        let dir = temp_dir("trustformers_gguf_validate");
+        let source = dir.join("model");
 
-        // Create a minimal GGUF file for testing
-        let mut file = File::create(&temp_file)?;
-        file.write_u32::<LittleEndian>(GGUF_MAGIC)?;
-        file.write_u32::<LittleEndian>(GGUF_VERSION)?;
-        file.write_u64::<LittleEndian>(0)?; // tensor count
-        file.write_u64::<LittleEndian>(0)?; // kv count
+        let config = ExportConfig {
+            format: ExportFormat::GGUF,
+            output_path: source.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        GGUFExporter::new().export(&block_aligned_model(0.0), &config)?;
 
-        let report =
-            GGUFConverter::validate_file(temp_file.to_str().expect("temp file creation failed"))?;
+        let report = GGUFConverter::validate_file(source.with_extension("gguf"))?;
         assert!(report.is_valid);
         assert_eq!(report.version, GGUF_VERSION);
-        assert_eq!(report.tensor_count, 0);
-        assert_eq!(report.metadata_count, 0);
+        assert_eq!(report.tensor_count, 1);
+        assert!(report.metadata_count >= 4);
 
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
+    }
+
+    #[test]
+    fn validate_file_rejects_truncated_files() {
+        let dir = temp_dir("trustformers_gguf_truncated");
+        let source = dir.join("model");
+        let config = ExportConfig {
+            format: ExportFormat::GGUF,
+            output_path: source.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        GGUFExporter::new().export(&block_aligned_model(0.0), &config).expect("export");
+
+        let path = source.with_extension("gguf");
+        let mut bytes = std::fs::read(&path).expect("read");
+        bytes.truncate(bytes.len() - 64);
+        std::fs::write(&path, &bytes).expect("truncate");
+
+        let err = GGUFConverter::validate_file(&path).expect_err("truncated file must fail");
+        assert!(err.to_string().contains("extends to byte"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn magic_constant_is_gguf_ascii() {
+        assert_eq!(
+            crate::export::gguf_format::GGUF_MAGIC.to_le_bytes(),
+            *b"GGUF"
+        );
     }
 }

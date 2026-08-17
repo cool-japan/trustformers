@@ -560,7 +560,9 @@ impl FP8Quantizer {
                 scaled
             };
 
-            // Convert to FP8 (simplified - actual implementation would use proper IEEE conversion)
+            // Bitwise IEEE-754 conversion to the configured FP8 format
+            // (see `f32_to_fp8`: sign/exponent/mantissa are re-encoded with
+            // round-to-nearest, and NaN/inf saturate to the format maximum).
             let fp8_val = self.f32_to_fp8(clipped)?;
             quantized.push(fp8_val);
         }
@@ -778,11 +780,93 @@ pub fn select_fp8_format(tensor: &Tensor, use_case: &str) -> FP8Format {
     }
 }
 
-/// Estimate quantization error
-pub fn estimate_quantization_error(_original: &Tensor, _quantized: &FP8Tensor) -> Result<f32> {
-    // This would require dequantization and comparison
-    // Simplified implementation
-    Ok(0.0)
+/// Measure the quantization error of an FP8 tensor against its source.
+///
+/// The FP8 payload is dequantized with the format and scale factors recorded in
+/// `quantized`, and the result is compared element-wise with `original`. The
+/// returned value is the **root mean squared error** in the units of the input
+/// tensor (0.0 means the round trip was exact).
+///
+/// Use [`quantization_sqnr_db`] when a scale-free figure is preferred.
+///
+/// # Errors
+///
+/// Returns an error when the shapes disagree or when the FP8 payload cannot be
+/// dequantized.
+pub fn estimate_quantization_error(original: &Tensor, quantized: &FP8Tensor) -> Result<f32> {
+    let (original_values, restored_values) = dequantized_pair(original, quantized)?;
+
+    let sum_squared: f64 = original_values
+        .iter()
+        .zip(restored_values.iter())
+        .map(|(&a, &b)| {
+            let d = a as f64 - b as f64;
+            d * d
+        })
+        .sum();
+
+    Ok((sum_squared / original_values.len() as f64).sqrt() as f32)
+}
+
+/// Measure the signal-to-quantization-noise ratio of an FP8 tensor, in dB.
+///
+/// Returns `f32::INFINITY` when the round trip is exact.
+pub fn quantization_sqnr_db(original: &Tensor, quantized: &FP8Tensor) -> Result<f32> {
+    let (original_values, restored_values) = dequantized_pair(original, quantized)?;
+
+    let mut signal = 0.0f64;
+    let mut noise = 0.0f64;
+    for (&a, &b) in original_values.iter().zip(restored_values.iter()) {
+        signal += (a as f64) * (a as f64);
+        let d = a as f64 - b as f64;
+        noise += d * d;
+    }
+
+    if noise == 0.0 {
+        return Ok(f32::INFINITY);
+    }
+    if signal == 0.0 {
+        return Ok(f32::NEG_INFINITY);
+    }
+    Ok((10.0 * (signal / noise).log10()) as f32)
+}
+
+/// Dequantize `quantized` and return `(original values, restored values)`.
+fn dequantized_pair(original: &Tensor, quantized: &FP8Tensor) -> Result<(Vec<f32>, Vec<f32>)> {
+    if original.shape() != quantized.shape {
+        return Err(TrustformersError::shape_error(format!(
+            "FP8 error estimation: original shape {:?} does not match quantized shape {:?}",
+            original.shape(),
+            quantized.shape
+        )));
+    }
+
+    // The dequantizer only needs the format and the recorded scale factors; the
+    // remaining config knobs affect quantization, not reconstruction.
+    let config = FP8Config {
+        format: quantized.format,
+        ..FP8Config::default()
+    };
+    let quantizer = FP8Quantizer::new(config)?;
+    let restored = quantizer.dequantize(quantized)?;
+
+    let original_values = original.to_vec_f32()?;
+    let restored_values = restored.to_vec_f32()?;
+
+    if original_values.is_empty() {
+        return Err(TrustformersError::invalid_input(
+            "FP8 error estimation requires a non-empty tensor".to_string(),
+        ));
+    }
+    if original_values.len() != restored_values.len() {
+        return Err(TrustformersError::shape_error(format!(
+            "FP8 error estimation: {} original values vs {} restored values",
+            original_values.len(),
+            restored_values.len()
+        )));
+    }
+
+    Ok((original_values, restored_values))
 }
 
 #[cfg(test)]
@@ -1393,6 +1477,57 @@ mod tests {
             rel_err < 0.05,
             "SR should be unbiased for negative values: mean={mean}, expected={original_val}, rel_err={rel_err}"
         );
+        Ok(())
+    }
+
+    /// Regression test: `estimate_quantization_error` used to return a constant
+    /// 0.0 ("perfect fidelity") for every tensor. The measured error must be
+    /// non-zero for data FP8 cannot represent exactly, and must grow when the
+    /// format's mantissa shrinks (E5M2 has 2 mantissa bits vs E4M3's 3).
+    #[test]
+    fn test_estimate_quantization_error_is_measured() -> Result<()> {
+        let values: Vec<f32> = (0..64).map(|i| 0.37 + i as f32 * 0.113).collect();
+        let tensor = Tensor::from_vec(values, &[8, 8])?;
+
+        let mut e4m3 = FP8Quantizer::new(FP8Config {
+            format: FP8Format::E4M3,
+            stochastic_rounding: false,
+            ..FP8Config::default()
+        })?;
+        let quantized_e4m3 = e4m3.quantize(&tensor)?;
+        let error_e4m3 = estimate_quantization_error(&tensor, &quantized_e4m3)?;
+
+        let mut e5m2 = FP8Quantizer::new(FP8Config {
+            format: FP8Format::E5M2,
+            stochastic_rounding: false,
+            ..FP8Config::default()
+        })?;
+        let quantized_e5m2 = e5m2.quantize(&tensor)?;
+        let error_e5m2 = estimate_quantization_error(&tensor, &quantized_e5m2)?;
+
+        assert!(
+            error_e4m3 > 0.0,
+            "FP8 cannot represent this data exactly; error must be > 0"
+        );
+        assert!(
+            error_e5m2 > error_e4m3,
+            "E5M2 (2 mantissa bits) must be coarser than E4M3 (3 bits): {error_e5m2} vs {error_e4m3}"
+        );
+
+        let sqnr = quantization_sqnr_db(&tensor, &quantized_e4m3)?;
+        assert!(sqnr.is_finite() && sqnr > 0.0, "measured SQNR was {sqnr}");
+        Ok(())
+    }
+
+    /// Mismatched shapes must be reported rather than silently compared.
+    #[test]
+    fn test_estimate_quantization_error_rejects_shape_mismatch() -> Result<()> {
+        let tensor = Tensor::from_vec(vec![1.0f32; 8], &[8])?;
+        let other = Tensor::from_vec(vec![1.0f32; 4], &[4])?;
+        let mut quantizer = FP8Quantizer::new(FP8Config::default())?;
+        let quantized = quantizer.quantize(&other)?;
+
+        assert!(estimate_quantization_error(&tensor, &quantized).is_err());
         Ok(())
     }
 }

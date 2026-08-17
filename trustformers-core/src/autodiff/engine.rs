@@ -231,8 +231,10 @@ impl AutodiffEngine {
 
     /// Forward-mode automatic differentiation
     fn forward_mode_backward(&self, output: &Variable, grad_output: Option<Tensor>) -> Result<()> {
-        // Forward-mode AD is typically used for computing derivatives with respect to few inputs
-        // This is a simplified implementation
+        // Forward-mode AD is best when the derivative is wanted with respect to
+        // *few* inputs. This engine stores a reverse-mode tape, and for a scalar
+        // output the two modes compute the same gradients, so the request is
+        // served by the reverse-mode traversal rather than by a second tape.
         let mut graph = self.graph.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         graph.backward(output.node_id(), grad_output)
     }
@@ -297,41 +299,30 @@ impl AutodiffEngine {
         self.graph.clone()
     }
 
-    /// Optimize the computation graph
-    pub fn optimize_graph(&self) -> Result<()> {
+    /// Optimize the computation graph.
+    ///
+    /// Returns the number of nodes removed (`0` when the optimization is
+    /// disabled by [`AutodiffConfig::optimize_graph`], or when nothing was dead).
+    ///
+    /// # What this does, and what it deliberately does not
+    ///
+    /// The single applicable pass is **dead-node elimination**: nodes that were
+    /// computed but are neither an output nor an ancestor of one are dropped
+    /// together with their retained tensors and gradients.
+    ///
+    /// Kernel fusion and memory-layout reordering are *not* performed, and there
+    /// are no stub methods pretending otherwise. This engine is eager: by the
+    /// time a node exists its tensor has already been computed, so there is no
+    /// pending kernel to fuse and no execution order left to permute. Fusion in
+    /// this crate happens at the tensor-expression level
+    /// (`crate::tensor::expression`), before evaluation.
+    pub fn optimize_graph(&self) -> Result<usize> {
         if !self.config.optimize_graph {
-            return Ok(());
+            return Ok(0);
         }
 
         let mut graph = self.graph.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        // Perform various graph optimizations
-        self.eliminate_dead_nodes(&mut graph)?;
-        self.fuse_operations(&mut graph)?;
-        self.optimize_memory_layout(&mut graph)?;
-
-        Ok(())
-    }
-
-    /// Eliminate dead nodes (nodes with no children)
-    fn eliminate_dead_nodes(&self, graph: &mut ComputationGraph) -> Result<()> {
-        // This is a simplified implementation
-        // In practice, you would identify and remove nodes that don't contribute to the output
-        Ok(())
-    }
-
-    /// Fuse operations where possible
-    fn fuse_operations(&self, graph: &mut ComputationGraph) -> Result<()> {
-        // This is a simplified implementation
-        // In practice, you would identify patterns like Add+Mul and fuse them into FusedAddMul
-        Ok(())
-    }
-
-    /// Optimize memory layout
-    fn optimize_memory_layout(&self, graph: &mut ComputationGraph) -> Result<()> {
-        // This is a simplified implementation
-        // In practice, you would reorder operations to minimize memory usage
-        Ok(())
+        Ok(graph.eliminate_dead_nodes())
     }
 
     /// Execute a function with gradient computation disabled

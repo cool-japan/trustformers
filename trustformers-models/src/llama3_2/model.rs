@@ -37,26 +37,150 @@ impl Layer for Llama32RmsNorm {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Normalise every trailing `normalized_shape`-sized vector independently.
+    ///
+    /// Pooling the mean square over the whole tensor would make one token's
+    /// scale depend on its neighbours, which is not RMSNorm.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        match &input {
-            Tensor::F32(arr) => {
+        match (&input, &self.weight) {
+            (Tensor::F32(arr), Tensor::F32(w)) => {
                 let eps_f32 = self.eps as f32;
-                let mean_sq = arr.iter().map(|x| x * x).sum::<f32>() / arr.len() as f32;
-                let rms = (mean_sq + eps_f32).sqrt();
-                let normalized = arr.mapv(|x| x / rms);
-                match &self.weight {
-                    Tensor::F32(w) => Ok(Tensor::F32(&normalized * w)),
-                    _ => Err(tensor_op_error(
+                let size = w.len();
+                if size == 0 || !arr.len().is_multiple_of(size) {
+                    return Err(tensor_op_error(
                         "Llama32RmsNorm::forward",
-                        "weight tensor type mismatch",
-                    )),
+                        format!(
+                            "tensor of {} elements is not a multiple of the norm size {size}",
+                            arr.len()
+                        ),
+                    ));
                 }
+                let weight: Vec<f32> = w.iter().copied().collect();
+                let values: Vec<f32> = arr.iter().copied().collect();
+                let mut data = Vec::with_capacity(values.len());
+                for chunk in values.chunks(size) {
+                    let mean_sq = chunk.iter().map(|x| x * x).sum::<f32>() / size as f32;
+                    let inv_rms = 1.0 / (mean_sq + eps_f32).sqrt();
+                    for (value, scale) in chunk.iter().zip(weight.iter()) {
+                        data.push(value * inv_rms * scale);
+                    }
+                }
+                let out = ArrayD::from_shape_vec(IxDyn(arr.shape()), data).map_err(|e| {
+                    tensor_op_error("Llama32RmsNorm::forward", format!("shape error: {e}"))
+                })?;
+                Ok(Tensor::F32(out))
             },
             _ => Err(tensor_op_error(
                 "Llama32RmsNorm::forward",
                 "unsupported input tensor dtype",
             )),
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared scaled dot-product attention
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Multi-head scaled dot-product attention over flat `[seq, num_heads * head_dim]`
+/// buffers.
+///
+/// `queries` has `q_len` rows, `keys`/`values` have `kv_len` rows (they may come
+/// from a different modality, which is exactly what cross-attention needs). When
+/// `causal` is set, query `i` only sees keys `0..=i`.
+///
+/// Returns `[q_len, num_heads * head_dim]`.
+pub(crate) fn multi_head_sdpa(
+    queries: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    q_len: usize,
+    kv_len: usize,
+    num_heads: usize,
+    head_dim: usize,
+    causal: bool,
+) -> Result<Vec<f32>> {
+    let width = num_heads * head_dim;
+    if queries.len() != q_len * width
+        || keys.len() != kv_len * width
+        || values.len() != kv_len * width
+    {
+        return Err(tensor_op_error(
+            "multi_head_sdpa",
+            format!(
+                "shape mismatch: q {} (expected {}), k {} / v {} (expected {})",
+                queries.len(),
+                q_len * width,
+                keys.len(),
+                values.len(),
+                kv_len * width
+            ),
+        ));
+    }
+    if q_len == 0 {
+        // Attention over an empty query sequence is vacuously empty (a tiny image
+        // can yield zero patches).
+        return Ok(Vec::new());
+    }
+    if kv_len == 0 {
+        return Err(tensor_op_error(
+            "multi_head_sdpa",
+            "attention needs at least one key/value position".to_string(),
+        ));
+    }
+
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let mut output = vec![0.0f32; q_len * width];
+    let mut scores = vec![0.0f32; kv_len];
+
+    for head in 0..num_heads {
+        for query_pos in 0..q_len {
+            let visible = if causal { (query_pos + 1).min(kv_len) } else { kv_len };
+            let q_base = query_pos * width + head * head_dim;
+
+            let mut max_score = f32::NEG_INFINITY;
+            for (key_pos, score) in scores.iter_mut().take(visible).enumerate() {
+                let k_base = key_pos * width + head * head_dim;
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    dot += queries[q_base + d] * keys[k_base + d];
+                }
+                dot *= scale;
+                *score = dot;
+                if dot > max_score {
+                    max_score = dot;
+                }
+            }
+
+            let mut sum = 0.0f32;
+            for score in scores.iter_mut().take(visible) {
+                *score = (*score - max_score).exp();
+                sum += *score;
+            }
+            let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+
+            for (key_pos, score) in scores.iter().take(visible).enumerate() {
+                let weight = score * inv_sum;
+                let v_base = key_pos * width + head * head_dim;
+                for d in 0..head_dim {
+                    output[q_base + d] += weight * values[v_base + d];
+                }
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+/// Split a 2-D `[seq, features]` or 3-D `[batch, seq, features]` shape.
+fn split_sequence_shape(shape: &[usize], context: &str) -> Result<(usize, usize, usize)> {
+    match shape.len() {
+        2 => Ok((1, shape[0], shape[1])),
+        3 => Ok((shape[0], shape[1], shape[2])),
+        _ => Err(tensor_op_error(
+            context,
+            format!("expected [seq, features] or [batch, seq, features], got {shape:?}"),
+        )),
     }
 }
 
@@ -87,15 +211,43 @@ impl Layer for VisionLayerNorm {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Normalise every trailing `normalized_shape`-sized vector independently.
+    ///
+    /// LayerNorm is defined per token: pooling the mean and variance across the
+    /// whole tensor would make one patch's activation depend on the other patches
+    /// in the batch, which is not LayerNorm and leaks information across the
+    /// sequence.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         match (&input, &self.weight, &self.bias) {
             (Tensor::F32(arr), Tensor::F32(w), Tensor::F32(b)) => {
-                let n = arr.len() as f32;
-                let mean = arr.iter().sum::<f32>() / n;
-                let var = arr.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / n;
-                let std = (var + self.eps as f32).sqrt();
-                let normalized = arr.mapv(|x| (x - mean) / std);
-                Ok(Tensor::F32((&normalized * w) + b))
+                let size = w.len();
+                if size == 0 || !arr.len().is_multiple_of(size) {
+                    return Err(tensor_op_error(
+                        "VisionLayerNorm::forward",
+                        format!(
+                            "tensor of {} elements is not a multiple of the norm size {size}",
+                            arr.len()
+                        ),
+                    ));
+                }
+                let weight: Vec<f32> = w.iter().copied().collect();
+                let bias: Vec<f32> = b.iter().copied().collect();
+                let values: Vec<f32> = arr.iter().copied().collect();
+                let mut data = Vec::with_capacity(values.len());
+                let n = size as f32;
+                for chunk in values.chunks(size) {
+                    let mean = chunk.iter().sum::<f32>() / n;
+                    let var = chunk.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / n;
+                    let inv_std = 1.0 / (var + self.eps as f32).sqrt();
+                    for ((value, scale), shift) in chunk.iter().zip(weight.iter()).zip(bias.iter())
+                    {
+                        data.push((value - mean) * inv_std * scale + shift);
+                    }
+                }
+                let out = ArrayD::from_shape_vec(IxDyn(arr.shape()), data).map_err(|e| {
+                    tensor_op_error("VisionLayerNorm::forward", format!("shape error: {e}"))
+                })?;
+                Ok(Tensor::F32(out))
             },
             _ => Err(tensor_op_error(
                 "VisionLayerNorm::forward",
@@ -109,11 +261,11 @@ impl Layer for VisionLayerNorm {
 // Rotary Position Embedding with LongRoPE scaling
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Rotary Position Embedding for Llama-3.2 with optional LongRoPE scaling
+/// Rotary Position Embedding for Llama-3.2 with optional position interpolation
 pub struct Llama32RotaryEmbedding {
     inv_freq: Vec<f64>,
-    _max_seq_len: usize,
-    _head_dim: usize,
+    max_seq_len: usize,
+    head_dim: usize,
     scaling_factor: f32,
     use_scaled: bool,
 }
@@ -135,8 +287,8 @@ impl Llama32RotaryEmbedding {
             .collect();
         Self {
             inv_freq,
-            _max_seq_len: max_seq_len,
-            _head_dim: head_dim,
+            max_seq_len,
+            head_dim,
             scaling_factor,
             use_scaled,
         }
@@ -147,25 +299,124 @@ impl Llama32RotaryEmbedding {
         self.inv_freq.len()
     }
 
-    /// Apply RoPE to query and key tensors (shape-preserving)
+    /// Width of one rotated head block.
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+    }
+
+    /// Longest position this table was built for.
+    pub fn max_seq_len(&self) -> usize {
+        self.max_seq_len
+    }
+
+    /// Effective position divisor: `scaling_factor` when scaled RoPE is on.
+    fn position_scale(&self) -> f64 {
+        if self.use_scaled {
+            self.scaling_factor as f64
+        } else {
+            1.0
+        }
+    }
+
+    /// Apply RoPE to query and key tensors (shape-preserving).
+    ///
+    /// `q` and `k` are `[seq_len, heads * head_dim]` or
+    /// `[batch, seq_len, heads * head_dim]` and may carry different head counts
+    /// (GQA keeps fewer KV heads). Every `head_dim`-wide head block is rotated
+    /// independently with the LLaMA "rotate-half" pairing: component `i` pairs
+    /// with component `i + head_dim/2` and the pair is rotated by
+    /// `angle = pos * inv_freq[i]`.
+    ///
+    /// With `use_scaled` the position is divided by `scaling_factor` — linear
+    /// position interpolation (Chen et al., 2023), which is what a single scalar
+    /// factor can express. The piecewise low/high-frequency schedule shipped with
+    /// Llama-3.1/3.2 needs `low_freq_factor`, `high_freq_factor` and the original
+    /// context length; this config carries none of them, so it is not claimed
+    /// here.
     pub fn apply_rotary_emb(
         &self,
         q: &Tensor,
         k: &Tensor,
         position_ids: &[usize],
     ) -> Result<(Tensor, Tensor)> {
-        let scale = if self.use_scaled { self.scaling_factor as f64 } else { 1.0 };
-        match (q, k) {
-            (Tensor::F32(q_arr), Tensor::F32(k_arr)) => {
-                let q_rotated = q_arr.clone();
-                let k_rotated = k_arr.clone();
-                for &pos in position_ids {
-                    for (i, &freq) in self.inv_freq.iter().enumerate() {
-                        let _angle = (pos as f64 * freq / scale) as f32;
-                        let _ = i;
+        let scale = self.position_scale();
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(tensor_op_error(
+                "Llama32RotaryEmbedding::apply_rotary_emb",
+                format!("rope scaling factor must be finite and positive, got {scale}"),
+            ));
+        }
+        // One (sin, cos) table shared by both tensors and every head.
+        let mut table = Vec::with_capacity(position_ids.len() * self.inv_freq.len());
+        for &pos in position_ids {
+            for &freq in &self.inv_freq {
+                let angle = (pos as f64 / scale) * freq;
+                table.push((angle.sin() as f32, angle.cos() as f32));
+            }
+        }
+
+        let q_rotated = self.rotate(q, position_ids.len(), &table, "query")?;
+        let k_rotated = self.rotate(k, position_ids.len(), &table, "key")?;
+        Ok((q_rotated, k_rotated))
+    }
+
+    /// Rotate every head block of one tensor with the precomputed table.
+    fn rotate(
+        &self,
+        tensor: &Tensor,
+        positions: usize,
+        table: &[(f32, f32)],
+        role: &str,
+    ) -> Result<Tensor> {
+        let half = self.inv_freq.len();
+        match tensor {
+            Tensor::F32(arr) => {
+                let shape = arr.shape().to_vec();
+                let (batch, seq_len, width) =
+                    split_sequence_shape(&shape, "Llama32RotaryEmbedding::apply_rotary_emb")?;
+                if self.head_dim == 0 || !width.is_multiple_of(self.head_dim) {
+                    return Err(tensor_op_error(
+                        "Llama32RotaryEmbedding::apply_rotary_emb",
+                        format!(
+                            "{role} width {width} is not a multiple of head_dim {}",
+                            self.head_dim
+                        ),
+                    ));
+                }
+                if seq_len != positions {
+                    return Err(tensor_op_error(
+                        "Llama32RotaryEmbedding::apply_rotary_emb",
+                        format!(
+                            "{role} has {seq_len} positions but {positions} position ids were given"
+                        ),
+                    ));
+                }
+
+                let heads = width / self.head_dim;
+                let mut data: Vec<f32> = arr.iter().copied().collect();
+                for b in 0..batch {
+                    for t in 0..seq_len {
+                        let row = (b * seq_len + t) * width;
+                        for head in 0..heads {
+                            let base = row + head * self.head_dim;
+                            for i in 0..half {
+                                let (sin, cos) = table[t * half + i];
+                                let x = data[base + i];
+                                let y = data[base + i + half];
+                                data[base + i] = x * cos - y * sin;
+                                data[base + i + half] = x * sin + y * cos;
+                            }
+                        }
                     }
                 }
-                Ok((Tensor::F32(q_rotated), Tensor::F32(k_rotated)))
+
+                let rotated = ArrayD::from_shape_vec(IxDyn(&shape), data).map_err(|e| {
+                    tensor_op_error(
+                        "Llama32RotaryEmbedding::apply_rotary_emb",
+                        format!("shape error while rebuilding the {role} tensor: {e}"),
+                    )
+                })?;
+                Ok(Tensor::F32(rotated))
             },
             _ => Err(tensor_op_error(
                 "Llama32RotaryEmbedding::apply_rotary_emb",
@@ -434,25 +685,45 @@ impl Layer for VisionAttention {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Bidirectional multi-head self-attention over the patch tokens.
+    ///
+    /// `softmax(Q Kᵀ / sqrt(head_dim)) V` — every patch may attend to every
+    /// other patch (a ViT encoder is not causal).
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let q = self.q_proj.forward(input.clone())?;
-        let k = self.k_proj.forward(input.clone())?;
-        let _v = self.v_proj.forward(input)?;
+        let shape = input.shape().to_vec();
+        let (batch, seq_len, features) = split_sequence_shape(&shape, "VisionAttention::forward")?;
+        let width = self.num_heads * self.head_dim;
+        if features != width {
+            return Err(tensor_op_error(
+                "VisionAttention::forward",
+                format!(
+                    "input feature size {features} != num_heads {} * head_dim {}",
+                    self.num_heads, self.head_dim
+                ),
+            ));
+        }
 
-        let scale = (self.head_dim as f32).sqrt().recip();
-        // Scaled dot-product attention (simplified: scale q by 1/sqrt(head_dim))
-        let attn_output = match &q {
-            Tensor::F32(q_arr) => {
-                let _ = &k;
-                Tensor::F32(q_arr.mapv(|x| x * scale))
-            },
-            _ => {
-                return Err(tensor_op_error(
-                    "VisionAttention::forward",
-                    "unsupported tensor dtype",
-                ))
-            },
-        };
+        let q = self.q_proj.forward(input.clone())?.data()?;
+        let k = self.k_proj.forward(input.clone())?.data()?;
+        let v = self.v_proj.forward(input)?.data()?;
+
+        let stride = seq_len * width;
+        let mut context = Vec::with_capacity(batch * stride);
+        for b in 0..batch {
+            let range = b * stride..(b + 1) * stride;
+            context.extend_from_slice(&multi_head_sdpa(
+                &q[range.clone()],
+                &k[range.clone()],
+                &v[range],
+                seq_len,
+                seq_len,
+                self.num_heads,
+                self.head_dim,
+                false,
+            )?);
+        }
+
+        let attn_output = Tensor::from_vec(context, &shape)?;
         self.out_proj.forward(attn_output)
     }
 }
@@ -634,27 +905,53 @@ impl CrossAttentionLayer {
     ///
     /// Returns a tensor of shape `[seq_len, hidden_size]`.
     pub fn cross_attend(&self, text_hidden: Tensor, vision_features: &Tensor) -> Result<Tensor> {
+        let text_shape = text_hidden.shape().to_vec();
+        let (text_batch, seq_len, _) =
+            split_sequence_shape(&text_shape, "CrossAttentionLayer::cross_attend")?;
+        let vision_shape = vision_features.shape().to_vec();
+        let (vision_batch, num_patches, _) =
+            split_sequence_shape(&vision_shape, "CrossAttentionLayer::cross_attend")?;
+        if text_batch != vision_batch {
+            return Err(tensor_op_error(
+                "CrossAttentionLayer::cross_attend",
+                format!("text batch {text_batch} does not match vision batch {vision_batch}"),
+            ));
+        }
+
         let q = self.q_proj.forward(text_hidden)?;
         let k = self.k_proj.forward(vision_features.clone())?;
-        let _v = self.v_proj.forward(vision_features.clone())?;
+        let v = self.v_proj.forward(vision_features.clone())?;
 
-        // Normalise q and k (per-head, simplified)
-        let q_normed = self.q_norm.forward(q)?;
-        let k_normed = self.k_norm.forward(k)?;
+        // Per-head RMS norm on queries and keys (the norms are head_dim wide).
+        let q_normed = self.q_norm.forward(q)?.data()?;
+        let k_normed = self.k_norm.forward(k)?.data()?;
+        let v_data = v.data()?;
 
-        let scale = (self.head_dim as f32).sqrt().recip();
-        let attn_output = match &q_normed {
-            Tensor::F32(q_arr) => {
-                let _ = &k_normed;
-                Tensor::F32(q_arr.mapv(|x| x * scale))
-            },
-            _ => {
-                return Err(tensor_op_error(
-                    "CrossAttentionLayer::cross_attend",
-                    "unsupported tensor dtype",
-                ))
-            },
+        // Text queries attend over every vision patch (no causal mask).
+        let width = self.num_heads * self.head_dim;
+        let q_stride = seq_len * width;
+        let kv_stride = num_patches * width;
+        let mut context = Vec::with_capacity(text_batch * q_stride);
+        for b in 0..text_batch {
+            let kv_range = b * kv_stride..(b + 1) * kv_stride;
+            context.extend_from_slice(&multi_head_sdpa(
+                &q_normed[b * q_stride..(b + 1) * q_stride],
+                &k_normed[kv_range.clone()],
+                &v_data[kv_range],
+                seq_len,
+                num_patches,
+                self.num_heads,
+                self.head_dim,
+                false,
+            )?);
+        }
+
+        let attn_shape: Vec<usize> = if text_shape.len() == 2 {
+            vec![seq_len, width]
+        } else {
+            vec![text_batch, seq_len, width]
         };
+        let attn_output = Tensor::from_vec(context, &attn_shape)?;
         self.o_proj.forward(attn_output)
     }
 
@@ -687,8 +984,8 @@ pub struct Llama32SelfAttention {
     v_proj: Linear,
     o_proj: Linear,
     rotary_emb: Llama32RotaryEmbedding,
-    _num_heads: usize,
-    _num_kv_heads: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
     head_dim: usize,
     num_query_groups: usize,
 }
@@ -740,8 +1037,8 @@ impl Llama32SelfAttention {
             v_proj,
             o_proj,
             rotary_emb,
-            _num_heads: config.num_attention_heads,
-            _num_kv_heads: config.num_key_value_heads,
+            num_heads: config.num_attention_heads,
+            num_kv_heads: config.num_key_value_heads,
             head_dim,
             num_query_groups,
         })
@@ -753,24 +1050,48 @@ impl Llama32SelfAttention {
             + self.v_proj.parameter_count()
             + self.o_proj.parameter_count()
     }
+
+    /// Number of query heads.
+    pub fn num_heads(&self) -> usize {
+        self.num_heads
+    }
+
+    /// Number of key/value heads (`num_heads / num_query_groups`).
+    pub fn num_kv_heads(&self) -> usize {
+        self.num_kv_heads
+    }
+
+    /// Width of one attention head.
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+    }
 }
 
 impl Layer for Llama32SelfAttention {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Causal grouped-query self-attention.
+    ///
+    /// Accepts `[seq_len, hidden]` or `[batch, seq_len, hidden]` and returns the
+    /// same rank. The computation is `softmax(mask(Q Kᵀ) / sqrt(head_dim)) V`
+    /// with RoPE applied to Q and K and each KV head shared by
+    /// `num_query_groups` query heads — the keys and values are read, not
+    /// discarded.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let shape = input.shape();
-        let seq_len = match shape.len() {
-            2 => shape[0],
-            3 => shape[1],
-            n => {
-                return Err(tensor_op_error(
-                    "Llama32SelfAttention::forward",
-                    format!("unexpected input rank {n}"),
-                ))
-            },
-        };
+        let shape = input.shape().to_vec();
+        let (batch, seq_len, hidden) =
+            split_sequence_shape(&shape, "Llama32SelfAttention::forward")?;
+        let width = self.num_heads * self.head_dim;
+        if hidden != width {
+            return Err(tensor_op_error(
+                "Llama32SelfAttention::forward",
+                format!(
+                    "input hidden size {hidden} != num_heads {} * head_dim {}",
+                    self.num_heads, self.head_dim
+                ),
+            ));
+        }
 
         let q = self.q_proj.forward(input.clone())?;
         let k = self.k_proj.forward(input.clone())?;
@@ -779,20 +1100,28 @@ impl Layer for Llama32SelfAttention {
         let position_ids: Vec<usize> = (0..seq_len).collect();
         let (q_rope, k_rope) = self.rotary_emb.apply_rotary_emb(&q, &k, &position_ids)?;
 
-        // GQA: expand KV heads to match query heads
-        let _v_expanded = self.expand_kv(&v)?;
-        let _ = &k_rope;
+        // GQA: expand KV heads so query head `h` reads KV head `h / groups`.
+        let k_expanded = self.expand_kv(&k_rope)?.data()?;
+        let v_expanded = self.expand_kv(&v)?.data()?;
+        let queries = q_rope.data()?;
 
-        let scale = (self.head_dim as f32).sqrt().recip();
-        let attn_output = match &q_rope {
-            Tensor::F32(q_arr) => Tensor::F32(q_arr.mapv(|x| x * scale)),
-            _ => {
-                return Err(tensor_op_error(
-                    "Llama32SelfAttention::forward",
-                    "tensor dtype mismatch in attention computation",
-                ))
-            },
-        };
+        let stride = seq_len * width;
+        let mut context = Vec::with_capacity(batch * stride);
+        for b in 0..batch {
+            let range = b * stride..(b + 1) * stride;
+            context.extend_from_slice(&multi_head_sdpa(
+                &queries[range.clone()],
+                &k_expanded[range.clone()],
+                &v_expanded[range],
+                seq_len,
+                seq_len,
+                self.num_heads,
+                self.head_dim,
+                true,
+            )?);
+        }
+
+        let attn_output = Tensor::from_vec(context, &shape)?;
         self.o_proj.forward(attn_output)
     }
 }
@@ -1139,10 +1468,22 @@ impl Model for Llama32VisionModel {
         self.forward_text_only(input_ids)
     }
 
+    /// Not supported yet — returns a structured error rather than pretending.
+    ///
+    /// A `MllamaForConditionalGeneration` checkpoint carries a vision tower with
+    /// tile/aspect-ratio embeddings and gated cross-attention that this
+    /// simplified architecture does not model, so its tensors have no faithful
+    /// destination here. Binding only the text decoder would leave the vision
+    /// path randomly initialised while reporting success, which would be worse
+    /// than refusing.
     fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
         Err(
             trustformers_core::errors::TrustformersError::not_implemented(
-                "Weight loading not yet implemented for Llama-3.2".to_string(),
+                "Llama-3.2 vision checkpoint loading is not implemented: this architecture omits \
+                 the Mllama tile/aspect-ratio embeddings and cross-attention gates, so a \
+                 checkpoint cannot be bound faithfully. Install weights explicitly through the \
+                 layer setters instead."
+                    .to_string(),
             ),
         )
     }
@@ -1157,316 +1498,5 @@ impl Model for Llama32VisionModel {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::llama3_2::config::Llama32Config;
-    use trustformers_core::traits::Layer;
-
-    // LCG — no rand crate
-    fn lcg_next(state: &mut u64) -> f32 {
-        *state = state.wrapping_mul(6364136223846793005u64).wrapping_add(1442695040888963407u64);
-        (*state >> 33) as f32 / (1u64 << 31) as f32
-    }
-
-    fn small_config() -> Llama32Config {
-        Llama32Config::small_test()
-    }
-
-    // ── Config spec tests ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_llama32_1b_vocab_size() {
-        // LLaMA-3.2 uses shared 128 256 Tiktoken vocabulary
-        let cfg = Llama32Config::llama32_3b();
-        assert_eq!(cfg.vocab_size, 128256, "vocab_size must be 128256");
-    }
-
-    #[test]
-    fn test_llama32_rope_theta() {
-        let cfg = Llama32Config::llama32_3b();
-        assert_eq!(cfg.rope_theta, 500000.0, "RoPE theta must be 500000");
-    }
-
-    #[test]
-    fn test_llama32_3b_num_attention_heads() {
-        let cfg = Llama32Config::llama32_3b();
-        assert_eq!(
-            cfg.num_attention_heads, 24,
-            "3B model must have 24 query heads"
-        );
-    }
-
-    #[test]
-    fn test_llama32_3b_num_kv_heads() {
-        let cfg = Llama32Config::llama32_3b();
-        assert_eq!(cfg.num_key_value_heads, 8, "3B model must have 8 KV heads");
-    }
-
-    #[test]
-    fn test_gqa_group_size_3b() {
-        let cfg = Llama32Config::llama32_3b();
-        let group_size = cfg.num_attention_heads / cfg.num_key_value_heads;
-        assert_eq!(group_size, 3, "3B GQA group size = 24/8 = 3");
-    }
-
-    #[test]
-    fn test_gqa_group_size_small_test() {
-        let cfg = small_config();
-        let group_size = cfg.num_attention_heads / cfg.num_key_value_heads;
-        // small_test: heads=4, kv_heads=2 → group_size=2
-        assert_eq!(group_size, 2, "small_test GQA group size must be 2");
-    }
-
-    #[test]
-    fn test_head_dim_divides_hidden_size() {
-        let cfg = small_config();
-        assert_eq!(
-            cfg.hidden_size % cfg.num_attention_heads,
-            0,
-            "hidden_size must be divisible by num_attention_heads"
-        );
-        let expected_head_dim = cfg.hidden_size / cfg.num_attention_heads;
-        assert_eq!(
-            cfg.head_dim, expected_head_dim,
-            "head_dim must equal hidden_size / num_heads"
-        );
-    }
-
-    #[test]
-    fn test_llama32_11b_config() {
-        let cfg = Llama32Config::llama32_11b();
-        assert_eq!(cfg.vocab_size, 128256);
-        assert_eq!(cfg.num_attention_heads, 32);
-        assert_eq!(cfg.num_key_value_heads, 8);
-        let group_size = cfg.num_attention_heads / cfg.num_key_value_heads;
-        assert_eq!(group_size, 4, "11B model GQA group_size = 32/8 = 4");
-    }
-
-    // ── RMSNorm ───────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_rms_norm_no_bias_construction() {
-        // Llama32RmsNorm has only `weight`, no bias
-        let norm = Llama32RmsNorm::new(32, 1e-5).expect("RMSNorm should construct");
-        assert_eq!(
-            norm.parameter_count(),
-            32,
-            "RMSNorm parameter count = hidden_size (weight only)"
-        );
-    }
-
-    #[test]
-    fn test_rms_norm_normalizes_non_zero_input() {
-        let norm = Llama32RmsNorm::new(4, 1e-5).expect("RMSNorm should construct");
-        let input =
-            Tensor::from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], &[4]).expect("tensor should construct");
-        let output = norm.forward(input).expect("RMSNorm forward should succeed");
-        let out_vals: Vec<f32> = match &output {
-            Tensor::F32(arr) => arr.iter().copied().collect(),
-            _ => panic!("expected F32"),
-        };
-        // The mean square should be ~1 after normalisation (with unit weights)
-        let mean_sq: f32 = out_vals.iter().map(|&x| x * x).sum::<f32>() / out_vals.len() as f32;
-        assert!(
-            (mean_sq - 1.0).abs() < 0.1,
-            "RMSNorm: mean square of output should ≈ 1"
-        );
-    }
-
-    #[test]
-    fn test_rms_norm_handles_uniform_input() {
-        let norm = Llama32RmsNorm::new(8, 1e-5).expect("RMSNorm should construct");
-        let data = vec![0.5_f32; 8];
-        let input = Tensor::from_vec(data, &[8]).expect("tensor should construct");
-        let output = norm.forward(input).expect("forward should succeed");
-        // All values equal → all outputs should equal each other after normalisation
-        match &output {
-            Tensor::F32(arr) => {
-                let first = arr[[0]];
-                assert!(
-                    arr.iter().all(|&v| (v - first).abs() < 1e-5),
-                    "uniform input must produce uniform output after RMSNorm"
-                );
-            },
-            _ => panic!("expected F32"),
-        }
-    }
-
-    // ── Vision patch embedding ─────────────────────────────────────────────
-
-    #[test]
-    fn test_vision_patch_embedding_construction() {
-        let cfg = small_config();
-        let emb = VisionPatchEmbedding::new(&cfg).expect("VisionPatchEmbedding should construct");
-        assert_eq!(emb.num_patches(), cfg.num_patches);
-        assert_eq!(emb.vision_hidden_size(), cfg.vision_hidden_size);
-    }
-
-    #[test]
-    fn test_vision_patch_embedding_num_patches_formula() {
-        let cfg = small_config();
-        let expected = (cfg.image_size / cfg.patch_size).pow(2);
-        assert_eq!(
-            cfg.num_patches, expected,
-            "num_patches must equal (image/patch)^2"
-        );
-    }
-
-    #[test]
-    fn test_vision_patch_embedding_parameter_count_positive() {
-        let cfg = small_config();
-        let emb = VisionPatchEmbedding::new(&cfg).expect("VisionPatchEmbedding should construct");
-        assert!(emb.parameter_count() > 0);
-    }
-
-    #[test]
-    fn test_vision_patch_embed_patches_output_shape() {
-        let cfg = small_config();
-        let emb = VisionPatchEmbedding::new(&cfg).expect("VisionPatchEmbedding should construct");
-        let h = cfg.image_size;
-        let w = cfg.image_size;
-        let pixel_values: Vec<f32> = {
-            let mut st = 42u64;
-            (0..h * w * 3).map(|_| lcg_next(&mut st)).collect()
-        };
-        let out = emb.embed_patches(&pixel_values, h, w).expect("embed_patches should succeed");
-        let shape = out.shape();
-        let expected_patches = cfg.num_patches;
-        assert_eq!(
-            shape[0], expected_patches,
-            "output[0] must equal num_patches"
-        );
-        assert_eq!(
-            shape[1], cfg.vision_hidden_size,
-            "output[1] must equal vision_hidden_size"
-        );
-    }
-
-    // ── RoPE ─────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_rotary_embedding_inv_freq_count() {
-        let cfg = small_config();
-        let rope = Llama32RotaryEmbedding::new(
-            cfg.head_dim,
-            cfg.max_position_embeddings,
-            cfg.rope_theta,
-            cfg.rope_scaling_factor,
-            cfg.use_scaled_rope,
-        );
-        assert_eq!(
-            rope.half_dim(),
-            cfg.head_dim / 2,
-            "half_dim must be head_dim/2"
-        );
-    }
-
-    #[test]
-    fn test_rope_apply_returns_same_shape() {
-        let cfg = small_config();
-        let rope = Llama32RotaryEmbedding::new(
-            cfg.head_dim,
-            cfg.max_position_embeddings,
-            cfg.rope_theta,
-            cfg.rope_scaling_factor,
-            cfg.use_scaled_rope,
-        );
-        let seq_len = 4usize;
-        let dim = cfg.head_dim;
-        let data: Vec<f32> = {
-            let mut st = 55u64;
-            (0..seq_len * dim).map(|_| lcg_next(&mut st)).collect()
-        };
-        let q = Tensor::from_vec(data.clone(), &[seq_len, dim]).expect("q tensor should construct");
-        let k = Tensor::from_vec(data, &[seq_len, dim]).expect("k tensor should construct");
-        let positions: Vec<usize> = (0..seq_len).collect();
-        let (q_rot, k_rot) = rope
-            .apply_rotary_emb(&q, &k, &positions)
-            .expect("apply_rotary_emb should succeed");
-        assert_eq!(q_rot.shape(), q.shape(), "RoPE must preserve q shape");
-        assert_eq!(k_rot.shape(), k.shape(), "RoPE must preserve k shape");
-    }
-
-    // ── Self-attention & decoder layer ────────────────────────────────────────
-
-    #[test]
-    fn test_self_attention_construction() {
-        let cfg = small_config();
-        let attn = Llama32SelfAttention::new(&cfg).expect("Llama32SelfAttention should construct");
-        assert!(attn.parameter_count() > 0);
-        assert_eq!(
-            attn.num_query_groups,
-            cfg.num_attention_heads / cfg.num_key_value_heads
-        );
-    }
-
-    #[test]
-    fn test_decoder_layer_without_cross_attention() {
-        let cfg = small_config();
-        let layer = Llama32DecoderLayer::new(&cfg, false).expect("decoder layer should construct");
-        assert!(
-            !layer.has_cross_attention(),
-            "layer without cross-attn flag must not have it"
-        );
-    }
-
-    #[test]
-    fn test_decoder_layer_with_cross_attention() {
-        let cfg = small_config();
-        let layer = Llama32DecoderLayer::new(&cfg, true)
-            .expect("decoder layer with cross-attn should construct");
-        assert!(
-            layer.has_cross_attention(),
-            "layer must have cross-attention when requested"
-        );
-    }
-
-    // ── Vision model ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_vision_model_construction() {
-        let cfg = small_config();
-        let model = Llama32VisionModel::new(cfg).expect("Llama32VisionModel should construct");
-        assert!(model.parameter_count() > 0, "model must have parameters");
-    }
-
-    #[test]
-    fn test_vision_model_text_only_forward() {
-        let cfg = small_config();
-        let model =
-            Llama32VisionModel::new(cfg.clone()).expect("Llama32VisionModel should construct");
-        let input_ids = vec![0u32, 1, 2];
-        let out = model
-            .forward_text_only(input_ids.clone())
-            .expect("text-only forward should succeed");
-        let shape = out.shape();
-        // Output must have hidden_size as last dimension
-        assert_eq!(
-            shape[shape.len() - 1],
-            cfg.hidden_size,
-            "output last dim must equal hidden_size"
-        );
-    }
-
-    #[test]
-    fn test_cross_attention_decoder_construction() {
-        let cfg = small_config();
-        let decoder =
-            Llama32CrossAttentionDecoder::new(cfg.clone()).expect("decoder should construct");
-        assert!(decoder.parameter_count() > 0);
-        assert_eq!(
-            decoder.config().num_hidden_layers,
-            cfg.num_hidden_layers,
-            "decoder must have correct number of layers"
-        );
-    }
-
-    #[test]
-    fn test_lcg_values_in_range() {
-        let mut state = 11111u64;
-        for _ in 0..20 {
-            let v = lcg_next(&mut state);
-            assert!((0.0..1.0).contains(&v), "LCG value must be in [0,1)");
-        }
-    }
-}
+#[path = "model_tests.rs"]
+mod tests;

@@ -6,6 +6,7 @@
 //! - Hybrid parallelism
 //! - NUMA-aware optimization
 
+pub mod local_communicator;
 pub mod model_parallel;
 pub mod parallel_layers;
 pub mod pipeline_parallel;
@@ -36,6 +37,7 @@ pub use pipeline_parallel::{
     PipelineStage,
 };
 
+pub use local_communicator::LocalCommunicator;
 pub use mpi_communicator::{mpi_utils, MpiCommunicatorImpl};
 
 #[cfg(feature = "nccl")]
@@ -155,7 +157,13 @@ where
     f(&context)
 }
 
-/// Map function across items in parallel
+/// Map function across items in parallel.
+///
+/// Genuinely parallel: dispatches through `scirs2_core::parallel_ops`
+/// (rayon), which preserves input order in its output (`Vec`'s
+/// `into_par_iter` is an `IndexedParallelIterator`). Falls back to the
+/// crate's sequential rayon shim automatically when the `parallel` feature
+/// is off, so this compiles and behaves correctly either way.
 pub fn parallel_map<F, T>(items: Vec<T>, f: F) -> Result<Vec<T>>
 where
     F: Fn(T, &ParallelContext) -> Result<T> + Send + Sync,
@@ -164,11 +172,15 @@ where
     let context =
         parallel_context().ok_or_else(|| runtime_error("Parallel context not initialized"))?;
 
-    // Simple implementation - in practice would use thread pool
-    items.into_iter().map(|item| f(item, &context)).collect()
+    use scirs2_core::parallel_ops::*;
+    items.into_par_iter().map(|item| f(item, &context)).collect()
 }
 
-/// Parallel chunk mapping for large datasets
+/// Parallel chunk mapping for large datasets.
+///
+/// Each chunk is processed by a separate task via
+/// `scirs2_core::parallel_ops` (rayon); chunk order is preserved before
+/// flattening.
 pub fn parallel_chunk_map<F, T>(items: Vec<T>, chunk_size: usize, f: F) -> Result<Vec<T>>
 where
     F: Fn(Vec<T>, &ParallelContext) -> Result<Vec<T>> + Send + Sync,
@@ -185,7 +197,9 @@ where
         i = end;
     }
 
-    let results: Result<Vec<Vec<T>>> = chunks.into_iter().map(|chunk| f(chunk, &context)).collect();
+    use scirs2_core::parallel_ops::*;
+    let results: Result<Vec<Vec<T>>> =
+        chunks.into_par_iter().map(|chunk| f(chunk, &context)).collect();
 
     results.map(|vecs| vecs.into_iter().flatten().collect())
 }
@@ -340,5 +354,72 @@ mod tests {
     fn test_parallel_context_clone() {
         let ctx = ParallelContext::new(ParallelismStrategy::Hybrid, 3);
         let _cloned = ctx.clone();
+    }
+
+    // ── 15. parallel_map actually uses more than one thread ───────────────────
+    //
+    // Regression test: before this fix, `parallel_map` was
+    // `items.into_iter().map(...)` - fully sequential despite its name and
+    // `Send + Sync` bounds. Every closure invocation would have run on the
+    // calling thread, so this would see exactly one distinct `ThreadId`
+    // (`seen.len() == 1`) against the old implementation. With a real rayon
+    // dispatch, closures that overlap in time (via `sleep`) get distributed
+    // across the global thread pool's worker threads.
+
+    #[test]
+    fn test_parallel_map_uses_multiple_threads() {
+        use std::collections::HashSet;
+        use std::sync::Mutex as StdMutex;
+        use std::thread;
+
+        if thread::available_parallelism().map(|n| n.get()).unwrap_or(1) < 2 {
+            // Cannot observe >1 thread in use on a single-hardware-thread
+            // machine; skip rather than produce a flaky failure.
+            return;
+        }
+
+        init_parallelism(ParallelContext::new(ParallelismStrategy::Data, 4));
+
+        let thread_ids: Arc<StdMutex<HashSet<thread::ThreadId>>> =
+            Arc::new(StdMutex::new(HashSet::new()));
+        let items: Vec<u32> = (0..64).collect();
+
+        let ids_for_closure = Arc::clone(&thread_ids);
+        let result = parallel_map(items, move |item, _ctx| {
+            ids_for_closure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(thread::current().id());
+            // Encourage the scheduler to actually overlap work across
+            // threads instead of draining the queue on whichever thread
+            // grabs it first.
+            thread::sleep(std::time::Duration::from_millis(1));
+            Ok(item)
+        });
+
+        assert!(result.is_ok());
+        let seen = thread_ids.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            seen.len() > 1,
+            "parallel_map should run its closure from more than one thread when \
+             available_parallelism() > 1; saw {} distinct thread(s) - looks sequential",
+            seen.len()
+        );
+    }
+
+    // ── 16. parallel_chunk_map preserves order and chunk boundaries ───────────
+
+    #[test]
+    fn test_parallel_chunk_map_preserves_order() {
+        init_parallelism(ParallelContext::new(ParallelismStrategy::Data, 2));
+        let items: Vec<u32> = (0..10).collect();
+        let result = parallel_chunk_map(items, 3, |chunk, _ctx| {
+            Ok(chunk.into_iter().map(|v| v * 10).collect())
+        });
+        assert_eq!(
+            result.unwrap_or_default(),
+            vec![0u32, 10, 20, 30, 40, 50, 60, 70, 80, 90],
+            "parallel_chunk_map must preserve item order across chunk boundaries"
+        );
     }
 }

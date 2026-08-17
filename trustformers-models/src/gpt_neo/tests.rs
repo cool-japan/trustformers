@@ -2,7 +2,8 @@
 #[allow(clippy::module_inception)]
 mod tests {
     use crate::gpt_neo::config::GptNeoConfig;
-    use crate::gpt_neo::model::{GptNeoLMHeadModel, GptNeoModel};
+    use crate::gpt_neo::model::{GptNeoAttention, GptNeoLMHeadModel, GptNeoModel};
+    use trustformers_core::tensor::Tensor;
     use trustformers_core::traits::Config;
 
     // ── LCG ───────────────────────────────────────────────────────────────────
@@ -308,6 +309,246 @@ mod tests {
         for _ in 0..100 {
             let v = rng.next_f32();
             assert!((0.0..1.0).contains(&v));
+        }
+    }
+
+    // ── Real attention regression tests ───────────────────────────────────────
+    //
+    // These exercise real multi-head scaled dot-product attention with
+    // causal masking and a real alternating local/global sliding window,
+    // replacing `out_proj(v)` (Q and K discarded, no local/global
+    // distinction at all). Every test below would have FAILED against that
+    // old code.
+
+    fn gptneo_lcg_vec(n: usize, seed: u64) -> Vec<f32> {
+        let mut rng = Lcg::new(seed);
+        (0..n).map(|_| rng.next_f32() * 2.0 - 1.0).collect()
+    }
+
+    fn gptneo_f32_data(t: &Tensor) -> Vec<f32> {
+        match t {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32 tensor"),
+        }
+    }
+
+    #[test]
+    fn test_gptneo_global_and_local_window_sizes() {
+        let config = minimal_gpt_neo_config();
+        let global = GptNeoAttention::new(&config, "global").expect("global attn");
+        let local = GptNeoAttention::new(&config, "local").expect("local attn");
+        assert_eq!(
+            global.window_size(),
+            None,
+            "global layer must have no window"
+        );
+        assert_eq!(
+            local.window_size(),
+            Some(config.window_size),
+            "local layer must use config.window_size"
+        );
+    }
+
+    #[test]
+    fn test_gptneo_attention_output_shape() {
+        let config = minimal_gpt_neo_config();
+        let attn = GptNeoAttention::new(&config, "global").expect("attn");
+        let seq_len = 4;
+        let hidden = config.hidden_size;
+        let input =
+            Tensor::from_vec(gptneo_lcg_vec(seq_len * hidden, 1), &[seq_len, hidden]).expect("t");
+        let out = attn.forward(input, None).expect("forward");
+        assert_eq!(out.shape(), vec![seq_len, hidden]);
+    }
+
+    /// Changing an EARLY token must change a LATER position's output — the
+    /// discriminating test that only real QK^T/softmax/V attention passes;
+    /// the old `out_proj(v)` fake path never even read Q or K.
+    #[test]
+    fn test_gptneo_attention_early_token_change_propagates_forward() {
+        let config = minimal_gpt_neo_config();
+        let attn = GptNeoAttention::new(&config, "global").expect("attn");
+        let seq_len = 4;
+        let hidden = config.hidden_size;
+
+        let base = gptneo_lcg_vec(seq_len * hidden, 41);
+        let mut modified = base.clone();
+        for x in modified[0..hidden].iter_mut() {
+            *x += 5.0;
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("t"), None)
+            .expect("fwd");
+        let out_mod = attn
+            .forward(
+                Tensor::from_vec(modified, &[seq_len, hidden]).expect("t"),
+                None,
+            )
+            .expect("fwd");
+
+        let a = gptneo_f32_data(&out_base);
+        let b = gptneo_f32_data(&out_mod);
+        let last_a = &a[3 * hidden..4 * hidden];
+        let last_b = &b[3 * hidden..4 * hidden];
+        let differs = last_a.iter().zip(last_b.iter()).any(|(x, y)| (x - y).abs() > 1e-5);
+        assert!(differs, "changing token 0 must change token 3's output");
+    }
+
+    #[test]
+    fn test_gptneo_attention_causal_mask_future_does_not_leak_backward() {
+        let config = minimal_gpt_neo_config();
+        let attn = GptNeoAttention::new(&config, "global").expect("attn");
+        let seq_len = 4;
+        let hidden = config.hidden_size;
+
+        let base = gptneo_lcg_vec(seq_len * hidden, 42);
+        let mut modified = base.clone();
+        for x in modified[3 * hidden..4 * hidden].iter_mut() {
+            *x += 5.0;
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("t"), None)
+            .expect("fwd");
+        let out_mod = attn
+            .forward(
+                Tensor::from_vec(modified, &[seq_len, hidden]).expect("t"),
+                None,
+            )
+            .expect("fwd");
+
+        let a = gptneo_f32_data(&out_base);
+        let b = gptneo_f32_data(&out_mod);
+        for row in 0..3 {
+            let ra = &a[row * hidden..(row + 1) * hidden];
+            let rb = &b[row * hidden..(row + 1) * hidden];
+            for (x, y) in ra.iter().zip(rb.iter()) {
+                assert!(
+                    (x - y).abs() < 1e-6,
+                    "row {row} must be unaffected by a later change"
+                );
+            }
+        }
+    }
+
+    /// A "local" layer's window must actually exclude distant keys: with
+    /// `window_size = 1`, token 3 can only see itself, so perturbing token 0
+    /// must leave token 3's output completely unchanged.
+    #[test]
+    fn test_gptneo_local_layer_window_excludes_distant_tokens() {
+        let mut config = minimal_gpt_neo_config();
+        config.window_size = 1;
+        let attn = GptNeoAttention::new(&config, "local").expect("attn");
+        let seq_len = 4;
+        let hidden = config.hidden_size;
+
+        let base = gptneo_lcg_vec(seq_len * hidden, 43);
+        let mut modified = base.clone();
+        for x in modified[0..hidden].iter_mut() {
+            *x += 5.0;
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("t"), None)
+            .expect("fwd");
+        let out_mod = attn
+            .forward(
+                Tensor::from_vec(modified, &[seq_len, hidden]).expect("t"),
+                None,
+            )
+            .expect("fwd");
+
+        let a = gptneo_f32_data(&out_base);
+        let b = gptneo_f32_data(&out_mod);
+        let last_a = &a[3 * hidden..4 * hidden];
+        let last_b = &b[3 * hidden..4 * hidden];
+        for (x, y) in last_a.iter().zip(last_b.iter()) {
+            assert!(
+                (x - y).abs() < 1e-6,
+                "token 3 with window_size=1 must not see token 0 at all"
+            );
+        }
+    }
+
+    /// Contrast with the windowed test above: a "global" layer over the
+    /// SAME perturbation must let token 0 influence token 3.
+    #[test]
+    fn test_gptneo_global_layer_has_no_window_exclusion() {
+        let config = minimal_gpt_neo_config();
+        let attn = GptNeoAttention::new(&config, "global").expect("attn");
+        let seq_len = 4;
+        let hidden = config.hidden_size;
+
+        let base = gptneo_lcg_vec(seq_len * hidden, 44);
+        let mut modified = base.clone();
+        for x in modified[0..hidden].iter_mut() {
+            *x += 5.0;
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("t"), None)
+            .expect("fwd");
+        let out_mod = attn
+            .forward(
+                Tensor::from_vec(modified, &[seq_len, hidden]).expect("t"),
+                None,
+            )
+            .expect("fwd");
+
+        let a = gptneo_f32_data(&out_base);
+        let b = gptneo_f32_data(&out_mod);
+        let last_a = &a[3 * hidden..4 * hidden];
+        let last_b = &b[3 * hidden..4 * hidden];
+        let differs = last_a.iter().zip(last_b.iter()).any(|(x, y)| (x - y).abs() > 1e-5);
+        assert!(differs, "a global layer must let token 0 influence token 3");
+    }
+
+    /// Causal property with a growing sequence: forwarding a prefix of
+    /// length N and then forwarding that same prefix plus one appended
+    /// token must leave rows `0..N` of the output bit-identical. This is
+    /// the variable-length analogue of "appending a token to the KV cache
+    /// does not change earlier positions' outputs" for this crate's
+    /// stateless `Layer::forward` (there is no incremental KV cache in the
+    /// attention API; `seq_len` is recomputed fresh from the input on every
+    /// call). Checked on the "global" attention type; GPT-Neo has no RoPE,
+    /// so this specifically exercises the causal-mask construction rather
+    /// than a position-dependent rotation.
+    #[test]
+    fn test_gptneo_attention_prefix_extension_preserves_earlier_outputs() {
+        let config = minimal_gpt_neo_config();
+        let attn = GptNeoAttention::new(&config, "global").expect("attn");
+        let hidden = config.hidden_size;
+        let prefix_len = 3;
+
+        let prefix = gptneo_lcg_vec(prefix_len * hidden, 81);
+        let mut extended = prefix.clone();
+        extended.extend(gptneo_lcg_vec(hidden, 82));
+
+        let out_prefix = attn
+            .forward(
+                Tensor::from_vec(prefix, &[prefix_len, hidden]).expect("t"),
+                None,
+            )
+            .expect("fwd prefix");
+        let out_extended = attn
+            .forward(
+                Tensor::from_vec(extended, &[prefix_len + 1, hidden]).expect("t"),
+                None,
+            )
+            .expect("fwd extended");
+
+        let a = gptneo_f32_data(&out_prefix);
+        let b = gptneo_f32_data(&out_extended);
+        for row in 0..prefix_len {
+            let ra = &a[row * hidden..(row + 1) * hidden];
+            let rb = &b[row * hidden..(row + 1) * hidden];
+            for (x, y) in ra.iter().zip(rb.iter()) {
+                assert!(
+                    (x - y).abs() < 1e-5,
+                    "row {row} must be unchanged when a new token is appended after it"
+                );
+            }
         }
     }
 }

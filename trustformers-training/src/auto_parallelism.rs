@@ -835,16 +835,153 @@ impl AutoParallelismSelector {
         Ok(())
     }
 
-    /// Generate simulated annealing strategies (placeholder)
+    /// Generate strategies with simulated annealing over the `(dp, mp, pp)` lattice.
+    ///
+    /// Starting from the smallest feasible configuration, the search repeatedly proposes a
+    /// neighbour (one axis doubled or halved), accepts it outright when it compares better
+    /// under [`AutoParallelismSelector::compare_strategies`], and otherwise accepts it with
+    /// probability `exp(-Δ/T)`. The temperature decays geometrically, so the walk anneals from
+    /// exploration to exploitation. The PRNG is seeded deterministically from the hardware and
+    /// model constraints, which makes the search reproducible for a given problem.
+    ///
+    /// The returned vector is the set of distinct configurations visited — including the best
+    /// one found — so the downstream evaluation step still sees a population to rank.
     fn generate_annealing_strategies(&self) -> Result<Vec<ParallelismStrategy>> {
-        // In practice, would implement simulated annealing for strategy optimization
-        self.generate_cost_based_strategies()
+        let max_devices = self.config.hardware_constraints.num_devices.max(1);
+
+        // Deterministic seed derived from the problem definition.
+        let mut rng_state = (max_devices as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (self.config.model_constraints.num_parameters as u64)
+            ^ (self.config.model_constraints.num_layers as u64).wrapping_mul(0x1000_0000_01b3);
+        let mut next_unit = || -> f64 {
+            rng_state = rng_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = rng_state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            ((z >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+
+        let mut current = (1usize, 1usize, 1usize);
+        let mut current_strategy =
+            self.create_3d_strategy_with_config(current.0, current.1, current.2)?;
+        let mut best_strategy = current_strategy.clone();
+
+        let mut visited: Vec<(usize, usize, usize)> = vec![current];
+        let mut population = vec![current_strategy.clone()];
+
+        let mut temperature = 1.0f64;
+        const COOLING: f64 = 0.9;
+        const ITERATIONS: usize = 64;
+
+        for _ in 0..ITERATIONS {
+            // Propose a neighbour: pick an axis, then double or halve it.
+            let axis = (next_unit() * 3.0) as usize % 3;
+            let grow = next_unit() < 0.5;
+            let mut candidate = current;
+            let slot = match axis {
+                0 => &mut candidate.0,
+                1 => &mut candidate.1,
+                _ => &mut candidate.2,
+            };
+            if grow {
+                *slot = (*slot).saturating_mul(2);
+            } else {
+                *slot = (*slot / 2).max(1);
+            }
+
+            if candidate.0 * candidate.1 * candidate.2 > max_devices {
+                continue;
+            }
+
+            let candidate_strategy =
+                self.create_3d_strategy_with_config(candidate.0, candidate.1, candidate.2)?;
+            let better = self.compare_strategies(&candidate_strategy, &current_strategy)?
+                == std::cmp::Ordering::Less;
+
+            let accept = if better {
+                true
+            } else {
+                // Metropolis acceptance on the normalised objective gap.
+                let delta = (self.calculate_multi_objective_score(&current_strategy)
+                    - self.calculate_multi_objective_score(&candidate_strategy))
+                .abs() as f64;
+                next_unit() < (-delta / temperature.max(1e-6)).exp()
+            };
+
+            if accept {
+                current = candidate;
+                current_strategy = candidate_strategy.clone();
+                if !visited.contains(&candidate) {
+                    visited.push(candidate);
+                    population.push(candidate_strategy.clone());
+                }
+                if self.compare_strategies(&current_strategy, &best_strategy)?
+                    == std::cmp::Ordering::Less
+                {
+                    best_strategy = current_strategy.clone();
+                }
+            }
+
+            temperature *= COOLING;
+        }
+
+        // Guarantee the best configuration is present even if it was pruned above.
+        if !population.iter().any(|s| s.strategy_id == best_strategy.strategy_id) {
+            population.push(best_strategy);
+        }
+
+        Ok(population)
     }
 
-    /// Generate multi-objective optimization strategies (placeholder)
+    /// Generate the Pareto-optimal subset of the cost-based candidates.
+    ///
+    /// The three competing objectives are throughput (maximised), memory per device
+    /// (minimised) and communication overhead (minimised). A candidate is kept unless another
+    /// candidate is at least as good on all three and strictly better on one — the standard
+    /// non-domination test. Unlike a weighted sum this makes no assumption about the relative
+    /// importance of the objectives, which is the point of multi-objective search.
     fn generate_multi_objective_strategies(&self) -> Result<Vec<ParallelismStrategy>> {
-        // In practice, would implement Pareto-optimal strategy generation
-        self.generate_cost_based_strategies()
+        let candidates = self.generate_cost_based_strategies()?;
+        if candidates.len() <= 1 {
+            return Ok(candidates);
+        }
+
+        // Objective vector, all in "smaller is better" form.
+        let objectives: Vec<[f64; 3]> = candidates
+            .iter()
+            .map(|s| {
+                [
+                    -s.expected_performance.throughput,
+                    s.expected_performance.memory_per_device as f64,
+                    s.expected_performance.communication_overhead as f64,
+                ]
+            })
+            .collect();
+
+        let dominates = |a: &[f64; 3], b: &[f64; 3]| -> bool {
+            let no_worse = a.iter().zip(b.iter()).all(|(x, y)| x <= y);
+            let strictly_better = a.iter().zip(b.iter()).any(|(x, y)| x < y);
+            no_worse && strictly_better
+        };
+
+        let mut front = Vec::new();
+        for (i, candidate) in candidates.iter().enumerate() {
+            let dominated = objectives
+                .iter()
+                .enumerate()
+                .any(|(j, other)| j != i && dominates(other, &objectives[i]));
+            if !dominated {
+                front.push(candidate.clone());
+            }
+        }
+
+        if front.is_empty() {
+            // Every candidate is mutually dominated only if the objective vectors are
+            // degenerate; fall back to the full set rather than returning nothing.
+            return Ok(candidates);
+        }
+        Ok(front)
     }
 
     /// Create data parallelism strategy
@@ -1099,31 +1236,167 @@ impl AutoParallelismSelector {
         Ok(strategies)
     }
 
-    /// Simulation-based evaluation (placeholder)
+    /// Simulation-based evaluation: roll the pipeline schedule forward micro-batch by
+    /// micro-batch instead of using the closed-form estimate.
+    ///
+    /// For a `pp_size`-stage pipeline running `m` micro-batches, the analytical model charges
+    /// only the steady-state cost; the simulation additionally counts the fill and drain
+    /// bubbles that a real schedule pays:
+    ///
+    /// ```text
+    /// GPipe      : total = (m + pp - 1) · t_stage          (fill and drain are serial)
+    /// OneForwardOneBackward / Interleaved:
+    ///              total = (m + pp - 1) · t_stage, with the bubble halved by overlapping
+    ///              the backward of micro-batch i with the forward of micro-batch i+1
+    /// ```
+    ///
+    /// The simulated `time_per_step` therefore differs from — and is never better than — the
+    /// analytical one, and `throughput`, `efficiency` and `confidence` are recomputed from it.
     fn evaluate_simulation_based(
         &self,
-        strategies: Vec<ParallelismStrategy>,
+        mut strategies: Vec<ParallelismStrategy>,
     ) -> Result<Vec<ParallelismStrategy>> {
-        // In practice, would run detailed simulations
-        self.evaluate_model_based(strategies)
+        for strategy in &mut strategies {
+            let base = self.refine_performance_estimate(strategy)?;
+            let simulated = self.simulate_step_time(strategy, &base);
+
+            let base_secs = base.time_per_step.as_secs_f64().max(1e-9);
+            let ratio = simulated.as_secs_f64() / base_secs;
+
+            strategy.expected_performance = PerformanceMetrics {
+                time_per_step: simulated,
+                throughput: base.throughput / ratio.max(1e-9),
+                efficiency: (base.efficiency as f64 / ratio.max(1e-9)) as f32,
+                ..base
+            };
+            // A timeline simulation is a stronger evidence source than the closed form, but
+            // it is still a model: keep the analytical confidence.
+            strategy.confidence = self.calculate_confidence(strategy);
+            strategy.rationale = format!(
+                "{} [simulated pipeline schedule: {:.1}% bubble overhead]",
+                strategy.rationale,
+                (ratio - 1.0).max(0.0) * 100.0
+            );
+        }
+        Ok(strategies)
     }
 
-    /// Profiling-based evaluation (placeholder)
+    /// Simulate the wall-clock time of one optimizer step for `strategy`.
+    ///
+    /// Returns the analytical time unchanged for strategies without a pipeline dimension —
+    /// there is no schedule to roll forward in that case.
+    fn simulate_step_time(
+        &self,
+        strategy: &ParallelismStrategy,
+        base: &PerformanceMetrics,
+    ) -> Duration {
+        let Some(config) = strategy.parallelism_3d.as_ref() else {
+            return base.time_per_step;
+        };
+        let pp = config.pp_size.max(1);
+        if pp == 1 {
+            return base.time_per_step;
+        }
+
+        let micro_batches = config.num_micro_batches.max(1);
+        // Per-stage cost implied by the analytical steady-state estimate.
+        let stage_secs = base.time_per_step.as_secs_f64() / micro_batches as f64;
+
+        // Fill + drain bubble, halved for schedules that interleave forward and backward.
+        let bubble_stages = match config.pipeline_schedule {
+            crate::parallelism_3d::PipelineSchedule::GPipe => (pp - 1) as f64,
+            _ => (pp - 1) as f64 * 0.5,
+        };
+
+        let total_secs = stage_secs * (micro_batches as f64 + bubble_stages);
+        Duration::from_secs_f64(total_secs.max(0.0))
+    }
+
+    /// Profiling-based evaluation.
+    ///
+    /// Genuine profiling means executing the candidate strategies on the target cluster and
+    /// measuring them. This crate has no way to launch such experiments, and returning
+    /// analytical estimates while claiming they came from profiling would be a fabricated
+    /// result — so the mode reports that it is unavailable and names the alternatives.
     fn evaluate_profiling_based(
         &self,
-        strategies: Vec<ParallelismStrategy>,
+        _strategies: Vec<ParallelismStrategy>,
     ) -> Result<Vec<ParallelismStrategy>> {
-        // In practice, would run actual profiling experiments
-        self.evaluate_model_based(strategies)
+        Err(anyhow!(
+            "EvaluationMethod::ProfilingBased requires executing candidate strategies on the \
+             target hardware, which this selector cannot do. Run the candidates yourself and \
+             feed the measurements back with `update_performance_history`, or choose \
+             EvaluationMethod::ModelBased / SimulationBased / Hybrid."
+        ))
     }
 
-    /// Hybrid evaluation (placeholder)
+    /// Hybrid evaluation: blend the analytical model with the pipeline simulation.
+    ///
+    /// Each strategy is evaluated both ways and the two estimates are combined
+    /// conservatively — the slower `time_per_step`, the lower `throughput` and `efficiency`
+    /// — because the two models disagree exactly where one of them is missing a cost. The
+    /// confidence is the mean of the two, reduced by the relative disagreement between them,
+    /// so a strategy the two methods rank very differently is reported as less certain.
     fn evaluate_hybrid(
         &self,
         strategies: Vec<ParallelismStrategy>,
     ) -> Result<Vec<ParallelismStrategy>> {
-        // In practice, would combine multiple evaluation methods
-        self.evaluate_model_based(strategies)
+        let model_based = self.evaluate_model_based(strategies.clone())?;
+        let simulated = self.evaluate_simulation_based(strategies)?;
+
+        let mut blended = Vec::with_capacity(model_based.len());
+        for (analytic, sim) in model_based.into_iter().zip(simulated.into_iter()) {
+            let analytic_secs = analytic.expected_performance.time_per_step.as_secs_f64();
+            let sim_secs = sim.expected_performance.time_per_step.as_secs_f64();
+            let disagreement = if analytic_secs > 0.0 {
+                ((sim_secs - analytic_secs).abs() / analytic_secs).min(1.0) as f32
+            } else {
+                0.0
+            };
+
+            let performance = PerformanceMetrics {
+                time_per_step: analytic
+                    .expected_performance
+                    .time_per_step
+                    .max(sim.expected_performance.time_per_step),
+                throughput: analytic
+                    .expected_performance
+                    .throughput
+                    .min(sim.expected_performance.throughput),
+                efficiency: analytic
+                    .expected_performance
+                    .efficiency
+                    .min(sim.expected_performance.efficiency),
+                memory_per_device: analytic
+                    .expected_performance
+                    .memory_per_device
+                    .max(sim.expected_performance.memory_per_device),
+                communication_overhead: analytic
+                    .expected_performance
+                    .communication_overhead
+                    .max(sim.expected_performance.communication_overhead),
+                scalability: analytic
+                    .expected_performance
+                    .scalability
+                    .min(sim.expected_performance.scalability),
+            };
+
+            let confidence = ((analytic.confidence + sim.confidence) * 0.5 * (1.0 - disagreement))
+                .clamp(0.0, 1.0);
+
+            blended.push(ParallelismStrategy {
+                expected_performance: performance,
+                confidence,
+                rationale: format!(
+                    "{} [hybrid: analytical and simulated estimates disagree by {:.1}%]",
+                    analytic.rationale,
+                    disagreement * 100.0
+                ),
+                ..analytic
+            });
+        }
+
+        Ok(blended)
     }
 
     /// Select the optimal strategy from evaluated strategies
@@ -1453,6 +1726,153 @@ pub mod utils {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Evaluation modes and strategy generation ─────────────────────────────
+
+    #[test]
+    fn test_profiling_based_evaluation_reports_that_it_is_unavailable() {
+        // Regression: this mode silently returned analytical estimates while the caller had
+        // explicitly asked for measurements.
+        let config = AutoParallelismConfig {
+            evaluation_method: EvaluationMethod::ProfilingBased,
+            ..Default::default()
+        };
+        let selector = AutoParallelismSelector::new(config);
+        let strategies =
+            selector.generate_cost_based_strategies().expect("candidate generation failed");
+
+        let err = selector
+            .evaluate_profiling_based(strategies)
+            .expect_err("profiling must not fabricate measurements");
+        let message = err.to_string();
+        assert!(
+            message.contains("ProfilingBased"),
+            "the error must name the mode: {message}"
+        );
+    }
+
+    #[test]
+    fn test_simulation_based_evaluation_differs_from_the_model() {
+        // Regression: `evaluate_simulation_based` was `self.evaluate_model_based(..)`.
+        let config = AutoParallelismConfig::default();
+        let selector = AutoParallelismSelector::new(config);
+        let strategy = selector.create_3d_strategy_with_config(1, 1, 4).expect("3d strategy");
+
+        let analytic = selector.evaluate_model_based(vec![strategy.clone()]).expect("model based");
+        let simulated =
+            selector.evaluate_simulation_based(vec![strategy]).expect("simulation based");
+
+        assert!(
+            simulated[0].expected_performance.time_per_step
+                > analytic[0].expected_performance.time_per_step,
+            "a 4-stage pipeline must pay a bubble in simulation: {:?} vs {:?}",
+            simulated[0].expected_performance.time_per_step,
+            analytic[0].expected_performance.time_per_step
+        );
+        assert!(
+            simulated[0].expected_performance.throughput
+                < analytic[0].expected_performance.throughput,
+            "the extra time must lower the throughput"
+        );
+        assert!(simulated[0].rationale.contains("simulated pipeline schedule"));
+    }
+
+    #[test]
+    fn test_simulation_matches_the_model_without_a_pipeline_dimension() {
+        let selector = AutoParallelismSelector::new(AutoParallelismConfig::default());
+        let strategy = selector.create_3d_strategy_with_config(4, 1, 1).expect("3d strategy");
+
+        let analytic = selector.evaluate_model_based(vec![strategy.clone()]).expect("model based");
+        let simulated =
+            selector.evaluate_simulation_based(vec![strategy]).expect("simulation based");
+        assert_eq!(
+            simulated[0].expected_performance.time_per_step,
+            analytic[0].expected_performance.time_per_step,
+            "with pp = 1 there is no schedule to simulate"
+        );
+    }
+
+    #[test]
+    fn test_hybrid_evaluation_is_conservative_and_lowers_confidence_on_disagreement() {
+        let selector = AutoParallelismSelector::new(AutoParallelismConfig::default());
+        let strategy = selector.create_3d_strategy_with_config(1, 1, 4).expect("3d strategy");
+
+        let analytic = selector.evaluate_model_based(vec![strategy.clone()]).expect("model based");
+        let hybrid = selector.evaluate_hybrid(vec![strategy]).expect("hybrid");
+
+        assert!(
+            hybrid[0].expected_performance.time_per_step
+                >= analytic[0].expected_performance.time_per_step,
+            "the hybrid estimate must take the slower of the two"
+        );
+        assert!(
+            hybrid[0].confidence < analytic[0].confidence,
+            "disagreement between the two models must reduce the confidence ({} vs {})",
+            hybrid[0].confidence,
+            analytic[0].confidence
+        );
+        assert!(hybrid[0].rationale.contains("hybrid"));
+    }
+
+    #[test]
+    fn test_annealing_search_explores_more_than_one_configuration() {
+        // Regression: this delegated verbatim to `generate_cost_based_strategies`.
+        let selector = AutoParallelismSelector::new(AutoParallelismConfig::default());
+        let annealed = selector.generate_annealing_strategies().expect("annealing failed");
+        assert!(
+            annealed.len() > 1,
+            "the annealing walk must visit more than the initial configuration"
+        );
+
+        // Deterministic for a fixed problem definition.
+        let again = selector.generate_annealing_strategies().expect("annealing failed");
+        let ids: Vec<&str> = annealed.iter().map(|s| s.strategy_id.as_str()).collect();
+        let ids_again: Vec<&str> = again.iter().map(|s| s.strategy_id.as_str()).collect();
+        assert_eq!(ids, ids_again, "the seeded search must be reproducible");
+
+        // Every configuration must respect the device budget.
+        let max_devices = selector.config.hardware_constraints.num_devices;
+        for strategy in &annealed {
+            if let Some(cfg) = &strategy.parallelism_3d {
+                assert!(
+                    cfg.dp_size * cfg.mp_size * cfg.pp_size <= max_devices,
+                    "annealing produced an infeasible configuration"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_multi_objective_returns_a_pareto_subset() {
+        // Regression: this delegated verbatim to `generate_cost_based_strategies`.
+        let selector = AutoParallelismSelector::new(AutoParallelismConfig::default());
+        let all = selector.generate_cost_based_strategies().expect("cost based");
+        let front = selector.generate_multi_objective_strategies().expect("multi objective");
+
+        assert!(!front.is_empty());
+        assert!(
+            front.len() <= all.len(),
+            "a Pareto front cannot be larger than the candidate set"
+        );
+
+        // No member of the front may be dominated by another candidate.
+        let key = |s: &ParallelismStrategy| {
+            [
+                -s.expected_performance.throughput,
+                s.expected_performance.memory_per_device as f64,
+                s.expected_performance.communication_overhead as f64,
+            ]
+        };
+        for member in &front {
+            let m = key(member);
+            for other in &all {
+                let o = key(other);
+                let dominates = o.iter().zip(m.iter()).all(|(x, y)| x <= y)
+                    && o.iter().zip(m.iter()).any(|(x, y)| x < y);
+                assert!(!dominates, "front member is dominated by another candidate");
+            }
+        }
+    }
 
     #[test]
     fn test_auto_parallelism_config() {

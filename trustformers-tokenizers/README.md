@@ -17,7 +17,7 @@ This crate provides **24 concrete tokenizer implementations** of the shared `tru
 - **WordPiece** (`WordPieceTokenizer`) — greedy longest-match-first, `##` continuation prefix; `from_pretrained` checks local vocab-file paths first, then falls back to a handful of built-in BERT/DistilBERT vocabularies
 - **SentencePiece / Unigram** (`SentencePieceTokenizer`) — Viterbi-decoded unigram LM segmentation; `from_model_file` loads real `.model` files
 - **Unigram** (`UnigramTokenizer`) — standalone Viterbi-decoded unigram scorer
-- **TikToken** (`TiktokenTokenizer`) — `cl100k_base()` and `r50k_base()` ship as built-in presets; other encodings (`p50k_base`, `o200k_base`, custom) can be loaded via `from_tiktoken_file`
+- **TikToken** (`TiktokenTokenizer`) — real byte-level BPE merging by rank; `cl100k_base()` / `p50k_base()` / `r50k_base()` load a local `.tiktoken` rank file (searched via `$TRUSTFORMERS_TIKTOKEN_DIR`, `$TIKTOKEN_CACHE_DIR`, `~/.cache/tiktoken`, `./`) and return an instructive error when none is present; any rank table can be loaded explicitly with `from_file` / `from_reader` / `from_tiktoken_file`
 - **Fairseq** (`FairseqTokenizer`) — loads fairseq `dict.txt`-style token/frequency dictionaries with fairseq's special-token IDs (`<pad>`=0, `</s>`=1, `<unk>`=2, `<s>`=3)
 - **Character-level** (`CharTokenizer`) — one token per character
 - **CANINE** (`CanineTokenizer`) — vocabulary-free character-hash tokenizer
@@ -242,8 +242,8 @@ for rec in &result.actionable_recommendations {
 
 ### Supported Formats
 - **Hugging Face**: `TokenizerImpl` embeds the real upstream `tokenizers` crate (re-exported via `trustformers-core`) — `.json` tokenizer files load with full fidelity
-- **SentencePiece**: `SentencePieceTokenizer::from_model_file` loads real `.model` files directly; `from_pretrained(model_name_or_path)` now also probes `{path}/spiece.model`, `{path}.model`, and the bare path for a real model file (delegating to `from_model_file` on a hit) before falling back to a simplified built-in vocabulary — see Known Limitations
-- **TikToken**: `cl100k_base`/`r50k_base` presets built in; other `.tiktoken` files loadable via `from_tiktoken_file`
+- **SentencePiece**: `SentencePieceTokenizer::from_model_file` loads real `.model` files (binary protobuf or the plain-text `piece<TAB>score` format); `from_pretrained(model_name_or_path)` probes `{path}/spiece.model`, `{path}/sentencepiece.bpe.model`, `{path}/tokenizer.model`, `{path}.model` and the bare path, and returns an error naming every probed path when none resolves
+- **TikToken**: `.tiktoken` rank files (base64 token + rank per line) via `from_file`/`from_reader`; `cl100k_base`/`p50k_base`/`r50k_base` resolve their rank file from documented search paths
 - **Fairseq**: `dict.txt` token/frequency dictionary format
 - **Custom**: JSON-based tokenizer configuration (`CustomFormatTokenizer`)
 
@@ -254,9 +254,9 @@ for rec in &result.actionable_recommendations {
 
 ## Known Limitations
 
-- `TokenizerImpl::from_pretrained` and `WordPieceTokenizer::from_pretrained` resolve a **local** cache/vocab path (or a small set of built-in vocabularies); neither downloads from the Hugging Face Hub
-- `SentencePieceTokenizer::from_pretrained` probes `{path}/spiece.model`, `{path}.model`, and the bare path for a real SentencePiece model file and loads it via `from_model_file` on a hit; it falls back to a simplified built-in vocabulary only when none of those candidates resolve
-- TikToken ships two named presets (`cl100k_base`, `r50k_base`); `p50k_base`/`o200k_base` are not built-in convenience constructors (load them manually via `from_tiktoken_file`)
+- `TokenizerImpl::from_pretrained` and `WordPieceTokenizer::from_pretrained` resolve a **local** path (the `huggingface_hub` cache layout `models--{org}--{name}/snapshots/{sha}/tokenizer.json` for the former, `vocab.txt` for the latter); neither downloads from the Hugging Face Hub, and neither substitutes a built-in vocabulary — a missing file is an error listing the probed paths
+- `SentencePieceTokenizer::from_pretrained` only loads real model files; when no candidate path resolves it returns an error naming each one (there is no built-in fallback vocabulary)
+- TikToken rank tables are **not** shipped with this crate: `cl100k_base()`/`p50k_base()`/`r50k_base()` need a local `.tiktoken` file (set `$TRUSTFORMERS_TIKTOKEN_DIR` or use `from_file`); `o200k_base` has no named constructor yet
 - SIMD acceleration is AVX2/x86_64-only; no ARM/NEON path yet
 - The `gpu`, `jax`, `tensorflow`, `pytorch`, and `onnx` features provide detection/data-structure/metadata layers, not real CUDA/ROCm/OpenCL/JAX/TensorFlow/PyTorch/ONNX-Runtime execution
 - `AutoTokenizer` exists only in the Python package (`python/trustformers_tokenizers`) — there is no Rust-level `AutoTokenizer` type; use `TokenizerWrapper` for enum-based dispatch across the built-in Rust tokenizer families

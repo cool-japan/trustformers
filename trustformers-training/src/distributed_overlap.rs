@@ -114,9 +114,7 @@ impl GradientOverlapManager {
         let gradients: HashMap<String, GradientTensor> = layer_names
             .iter()
             .enumerate()
-            .map(|(idx, name)| {
-                (name.clone(), GradientTensor::new(name.clone(), idx, 0))
-            })
+            .map(|(idx, name)| (name.clone(), GradientTensor::new(name.clone(), idx, 0)))
             .collect();
 
         Self {
@@ -140,10 +138,8 @@ impl GradientOverlapManager {
         let start_compute = Instant::now();
 
         {
-            let mut grads = self
-                .gradients
-                .lock()
-                .map_err(|e| OverlapError::LayerNotFound(e.to_string()))?;
+            let mut grads =
+                self.gradients.lock().map_err(|e| OverlapError::LayerNotFound(e.to_string()))?;
 
             let tensor = grads
                 .get_mut(layer_name)
@@ -154,8 +150,10 @@ impl GradientOverlapManager {
             }
 
             if self.config.compression_enabled {
-                let compressed = Self::compress_gradient(&grad_values, self.config.compression_ratio);
-                let saved = (grad_values.len() - compressed.iter().filter(|&&v| v != 0.0).count()) * 8;
+                let compressed =
+                    Self::compress_gradient(&grad_values, self.config.compression_ratio);
+                let saved =
+                    (grad_values.len() - compressed.iter().filter(|&&v| v != 0.0).count()) * 8;
                 if let Ok(mut cs) = self.compression_savings_bytes.lock() {
                     *cs += saved;
                 }
@@ -210,16 +208,8 @@ impl GradientOverlapManager {
     /// Overlap efficiency: compute_time / (compute_time + communication_time).
     /// Perfect overlap = 1.0, no overlap ≈ 0.5.
     pub fn overlap_efficiency(&self) -> f64 {
-        let comm = self
-            .communication_time_ns
-            .lock()
-            .map(|g| *g)
-            .unwrap_or(0);
-        let comp = self
-            .compute_time_ns
-            .lock()
-            .map(|g| *g)
-            .unwrap_or(0);
+        let comm = self.communication_time_ns.lock().map(|g| *g).unwrap_or(0);
+        let comp = self.compute_time_ns.lock().map(|g| *g).unwrap_or(0);
 
         if comm == 0 && comp == 0 {
             // Use configured overlap_fraction as a theoretical baseline
@@ -244,11 +234,8 @@ impl GradientOverlapManager {
         let keep_count = ((values.len() as f64 * keep_ratio).ceil() as usize).max(1);
 
         // Collect indices sorted by absolute value descending
-        let mut indexed: Vec<(usize, f64)> = values
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| (i, v.abs()))
-            .collect();
+        let mut indexed: Vec<(usize, f64)> =
+            values.iter().enumerate().map(|(i, &v)| (i, v.abs())).collect();
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let top_indices: std::collections::HashSet<usize> =
@@ -273,17 +260,9 @@ impl GradientOverlapManager {
             })
             .unwrap_or((0, 0));
 
-        let bt = self
-            .buckets_triggered
-            .lock()
-            .map(|g| *g)
-            .unwrap_or(0);
+        let bt = self.buckets_triggered.lock().map(|g| *g).unwrap_or(0);
 
-        let savings = self
-            .compression_savings_bytes
-            .lock()
-            .map(|g| *g)
-            .unwrap_or(0);
+        let savings = self.compression_savings_bytes.lock().map(|g| *g).unwrap_or(0);
 
         OverlapStats {
             total_layers: total,
@@ -302,10 +281,7 @@ impl GradientOverlapManager {
         }
         // Aim for roughly sqrt(num_layers) layers per bucket
         let bucket_capacity = ((num_layers as f64).sqrt().ceil() as usize).max(1);
-        layer_names
-            .chunks(bucket_capacity)
-            .map(|chunk| chunk.to_vec())
-            .collect()
+        layer_names.chunks(bucket_capacity).map(|chunk| chunk.to_vec()).collect()
     }
 
     fn bucket_for_layer(&self, layer_name: &str) -> Option<Vec<String>> {
@@ -319,9 +295,7 @@ impl GradientOverlapManager {
         self.gradients
             .lock()
             .map(|grads| {
-                bucket.iter().all(|name| {
-                    grads.get(name).map(|g| g.is_ready).unwrap_or(false)
-                })
+                bucket.iter().all(|name| grads.get(name).map(|g| g.is_ready).unwrap_or(false))
             })
             .unwrap_or(false)
     }
@@ -330,10 +304,8 @@ impl GradientOverlapManager {
         let comm_start = Instant::now();
 
         {
-            let mut grads = self
-                .gradients
-                .lock()
-                .map_err(|e| OverlapError::LayerNotFound(e.to_string()))?;
+            let mut grads =
+                self.gradients.lock().map_err(|e| OverlapError::LayerNotFound(e.to_string()))?;
 
             for name in bucket {
                 if let Some(tensor) = grads.get_mut(name) {
@@ -511,10 +483,7 @@ mod tests {
         let mgr = make_manager(1, 4);
         // No timing data accumulated → falls back to config overlap_fraction
         let eff = mgr.overlap_efficiency();
-        assert!(
-            (eff - 0.8).abs() < 1e-10,
-            "expected 0.8, got {eff}"
-        );
+        assert!((eff - 0.8).abs() < 1e-10, "expected 0.8, got {eff}");
     }
 
     // 11. stats returns correct layer/bucket counts

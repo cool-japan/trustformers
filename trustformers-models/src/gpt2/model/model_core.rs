@@ -12,11 +12,13 @@ use trustformers_core::{
     traits::{Config, Layer, Model, TokenizedInput, WeightReader},
 };
 
-use super::model_blocks::{
+use super::model_blocks::Gpt2Block;
+use super::model_ops::{
     apply_top_k_filtering, apply_top_p_filtering, create_causal_mask, log_softmax,
-    sample_from_logits, stack_tensors, Gpt2Block,
+    sample_from_logits, stack_tensors,
 };
 use crate::gpt2::config::Gpt2Config;
+use crate::weight_loading::checkpoint::CheckpointReader;
 
 /// Transpose a 2D tensor (swap dimensions 0 and 1)
 /// PyTorch Linear weights are [out_features, in_features]
@@ -39,6 +41,36 @@ pub(crate) fn transpose_tensor(tensor: Tensor) -> Result<Tensor> {
             "transpose",
         )),
     }
+}
+
+/// Read a `[batch, seq, width]` or `[seq, width]` F32 tensor as `seq` rows,
+/// taking the **first** batch element when a batch axis is present.
+///
+/// # Errors
+///
+/// Fails for non-F32 tensors and for ranks other than 2 or 3.
+fn rows_of_first_batch(tensor: &Tensor, label: &str) -> Result<Vec<Vec<f32>>> {
+    let Tensor::F32(arr) = tensor else {
+        return Err(TrustformersError::tensor_op_error(
+            "only CPU F32 tensors can be read row-wise",
+            label,
+        ));
+    };
+    let shape = arr.shape();
+    let (seq_len, width) = match shape.len() {
+        2 => (shape[0], shape[1]),
+        3 => (shape[1], shape[2]),
+        other => {
+            return Err(TrustformersError::shape_error(format!(
+                "expected 2-D or 3-D {label}, got {other} dimensions"
+            )))
+        },
+    };
+
+    let flat: Vec<f32> = arr.iter().copied().collect();
+    // With a batch axis the first element's rows come first, which is what the
+    // single-sequence generation paths need.
+    Ok((0..seq_len).map(|i| flat[i * width..(i + 1) * width].to_vec()).collect())
 }
 
 /// GPT-2 base model (decoder-only transformer)
@@ -126,10 +158,6 @@ impl Gpt2Model {
             block.weights_to_gpu_cuda(device)?;
         }
         self.ln_f.weights_to_gpu_cuda(device)?;
-        println!(
-            "✓ Gpt2Model: All layer weights cached on CUDA GPU ({} blocks)",
-            self.h.len()
-        );
         Ok(())
     }
 
@@ -215,42 +243,25 @@ impl Gpt2Model {
 
         // Determine starting position based on cache state
         let position_offset = if let Some(ref cache) = past_key_values {
-            eprintln!("🔍 Cache exists: {} layers", cache.layers.len());
             // If cache exists and has keys, start from past sequence length
             if let Some(first_layer_cache) = cache.layers.first() {
-                eprintln!(
-                    "🔍 First layer cache - key type: {:?}",
-                    first_layer_cache.key.as_ref().map(std::mem::discriminant)
-                );
                 match &first_layer_cache.key {
                     Some(Tensor::F32(ref past_k)) => {
-                        eprintln!("🔍 F32 key shape: {:?}", past_k.shape());
                         past_k.shape()[1] as u32 // past_seq_len
                     },
                     #[cfg(all(target_os = "macos", feature = "metal"))]
                     Some(Tensor::Metal(ref metal_data)) => {
-                        eprintln!("🔍 Metal key shape: {:?}", metal_data.shape);
                         metal_data.shape[1] as u32 // past_seq_len from Metal tensor
                     },
-                    None => {
-                        eprintln!("🔍 Key is None!");
-                        0
-                    },
-                    _ => {
-                        eprintln!("🔍 Key is unknown type!");
-                        0
-                    },
+                    None => 0,
+                    _ => 0,
                 }
             } else {
-                eprintln!("🔍 No first layer cache!");
                 0
             }
         } else {
-            eprintln!("🔍 No cache!");
             0
         };
-
-        eprintln!("🔍 Position offset: {} (from cache)", position_offset);
 
         // Process embeddings for entire batch
         let mut batch_word_embeds = Vec::new();
@@ -267,8 +278,6 @@ impl Gpt2Model {
                 // Start from position_offset (for KV-cache continuation)
                 (position_offset..(position_offset + seq_len as u32)).collect()
             };
-
-            eprintln!("🔍 Position IDs for batch {}: {:?}", batch_idx, pos_ids);
 
             // Get position embeddings for this sequence
             let position_embeds = self.wpe.forward(pos_ids)?;
@@ -319,55 +328,18 @@ impl Gpt2Model {
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             if matches!(self.device, Device::Metal(_)) {
-                eprintln!(
-                    "🔄 Converting hidden_states from {:?} to Metal device",
-                    std::mem::discriminant(&hidden_states)
-                );
-
                 // Debug: Check values before GPU upload
                 if let Tensor::F32(ref arr) = hidden_states {
                     let data: Vec<f32> = arr.iter().cloned().collect();
-                    eprintln!(
-                        "🔍 Embedding output (CPU) first 10: {:?}",
-                        &data[..10.min(data.len())]
-                    );
-                    eprintln!(
-                        "🔍 Embedding stats: min={:.4}, max={:.4}, mean={:.4}",
-                        data.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-                        data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
-                        data.iter().sum::<f32>() / data.len() as f32
-                    );
                 }
 
                 hidden_states = hidden_states.to_device_enum(&self.device)?;
-                eprintln!(
-                    "✅ hidden_states converted to: {:?}",
-                    std::mem::discriminant(&hidden_states)
-                );
 
                 // Debug: Check values after GPU upload
                 if let Tensor::Metal(ref metal_data) = hidden_states {
                     use trustformers_core::gpu_ops::metal::get_metal_backend;
                     let backend = get_metal_backend()?;
-                    eprintln!(
-                        "🔍 After GPU upload: buffer_id={:?}, shape={:?}",
-                        metal_data.buffer_id, metal_data.shape
-                    );
                     let gpu_data = backend.download_buffer_to_vec(&metal_data.buffer_id)?;
-                    eprintln!(
-                        "🔍 After GPU upload: Downloaded {} f32 values",
-                        gpu_data.len()
-                    );
-                    eprintln!(
-                        "🔍 After GPU upload first 10: {:?}",
-                        &gpu_data[..10.min(gpu_data.len())]
-                    );
-                    eprintln!(
-                        "🔍 After GPU upload stats: min={:.4}, max={:.4}, mean={:.4}",
-                        gpu_data.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-                        gpu_data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
-                        gpu_data.iter().sum::<f32>() / gpu_data.len() as f32
-                    );
                 }
             }
         }
@@ -409,12 +381,23 @@ impl Model for Gpt2Model {
         })
     }
 
-    fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
-        // GPT-2 uses a different Read interface for now
-        // We'll implement weight loading through a separate method
-        Err(TrustformersError::model_error(
-            "Use load_weights_from_reader instead".to_string(),
-        ))
+    /// Load pretrained weights from a safetensors or PyTorch byte stream.
+    ///
+    /// The stream is parsed by [`Checkpoint`] and bound through
+    /// [`Gpt2Model::load_weights_from_reader`], which maps HuggingFace's GPT-2
+    /// names (including the `transformer.` prefix used by task checkpoints) and
+    /// transposes the Conv1D weights that HF stores as `[in, out]`.
+    ///
+    /// This used to return `"Use load_weights_from_reader instead"` for every
+    /// call, which left `Model::load_pretrained` unusable for GPT-2.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the container cannot be parsed or when a required tensor is
+    /// missing from the checkpoint.
+    fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+        let mut checkpoint_reader = CheckpointReader::from_reader(reader)?;
+        self.load_weights_from_reader(&mut checkpoint_reader)
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -494,7 +477,6 @@ impl Gpt2LMHeadModel {
         }
         self.transformer.weights_to_gpu_cuda(device)?;
         self.lm_head.weights_to_gpu_cuda(device)?;
-        println!("✓ Gpt2LMHeadModel: All weights uploaded to CUDA GPU");
         Ok(())
     }
 
@@ -527,6 +509,46 @@ impl Gpt2LMHeadModel {
 
         loader.close()?;
         Ok(())
+    }
+
+    /// The transformer backbone under the language-modelling head.
+    pub fn transformer(&self) -> &Gpt2Model {
+        &self.transformer
+    }
+
+    /// Last-layer hidden states and next-token logits for one sequence.
+    ///
+    /// Returns `(logits, hidden_states)` where `logits` are the vocabulary
+    /// scores for the position after the final input token, and `hidden_states`
+    /// holds the post-`ln_f` representation of every input position as
+    /// `seq_len` rows of `n_embd` values.
+    ///
+    /// Contrastive search needs the representations themselves, not just the
+    /// logits, to compute its degeneration penalty; this is the accessor that
+    /// makes that possible without a second forward pass.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `input_ids` is empty, when the forward pass fails, or when the
+    /// backbone returns a tensor this method cannot read on the CPU.
+    pub fn logits_and_hidden_states(&self, input_ids: &[u32]) -> Result<(Vec<f32>, Vec<Vec<f32>>)> {
+        if input_ids.is_empty() {
+            return Err(TrustformersError::model_error(
+                "logits_and_hidden_states requires at least one input token".to_string(),
+            ));
+        }
+
+        let batch = vec![input_ids.to_vec()];
+        let hidden = self.transformer.forward_internal(&batch, None, None)?;
+        let logits = self.lm_head.forward(hidden.clone())?;
+
+        let hidden_rows = rows_of_first_batch(&hidden, "hidden states")?;
+        let logit_rows = rows_of_first_batch(&logits, "logits")?;
+        let last_logits = logit_rows.last().cloned().ok_or_else(|| {
+            TrustformersError::model_error("forward pass produced no logits".to_string())
+        })?;
+
+        Ok((last_logits, hidden_rows))
     }
 
     /// Forward pass with KV-cache support for efficient generation
@@ -696,41 +718,6 @@ impl Gpt2LMHeadModel {
                     }
                     let seq_len = shape[1];
                     let last_logits = arr.slice(s![0, seq_len - 1, ..]);
-                    let vocab_size = last_logits.len();
-
-                    // Debug: Show logits statistics for first few iterations
-                    if generated.len() <= 8 {
-                        eprintln!("\n🔍 CPU Logits Debug (iteration {}):", generated.len());
-                        eprintln!("   Shape: {:?}", shape);
-
-                        let logits_vec: Vec<f32> = last_logits.iter().copied().collect();
-                        eprintln!(
-                            "   Last token logits - first 10: {:?}",
-                            &logits_vec[..10.min(vocab_size)]
-                        );
-                        eprintln!(
-                            "   Last token logits - last 10: {:?}",
-                            &logits_vec[vocab_size.saturating_sub(10)..]
-                        );
-
-                        // Find top 5 predictions
-                        let mut top_indices: Vec<usize> = (0..vocab_size).collect();
-                        top_indices.sort_by(|&a, &b| {
-                            logits_vec[b]
-                                .partial_cmp(&logits_vec[a])
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        eprintln!("   Top 5 predictions:");
-                        for &idx in &top_indices[..5.min(vocab_size)] {
-                            eprintln!("      token {} → logit {:.4}", idx, logits_vec[idx]);
-                        }
-
-                        // Statistics
-                        let min = logits_vec.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-                        let max = logits_vec.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-                        let mean = logits_vec.iter().sum::<f32>() / vocab_size as f32;
-                        eprintln!("   Stats: min={:.4}, max={:.4}, mean={:.4}", min, max, mean);
-                    }
 
                     // Find argmax
                     let mut max_idx = 0;
@@ -768,17 +755,6 @@ impl Gpt2LMHeadModel {
 
                     // Debug: Show logits statistics for first few iterations
                     if generated.len() <= 8 {
-                        eprintln!("\n🔍 GPU Logits Debug (iteration {}):", generated.len());
-                        eprintln!("   Shape: {:?}", metal_data.shape);
-                        eprintln!(
-                            "   Last token logits - first 10: {:?}",
-                            &last_logits[..10.min(vocab_size)]
-                        );
-                        eprintln!(
-                            "   Last token logits - last 10: {:?}",
-                            &last_logits[vocab_size.saturating_sub(10)..]
-                        );
-
                         // Find top 5 predictions
                         let mut top_indices: Vec<usize> = (0..vocab_size).collect();
                         top_indices.sort_by(|&a, &b| {
@@ -786,16 +762,12 @@ impl Gpt2LMHeadModel {
                                 .partial_cmp(&last_logits[a])
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         });
-                        eprintln!("   Top 5 predictions:");
-                        for &idx in &top_indices[..5.min(vocab_size)] {
-                            eprintln!("      token {} → logit {:.4}", idx, last_logits[idx]);
-                        }
+                        for &idx in &top_indices[..5.min(vocab_size)] {}
 
                         // Statistics
                         let min = last_logits.iter().fold(f32::INFINITY, |a, &b| a.min(b));
                         let max = last_logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
                         let mean = last_logits.iter().sum::<f32>() / vocab_size as f32;
-                        eprintln!("   Stats: min={:.4}, max={:.4}, mean={:.4}", min, max, mean);
                     }
 
                     // Find argmax
@@ -817,16 +789,10 @@ impl Gpt2LMHeadModel {
                 },
             };
 
-            eprintln!(
-                "🎲 Generated token: {} (total: {})",
-                next_token,
-                generated.len() + 1
-            );
             generated.push(next_token);
 
             // Check for EOS token (GPT-2 default, should use config.eos_token_id)
             if next_token == 50256 || next_token == self.transformer.config.eos_token_id {
-                eprintln!("🛑 EOS token detected, stopping generation");
                 break;
             }
         }
@@ -844,36 +810,15 @@ impl Gpt2LMHeadModel {
         let mut cache = KVCache::new(self.transformer.config.n_layer);
         let mut is_first_iteration = true;
 
-        eprintln!(
-            "🔄 Starting generation: input_len={}, max_length={}, will generate {} tokens",
-            generated.len(),
-            max_length,
-            max_length - generated.len()
-        );
-
         while generated.len() < max_length {
-            eprintln!(
-                "\n━━━ Loop iteration: current_len={}, target={} ━━━",
-                generated.len(),
-                max_length
-            );
-
             // Prepare input - only process new token after first iteration
             let input_batch = if is_first_iteration {
-                eprintln!(
-                    "📥 First iteration: processing full prompt ({} tokens)",
-                    generated.len()
-                );
                 // First iteration: process full prompt
                 vec![generated.clone()]
             } else {
                 let last_token = *generated.last().ok_or_else(|| {
                     tensor_op_error("generation", "Generated sequence is empty".to_string())
                 })?;
-                eprintln!(
-                    "📤 Subsequent iteration: processing last token [{}]",
-                    last_token
-                );
                 // Subsequent iterations: process only last generated token
                 vec![vec![last_token]]
             };
@@ -883,16 +828,6 @@ impl Gpt2LMHeadModel {
                 self.transformer.forward_internal(&input_batch, None, Some(&mut cache))?;
 
             // Apply LM head
-            eprintln!(
-                "🔍 Hidden states before lm_head: shape={:?}, type={:?}",
-                match &hidden_states {
-                    Tensor::F32(arr) => format!("{:?}", arr.shape()),
-                    #[cfg(all(target_os = "macos", feature = "metal"))]
-                    Tensor::Metal(m) => format!("{:?}", m.shape),
-                    _ => "unknown".to_string(),
-                },
-                std::mem::discriminant(&hidden_states)
-            );
 
             // Debug: Download and check hidden state values
             #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -900,38 +835,16 @@ impl Gpt2LMHeadModel {
                 use trustformers_core::gpu_ops::metal::get_metal_backend;
                 let backend = get_metal_backend()?;
                 let hidden_data = backend.download_buffer_to_vec(&metal_data.buffer_id)?;
-                eprintln!(
-                    "🔍 Hidden states first 10 values: {:?}",
-                    &hidden_data[..10.min(hidden_data.len())]
-                );
-                eprintln!(
-                    "🔍 Hidden states stats: min={:.4}, max={:.4}, mean={:.4}",
-                    hidden_data.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-                    hidden_data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
-                    hidden_data.iter().sum::<f32>() / hidden_data.len() as f32
-                );
             }
 
-            eprintln!("🔍 About to call lm_head.forward...");
             let logits = self.lm_head.forward(hidden_states)?;
-            eprintln!("🔍 lm_head.forward returned successfully!");
-            eprintln!(
-                "🔍 Logits after lm_head: shape={:?}, type={:?}",
-                match &logits {
-                    Tensor::F32(arr) => format!("{:?}", arr.shape()),
-                    #[cfg(all(target_os = "macos", feature = "metal"))]
-                    Tensor::Metal(m) => format!("{:?}", m.shape),
-                    _ => "unknown".to_string(),
-                },
-                std::mem::discriminant(&logits)
-            );
 
             // Debug: Check which match arm will be taken
             match &logits {
-                Tensor::F32(_) => eprintln!("🔍 Logits match: Tensor::F32"),
+                Tensor::F32(_) => {},
                 #[cfg(all(target_os = "macos", feature = "metal"))]
-                Tensor::Metal(_) => eprintln!("🔍 Logits match: Tensor::Metal"),
-                _ => eprintln!("❌ Logits match: WILDCARD (unsupported!)"),
+                Tensor::Metal(_) => {},
+                _ => {},
             }
 
             is_first_iteration = false;
@@ -958,7 +871,6 @@ impl Gpt2LMHeadModel {
                             max_idx = idx;
                         }
                     }
-                    eprintln!("🔍 Argmax (F32): idx={}, val={:.4}", max_idx, max_val);
                     max_idx as u32
                 },
                 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -986,16 +898,6 @@ impl Gpt2LMHeadModel {
                     let last_logits = &data[offset..offset + vocab_size];
 
                     // Debug: Print first 10 logits values
-                    eprintln!(
-                        "🔍 First 10 logits: {:?}",
-                        &last_logits[..10.min(last_logits.len())]
-                    );
-                    eprintln!(
-                        "🔍 Logits stats: min={:.4}, max={:.4}, mean={:.4}",
-                        last_logits.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-                        last_logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
-                        last_logits.iter().sum::<f32>() / last_logits.len() as f32
-                    );
 
                     // Find argmax
                     let mut max_idx = 0;
@@ -1006,7 +908,6 @@ impl Gpt2LMHeadModel {
                             max_idx = idx;
                         }
                     }
-                    eprintln!("🔍 Argmax: idx={}, val={:.4}", max_idx, max_val);
                     max_idx as u32
                 },
                 _ => {
@@ -1017,16 +918,10 @@ impl Gpt2LMHeadModel {
                 },
             };
 
-            eprintln!(
-                "🎲 Generated token: {} (total: {})",
-                next_token,
-                generated.len() + 1
-            );
             generated.push(next_token);
 
             // Check for EOS token (GPT-2 default, should use config.eos_token_id)
             if next_token == 50256 || next_token == self.transformer.config.eos_token_id {
-                eprintln!("🛑 EOS token detected, stopping generation");
                 break;
             }
         }
@@ -1152,8 +1047,32 @@ impl Model for Gpt2LMHeadModel {
         })
     }
 
+    /// Load pretrained weights for the backbone and the language-modelling head.
+    ///
+    /// When the checkpoint has no `lm_head.weight` the head is tied to the token
+    /// embedding table, as GPT-2 itself does, instead of being left randomly
+    /// initialised.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the container cannot be parsed, when a backbone tensor is
+    /// missing, or when neither an LM head nor a token embedding table is present.
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.transformer.load_pretrained(reader)
+        let mut checkpoint_reader = CheckpointReader::from_reader(reader)?;
+        self.transformer.load_weights_from_reader(&mut checkpoint_reader)?;
+
+        let checkpoint = checkpoint_reader.checkpoint();
+        let head = ["lm_head.weight", "transformer.wte.weight", "wte.weight"]
+            .iter()
+            .find_map(|name| checkpoint.get(name))
+            .ok_or_else(|| {
+                TrustformersError::weight_load_error(
+                    "checkpoint has no lm_head.weight and no token embedding table to tie it to"
+                        .to_string(),
+                )
+            })?
+            .clone();
+        self.lm_head.set_weight(head)
     }
 
     fn get_config(&self) -> &Self::Config {

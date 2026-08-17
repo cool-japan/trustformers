@@ -32,13 +32,13 @@ impl fmt::Display for QuantError {
             QuantError::EmptyData => write!(f, "Input data is empty"),
             QuantError::InvalidGroupSize { size } => {
                 write!(f, "Invalid group size {size}: must be > 0")
-            }
+            },
             QuantError::LengthMismatch { params, data } => {
                 write!(
                     f,
                     "Parameter count {params} does not match data length {data}"
                 )
-            }
+            },
             QuantError::InvalidDtype(s) => write!(f, "Invalid dtype: {s}"),
         }
     }
@@ -175,10 +175,7 @@ impl QuantParams {
 
         match &scheme {
             QuantScheme::Symmetric => {
-                let max_abs = data
-                    .iter()
-                    .map(|&x| x.abs())
-                    .fold(0.0_f32, f32::max);
+                let max_abs = data.iter().map(|&x| x.abs()).fold(0.0_f32, f32::max);
                 let scale = (max_abs / dtype.max_val()).max(1e-8_f32);
                 Ok(Self {
                     dtype,
@@ -186,32 +183,28 @@ impl QuantParams {
                     scales: vec![scale],
                     zero_points: vec![0],
                 })
-            }
+            },
 
             QuantScheme::Asymmetric => {
                 let min_val = data.iter().cloned().fold(f32::INFINITY, f32::min);
                 let max_val = data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                 let scale = ((max_val - min_val) / dtype.range()).max(1e-8_f32);
-                let zero_point =
-                    (dtype.min_val() - min_val / scale).round() as i32;
-                let zero_point = zero_point.clamp(
-                    dtype.min_val() as i32,
-                    dtype.max_val() as i32,
-                );
+                let zero_point = (dtype.min_val() - min_val / scale).round() as i32;
+                let zero_point = zero_point.clamp(dtype.min_val() as i32, dtype.max_val() as i32);
                 Ok(Self {
                     dtype,
                     scheme,
                     scales: vec![scale],
                     zero_points: vec![zero_point],
                 })
-            }
+            },
 
             QuantScheme::PerGroup { group_size } => {
                 let group_size = *group_size;
                 if group_size == 0 {
                     return Err(QuantError::InvalidGroupSize { size: group_size });
                 }
-                let num_groups = (data.len() + group_size - 1) / group_size;
+                let num_groups = data.len().div_ceil(group_size);
                 let mut scales = Vec::with_capacity(num_groups);
                 let mut zero_points = Vec::with_capacity(num_groups);
 
@@ -230,14 +223,11 @@ impl QuantParams {
                     scales,
                     zero_points,
                 })
-            }
+            },
 
             QuantScheme::PerChannel { .. } => {
                 // For calibration purposes, treat the entire buffer as one channel
-                let max_abs = data
-                    .iter()
-                    .map(|&x| x.abs())
-                    .fold(0.0_f32, f32::max);
+                let max_abs = data.iter().map(|&x| x.abs()).fold(0.0_f32, f32::max);
                 let scale = (max_abs / dtype.max_val()).max(1e-8_f32);
                 Ok(Self {
                     dtype,
@@ -245,7 +235,7 @@ impl QuantParams {
                     scales: vec![scale],
                     zero_points: vec![0],
                 })
-            }
+            },
         }
     }
 }
@@ -273,7 +263,7 @@ pub fn quantize(data: &[f32], params: &QuantParams) -> Result<Vec<i32>, QuantErr
             if group_size == 0 {
                 return Err(QuantError::InvalidGroupSize { size: group_size });
             }
-            let num_groups = (data.len() + group_size - 1) / group_size;
+            let num_groups = data.len().div_ceil(group_size);
             if params.scales.len() != num_groups {
                 return Err(QuantError::LengthMismatch {
                     params: params.scales.len(),
@@ -290,14 +280,10 @@ pub fn quantize(data: &[f32], params: &QuantParams) -> Result<Vec<i32>, QuantErr
                     q.clamp(min_q, max_q)
                 })
                 .collect()
-        }
+        },
         _ => {
             // Per-tensor: single scale and zero_point
-            let scale = params
-                .scales
-                .first()
-                .copied()
-                .ok_or(QuantError::EmptyData)?;
+            let scale = params.scales.first().copied().ok_or(QuantError::EmptyData)?;
             let zp = params.zero_points.first().copied().unwrap_or(0);
             data.iter()
                 .map(|&x| {
@@ -305,7 +291,7 @@ pub fn quantize(data: &[f32], params: &QuantParams) -> Result<Vec<i32>, QuantErr
                     q.clamp(min_q, max_q)
                 })
                 .collect()
-        }
+        },
     };
 
     Ok(quantized)
@@ -325,7 +311,7 @@ pub fn dequantize(data: &[i32], params: &QuantParams) -> Result<Vec<f32>, QuantE
             if group_size == 0 {
                 return Err(QuantError::InvalidGroupSize { size: group_size });
             }
-            let num_groups = (data.len() + group_size - 1) / group_size;
+            let num_groups = data.len().div_ceil(group_size);
             if params.scales.len() != num_groups {
                 return Err(QuantError::LengthMismatch {
                     params: params.scales.len(),
@@ -341,18 +327,12 @@ pub fn dequantize(data: &[i32], params: &QuantParams) -> Result<Vec<f32>, QuantE
                     (q - zp) as f32 * scale
                 })
                 .collect()
-        }
+        },
         _ => {
-            let scale = params
-                .scales
-                .first()
-                .copied()
-                .ok_or(QuantError::EmptyData)?;
+            let scale = params.scales.first().copied().ok_or(QuantError::EmptyData)?;
             let zp = params.zero_points.first().copied().unwrap_or(0);
-            data.iter()
-                .map(|&q| (q - zp) as f32 * scale)
-                .collect()
-        }
+            data.iter().map(|&q| (q - zp) as f32 * scale).collect()
+        },
     };
 
     Ok(dequantized)
@@ -392,11 +372,8 @@ pub fn measure_quant_error(
     let n = original.len() as f32;
 
     // Compute absolute errors
-    let errors: Vec<f32> = original
-        .iter()
-        .zip(dequantized.iter())
-        .map(|(&o, &d)| (o - d).abs())
-        .collect();
+    let errors: Vec<f32> =
+        original.iter().zip(dequantized.iter()).map(|(&o, &d)| (o - d).abs()).collect();
 
     let max_abs_error = errors.iter().cloned().fold(0.0_f32, f32::max);
     let mean_abs_error = errors.iter().sum::<f32>() / n;
@@ -409,10 +386,7 @@ pub fn measure_quant_error(
 
     let min_q = params.dtype.min_val() as i32;
     let max_q = params.dtype.max_val() as i32;
-    let num_clipped = quantized
-        .iter()
-        .filter(|&&q| q == min_q || q == max_q)
-        .count();
+    let num_clipped = quantized.iter().filter(|&&q| q == min_q || q == max_q).count();
 
     Ok(QuantizationMetrics {
         max_abs_error,
@@ -473,11 +447,8 @@ impl Fp16 {
             let shift = (1 - exp16) as u32;
             let mant_with_implicit = (mant32 | 0x0080_0000) >> shift;
             // Round-to-nearest: check the bit just below the kept bits
-            let rounding_bit = if shift > 0 {
-                (mant32 | 0x0080_0000) >> (shift - 1) & 1
-            } else {
-                0
-            };
+            let rounding_bit =
+                if shift > 0 { (mant32 | 0x0080_0000) >> (shift - 1) & 1 } else { 0 };
             let mant16 = ((mant_with_implicit >> 13) as u16) + rounding_bit as u16;
             return Fp16 {
                 bits: (sign << 15) | mant16,
@@ -519,7 +490,7 @@ impl Fp16 {
             // Subnormal fp16 → normalised fp32
             // Find leading bit position
             let leading = mant16.leading_zeros() - 22; // mant16 is in bits 0..9
-            let exp32 = (127 - 14 - leading) as u32;
+            let exp32 = 127 - 14 - leading;
             let mant32 = (mant16 << (leading + 14)) & 0x007F_FFFF;
             return f32::from_bits(sign | (exp32 << 23) | mant32);
         }
@@ -638,12 +609,15 @@ mod tests {
     #[test]
     fn test_calibrate_per_group() {
         let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 0.5, 0.5, 0.5, 0.5];
-        let params =
-            QuantParams::calibrate(&data, QuantDtype::Int8, QuantScheme::PerGroup { group_size: 4 })
-                .expect("calibrate failed");
+        let params = QuantParams::calibrate(
+            &data,
+            QuantDtype::Int8,
+            QuantScheme::PerGroup { group_size: 4 },
+        )
+        .expect("calibrate failed");
 
         assert_eq!(params.scales.len(), 2); // 8 elements / 4 group_size = 2 groups
-        // Group 0: max_abs = 4.0 → scale = 4.0/127.0
+                                            // Group 0: max_abs = 4.0 → scale = 4.0/127.0
         let expected_s0 = 4.0_f32 / 127.0;
         assert!((params.scales[0] - expected_s0).abs() < 1e-6);
         // Group 1: max_abs = 0.5 → scale = 0.5/127.0
@@ -680,7 +654,7 @@ mod tests {
         let q = quantize(&data, &params).expect("quantize failed");
         // q = clamp(round(x/1.0) + (-128), -128, 127)
         assert_eq!(q[0], -128); // 0 + (-128) = -128
-        // 127.5 + (-128) = -0.5 → 0 after round... wait: round(127.5) = 128, 128 + (-128) = 0
+                                // 127.5 + (-128) = -0.5 → 0 after round... wait: round(127.5) = 128, 128 + (-128) = 0
         assert_eq!(q[1], 0);
         // 255 + (-128) = 127
         assert_eq!(q[2], 127);
@@ -699,25 +673,21 @@ mod tests {
 
         // All values should be in [-8, 7]
         for &v in &q {
-            assert!(v >= -8 && v <= 7, "Int4 value {v} out of range");
+            assert!((-8..=7).contains(&v), "Int4 value {v} out of range");
         }
     }
 
     #[test]
     fn test_dequantize_roundtrip_int8() {
         let data: Vec<f32> = (0..64).map(|i| i as f32 * 0.1 - 3.0).collect();
-        let params =
-            QuantParams::calibrate(&data, QuantDtype::Int8, QuantScheme::Symmetric)
-                .expect("calibrate failed");
+        let params = QuantParams::calibrate(&data, QuantDtype::Int8, QuantScheme::Symmetric)
+            .expect("calibrate failed");
         let q = quantize(&data, &params).expect("quantize failed");
         let dq = dequantize(&q, &params).expect("dequantize failed");
 
         // Max error for INT8 symmetric should be ≤ 0.5 * scale
-        let max_err = data
-            .iter()
-            .zip(dq.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0_f32, f32::max);
+        let max_err =
+            data.iter().zip(dq.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
         let max_allowed = 0.5 * params.scales[0];
         assert!(
             max_err <= max_allowed * 1.01,
@@ -728,9 +698,8 @@ mod tests {
     #[test]
     fn test_dequantize_roundtrip_int4() {
         let data: Vec<f32> = (0..16).map(|i| i as f32 * 0.5 - 4.0).collect();
-        let params =
-            QuantParams::calibrate(&data, QuantDtype::Int4, QuantScheme::Symmetric)
-                .expect("calibrate failed");
+        let params = QuantParams::calibrate(&data, QuantDtype::Int4, QuantScheme::Symmetric)
+            .expect("calibrate failed");
         let q = quantize(&data, &params).expect("quantize failed");
         let dq = dequantize(&q, &params).expect("dequantize failed");
 
@@ -738,12 +707,8 @@ mod tests {
         assert_eq!(dq.len(), data.len());
 
         // At least some elements should round-trip closely
-        let mae = data
-            .iter()
-            .zip(dq.iter())
-            .map(|(a, b)| (a - b).abs())
-            .sum::<f32>()
-            / data.len() as f32;
+        let mae =
+            data.iter().zip(dq.iter()).map(|(a, b)| (a - b).abs()).sum::<f32>() / data.len() as f32;
         let scale = params.scales[0];
         assert!(
             mae <= scale * 2.0,
@@ -756,9 +721,8 @@ mod tests {
     #[test]
     fn test_quant_error_metrics() {
         let data: Vec<f32> = (0..100).map(|i| i as f32 * 0.1).collect();
-        let params =
-            QuantParams::calibrate(&data, QuantDtype::Int8, QuantScheme::Symmetric)
-                .expect("calibrate failed");
+        let params = QuantParams::calibrate(&data, QuantDtype::Int8, QuantScheme::Symmetric)
+            .expect("calibrate failed");
         let metrics = measure_quant_error(&data, &params).expect("measure failed");
 
         assert!(metrics.max_abs_error >= 0.0);
@@ -766,22 +730,17 @@ mod tests {
         assert!(metrics.rmse >= 0.0);
         assert!(metrics.mean_abs_error <= metrics.max_abs_error);
         // INT8 should have decent SNR (>> 0 dB)
-        assert!(metrics.snr_db > 20.0, "INT8 SNR too low: {}", metrics.snr_db);
+        assert!(
+            metrics.snr_db > 20.0,
+            "INT8 SNR too low: {}",
+            metrics.snr_db
+        );
     }
 
     #[test]
     fn test_quant_snr_high_for_fp32() {
-        // FP32 params with scale=1, zp=0 — essentially no quantization
-        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        // Use symmetric with very fine scale (essentially identity)
-        let params = QuantParams {
-            dtype: QuantDtype::Int8,
-            scheme: QuantScheme::Symmetric,
-            scales: vec![0.001],
-            zero_points: vec![0],
-        };
-        // With tiny scale, values will clip at 127 → but range is [-0.127, 0.127]
-        // Let's use a proper test: data fits within INT8 range
+        // Data that fits exactly on the INT8 grid with scale = 1 must round-trip
+        // losslessly, giving an effectively infinite SNR.
         let small_data: Vec<f32> = (1..=127).map(|i| i as f32).collect();
         let p2 = QuantParams {
             dtype: QuantDtype::Int8,
@@ -791,8 +750,10 @@ mod tests {
         };
         let metrics = measure_quant_error(&small_data, &p2).expect("measure failed");
         // With scale=1.0 and integer inputs, round-trip is exact (no error)
-        assert_eq!(metrics.max_abs_error, 0.0, "Integer data should round-trip exactly");
-        let _ = params; // suppress unused warning
+        assert_eq!(
+            metrics.max_abs_error, 0.0,
+            "Integer data should round-trip exactly"
+        );
     }
 
     // ── FP16 ─────────────────────────────────────────────────────────────────
@@ -924,8 +885,11 @@ mod tests {
     #[test]
     fn test_calibrate_invalid_group_size() {
         let data = vec![1.0_f32; 8];
-        let result =
-            QuantParams::calibrate(&data, QuantDtype::Int8, QuantScheme::PerGroup { group_size: 0 });
+        let result = QuantParams::calibrate(
+            &data,
+            QuantDtype::Int8,
+            QuantScheme::PerGroup { group_size: 0 },
+        );
         assert!(matches!(result, Err(QuantError::InvalidGroupSize { .. })));
     }
 

@@ -65,12 +65,40 @@ impl Tensor {
     pub fn relu(&self) -> Result<Tensor> {
         match self {
             Tensor::F32(a) => {
-                let result = a.mapv(|x| x.max(0.0));
-                Ok(Tensor::F32(result))
+                let size = a.len();
+                if size >= MIN_SIZE_FOR_SIMD {
+                    let shape = a.shape().to_vec();
+                    let flat = a.as_standard_layout();
+                    let flat_view = flat
+                        .view()
+                        .into_shape_with_order(size)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    let result_1d = f32::simd_relu(&flat_view);
+                    let result = result_1d
+                        .into_shape_with_order(IxDyn(&shape))
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    Ok(Tensor::F32(result))
+                } else {
+                    Ok(Tensor::F32(a.mapv(|x| x.max(0.0))))
+                }
             },
             Tensor::F64(a) => {
-                let result = a.mapv(|x| x.max(0.0));
-                Ok(Tensor::F64(result))
+                let size = a.len();
+                if size >= MIN_SIZE_FOR_SIMD {
+                    let shape = a.shape().to_vec();
+                    let flat = a.as_standard_layout();
+                    let flat_view = flat
+                        .view()
+                        .into_shape_with_order(size)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    let result_1d = f64::simd_relu(&flat_view);
+                    let result = result_1d
+                        .into_shape_with_order(IxDyn(&shape))
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    Ok(Tensor::F64(result))
+                } else {
+                    Ok(Tensor::F64(a.mapv(|x| x.max(0.0))))
+                }
             },
             Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.relu()),
             _ => Err(TrustformersError::tensor_op_error(
@@ -238,38 +266,38 @@ impl Tensor {
                     )));
                 }
 
-                // Ensure contiguous input layout
-                let a_contiguous = a.as_standard_layout().to_owned();
+                // Single owned buffer, then one in-place pass per lane.
+                //
+                // The previous implementation materialised seven full-size arrays
+                // (input copy, max, shifted, shifted copy, exp, exp copy, result,
+                // result copy); three of those copies were provably pure memcpy
+                // because the preceding expression already produced an owned
+                // standard-layout array. For [1,32,2048,2048] attention scores
+                // that is gigabytes of needless traffic per softmax.
+                let mut result = a.as_standard_layout().into_owned();
 
-                // For numerical stability, subtract max before exp
-                let max_vals = a_contiguous.map_axis(Axis(axis), |lane| {
-                    lane.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x))
-                });
+                for mut lane in result.lanes_mut(Axis(axis)) {
+                    let max = lane.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
+                    // An all-`-inf` lane would make `x - max` NaN; shift by 0 so the
+                    // lane degrades to all-zero weights instead of NaN.
+                    let max = if max.is_finite() { max } else { 0.0 };
 
-                // Ensure contiguous max_vals and compute shifted values
-                let max_vals_contiguous = max_vals.as_standard_layout().to_owned();
-                let shifted = &a_contiguous - &max_vals_contiguous.insert_axis(Axis(axis));
-                let shifted_contiguous = shifted.as_standard_layout().to_owned();
-
-                // Compute exp and sum with contiguous layout
-                let exp_vals = shifted_contiguous.mapv(|x| x.exp());
-                let exp_vals_contiguous = exp_vals.as_standard_layout().to_owned();
-                let sum_exp = exp_vals_contiguous.sum_axis(Axis(axis));
-                let sum_exp_contiguous = sum_exp.as_standard_layout().to_owned();
-
-                // Protect against division by very small numbers
-                let protected_sum = sum_exp_contiguous.mapv(|x| {
-                    if x <= f32::MIN_POSITIVE {
-                        f32::MIN_POSITIVE
-                    } else {
-                        x
+                    let mut sum = 0.0f32;
+                    for value in lane.iter_mut() {
+                        let exponential = (*value - max).exp();
+                        *value = exponential;
+                        sum += exponential;
                     }
-                });
 
-                // Final result with contiguous layout
-                let result = exp_vals_contiguous / protected_sum.insert_axis(Axis(axis));
-                let result_contiguous = result.as_standard_layout().to_owned();
-                Ok(Tensor::F32(result_contiguous))
+                    // Protect against division by (sub)normal sums.
+                    let inverse_sum =
+                        if sum <= f32::MIN_POSITIVE { 1.0 / f32::MIN_POSITIVE } else { 1.0 / sum };
+                    for value in lane.iter_mut() {
+                        *value *= inverse_sum;
+                    }
+                }
+
+                Ok(Tensor::F32(result))
             },
             Tensor::F64(a) => {
                 let ndim = a.ndim();
@@ -282,35 +310,29 @@ impl Tensor {
                     )));
                 }
 
-                // Ensure contiguous input layout
-                let a_contiguous = a.as_standard_layout().to_owned();
+                // Single owned buffer, then one in-place pass per lane (see the
+                // F32 arm for why the seven-buffer version was removed).
+                let mut result = a.as_standard_layout().into_owned();
 
-                let max_vals = a_contiguous.map_axis(Axis(axis), |lane| {
-                    lane.iter().fold(f64::NEG_INFINITY, |acc, &x| acc.max(x))
-                });
+                for mut lane in result.lanes_mut(Axis(axis)) {
+                    let max = lane.iter().fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
+                    let max = if max.is_finite() { max } else { 0.0 };
 
-                // Ensure contiguous layouts throughout computation
-                let max_vals_contiguous = max_vals.as_standard_layout().to_owned();
-                let shifted = &a_contiguous - &max_vals_contiguous.insert_axis(Axis(axis));
-                let shifted_contiguous = shifted.as_standard_layout().to_owned();
-
-                let exp_vals = shifted_contiguous.mapv(|x| x.exp());
-                let exp_vals_contiguous = exp_vals.as_standard_layout().to_owned();
-                let sum_exp = exp_vals_contiguous.sum_axis(Axis(axis));
-                let sum_exp_contiguous = sum_exp.as_standard_layout().to_owned();
-
-                // Protect against division by very small numbers
-                let protected_sum = sum_exp_contiguous.mapv(|x| {
-                    if x <= f64::MIN_POSITIVE {
-                        f64::MIN_POSITIVE
-                    } else {
-                        x
+                    let mut sum = 0.0f64;
+                    for value in lane.iter_mut() {
+                        let exponential = (*value - max).exp();
+                        *value = exponential;
+                        sum += exponential;
                     }
-                });
 
-                let result = exp_vals_contiguous / protected_sum.insert_axis(Axis(axis));
-                let result_contiguous = result.as_standard_layout().to_owned();
-                Ok(Tensor::F64(result_contiguous))
+                    let inverse_sum =
+                        if sum <= f64::MIN_POSITIVE { 1.0 / f64::MIN_POSITIVE } else { 1.0 / sum };
+                    for value in lane.iter_mut() {
+                        *value *= inverse_sum;
+                    }
+                }
+
+                Ok(Tensor::F64(result))
             },
             Tensor::F16(_) | Tensor::BF16(_) => run_half_in_f32(self, |t| t.softmax(axis)),
             _ => Err(TrustformersError::tensor_op_error(

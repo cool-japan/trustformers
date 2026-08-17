@@ -53,20 +53,39 @@
 //! - Efficient memory usage for very long sequences
 
 pub mod config;
+mod gating;
+pub mod mlstm;
 pub mod model;
+pub mod slstm;
 
 pub use config::{
     ExponentialGatingConfig, MLstmConfig, SLstmConfig, XLSTMBlockConfig, XLSTMBlockType,
     XLSTMConfig,
 };
+pub use mlstm::{MLstmBlock, MLstmState};
 pub use model::{
-    FeedForward, MLstmBlock, MLstmState, SLstmBlock, SLstmState, XLSTMForCausalLM,
-    XLSTMForSequenceClassification, XLSTMLayer, XLSTMModel, XLSTMState,
+    FeedForward, XLSTMForCausalLM, XLSTMForSequenceClassification, XLSTMLayer, XLSTMModel,
+    XLSTMOutput, XLSTMState,
 };
+pub use slstm::{SLstmBlock, SLstmState};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A model small enough to build repeatedly without dominating a test run,
+    /// while still exercising the embedding, both cell types and the LM head.
+    fn tiny_config() -> XLSTMConfig {
+        XLSTMConfig {
+            vocab_size: 24,
+            hidden_size: 8,
+            intermediate_size: 16,
+            num_layers: 2,
+            num_heads: 2,
+            max_sequence_length: 32,
+            ..XLSTMConfig::default()
+        }
+    }
 
     #[test]
     fn test_xlstm_config_creation() {
@@ -118,6 +137,21 @@ mod tests {
         }
     }
 
+    /// The per-layer block schedule cycles the pattern and falls back to the
+    /// declared block type when no pattern is given.
+    #[test]
+    fn test_block_type_for_layer_cycles_the_pattern() {
+        let mut config = tiny_config();
+        config.block_config.block_pattern = vec![XLSTMBlockType::SLstm, XLSTMBlockType::MLstm];
+        assert_eq!(config.block_type_for_layer(0), XLSTMBlockType::SLstm);
+        assert_eq!(config.block_type_for_layer(1), XLSTMBlockType::MLstm);
+        assert_eq!(config.block_type_for_layer(2), XLSTMBlockType::SLstm);
+
+        config.block_config.block_pattern = Vec::new();
+        config.block_config.block_type = XLSTMBlockType::MLstm;
+        assert_eq!(config.block_type_for_layer(5), XLSTMBlockType::MLstm);
+    }
+
     #[test]
     fn test_exponential_gating_config() {
         let config = ExponentialGatingConfig::default();
@@ -129,18 +163,18 @@ mod tests {
 
     #[test]
     fn test_xlstm_state_creation() {
-        let config = XLSTMConfig::small();
         let batch_size = 4;
+        let hidden_size = 512;
 
-        let state = XLSTMState::new(batch_size, config.hidden_size);
+        let state = XLSTMState::new(batch_size, hidden_size);
 
         assert_eq!(state.batch_size, batch_size);
-        assert_eq!(state.hidden_size, config.hidden_size);
+        assert_eq!(state.hidden_size, hidden_size);
     }
 
     #[test]
     fn test_xlstm_model_creation() -> trustformers_core::errors::Result<()> {
-        let config = XLSTMConfig::small();
+        let config = tiny_config();
         let model = XLSTMModel::new(config.clone())?;
 
         assert_eq!(model.config().vocab_size, config.vocab_size);
@@ -149,24 +183,31 @@ mod tests {
         Ok(())
     }
 
+    /// The parameter count must come from the real weight tensors, so it must
+    /// scale with the configured width rather than being a fixed estimate.
     #[test]
     fn test_xlstm_parameter_counting() -> trustformers_core::errors::Result<()> {
-        let config = XLSTMConfig::small();
-        let model = XLSTMModel::new(config)?;
+        let narrow = XLSTMModel::new(tiny_config())?;
+        let wide_config = XLSTMConfig {
+            hidden_size: 16,
+            ..tiny_config()
+        };
+        let wide = XLSTMModel::new(wide_config)?;
 
-        let param_count = model.parameter_count();
-        assert!(param_count > 0);
-
-        // Basic sanity check - should be reasonable for a 512-hidden model
-        assert!(param_count > 1_000_000); // At least 1M parameters
-        assert!(param_count < 100_000_000); // But not more than 100M for small model
+        assert!(narrow.parameter_count() > 0);
+        assert!(
+            wide.parameter_count() > 2 * narrow.parameter_count(),
+            "doubling the width must more than double the parameter count: {} vs {}",
+            wide.parameter_count(),
+            narrow.parameter_count()
+        );
 
         Ok(())
     }
 
     #[test]
     fn test_xlstm_forward_pass() -> trustformers_core::errors::Result<()> {
-        let config = XLSTMConfig::small();
+        let config = tiny_config();
         let model = XLSTMModel::new(config.clone())?;
 
         let input_ids = vec![1u32, 2u32, 3u32, 4u32, 5u32];
@@ -179,6 +220,7 @@ mod tests {
                 assert_eq!(shape[0], 1); // batch size
                 assert_eq!(shape[1], input_ids.len()); // sequence length
                 assert_eq!(shape[2], config.vocab_size); // vocab size
+                assert!(arr.iter().any(|v| v.abs() > 1e-6), "logits are all zero");
             },
             _ => panic!("Expected F32 tensor"),
         }
@@ -188,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_xlstm_classification_model() -> trustformers_core::errors::Result<()> {
-        let config = XLSTMConfig::small();
+        let config = tiny_config();
         let num_labels = 5;
         let model = XLSTMForSequenceClassification::new(config, num_labels)?;
 
@@ -200,6 +242,7 @@ mod tests {
                 let shape = arr.shape();
                 assert_eq!(shape[0], 1); // batch size
                 assert_eq!(shape[1], num_labels); // number of labels
+                assert!(arr.iter().any(|v| v.abs() > 1e-6), "logits are all zero");
             },
             _ => panic!("Expected F32 tensor"),
         }
@@ -209,22 +252,25 @@ mod tests {
 
     #[test]
     fn test_slstm_block_creation() {
-        let block = SLstmBlock::new(512);
+        let block = SLstmBlock::new(64);
         let param_count = block.parameter_count();
         assert!(param_count > 0);
+        assert_eq!(param_count, 4 * (64 * 64 + 64) + 4 * (64 * 64));
     }
 
     #[test]
     fn test_mlstm_block_creation() {
-        let block = MLstmBlock::new(768, 12);
+        let block = MLstmBlock::new(64, 4);
         let param_count = block.parameter_count();
         assert!(param_count > 0);
+        assert_eq!(param_count, 4 * (64 * 64 + 64) + 2 * (64 * 4 + 4));
+        assert_eq!(block.head_dim(), 16);
     }
 
     #[test]
     fn test_feedforward_network() {
-        let hidden_size = 512;
-        let intermediate_size = 2048;
+        let hidden_size = 64;
+        let intermediate_size = 128;
 
         let ff = FeedForward::new(hidden_size, intermediate_size);
         let param_count = ff.parameter_count();
@@ -236,5 +282,21 @@ mod tests {
             + intermediate_size * hidden_size
             + hidden_size;
         assert_eq!(param_count, expected);
+    }
+
+    /// End-to-end: the causal LM head must produce real, input-dependent logits.
+    #[test]
+    fn test_causal_lm_end_to_end() -> trustformers_core::errors::Result<()> {
+        let config = tiny_config();
+        let model = XLSTMForCausalLM::new(config.clone())?;
+
+        let out = model.forward(vec![3, 1, 4, 1, 5])?;
+        assert_eq!(out.logits.shape(), vec![1, 5, config.vocab_size]);
+        let data = out.logits.data()?;
+        assert!(data.iter().all(|v| v.is_finite()));
+        assert!(data.iter().any(|v| v.abs() > 1e-6));
+        assert!(model.parameter_count() > 0);
+
+        Ok(())
     }
 }

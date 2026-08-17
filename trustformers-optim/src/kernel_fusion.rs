@@ -492,6 +492,11 @@ pub struct KernelFusedAdam {
     weight_decay: f32,
     /// Fused GPU state
     gpu_state: FusedGPUState,
+    /// Stable parameter identity registry (see [`crate::param_id`]).
+    ///
+    /// Replaces heap-address keys, which change in every process and so made
+    /// checkpoint resume silently restore nothing.
+    params: crate::param_id::ParamRegistry,
 }
 
 impl KernelFusedAdam {
@@ -514,6 +519,7 @@ impl KernelFusedAdam {
             eps,
             weight_decay,
             gpu_state: FusedGPUState::new(config),
+            params: crate::param_id::ParamRegistry::new(),
         }
     }
 
@@ -548,7 +554,7 @@ impl Optimizer for KernelFusedAdam {
     fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
         match (parameter, grad) {
             (Tensor::F32(param), Tensor::F32(grad_arr)) => {
-                let param_id = format!("{:p}", param.as_ptr());
+                let param_id = self.params.key_for_addr(param.as_ptr() as usize, param.len())?;
 
                 // Ensure parameter buffer is allocated
                 if !self.gpu_state.fused_buffers.contains_key(&param_id) {

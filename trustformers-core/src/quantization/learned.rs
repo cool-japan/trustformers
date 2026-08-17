@@ -293,8 +293,29 @@ impl LearnedFakeQuantize {
         })
     }
 
-    /// Quantize and dequantize with learned parameters (fake quantization)
+    /// Quantize and dequantize with learned parameters (fake quantization).
+    ///
+    /// In training mode the EMA statistics are updated afterwards; use
+    /// [`LearnedFakeQuantize::fake_quantize`] for the pure, side-effect-free
+    /// round trip.
     pub fn forward_fake_quantize(&mut self, input: &Variable) -> Result<Variable> {
+        let dequantized = self.fake_quantize(input)?;
+
+        // Update EMA parameters if in training mode
+        if self.params.training {
+            self.params.update_ema()?;
+            self.params.apply_constraints()?;
+        }
+
+        Ok(dequantized)
+    }
+
+    /// Side-effect-free fake quantization round trip.
+    ///
+    /// `x -> (clamp(round(x / s + z), qmin, qmax) - z) * s`, with straight-through
+    /// gradients through the rounding and the clamp so the learned scales and
+    /// zero points stay trainable.
+    pub fn fake_quantize(&self, input: &Variable) -> Result<Variable> {
         let scales = self.params.effective_scales()?;
         let zero_points = self.params.effective_zero_points()?;
 
@@ -309,22 +330,16 @@ impl LearnedFakeQuantize {
         let clamped = self.clamp(&quantized, qmin, qmax)?;
 
         // Dequantize: x = (q - zero_point) * scale
-        let dequantized = clamped.sub(&zero_points)?.mul(&scales)?;
-
-        // Update EMA parameters if in training mode
-        if self.params.training {
-            self.params.update_ema()?;
-            self.params.apply_constraints()?;
-        }
-
-        Ok(dequantized)
+        clamped.sub(&zero_points)?.mul(&scales)
     }
 
-    /// Straight-through estimator for rounding
+    /// Straight-through estimator for rounding.
+    ///
+    /// At the default temperature (`1.0`) this is the hard STE: forward rounds,
+    /// backward is the identity. Any other temperature selects the smooth
+    /// `soft_quantization` surrogate, whose gradient is exact for the surrogate
+    /// it computes.
     fn straight_through_round(&self, input: &Variable) -> Result<Variable> {
-        // In forward pass: round, in backward pass: identity
-        // This is a simplified implementation - in practice you'd use custom gradients
-
         if self.params.config.ste_temperature == 1.0 {
             // Standard straight-through estimator
             self.round_with_straight_through(input)
@@ -334,40 +349,52 @@ impl LearnedFakeQuantize {
         }
     }
 
-    /// Round with straight-through gradients
+    /// Round with straight-through gradients.
+    ///
+    /// Registers a [`Variable::round_straight_through`] node so the rounding stays
+    /// *in* the autograd graph: forward rounds, backward is the identity. The
+    /// previous implementation built a brand-new leaf `Variable` from the rounded
+    /// data, which severed the graph and left the learned scales and zero points
+    /// with no gradient at all.
     fn round_with_straight_through(&self, input: &Variable) -> Result<Variable> {
-        // For now, we'll use a simple approximation
-        // In a full implementation, you'd use custom gradient functions
-        let rounded_data = input.data()?.round()?;
-        let rounded_var = self.engine.variable(rounded_data, input.requires_grad());
-        Ok(rounded_var)
+        input.round_straight_through()
     }
 
-    /// Soft quantization with temperature
+    /// Soft quantization with temperature.
+    ///
+    /// `soft_round(x) = floor(x) + sigmoid((frac(x) - 0.5) / T)`, which converges
+    /// to `round(x)` as `T -> 0` and is smooth for `T > 0`. `floor(x)` is a
+    /// piecewise constant, so it is registered as a constant (its derivative is
+    /// zero almost everywhere) and the gradient flows through `frac(x) = x -
+    /// floor(x)` and the sigmoid.
     fn soft_quantization(&self, input: &Variable) -> Result<Variable> {
         let temp = self.params.config.ste_temperature;
+        if !temp.is_finite() || temp <= 0.0 {
+            return Err(TrustformersError::invalid_input(format!(
+                "STE temperature must be positive, got {}",
+                temp
+            )));
+        }
 
-        // Soft rounding using sigmoid-based approximation
-        let floor_val = input.clone(); // Simplified - should be floor
-        let ceil_val = floor_val.add_scalar(1.0)?;
+        // Constant floor: `floor` has zero derivative almost everywhere.
+        let floor_tensor = input.data()?.floor()?;
+        let floor_val = self.engine.variable(floor_tensor, false);
 
-        let diff = input.sub(&floor_val)?;
-        let sigmoid_weight = diff.div_scalar(temp)?.sigmoid()?;
+        // frac = x - floor(x), in [0, 1)
+        let fraction = input.sub(&floor_val)?;
+        let sigmoid_weight = fraction.sub_scalar(0.5)?.div_scalar(temp)?.sigmoid()?;
 
-        let result = floor_val
-            .mul(&sigmoid_weight.sub_scalar(1.0)?.neg()?)?
-            .add(&ceil_val.mul(&sigmoid_weight)?)?;
-
-        Ok(result)
+        // floor + w  ==  floor * (1 - w) + (floor + 1) * w
+        floor_val.add(&sigmoid_weight)
     }
 
-    /// Clamp values to quantization range
+    /// Clamp values to the quantization range with a clipped STE gradient.
+    ///
+    /// Saturated entries receive no gradient (they cannot influence the loss);
+    /// entries inside the range pass their gradient through. The previous
+    /// implementation rebuilt a detached leaf and dropped the gradient entirely.
     fn clamp(&self, input: &Variable, min_val: f32, max_val: f32) -> Result<Variable> {
-        // Simplified clamping - in practice you'd implement proper clamp operation
-        let data = input.data()?;
-        let clamped_data = data.clamp(min_val, max_val)?;
-        let clamped_var = self.engine.variable(clamped_data, input.requires_grad());
-        Ok(clamped_var)
+        input.clamp_straight_through(min_val, max_val)
     }
 
     /// Get quantization parameters
@@ -780,15 +807,16 @@ impl Layer for LearnedQuantLayer {
     type Input = Variable;
     type Output = Variable;
 
+    /// Run the real fake-quantization round trip.
+    ///
+    /// `Layer::forward` takes `&self`, so the EMA statistics cannot be updated
+    /// here; use [`LearnedQuantLayer::fake_quant_mut`] +
+    /// [`LearnedFakeQuantize::forward_fake_quantize`] when training with EMA.
+    /// The quantization itself is the same computation either way -- this used
+    /// to be `input * scale + zero_point`, i.e. an affine rescale that never
+    /// quantized anything.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        // This is immutable forward, so we can't update parameters
-        // In practice, you'd need a mutable forward or use interior mutability
-        let scales = self.fake_quant.params.effective_scales()?;
-        let zero_points = self.fake_quant.params.effective_zero_points()?;
-
-        // Simplified quantization for immutable forward
-        let result = input.mul(&scales)?.add(&zero_points)?;
-        Ok(result)
+        self.fake_quant.fake_quantize(&input)
     }
 }
 
@@ -842,6 +870,94 @@ mod tests {
         assert_eq!(
             result.shape().expect("Failed to get result shape"),
             vec![2, 5, 10]
+        );
+    }
+
+    /// Regression test for the severed STE graph.
+    ///
+    /// `round_with_straight_through` used to build a brand-new leaf `Variable`
+    /// from the rounded data, so no gradient ever reached the input or the
+    /// learned scales. A gradient must arrive at the input after `backward`.
+    #[test]
+    fn straight_through_estimator_keeps_the_gradient_flowing_to_the_input() {
+        let config = LearnedQuantConfig {
+            per_channel_learned: false,
+            ..Default::default()
+        };
+        let engine = Arc::new(AutodiffEngine::default());
+        let shape = vec![4];
+
+        let fake_quant = LearnedFakeQuantize::new(config, &shape, 8, engine.clone())
+            .expect("build LearnedFakeQuantize");
+
+        let input_tensor =
+            Tensor::from_vec(vec![0.13f32, -0.42, 0.77, -0.05], &[4]).expect("input tensor");
+        let input_var = engine.variable(input_tensor, true);
+
+        let output = fake_quant.fake_quantize(&input_var).expect("fake quantize");
+        output
+            .backward_with_grad(Tensor::ones(&[4]).expect("upstream gradient"))
+            .expect("backward");
+
+        let grad = input_var
+            .grad()
+            .expect("gradient lookup")
+            .expect("STE must deliver a gradient to the input");
+        let values = grad.to_vec_f32().expect("gradient values");
+        assert_eq!(values.len(), 4);
+        assert!(
+            values.iter().any(|v| v.abs() > 1e-6),
+            "STE produced an all-zero gradient: {:?}",
+            values
+        );
+        assert!(
+            values.iter().all(|v| v.is_finite()),
+            "STE produced a non-finite gradient: {:?}",
+            values
+        );
+    }
+
+    /// Regression test for `LearnedQuantLayer::forward`, which used to compute
+    /// `input * scale + zero_point` -- an affine rescale that never rounded, so
+    /// a fine-grained ramp came out unchanged up to that affine map.
+    #[test]
+    fn quant_layer_forward_actually_quantizes() {
+        let config = LearnedQuantConfig {
+            per_channel_learned: false,
+            ..Default::default()
+        };
+        let engine = Arc::new(AutodiffEngine::default());
+        let shape = vec![64];
+
+        let layer = LearnedQuantLayer::new(
+            "test".to_string(),
+            config,
+            &shape,
+            4, // 4 bits => a coarse grid, so distinct inputs must collide
+            engine.clone(),
+        )
+        .expect("build LearnedQuantLayer");
+
+        // A dense ramp inside one quantization step: a real quantizer maps many
+        // of these onto the same reconstruction level.
+        let values: Vec<f32> = (0..64).map(|i| i as f32 * 1e-3).collect();
+        let input_var = engine.variable(
+            Tensor::from_vec(values.clone(), &[64]).expect("input"),
+            true,
+        );
+
+        let output = layer.forward(input_var).expect("layer forward");
+        let out_values = output.data().expect("output tensor").to_vec_f32().expect("values");
+        assert_eq!(out_values.len(), 64);
+
+        let mut distinct = out_values.clone();
+        distinct.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        distinct.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        assert!(
+            distinct.len() < out_values.len(),
+            "output has {} distinct levels for {} inputs -- nothing was quantized",
+            distinct.len(),
+            out_values.len()
         );
     }
 

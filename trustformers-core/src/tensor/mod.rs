@@ -54,6 +54,8 @@ mod complex_tests;
 mod constructors_tests;
 #[cfg(test)]
 mod property_tests;
+#[cfg(test)]
+mod transformations_tests;
 
 use crate::errors::Result;
 use scirs2_core::ndarray::{ArrayBase, ArrayD, Dim, IxDynImpl, OwnedRepr};
@@ -498,3 +500,9 @@ pub use expression::{EvalContext, ExprNode, OpType, OptimizationHints, TensorExp
 
 // Re-export gradient tracking utilities
 pub use utils::{clear_gradients, disable_grad, enable_grad, is_grad_enabled};
+
+// Numerical-stability predicates and clamps used by the tensor math kernels.
+pub use math_ops::{
+    is_stable_f32, is_stable_f64, stabilize_f32, stabilize_f64, MAX_SAFE_VALUE_F32,
+    MAX_SAFE_VALUE_F64, STABILITY_EPSILON_F32, STABILITY_EPSILON_F64,
+};

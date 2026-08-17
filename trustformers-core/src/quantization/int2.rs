@@ -179,22 +179,42 @@ pub fn unpack_four(byte: u8) -> (u8, u8, u8, u8) {
 /// per group.  `config.group_size` must be a multiple of 4 and at least 4.
 pub fn quantize_to_int2(data: &[f32], config: &Int2QuantConfig) -> PackedInt2 {
     let group_size = config.group_size.max(4);
-    let num_groups = (data.len() + group_size - 1) / group_size;
+    let num_groups = data.len().div_ceil(group_size);
 
-    let mut packed_bytes: Vec<u8> = Vec::with_capacity((data.len() + 3) / 4);
+    let mut packed_bytes: Vec<u8> = Vec::with_capacity(data.len().div_ceil(4));
     let mut scales: Vec<f32> = Vec::with_capacity(num_groups);
     let mut zero_points: Vec<f32> = Vec::with_capacity(num_groups);
 
     match config.mode {
         Int2Mode::Asymmetric => {
-            quantize_asymmetric(data, group_size, config, &mut packed_bytes, &mut scales, &mut zero_points);
-        }
+            quantize_asymmetric(
+                data,
+                group_size,
+                config,
+                &mut packed_bytes,
+                &mut scales,
+                &mut zero_points,
+            );
+        },
         Int2Mode::Symmetric => {
-            quantize_symmetric(data, group_size, config, &mut packed_bytes, &mut scales, &mut zero_points);
-        }
+            quantize_symmetric(
+                data,
+                group_size,
+                config,
+                &mut packed_bytes,
+                &mut scales,
+                &mut zero_points,
+            );
+        },
         Int2Mode::Ternary => {
-            quantize_ternary_inner(data, group_size, &mut packed_bytes, &mut scales, &mut zero_points);
-        }
+            quantize_ternary_inner(
+                data,
+                group_size,
+                &mut packed_bytes,
+                &mut scales,
+                &mut zero_points,
+            );
+        },
     }
 
     PackedInt2 {
@@ -215,13 +235,13 @@ pub fn dequantize_from_int2(packed: &PackedInt2) -> Vec<f32> {
     match packed.mode {
         Int2Mode::Asymmetric => {
             dequantize_asymmetric(packed, group_size, &mut out);
-        }
+        },
         Int2Mode::Symmetric => {
             dequantize_symmetric(packed, group_size, &mut out);
-        }
+        },
         Int2Mode::Ternary => {
             dequantize_ternary_inner(packed, group_size, &mut out);
-        }
+        },
     }
 
     out.truncate(packed.num_values);
@@ -247,10 +267,13 @@ pub fn validate_config(config: &Int2QuantConfig) -> Result<()> {
             "group_size must be > 0",
         ));
     }
-    if config.group_size % 4 != 0 {
+    if !config.group_size.is_multiple_of(4) {
         return Err(quantization_error(
             "int2_validate",
-            format!("group_size must be a multiple of 4, got {}", config.group_size),
+            format!(
+                "group_size must be a multiple of 4, got {}",
+                config.group_size
+            ),
         ));
     }
     if config.scale.is_nan() || config.zero_point.is_nan() {
@@ -311,8 +334,12 @@ fn compute_asymmetric_params(group: &[f32]) -> (f32, f32) {
     let mut min_val = f32::MAX;
     let mut max_val = f32::MIN;
     for &v in group {
-        if v < min_val { min_val = v; }
-        if v > max_val { max_val = v; }
+        if v < min_val {
+            min_val = v;
+        }
+        if v > max_val {
+            max_val = v;
+        }
     }
     let range = max_val - min_val;
     if range.abs() < f32::EPSILON {
@@ -335,11 +362,7 @@ fn quantize_symmetric(
     zero_points: &mut Vec<f32>,
 ) {
     for chunk in data.chunks(group_size) {
-        let scale = if config.scale != 0.0 {
-            config.scale
-        } else {
-            compute_symmetric_scale(chunk)
-        };
+        let scale = if config.scale != 0.0 { config.scale } else { compute_symmetric_scale(chunk) };
         scales.push(scale);
         zero_points.push(0.0);
 
@@ -455,11 +478,7 @@ fn compute_ternary_params(group: &[f32]) -> (f32, f32) {
         }
     }
 
-    let scale = if count_above > 0 {
-        sum_above / count_above as f32
-    } else {
-        abs_mean
-    };
+    let scale = if count_above > 0 { sum_above / count_above as f32 } else { abs_mean };
 
     (threshold, scale)
 }
@@ -469,13 +488,7 @@ fn compute_ternary_params(group: &[f32]) -> (f32, f32) {
 // ---------------------------------------------------------------------------
 
 /// Pack a group of f32 values using a quantize-to-u8 closure, appending packed bytes.
-fn pack_group<F>(
-    group: &[f32],
-    scale: f32,
-    zero_point: f32,
-    packed: &mut Vec<u8>,
-    quantize_fn: F,
-)
+fn pack_group<F>(group: &[f32], scale: f32, zero_point: f32, packed: &mut Vec<u8>, quantize_fn: F)
 where
     F: Fn(f32, f32, f32) -> u8,
 {
@@ -493,8 +506,8 @@ where
 
     // Flush partial quad (pad with 0)
     if buf_idx > 0 {
-        for i in buf_idx..4 {
-            buf[i] = 0;
+        for slot in buf.iter_mut().skip(buf_idx) {
+            *slot = 0;
         }
         packed.push(pack_four(buf[0], buf[1], buf[2], buf[3]));
     }
@@ -507,8 +520,7 @@ fn unpack_group<F>(
     count: usize,
     out: &mut Vec<f32>,
     dequantize_fn: F,
-)
-where
+) where
     F: Fn(u8) -> f32,
 {
     let start_byte = start_value_idx / 4;
@@ -545,7 +557,7 @@ fn compute_group_size(num_values: usize, num_groups: usize) -> usize {
         return num_values.max(4);
     }
     // Reconstruct group_size from value count / group count
-    (num_values + num_groups - 1) / num_groups
+    num_values.div_ceil(num_groups)
 }
 
 // ---------------------------------------------------------------------------
@@ -558,7 +570,8 @@ pub fn quantization_mse(original: &[f32], reconstructed: &[f32]) -> f32 {
     if n == 0 {
         return 0.0;
     }
-    let sum_sq: f32 = original.iter()
+    let sum_sq: f32 = original
+        .iter()
         .zip(reconstructed.iter())
         .map(|(a, b)| {
             let d = a - b;
@@ -601,7 +614,10 @@ mod tests {
         }
 
         fn next_u32(&mut self) -> u32 {
-            self.state = self.state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            self.state = self
+                .state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             ((self.state >> 33) ^ self.state) as u32
         }
 
@@ -783,8 +799,16 @@ mod tests {
         let packed = quantize_to_int2(&data, &config);
         let recovered = dequantize_from_int2(&packed);
         // The sign should be preserved
-        assert!(recovered[0] < 0.0, "expected negative, got {}", recovered[0]);
-        assert!(recovered[3] > 0.0, "expected positive, got {}", recovered[3]);
+        assert!(
+            recovered[0] < 0.0,
+            "expected negative, got {}",
+            recovered[0]
+        );
+        assert!(
+            recovered[3] > 0.0,
+            "expected positive, got {}",
+            recovered[3]
+        );
     }
 
     #[test]
@@ -840,7 +864,10 @@ mod tests {
         let recovered = dequantize_from_int2(&packed);
         // All large positive -> all should be positive
         for (i, &v) in recovered.iter().enumerate() {
-            assert!(v > 0.0 || v.abs() < f32::EPSILON, "idx {i}: expected >=0 got {v}");
+            assert!(
+                v > 0.0 || v.abs() < f32::EPSILON,
+                "idx {i}: expected >=0 got {v}"
+            );
         }
     }
 

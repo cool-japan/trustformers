@@ -136,7 +136,7 @@ impl<T: Optimizer> Lookahead<T> {
     fn init_slow_weights(&mut self, parameter: &Tensor) -> Result<()> {
         match parameter {
             Tensor::F32(param) => {
-                let param_id = format!("{:p}", param.as_ptr());
+                let param_id = self.state.param_key(param.as_ptr() as usize, param.len())?;
                 self.slow_weights
                     .entry(param_id)
                     .or_insert_with(|| param.iter().cloned().collect());
@@ -153,7 +153,7 @@ impl<T: Optimizer> Lookahead<T> {
     fn update_slow_weights(&mut self, parameter: &mut Tensor) -> Result<()> {
         match parameter {
             Tensor::F32(param) => {
-                let param_id = format!("{:p}", param.as_ptr());
+                let param_id = self.state.param_key(param.as_ptr() as usize, param.len())?;
 
                 if let Some(slow_weights) = self.slow_weights.get_mut(&param_id) {
                     if slow_weights.len() != param.len() {

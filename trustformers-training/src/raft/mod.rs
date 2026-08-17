@@ -41,27 +41,30 @@ impl fmt::Display for RaftError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RaftError::EmptyDataset => {
-                write!(f, "RAFT error: dataset is empty; at least one prompt is required")
-            }
+                write!(
+                    f,
+                    "RAFT error: dataset is empty; at least one prompt is required"
+                )
+            },
             RaftError::NoResponsesSelected => {
                 write!(
                     f,
                     "RAFT error: no responses were selected; \
                      try lowering reward_threshold or increasing top_k_fraction"
                 )
-            }
+            },
             RaftError::InsufficientSamples { required, got } => {
                 write!(
                     f,
                     "RAFT error: insufficient samples — required {required}, got {got}"
                 )
-            }
+            },
             RaftError::InvalidConfig(msg) => {
                 write!(f, "RAFT invalid config: {msg}")
-            }
+            },
             RaftError::RewardNormalizationFailed(msg) => {
                 write!(f, "RAFT reward normalization failed: {msg}")
-            }
+            },
         }
     }
 }
@@ -227,8 +230,7 @@ impl RaftSelector {
 
         let n = responses.len() as f32;
         let mean = responses.iter().map(|r| r.reward).sum::<f32>() / n;
-        let variance =
-            responses.iter().map(|r| (r.reward - mean).powi(2)).sum::<f32>() / n;
+        let variance = responses.iter().map(|r| (r.reward - mean).powi(2)).sum::<f32>() / n;
         let std_dev = variance.sqrt();
 
         if std_dev < 1e-8 {
@@ -272,10 +274,7 @@ impl RaftSelector {
         let mut min_selected_reward = f32::INFINITY;
 
         for (i, prompt) in prompts.iter().enumerate() {
-            let responses = scored_responses
-                .get(i)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
+            let responses = scored_responses.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
 
             if responses.is_empty() {
                 return Err(RaftError::InsufficientSamples {
@@ -304,11 +303,8 @@ impl RaftSelector {
 
         let mean_reward_all = sum_reward_all / (total_generated as f32);
         let mean_reward_selected = sum_reward_selected / (total_selected as f32);
-        let reward_threshold_used = if min_selected_reward == f32::INFINITY {
-            0.0
-        } else {
-            min_selected_reward
-        };
+        let reward_threshold_used =
+            if min_selected_reward == f32::INFINITY { 0.0 } else { min_selected_reward };
 
         Ok(RaftBatch {
             selected_pairs,
@@ -364,7 +360,11 @@ pub struct RaftTrainer {
 impl RaftTrainer {
     /// Create a new RAFT trainer at iteration 0.
     pub fn new(config: RaftConfig) -> Self {
-        Self { config, iteration: 0, history: Vec::new() }
+        Self {
+            config,
+            iteration: 0,
+            history: Vec::new(),
+        }
     }
 
     /// Record the result of a completed RAFT iteration.
@@ -374,10 +374,7 @@ impl RaftTrainer {
     ///
     /// # Errors
     /// Returns `RaftError::NoResponsesSelected` if the batch contains no selected pairs.
-    pub fn process_iteration(
-        &mut self,
-        batch: RaftBatch,
-    ) -> Result<RaftIterationStats, RaftError> {
+    pub fn process_iteration(&mut self, batch: RaftBatch) -> Result<RaftIterationStats, RaftError> {
         if batch.total_selected == 0 {
             return Err(RaftError::NoResponsesSelected);
         }
@@ -492,7 +489,9 @@ mod tests {
         assert_eq!(empty.len(), 0);
         assert!(empty.is_empty());
 
-        let one = RaftDataset { prompts: vec![vec![1, 2, 3]] };
+        let one = RaftDataset {
+            prompts: vec![vec![1, 2, 3]],
+        };
         assert_eq!(one.len(), 1);
         assert!(!one.is_empty());
     }
@@ -514,7 +513,10 @@ mod tests {
     #[test]
     fn test_select_top_responses_basic() {
         let responses = make_responses(&[0.1, 0.9, 0.4, 0.7, 0.2]);
-        let config = RaftConfig { top_k_fraction: 0.4, ..RaftConfig::default() };
+        let config = RaftConfig {
+            top_k_fraction: 0.4,
+            ..RaftConfig::default()
+        };
         // ceil(5 * 0.4) = ceil(2.0) = 2
         let selected = RaftSelector::select_top_responses(&responses, &config);
         assert_eq!(selected.len(), 2);
@@ -526,7 +528,10 @@ mod tests {
     #[test]
     fn test_select_top_responses_all_fraction_one() {
         let responses = make_responses(&[0.3, 0.1, 0.8]);
-        let config = RaftConfig { top_k_fraction: 1.0, ..RaftConfig::default() };
+        let config = RaftConfig {
+            top_k_fraction: 1.0,
+            ..RaftConfig::default()
+        };
         let selected = RaftSelector::select_top_responses(&responses, &config);
         assert_eq!(selected.len(), 3);
     }
@@ -583,7 +588,10 @@ mod tests {
         let std_dev = var.sqrt();
 
         assert!(mean.abs() < 1e-5, "mean should be ≈ 0, got {mean}");
-        assert!((std_dev - 1.0).abs() < 1e-5, "std_dev should be ≈ 1, got {std_dev}");
+        assert!(
+            (std_dev - 1.0).abs() < 1e-5,
+            "std_dev should be ≈ 1, got {std_dev}"
+        );
     }
 
     #[test]
@@ -592,7 +600,10 @@ mod tests {
         let mut responses = make_responses(&[3.0, 3.0, 3.0]);
         RaftSelector::normalize_rewards(&mut responses);
         for r in &responses {
-            assert!((r.reward - 3.0).abs() < 1e-6, "identical rewards should stay unchanged");
+            assert!(
+                (r.reward - 3.0).abs() < 1e-6,
+                "identical rewards should stay unchanged"
+            );
         }
     }
 
@@ -641,7 +652,10 @@ mod tests {
             RaftSelector::build_sft_batch(&prompts, &scored_responses, &RaftConfig::default());
         assert!(matches!(
             result,
-            Err(RaftError::InsufficientSamples { required: _, got: 0 })
+            Err(RaftError::InsufficientSamples {
+                required: _,
+                got: 0
+            })
         ));
     }
 
@@ -661,7 +675,11 @@ mod tests {
         let mut trainer = RaftTrainer::new(config);
         let stats = trainer.process_iteration(batch).expect("should succeed");
 
-        assert!((stats.selection_rate - 0.25).abs() < 1e-6, "2/8 = 0.25, got {}", stats.selection_rate);
+        assert!(
+            (stats.selection_rate - 0.25).abs() < 1e-6,
+            "2/8 = 0.25, got {}",
+            stats.selection_rate
+        );
     }
 
     // ── Reward gain ───────────────────────────────────────────────────────────
@@ -789,7 +807,10 @@ mod tests {
     fn test_raft_error_display() {
         let e1 = RaftError::EmptyDataset;
         let e2 = RaftError::NoResponsesSelected;
-        let e3 = RaftError::InsufficientSamples { required: 8, got: 3 };
+        let e3 = RaftError::InsufficientSamples {
+            required: 8,
+            got: 3,
+        };
         let e4 = RaftError::InvalidConfig("bad fraction".to_string());
         let e5 = RaftError::RewardNormalizationFailed("zero std".to_string());
 
@@ -808,12 +829,24 @@ mod tests {
     fn test_ranking_top_k_ordered_by_reward() {
         let rewards_input = [0.3_f32, 0.9, 0.1, 0.7, 0.5];
         let responses = make_responses(&rewards_input);
-        let config = RaftConfig { top_k_fraction: 0.4, reward_threshold: None, ..RaftConfig::default() };
+        let config = RaftConfig {
+            top_k_fraction: 0.4,
+            reward_threshold: None,
+            ..RaftConfig::default()
+        };
         // ceil(5 * 0.4) = 2, should pick 0.9 and 0.7
         let selected = RaftSelector::select_top_responses(&responses, &config);
         assert_eq!(selected.len(), 2);
-        assert!((selected[0].reward - 0.9).abs() < 1e-6, "first should be 0.9, got {}", selected[0].reward);
-        assert!((selected[1].reward - 0.7).abs() < 1e-6, "second should be 0.7, got {}", selected[1].reward);
+        assert!(
+            (selected[0].reward - 0.9).abs() < 1e-6,
+            "first should be 0.9, got {}",
+            selected[0].reward
+        );
+        assert!(
+            (selected[1].reward - 0.7).abs() < 1e-6,
+            "second should be 0.7, got {}",
+            selected[1].reward
+        );
     }
 
     // Test: reward threshold filtering removes below-threshold entries
@@ -829,7 +862,11 @@ mod tests {
         // Only >= 0.5: 0.9, 0.8, 0.5
         assert_eq!(selected.len(), 3);
         for r in &selected {
-            assert!(r.reward >= 0.5, "all selected should be >= 0.5, got {}", r.reward);
+            assert!(
+                r.reward >= 0.5,
+                "all selected should be >= 0.5, got {}",
+                r.reward
+            );
         }
     }
 
@@ -845,11 +882,13 @@ mod tests {
             normalize_rewards: false,
             ..RaftConfig::default()
         };
-        let batch = RaftSelector::build_sft_batch(&prompts, &scored_responses, &config).expect("ok");
+        let batch =
+            RaftSelector::build_sft_batch(&prompts, &scored_responses, &config).expect("ok");
         assert!(
             batch.mean_reward_selected > batch.mean_reward_all,
             "selected mean reward {} should > all mean reward {}",
-            batch.mean_reward_selected, batch.mean_reward_all
+            batch.mean_reward_selected,
+            batch.mean_reward_all
         );
     }
 
@@ -882,7 +921,10 @@ mod tests {
             ..RaftConfig::default()
         };
         let selected = RaftSelector::select_top_responses(&responses, &config);
-        assert!(selected.is_empty(), "all rewards below threshold, nothing should be selected");
+        assert!(
+            selected.is_empty(),
+            "all rewards below threshold, nothing should be selected"
+        );
     }
 
     // Test: batch reward normalization changes reward values to mean=0, std=1
@@ -894,7 +936,11 @@ mod tests {
         let mean = responses.iter().map(|r| r.reward).sum::<f32>() / n;
         let var = responses.iter().map(|r| (r.reward - mean).powi(2)).sum::<f32>() / n;
         assert!(mean.abs() < 1e-4, "mean should be ≈ 0, got {mean}");
-        assert!((var.sqrt() - 1.0).abs() < 1e-4, "std should be ≈ 1, got {}", var.sqrt());
+        assert!(
+            (var.sqrt() - 1.0).abs() < 1e-4,
+            "std should be ≈ 1, got {}",
+            var.sqrt()
+        );
     }
 
     // Test: reward scaling — verify normalized scores are in reasonable range
@@ -906,7 +952,8 @@ mod tests {
         for r in &responses {
             assert!(
                 r.reward.abs() <= 3.0,
-                "normalized reward {} should be within reasonable range [-3, 3]", r.reward
+                "normalized reward {} should be within reasonable range [-3, 3]",
+                r.reward
             );
         }
     }
@@ -925,9 +972,13 @@ mod tests {
             normalize_rewards: false,
             ..RaftConfig::default()
         };
-        let batch = RaftSelector::build_sft_batch(&prompts, &scored_responses, &config).expect("ok");
+        let batch =
+            RaftSelector::build_sft_batch(&prompts, &scored_responses, &config).expect("ok");
         assert_eq!(batch.total_generated, 8, "8 total responses");
-        assert_eq!(batch.total_selected, 4, "4 selected (top-2 from each prompt)");
+        assert_eq!(
+            batch.total_selected, 4,
+            "4 selected (top-2 from each prompt)"
+        );
         let discarded = batch.total_generated - batch.total_selected;
         assert_eq!(discarded, 4, "4 discarded");
     }
@@ -942,9 +993,17 @@ mod tests {
             ..RaftConfig::default()
         };
         let selected = RaftSelector::select_top_responses(&responses, &config);
-        assert!(!selected.is_empty(), "at least one should survive selection with equal rewards");
+        assert!(
+            !selected.is_empty(),
+            "at least one should survive selection with equal rewards"
+        );
         // ceil(4 * 0.25) = 1
-        assert_eq!(selected.len(), 1, "expected 1 selected, got {}", selected.len());
+        assert_eq!(
+            selected.len(),
+            1,
+            "expected 1 selected, got {}",
+            selected.len()
+        );
     }
 
     // Test: empty batch handling after threshold filtering
@@ -960,7 +1019,10 @@ mod tests {
             ..RaftConfig::default()
         };
         let result = RaftSelector::build_sft_batch(&prompts, &scored_responses, &config);
-        assert!(matches!(result, Err(RaftError::NoResponsesSelected)), "should fail with NoResponsesSelected");
+        assert!(
+            matches!(result, Err(RaftError::NoResponsesSelected)),
+            "should fail with NoResponsesSelected"
+        );
     }
 
     // Test: ceil_frac correctness
@@ -999,16 +1061,22 @@ mod tests {
             normalize_rewards: false,
             ..RaftConfig::default()
         };
-        let batch = RaftSelector::build_sft_batch(&prompts, &scored_responses, &config).expect("ok");
+        let batch =
+            RaftSelector::build_sft_batch(&prompts, &scored_responses, &config).expect("ok");
         // Min of top-2 selected rewards: 0.8
-        assert!((batch.reward_threshold_used - 0.8).abs() < 1e-5,
-            "threshold_used should equal min selected reward, got {}", batch.reward_threshold_used);
+        assert!(
+            (batch.reward_threshold_used - 0.8).abs() < 1e-5,
+            "threshold_used should equal min selected reward, got {}",
+            batch.reward_threshold_used
+        );
     }
 
     // Test: RaftDataset clone
     #[test]
     fn test_raft_dataset_clone() {
-        let ds = RaftDataset { prompts: vec![vec![1, 2], vec![3, 4]] };
+        let ds = RaftDataset {
+            prompts: vec![vec![1, 2], vec![3, 4]],
+        };
         let clone = ds.clone();
         assert_eq!(clone.len(), ds.len());
         assert_eq!(clone.prompts[0], ds.prompts[0]);
@@ -1032,7 +1100,10 @@ mod tests {
         assert_eq!(trainer.history.len(), 5);
         assert_eq!(trainer.iteration, 5);
         for (i, stat) in trainer.history.iter().enumerate() {
-            assert_eq!(stat.iteration, i, "iteration index should match history index");
+            assert_eq!(
+                stat.iteration, i,
+                "iteration index should match history index"
+            );
         }
     }
 }

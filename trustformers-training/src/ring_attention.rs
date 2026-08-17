@@ -73,6 +73,15 @@ pub struct RingAttentionBlock {
     pub sequence_chunk: (usize, usize), // (start, end)
     /// Key-value pairs from previous devices
     pub received_kv: Vec<RingKVPair>,
+    /// This device's own key chunk, flattened `[chunk_len * head_dim]`.
+    ///
+    /// Populated by [`RingAttentionManager::set_local_kv`]. The ring rotates
+    /// *these* values; nothing is synthesised.
+    #[serde(default)]
+    pub local_keys: Vec<f32>,
+    /// This device's own value chunk, flattened `[chunk_len * head_dim]`.
+    #[serde(default)]
+    pub local_values: Vec<f32>,
     /// Communication buffer for ring transfers
     pub comm_buffer: Option<Vec<f32>>,
     /// Attention computation statistics
@@ -180,6 +189,8 @@ impl RingAttentionManager {
                 device_rank: rank,
                 sequence_chunk: (start_pos, end_pos),
                 received_kv: Vec::with_capacity(config.num_devices),
+                local_keys: Vec::new(),
+                local_values: Vec::new(),
                 comm_buffer: Some(vec![0.0; buffer_size]),
                 attention_stats: RingAttentionStats::default(),
             };
@@ -553,89 +564,114 @@ impl RingAttentionManager {
         Ok(output)
     }
 
-    /// Rotate key-value pairs to next device in the ring
-    fn rotate_kv_pairs(&mut self) -> Result<()> {
-        let num_devices = self.config.num_devices;
-
-        match self.communication_pattern {
-            RingCommunicationPattern::Unidirectional => {
-                // Simple ring rotation: device i sends to device (i+1) % num_devices
-                for i in 0..num_devices {
-                    let next_device = (i + 1) % num_devices;
-
-                    // Simulate KV transfer
-                    let kv_pair = RingKVPair {
-                        keys: vec![0.0; self.config.chunk_size * self.config.head_dim],
-                        values: vec![0.0; self.config.chunk_size * self.config.head_dim],
-                        source_rank: i,
-                        position_range: self.devices[i].sequence_chunk,
-                        attention_mask: None,
-                    };
-
-                    self.devices[next_device].received_kv.push(kv_pair);
-
-                    // Update communication statistics
-                    let comm_volume = self.config.chunk_size * self.config.head_dim * 2 * 4; // float32
-                    self.devices[i].attention_stats.communication_volume += comm_volume as u64;
-                }
-            },
-            RingCommunicationPattern::Bidirectional => {
-                // Bidirectional ring: communicate in both directions
-                self.rotate_kv_unidirectional()?;
-                self.rotate_kv_reverse()?;
-            },
-            _ => {
-                // Other patterns can be implemented here
-                self.rotate_kv_unidirectional()?;
-            },
+    /// Load this device's key/value chunk.
+    ///
+    /// `keys` and `values` must have the same length; the ring rotation moves
+    /// exactly these buffers between devices.
+    pub fn set_local_kv(
+        &mut self,
+        device_rank: usize,
+        keys: Vec<f32>,
+        values: Vec<f32>,
+    ) -> Result<()> {
+        if keys.len() != values.len() {
+            return Err(anyhow::anyhow!(
+                "keys ({}) and values ({}) must have the same length",
+                keys.len(),
+                values.len()
+            ));
         }
-
+        let device = self.devices.get_mut(device_rank).ok_or_else(|| {
+            anyhow::anyhow!(
+                "device rank {device_rank} is out of range for {} devices",
+                self.config.num_devices
+            )
+        })?;
+        device.local_keys = keys;
+        device.local_values = values;
         Ok(())
     }
 
-    /// Helper for unidirectional KV rotation
+    /// This device's currently loaded key/value chunk.
+    pub fn local_kv(&self, device_rank: usize) -> Option<(&[f32], &[f32])> {
+        self.devices
+            .get(device_rank)
+            .map(|device| (device.local_keys.as_slice(), device.local_values.as_slice()))
+    }
+
+    /// Take a snapshot of every device's local key/value chunk.
+    ///
+    /// Rotation reads from this snapshot so that a device forwarding data does
+    /// not observe values another device wrote in the same step.
+    fn snapshot_local_kv(&self) -> Result<Vec<(Vec<f32>, Vec<f32>)>> {
+        self.devices
+            .iter()
+            .map(|device| {
+                if device.local_keys.is_empty() || device.local_values.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "device {} has no local key/value chunk loaded; call \
+                         RingAttentionManager::set_local_kv before rotating",
+                        device.device_rank
+                    ));
+                }
+                Ok((device.local_keys.clone(), device.local_values.clone()))
+            })
+            .collect()
+    }
+
+    /// Rotate key-value pairs to the neighbouring device(s) in the ring.
+    fn rotate_kv_pairs(&mut self) -> Result<()> {
+        match self.communication_pattern {
+            RingCommunicationPattern::Bidirectional => {
+                self.rotate_kv_unidirectional()?;
+                self.rotate_kv_reverse()?;
+                Ok(())
+            },
+            // Unidirectional is the base rotation; hierarchical and adaptive
+            // patterns differ only in how the ring is grouped, and both reduce
+            // to a single forward hop at this level.
+            _ => self.rotate_kv_unidirectional(),
+        }
+    }
+
+    /// Forward ring rotation: device `i` sends its own K/V chunk to device
+    /// `(i + 1) % num_devices`.
+    ///
+    /// The transferred payload is the *source device's actual* key/value data.
+    /// An earlier revision fabricated `sin`/`cos` sequences here and discarded
+    /// the real chunk, so the attention computation downstream operated on
+    /// synthetic data.
     fn rotate_kv_unidirectional(&mut self) -> Result<()> {
         let num_devices = self.config.num_devices;
+        let snapshot = self.snapshot_local_kv()?;
 
         // Clear previous received KV pairs
         for device in &mut self.devices {
             device.received_kv.clear();
         }
 
-        // Perform ring rotation: device i sends to device (i+1) % num_devices
         for i in 0..num_devices {
             let next_device = (i + 1) % num_devices;
-            let current_device = &self.devices[i];
-
-            // Create KV pair with actual data (simplified for demonstration)
-            let kv_size = self.config.chunk_size * self.config.head_dim;
-            let mut keys = vec![0.0f32; kv_size];
-            let mut values = vec![0.0f32; kv_size];
-
-            // Simulate actual key/value data with some variation
-            for j in 0..kv_size {
-                keys[j] = (i as f32 + j as f32 * 0.001).sin();
-                values[j] = (i as f32 + j as f32 * 0.001).cos();
-            }
+            let (mut keys, mut values) = snapshot[i].clone();
 
             // Apply compression if enabled
             if self.config.compression_enabled {
                 self.compress_kv_data(&mut keys, &mut values)?;
             }
 
+            let comm_volume = (keys.len() + values.len()) * std::mem::size_of::<f32>();
+
             let kv_pair = RingKVPair {
                 keys,
                 values,
                 source_rank: i,
-                position_range: current_device.sequence_chunk,
+                position_range: self.devices[i].sequence_chunk,
                 attention_mask: None,
             };
 
-            // Send to next device in ring
             self.devices[next_device].received_kv.push(kv_pair);
 
-            // Update communication statistics
-            let comm_volume = kv_size * 2 * 4; // keys + values, 4 bytes per float32
+            self.devices[i].attention_stats.communication_volume += comm_volume as u64;
             if let Some(stats) = self.performance_stats.get_mut(&i) {
                 stats.communication_volume += comm_volume as u64;
             }
@@ -644,47 +680,35 @@ impl RingAttentionManager {
         Ok(())
     }
 
-    /// Helper for reverse direction KV rotation
+    /// Reverse ring rotation: device `i` sends its own K/V chunk to device
+    /// `(i - 1) % num_devices`.
     fn rotate_kv_reverse(&mut self) -> Result<()> {
         let num_devices = self.config.num_devices;
+        let snapshot = self.snapshot_local_kv()?;
 
-        // Perform reverse ring rotation: device i sends to device (i-1+num_devices) % num_devices
         for i in 0..num_devices {
             let prev_device = (i + num_devices - 1) % num_devices;
-            let current_device = &self.devices[i];
+            let (mut keys, mut values) = snapshot[i].clone();
 
-            // Create KV pair for reverse direction
-            let kv_size = self.config.chunk_size * self.config.head_dim;
-            let mut keys = vec![0.0f32; kv_size];
-            let mut values = vec![0.0f32; kv_size];
-
-            // Generate different data for reverse direction
-            for j in 0..kv_size {
-                keys[j] = -(i as f32 + j as f32 * 0.001).sin();
-                values[j] = -(i as f32 + j as f32 * 0.001).cos();
-            }
-
-            // Apply compression if enabled
             if self.config.compression_enabled {
                 self.compress_kv_data(&mut keys, &mut values)?;
             }
+
+            let comm_volume = (keys.len() + values.len()) * std::mem::size_of::<f32>();
 
             let kv_pair = RingKVPair {
                 keys,
                 values,
                 source_rank: i,
-                position_range: current_device.sequence_chunk,
+                position_range: self.devices[i].sequence_chunk,
                 attention_mask: None,
             };
 
-            // Send to previous device in ring
             self.devices[prev_device].received_kv.push(kv_pair);
 
-            // Update communication statistics
-            let comm_volume = kv_size * 2 * 4; // keys + values, 4 bytes per float32
+            self.devices[i].attention_stats.communication_volume += comm_volume as u64;
             if let Some(stats) = self.performance_stats.get_mut(&i) {
                 stats.communication_volume += comm_volume as u64;
-                stats.communication_time_ms += 0.1; // Simulate communication latency
             }
         }
 

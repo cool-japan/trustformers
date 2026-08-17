@@ -26,9 +26,9 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
     // Row-major B(k×n) reinterpreted as col-major is Bᵀ(n×k), lda=n.
     // Row-major C(m×n) reinterpreted as col-major is Cᵀ(n×m), lda=n.
     // gemm(Bᵀ, Aᵀ) → Cᵀ = Bᵀ·Aᵀ = (A·B)ᵀ, so C buffer holds A·B. ✓
-    let a_t = MatRef::new(a.as_ptr(), k, m, k);
-    let b_t = MatRef::new(b.as_ptr(), n, k, n);
-    let c_t = MatMut::new(c.as_mut_ptr(), n, m, n);
+    let a_t = MatRef::from_column_major(a, k, m).expect("A slice must hold m*k elements");
+    let b_t = MatRef::from_column_major(b, n, k).expect("B slice must hold k*n elements");
+    let c_t = MatMut::from_column_major(c, n, m).expect("C slice must hold m*n elements");
 
     // GEMM: Cᵀ = 1.0 * Bᵀ * Aᵀ + 0.0 * Cᵀ
     gemm(1.0, b_t, a_t, 0.0, c_t);
@@ -46,9 +46,9 @@ fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize)
     // Row-major B(k×n) reinterpreted as col-major is Bᵀ(n×k), lda=n.
     // Row-major C(m×n) reinterpreted as col-major is Cᵀ(n×m), lda=n.
     // gemm(Bᵀ, Aᵀ) → Cᵀ = Bᵀ·Aᵀ = (A·B)ᵀ, so C buffer holds A·B. ✓
-    let a_t = MatRef::new(a.as_ptr(), k, m, k);
-    let b_t = MatRef::new(b.as_ptr(), n, k, n);
-    let c_t = MatMut::new(c.as_mut_ptr(), n, m, n);
+    let a_t = MatRef::from_column_major(a, k, m).expect("A slice must hold m*k elements");
+    let b_t = MatRef::from_column_major(b, n, k).expect("B slice must hold k*n elements");
+    let c_t = MatMut::from_column_major(c, n, m).expect("C slice must hold m*n elements");
 
     // GEMM: Cᵀ = 1.0 * Bᵀ * Aᵀ + 0.0 * Cᵀ
     gemm(1.0, b_t, a_t, 0.0, c_t);
@@ -122,6 +122,18 @@ fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize)
 #[derive(Debug, Clone)]
 pub struct Linear {
     weight: Tensor,
+    /// Cached transpose of `weight` (`[in_features, out_features]`).
+    ///
+    /// `Linear::forward` multiplies by `W^T`, and the weight is immutable for
+    /// the whole of inference, so recomputing the transpose per forward call
+    /// (a 128 MiB memcpy for a 4096x4096 f32 weight -- ~896 MiB per transformer
+    /// block per token in decode) is pure waste. The transpose is computed once
+    /// here and rebuilt only when the weight itself changes.
+    ///
+    /// `Arc` so cloning a `Linear` does not deep-copy the cached matrix, and
+    /// `Option` so a weight that cannot be transposed (non-2D) simply falls back
+    /// to computing the transpose on the fly.
+    weight_transposed: Option<std::sync::Arc<Tensor>>,
     bias: Option<Tensor>,
     device: Device,
     #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -206,8 +218,11 @@ impl Linear {
             None
         };
 
+        let weight_transposed = Self::build_transposed_weight(&weight);
+
         Self {
             weight,
+            weight_transposed,
             bias,
             device,
             #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -250,6 +265,22 @@ impl Linear {
         self
     }
 
+    /// Build the cached `W^T` for a weight matrix, or `None` when the weight is
+    /// not a 2-D matrix (in which case callers transpose on demand).
+    fn build_transposed_weight(weight: &Tensor) -> Option<std::sync::Arc<Tensor>> {
+        weight.transpose(0, 1).ok().map(std::sync::Arc::new)
+    }
+
+    /// Return `W^T`, using the cache when it is available.
+    ///
+    /// The returned `Arc` is a refcount bump, not a copy.
+    fn transposed_weight(&self) -> Result<std::sync::Arc<Tensor>> {
+        match &self.weight_transposed {
+            Some(cached) => Ok(std::sync::Arc::clone(cached)),
+            None => Ok(std::sync::Arc::new(self.weight.transpose(0, 1)?)),
+        }
+    }
+
     /// Sets the weight matrix for this layer.
     ///
     /// # Arguments
@@ -264,6 +295,7 @@ impl Linear {
     ///
     /// This method is typically used when loading pretrained weights.
     pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
+        self.weight_transposed = Self::build_transposed_weight(&weight);
         self.weight = weight;
         // Clear cached buffer when weights are updated
         #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -361,8 +393,8 @@ impl Linear {
             // CRITICAL FIX: Cache the TRANSPOSED weight, not the original!
             // The Metal shader expects weight in [in_features, out_features] layout
             // but self.weight is stored as [out_features, in_features]
-            let weight_t = self.weight.transpose(0, 1)?;
-            match &weight_t {
+            let weight_t = self.transposed_weight()?;
+            match weight_t.as_ref() {
                 Tensor::F32(arr) => {
                     if arr.ndim() != 2 {
                         return Err(TrustformersError::shape_error(
@@ -448,8 +480,8 @@ impl Linear {
             // CRITICAL FIX: Cache the TRANSPOSED weight, not the original!
             // The CUDA kernel expects weight in [in_features, out_features] layout
             // but self.weight is stored as [out_features, in_features]
-            let weight_t = self.weight.transpose(0, 1)?;
-            match &weight_t {
+            let weight_t = self.transposed_weight()?;
+            match weight_t.as_ref() {
                 Tensor::F32(arr) => {
                     if arr.ndim() != 2 {
                         return Err(TrustformersError::shape_error(
@@ -784,7 +816,7 @@ impl Layer for Linear {
         // =====================================================================
         // Handle different input shapes for matmul
         let input_shape = input.shape();
-        let weight_t = self.weight.transpose(0, 1)?;
+        let weight_t = self.transposed_weight()?;
 
         let output = if input_shape.len() == 2 {
             // Standard 2D input: [seq_len, hidden_size] x [hidden_size, out_features]
@@ -801,7 +833,7 @@ impl Layer for Linear {
                         // We have a cached buffer! Use it for ZERO-COPY matmul
                         use crate::gpu_ops::metal::get_metal_backend;
 
-                        if let (Tensor::F32(inp), Tensor::F32(w_t)) = (&input, &weight_t) {
+                        if let (Tensor::F32(inp), Tensor::F32(w_t)) = (&input, weight_t.as_ref()) {
                             if inp.ndim() == 2 && w_t.ndim() == 2 {
                                 let inp_shape = inp.shape();
                                 let w_shape = w_t.shape();
@@ -855,19 +887,19 @@ impl Layer for Linear {
             #[cfg(all(target_os = "macos", feature = "metal"))]
             {
                 if self.device.is_gpu() {
-                    dispatch_matmul(&input, &weight_t, &self.device)?
+                    dispatch_matmul(&input, weight_t.as_ref(), &self.device)?
                 } else {
-                    input.matmul(&weight_t)?
+                    input.matmul(weight_t.as_ref())?
                 }
             }
             #[cfg(not(all(target_os = "macos", feature = "metal")))]
             {
-                input.matmul(&weight_t)?
+                input.matmul(weight_t.as_ref())?
             }
         } else if input_shape.len() == 3 {
             // Batched 3D input: [batch, seq_len, hidden_size] x [hidden_size, out_features]
             // Handle manually since tensor.matmul doesn't support 3D x 2D
-            match (&input, &weight_t) {
+            match (&input, weight_t.as_ref()) {
                 (Tensor::F32(inp), Tensor::F32(w)) => {
                     let batch = input_shape[0];
                     let seq_len = input_shape[1];

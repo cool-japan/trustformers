@@ -133,39 +133,64 @@ mod trainer_tests;
 pub mod adaptive_gradient_scaling;
 pub mod adaptive_learning_rate;
 pub mod advanced_stability_monitor;
+pub mod async_checkpoint;
 pub mod auto_parallelism;
 pub mod config_validation;
+pub mod constitutional_ai;
 pub mod continual;
+pub mod contrastive_search;
 pub mod cost_tracking;
+pub mod curriculum;
 pub mod data_pipeline;
+pub mod distillation;
 pub mod distributed;
+/// Real collective backends (shared-memory and TCP) implementing
+/// [`distributed::ProcessGroup`].
+pub mod distributed_collective;
+pub mod distributed_overlap;
+pub mod dpo;
 pub mod elastic_training;
 pub mod error_codes;
 pub mod error_handling;
+pub mod ewc;
 pub mod experiment_management;
 pub mod expert_parallelism;
 pub mod few_shot;
 pub mod framework_integration;
 pub mod gradient;
 pub mod gradient_anomaly_recovery;
+pub mod grpo;
 pub mod hpo;
 pub mod hyperopt;
+pub mod ipo;
+pub mod kto;
+pub mod lora;
 pub mod losses;
 pub mod memory_optimization;
 pub mod metrics;
 pub mod mixed_precision;
+pub mod model_merging;
 pub mod model_versioning;
 pub mod multicloud;
 pub mod nas_integration;
+pub mod online_dpo;
 pub mod online_learning;
+pub mod orpo;
 pub mod parallelism_3d;
+pub mod ppo;
 pub mod qat;
+pub mod raft;
+pub mod reinforce;
 pub mod resource_scheduling;
+pub mod reward_modeling;
 pub mod ring_attention;
 pub mod rlhf;
 pub mod sequence_parallelism;
 pub mod simplified_trainer;
+pub mod simpo;
+pub mod spin;
 pub mod tensor_parallelism;
+pub mod token_dpo;
 pub mod trainer;
 pub mod training_args;
 pub mod training_dynamics;
@@ -289,9 +314,10 @@ pub use mixed_precision::{
     LossScaler, MixedPrecisionConfig, MixedPrecisionReport,
 };
 pub use qat::{
-    fake_quantize, fake_quantize_mixed_bit, qat_loss, ActivationQuantizer, CalibrationDataset,
-    LayerQuantConfig, MixedBitQATTrainer, MixedBitStrategy, QATConfig, QATConv2d, QATLinear,
-    QATModel, QATTrainer, QuantStats, QuantizationGradients, QuantizationParams, QuantizedModel,
+    fake_quantize, fake_quantize_mixed_bit, qat_loss, qat_loss_with, ActivationQuantizer,
+    CalibrationDataset, LayerQuantConfig, MixedBitQATTrainer, MixedBitStrategy, QATConfig,
+    QATConv2d, QATLinear, QATModel, QATTrainer, QuantStats, QuantizableLayer,
+    QuantizationGradients, QuantizationParams, QuantizedModel,
 };
 pub use rlhf::{
     ConstitutionalPrinciple, GenerationResult, HumanFeedback, PPOConfig, PPOStepResult, PPOTrainer,
@@ -455,9 +481,9 @@ pub use training_orchestration::{
 
 // API improvement exports
 pub use config_validation::{
-    ConfigSchema, ConfigValidator, Constraint, FieldSchema, FieldType, Severity, Validatable,
-    ValidatedConfig, ValidationError as ConfigValidationError, ValidationReport,
-    ValidationRule as ConfigValidationRule,
+    ConfigSchema, ConfigValidator, Constraint, CustomConstraintEvaluator, FieldSchema, FieldType,
+    Severity, Validatable, ValidatedConfig, ValidationError as ConfigValidationError,
+    ValidationReport, ValidationRule as ConfigValidationRule,
 };
 pub use error_codes::{
     get_error_info, get_recovery_actions, is_critical_error, ErrorCodeInfo, ErrorCodeRegistry,
@@ -470,5 +496,5 @@ pub use error_handling::{
 pub use simplified_trainer::{
     CheckpointCallback, EarlyStoppingMode, EpochResult, LogLevel, LoggingCallback, MetricsCallback,
     ProgressCallback, SimpleCallback, SimpleTrainer, SimpleTrainerBuilder, SimpleTrainingConfig,
-    TrainingResults,
+    TensorDataset, TrainableModel, TrainingDataset, TrainingResults,
 };

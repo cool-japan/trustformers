@@ -6,10 +6,6 @@
 
 use super::super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use scirs2_core::ndarray::ArrayD;
-
-// Import stability functions from the stability module
-use super::stability::{is_stable_f32, is_stable_f64, stabilize_f32, stabilize_f64};
 
 // Import broadcasting function from the broadcasting module
 use super::broadcasting::shapes_are_broadcastable;
@@ -30,23 +26,12 @@ impl Tensor {
                     )));
                 }
 
-                // Always use ndarray's broadcasting addition (handles all shapes correctly)
-                // Then stabilize the result if needed
-                let result = a + b;
-
-                // Check if stabilization is needed
-                let has_unstable = result.iter().any(|&x| !is_stable_f32(x));
-
-                if has_unstable {
-                    // Stabilize the result
-                    let stabilized: Vec<f32> = result.iter().map(|&x| stabilize_f32(x)).collect();
-
-                    let result_array = ArrayD::from_shape_vec(result.raw_dim(), stabilized)
-                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                    Ok(Tensor::F32(result_array))
-                } else {
-                    Ok(Tensor::F32(result))
-                }
+                // ndarray's broadcasting addition already propagates NaN/Inf per
+                // IEEE-754. The former post-hoc "stability" scan+rewrite was an
+                // unconditional O(N) read of the result plus, whenever a single
+                // near-zero element was present, a full scalar rebuild through a
+                // `Vec` -- and it silently rewrote tiny activations to +/-1e-7.
+                Ok(Tensor::F32(a + b))
             },
             (Tensor::F64(a), Tensor::F64(b)) => {
                 if !shapes_are_broadcastable(a.shape(), b.shape()) {
@@ -57,23 +42,8 @@ impl Tensor {
                     )));
                 }
 
-                // Always use ndarray's broadcasting addition (handles all shapes correctly)
-                // Then stabilize the result if needed
-                let result = a + b;
-
-                // Check if stabilization is needed
-                let has_unstable = result.iter().any(|&x| !is_stable_f64(x));
-
-                if has_unstable {
-                    // Stabilize the result
-                    let stabilized: Vec<f64> = result.iter().map(|&x| stabilize_f64(x)).collect();
-
-                    let result_array = ArrayD::from_shape_vec(result.raw_dim(), stabilized)
-                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                    Ok(Tensor::F64(result_array))
-                } else {
-                    Ok(Tensor::F64(result))
-                }
+                // See the F32 arm: no post-hoc stability scan/rewrite.
+                Ok(Tensor::F64(a + b))
             },
             (Tensor::I64(a), Tensor::I64(b)) => {
                 if !shapes_are_broadcastable(a.shape(), b.shape()) {
@@ -137,8 +107,29 @@ impl Tensor {
             },
             #[cfg(all(target_os = "macos", feature = "metal"))]
             (Tensor::Metal(_), _) | (_, Tensor::Metal(_)) => {
-                // Mixed Metal/CPU - convert to CPU for now
-                // TODO: Could upload CPU tensor to GPU instead
+                // Mixed Metal/CPU: keep the result GPU-resident by *uploading* the
+                // host operand instead of downloading the device one. The GPU
+                // element-wise kernel requires identical shapes, so broadcasting
+                // pairs still fall back to the host path.
+                const METAL_DEVICE_ID: usize = 0;
+                let metal_device = crate::device::Device::Metal(METAL_DEVICE_ID);
+
+                let self_shape = self.shape();
+                let other_shape = other.shape();
+                let uploadable = |t: &Tensor| matches!(t, Tensor::F32(_) | Tensor::Metal(_));
+
+                if self_shape == other_shape && uploadable(self) && uploadable(other) {
+                    let gpu_self = self.to_device_enum(&metal_device);
+                    let gpu_other = other.to_device_enum(&metal_device);
+                    if let (Ok(gpu_self), Ok(gpu_other)) = (gpu_self, gpu_other) {
+                        if let Ok(result) = gpu_self.add(&gpu_other) {
+                            return Ok(result);
+                        }
+                    }
+                }
+
+                // Fall back to the host path (broadcasting, unsupported dtypes, or
+                // a failed upload / kernel dispatch).
                 let cpu_self = self.to_device_enum(&crate::device::Device::CPU)?;
                 let cpu_other = other.to_device_enum(&crate::device::Device::CPU)?;
                 cpu_self.add(&cpu_other)

@@ -654,6 +654,34 @@ mod tests {
     use futures::StreamExt;
     use std::time::Instant;
 
+    /// A small explicit WordPiece vocabulary for the async tests.
+    ///
+    /// `WordPieceTokenizer::from_pretrained` deliberately errors when no
+    /// `vocab.txt` is present instead of inventing a vocabulary, so these tests
+    /// build one directly (the same pattern the other tests in this module use).
+    fn test_wordpiece_tokenizer() -> WordPieceTokenizer {
+        let tokens = [
+            "[UNK]",
+            "[CLS]",
+            "[SEP]",
+            "[PAD]",
+            "[MASK]",
+            "hello",
+            "world",
+            "this",
+            "is",
+            "a",
+            "test",
+            "async",
+            "tokenization",
+            "from",
+            "performance",
+        ];
+        let vocab: std::collections::HashMap<String, u32> =
+            tokens.iter().enumerate().map(|(id, t)| ((*t).to_string(), id as u32)).collect();
+        WordPieceTokenizer::new(vocab, true)
+    }
+
     #[tokio::test]
     async fn test_async_tokenizer_wrapper() {
         let mut vocab = std::collections::HashMap::new();
@@ -677,8 +705,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_async_encoding() {
-        let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased")
-            .expect("Operation failed in test");
+        let tokenizer = test_wordpiece_tokenizer();
         let async_tokenizer = AsyncTokenizerWrapper::new(tokenizer, Some(4));
 
         let texts = vec!["Hello world", "This is a test", "Async tokenization"];
@@ -695,8 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_configurable_async_tokenizer() {
-        let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased")
-            .expect("Operation failed in test");
+        let tokenizer = test_wordpiece_tokenizer();
         let config = AsyncTokenizerConfig {
             max_concurrent_tasks: 2,
             stream_buffer_size: 100,
@@ -782,8 +808,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_batch_with_progress() {
-        let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased")
-            .expect("Operation failed in test");
+        let tokenizer = test_wordpiece_tokenizer();
         let config = AsyncTokenizerConfig::default();
         let async_tokenizer = ConfigurableAsyncTokenizer::new(tokenizer, config);
 
@@ -828,8 +853,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_performance() {
-        let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased")
-            .expect("Operation failed in test");
+        let tokenizer = test_wordpiece_tokenizer();
         let async_tokenizer = AsyncTokenizerWrapper::new(tokenizer, Some(8));
 
         let texts: Vec<&str> = (0..50)

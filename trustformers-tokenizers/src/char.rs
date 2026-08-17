@@ -59,9 +59,16 @@ impl CharTokenizer {
         // Add space character if not present
         char_counts.entry(" ".to_string()).or_insert(1);
 
-        // Sort by frequency and take top vocab_size
+        // Sort by frequency (descending), breaking ties by the character
+        // itself (ascending). `char_counts` is a std `HashMap` with a
+        // randomized iteration order, and `sort_by_key` is a stable sort: it
+        // only preserves whatever order the map happened to iterate in, so
+        // without an explicit tie-break, characters sharing a frequency were
+        // assigned different IDs (and, combined with the `.take(vocab_size)`
+        // cut below, a different *set* of characters could even survive)
+        // from one run to the next.
         let mut sorted_chars: Vec<_> = char_counts.into_iter().collect();
-        sorted_chars.sort_by_key(|item| std::cmp::Reverse(item.1));
+        sorted_chars.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         let vocab: HashMap<String, u32> = sorted_chars
             .into_iter()
@@ -419,5 +426,58 @@ mod tests {
 
         // Should have BOS and EOS tokens (text length + 2 special tokens)
         assert_eq!(encoded.input_ids.len(), text.len() + 2);
+    }
+
+    /// Regression test for nondeterministic tie-breaking in `from_text`.
+    ///
+    /// "budget" contributes six distinct single-occurrence characters (b, u,
+    /// d, g, e, t); `from_text` also always inserts a `count >= 1` entry for
+    /// `' '` even when the input has no space. All seven therefore tie at
+    /// frequency 1, behind the five special tokens (whose synthetic counts
+    /// `u32::MAX - i` are already distinct and so unaffected by tie
+    /// breaking). Under the old `sort_by_key(Reverse(freq))` (a stable sort
+    /// over a randomly-ordered `HashMap`), which of the tied characters
+    /// received which ID -- and, with a `vocab_size` cut, which of them
+    /// survived at all -- depended on `HashMap` iteration order and could
+    /// change from call to call.
+    #[test]
+    fn test_from_text_deterministic_tie_break_for_equal_frequency_chars() {
+        let text = "budget";
+        let vocab_size = 8; // 5 special tokens + 3 of the 7 tied characters
+
+        // Each `from_text` call builds its own fresh `HashMap` (with Rust's
+        // randomized per-instance hashing seed), so repeating the call
+        // exercises independent iteration orders.
+        let mut previous: Option<HashMap<String, u32>> = None;
+        for _ in 0..20 {
+            let tokenizer = CharTokenizer::from_text(text, vocab_size);
+            let vocab = tokenizer.get_vocab();
+            assert_eq!(vocab.len(), vocab_size);
+
+            if let Some(prev) = &previous {
+                assert_eq!(
+                    &vocab, prev,
+                    "vocabulary built from the same text differed across \
+                     otherwise-identical from_text() calls"
+                );
+            }
+            previous = Some(vocab);
+        }
+
+        let vocab = previous.expect("Operation failed in test");
+        // Ties are broken alphabetically: among {' ', 'b', 'd', 'e', 'g',
+        // 't', 'u'} (all at frequency 1), ' ' (0x20) < 'b' < 'd' sort first
+        // and must land at IDs 5, 6, 7 (right after the five special
+        // tokens).
+        assert_eq!(vocab.get(" "), Some(&5));
+        assert_eq!(vocab.get("b"), Some(&6));
+        assert_eq!(vocab.get("d"), Some(&7));
+        for dropped in ["e", "g", "t", "u"] {
+            assert!(
+                !vocab.contains_key(dropped),
+                "'{}' should not have survived the vocab_size cut",
+                dropped
+            );
+        }
     }
 }

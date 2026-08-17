@@ -795,14 +795,33 @@ impl TokenizationDebugger {
         issues
     }
 
-    fn find_oov_tokens(&self, tokens: &[String], _tokenizer: &TokenizerWrapper) -> Vec<String> {
-        // Simplified OOV detection - would need access to tokenizer vocabulary
-        // For now, detect common patterns that might indicate OOV tokens
+    /// Common spellings of the "unknown token" marker across tokenizer
+    /// families (WordPiece/BERT-style, SentencePiece/T5-style, other BPE
+    /// variants, ...).
+    const KNOWN_UNK_TOKEN_SPELLINGS: &[&str] = &["[UNK]", "<unk>", "<|unk|>"];
+
+    /// Tokens in `tokens` that represent an out-of-vocabulary substitution
+    /// by `tokenizer`.
+    ///
+    /// The `tokens` this is called with are always produced by decoding IDs
+    /// that `tokenizer` itself just encoded (see `debug_text`), so every one
+    /// of them trivially has an entry in `tokenizer`'s vocabulary already --
+    /// `token_to_id(token).is_some()` for all of them. What actually
+    /// indicates an OOV occurrence is a token matching *this tokenizer's own
+    /// unk marker*: rather than trusting a hardcoded literal, each candidate
+    /// spelling is confirmed against the tokenizer's real vocabulary via
+    /// `token_to_id` before being treated as this tokenizer's marker, and
+    /// tokens are compared to it exactly (not by fuzzy substring match).
+    fn find_oov_tokens(&self, tokens: &[String], tokenizer: &TokenizerWrapper) -> Vec<String> {
+        let unk_markers: Vec<&str> = Self::KNOWN_UNK_TOKEN_SPELLINGS
+            .iter()
+            .copied()
+            .filter(|candidate| tokenizer.token_to_id(candidate).is_some())
+            .collect();
+
         tokens
             .iter()
-            .filter(|token| {
-                token.contains("[UNK]") || token.contains("<unk>") || token.contains("�")
-            })
+            .filter(|token| unk_markers.contains(&token.as_str()) || token.contains('\u{FFFD}'))
             .cloned()
             .collect()
     }
@@ -855,5 +874,51 @@ mod tests {
         assert_eq!(html_escape("<test>"), "&lt;test&gt;");
         assert_eq!(html_escape("&amp;"), "&amp;amp;");
         assert_eq!(html_escape("\"quote\""), "&quot;quote&quot;");
+    }
+
+    /// Regression test for the fabricated-OOV-detection bug:
+    /// `find_oov_tokens` used to ignore the `tokenizer` parameter entirely
+    /// and only string-match the literal `[UNK]`/`<unk>` substrings. A
+    /// tokenizer whose unknown marker is spelled `<|unk|>` (present in its
+    /// own real vocabulary) must now be detected via `token_to_id`.
+    #[test]
+    fn test_find_oov_tokens_uses_real_vocabulary_lookup() {
+        let mut vocab = std::collections::HashMap::new();
+        vocab.insert("<|unk|>".to_string(), 0u32);
+        vocab.insert("hello".to_string(), 1);
+        vocab.insert("world".to_string(), 2);
+        let tokenizer = TokenizerWrapper::Char(crate::char::CharTokenizer::new(vocab));
+        let debugger = TokenizationDebugger::new();
+
+        let tokens = vec![
+            "<|unk|>".to_string(),
+            "hello".to_string(),
+            "world".to_string(),
+        ];
+        let oov = debugger.find_oov_tokens(&tokens, &tokenizer);
+        assert_eq!(oov, vec!["<|unk|>".to_string()]);
+
+        // A plain word that merely contains "unk" as a substring must not
+        // be flagged (the old code's `.contains("<unk>")` style check is
+        // replaced by exact matching against a vocabulary-confirmed
+        // marker).
+        let tokens_with_lookalike = vec!["chunky".to_string()];
+        assert!(debugger.find_oov_tokens(&tokens_with_lookalike, &tokenizer).is_empty());
+    }
+
+    /// The replacement-character signal (invalid UTF-8 substitution) must
+    /// still be detected regardless of which unk spelling a tokenizer uses.
+    #[test]
+    fn test_find_oov_tokens_detects_replacement_character() {
+        let mut vocab = std::collections::HashMap::new();
+        vocab.insert("hello".to_string(), 0u32);
+        let tokenizer = TokenizerWrapper::Char(crate::char::CharTokenizer::new(vocab));
+        let debugger = TokenizationDebugger::new();
+
+        let tokens = vec!["\u{FFFD}".to_string(), "hello".to_string()];
+        assert_eq!(
+            debugger.find_oov_tokens(&tokens, &tokenizer),
+            vec!["\u{FFFD}".to_string()]
+        );
     }
 }

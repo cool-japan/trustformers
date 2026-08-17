@@ -2,11 +2,27 @@ use super::config::{HierarchicalConfig, HierarchicalType};
 use super::layers::{HierarchicalEncoder, NestedTransformerLayer, PyramidLayer, TreeAttention};
 use super::utils::HierarchicalOutput;
 use trustformers_core::{
-    errors::{invalid_config, Result},
+    errors::{invalid_config, not_implemented, Result},
     layers::{Embedding, LayerNorm, Linear},
     tensor::Tensor,
     traits::{Layer, Model},
 };
+
+/// The error every hierarchical checkpoint entry point returns.
+///
+/// No published checkpoint uses this family's parameter layout, and no naming
+/// scheme has been agreed for it, so there is nothing to parse. Returning `Ok(())`
+/// here would leave the caller holding a randomly initialised model while
+/// believing a checkpoint had been applied — a previous revision did exactly
+/// that, printing `Loaded <tensor>` lines for tensors it then discarded.
+fn checkpoint_unsupported(model: &str) -> trustformers_core::errors::TrustformersError {
+    not_implemented(format!(
+        "{model}: no hierarchical checkpoint format is parsed yet. There is no agreed parameter \
+         naming scheme for this model family, so loading would silently leave the randomly \
+         initialised weights in place. Assign weights explicitly through the individual \
+         Linear/LayerNorm/Embedding/MultiHeadAttention setters instead."
+    ))
+}
 
 /// Main hierarchical transformer model
 pub struct HierarchicalTransformer {
@@ -32,306 +48,31 @@ impl HierarchicalTransformer {
         })
     }
 
-    /// Enhanced weight loading from local path with support for multiple formats
-    pub fn load_from_path(&mut self, model_path: impl AsRef<std::path::Path>) -> Result<()> {
-        use crate::weight_loading::{auto_create_loader, WeightLoadingConfig};
-
-        let config = WeightLoadingConfig {
-            lazy_loading: true,
-            memory_mapped: false,
-            ..Default::default()
-        };
-
-        let mut loader = auto_create_loader(model_path, Some(config))?;
-
-        // Load embeddings
-        if let Ok(embeddings_weight) = loader.load_tensor("embeddings.word_embeddings.weight") {
-            println!(
-                "Loaded embeddings.word_embeddings.weight: {:?}",
-                embeddings_weight.shape()
-            );
-        }
-
-        // Load final layer normalization
-        if let Ok(final_norm_weight) = loader.load_tensor("final_norm.weight") {
-            println!("Loaded final_norm.weight: {:?}", final_norm_weight.shape());
-        }
-
-        if let Ok(final_norm_bias) = loader.load_tensor("final_norm.bias") {
-            println!("Loaded final_norm.bias: {:?}", final_norm_bias.shape());
-        }
-
-        // Load hierarchical encoder layers
-        let num_levels = self.config.num_levels;
-        for level_idx in 0..num_levels {
-            let level_prefix = format!("encoder.level.{}", level_idx);
-
-            // Load based on hierarchical type
-            match self.config.hierarchical_type {
-                HierarchicalType::Pyramid => {
-                    // Load pyramid-specific weights
-                    let pyramid_prefix = format!("{}.pyramid", level_prefix);
-
-                    // Pooling weights
-                    let pooling_weight = format!("{}.pooling.weight", pyramid_prefix);
-                    if let Ok(weight) = loader.load_tensor(&pooling_weight) {
-                        println!("Loaded {}: {:?}", pooling_weight, weight.shape());
-                    }
-
-                    // Upsampling weights
-                    let upsampling_weight = format!("{}.upsampling.weight", pyramid_prefix);
-                    if let Ok(weight) = loader.load_tensor(&upsampling_weight) {
-                        println!("Loaded {}: {:?}", upsampling_weight, weight.shape());
-                    }
-                },
-                HierarchicalType::Tree => {
-                    // Load tree-specific weights
-                    let tree_prefix = format!("{}.tree", level_prefix);
-
-                    // Tree attention weights
-                    for weight_type in &["query", "key", "value"] {
-                        let weight_name =
-                            format!("{}.attention.{}.weight", tree_prefix, weight_type);
-                        if let Ok(weight) = loader.load_tensor(&weight_name) {
-                            println!("Loaded {}: {:?}", weight_name, weight.shape());
-                        }
-                    }
-                },
-                HierarchicalType::Nested => {
-                    // Load nested transformer weights
-                    let nested_prefix = format!("{}.nested", level_prefix);
-
-                    // Bidirectional attention weights
-                    for direction in &["forward", "backward"] {
-                        for weight_type in &["query", "key", "value"] {
-                            let weight_name =
-                                format!("{}.{}.{}.weight", nested_prefix, direction, weight_type);
-                            if let Ok(weight) = loader.load_tensor(&weight_name) {
-                                println!("Loaded {}: {:?}", weight_name, weight.shape());
-                            }
-                        }
-                    }
-                },
-                HierarchicalType::Hierarchical => {
-                    // Load standard hierarchical attention weights
-                    let hierarchical_prefix = format!("{}.hierarchical", level_prefix);
-
-                    // Hierarchical attention weights
-                    for weight_type in &["query", "key", "value"] {
-                        let weight_name =
-                            format!("{}.attention.{}.weight", hierarchical_prefix, weight_type);
-                        if let Ok(weight) = loader.load_tensor(&weight_name) {
-                            println!("Loaded {}: {:?}", weight_name, weight.shape());
-                        }
-                    }
-                },
-                HierarchicalType::Hybrid => {
-                    // Load hybrid model weights (combination of multiple approaches)
-                    let hybrid_prefix = format!("{}.hybrid", level_prefix);
-
-                    // Load weights for each hybrid component
-                    for component in &["pyramid", "tree", "nested"] {
-                        let component_prefix = format!("{}.{}", hybrid_prefix, component);
-                        for weight_type in &["query", "key", "value"] {
-                            let weight_name =
-                                format!("{}.attention.{}.weight", component_prefix, weight_type);
-                            if let Ok(weight) = loader.load_tensor(&weight_name) {
-                                println!("Loaded {}: {:?}", weight_name, weight.shape());
-                            }
-                        }
-                    }
-                },
-            }
-
-            // Load standard transformer components for each level
-            let num_layers = self.config.num_layers_per_level;
-            for layer_idx in 0..num_layers {
-                let layer_prefix = format!("{}.layer.{}", level_prefix, layer_idx);
-
-                // Self-attention weights
-                let attention_prefix = format!("{}.attention.self", layer_prefix);
-                for weight_type in &["query", "key", "value"] {
-                    let weight_name = format!("{}.{}.weight", attention_prefix, weight_type);
-                    let bias_name = format!("{}.{}.bias", attention_prefix, weight_type);
-
-                    if let Ok(weight) = loader.load_tensor(&weight_name) {
-                        println!("Loaded {}: {:?}", weight_name, weight.shape());
-                    }
-                    if let Ok(bias) = loader.load_tensor(&bias_name) {
-                        println!("Loaded {}: {:?}", bias_name, bias.shape());
-                    }
-                }
-
-                // Output weights
-                let output_weight = format!("{}.attention.output.dense.weight", layer_prefix);
-                let output_bias = format!("{}.attention.output.dense.bias", layer_prefix);
-                if let Ok(weight) = loader.load_tensor(&output_weight) {
-                    println!("Loaded {}: {:?}", output_weight, weight.shape());
-                }
-                if let Ok(bias) = loader.load_tensor(&output_bias) {
-                    println!("Loaded {}: {:?}", output_bias, bias.shape());
-                }
-
-                // LayerNorm weights
-                let layernorm_weight =
-                    format!("{}.attention.output.LayerNorm.weight", layer_prefix);
-                let layernorm_bias = format!("{}.attention.output.LayerNorm.bias", layer_prefix);
-                if let Ok(weight) = loader.load_tensor(&layernorm_weight) {
-                    println!("Loaded {}: {:?}", layernorm_weight, weight.shape());
-                }
-                if let Ok(bias) = loader.load_tensor(&layernorm_bias) {
-                    println!("Loaded {}: {:?}", layernorm_bias, bias.shape());
-                }
-
-                // Feed forward weights
-                let intermediate_weight = format!("{}.intermediate.dense.weight", layer_prefix);
-                let intermediate_bias = format!("{}.intermediate.dense.bias", layer_prefix);
-                if let Ok(weight) = loader.load_tensor(&intermediate_weight) {
-                    println!("Loaded {}: {:?}", intermediate_weight, weight.shape());
-                }
-                if let Ok(bias) = loader.load_tensor(&intermediate_bias) {
-                    println!("Loaded {}: {:?}", intermediate_bias, bias.shape());
-                }
-
-                let output_dense_weight = format!("{}.output.dense.weight", layer_prefix);
-                let output_dense_bias = format!("{}.output.dense.bias", layer_prefix);
-                if let Ok(weight) = loader.load_tensor(&output_dense_weight) {
-                    println!("Loaded {}: {:?}", output_dense_weight, weight.shape());
-                }
-                if let Ok(bias) = loader.load_tensor(&output_dense_bias) {
-                    println!("Loaded {}: {:?}", output_dense_bias, bias.shape());
-                }
-
-                // Output LayerNorm
-                let output_layernorm_weight = format!("{}.output.LayerNorm.weight", layer_prefix);
-                let output_layernorm_bias = format!("{}.output.LayerNorm.bias", layer_prefix);
-                if let Ok(weight) = loader.load_tensor(&output_layernorm_weight) {
-                    println!("Loaded {}: {:?}", output_layernorm_weight, weight.shape());
-                }
-                if let Ok(bias) = loader.load_tensor(&output_layernorm_bias) {
-                    println!("Loaded {}: {:?}", output_layernorm_bias, bias.shape());
-                }
-            }
-        }
-
-        println!("Successfully loaded HierarchicalTransformer model weights from path");
-        Ok(())
+    /// Load weights for this model from a local checkpoint directory or file.
+    ///
+    /// # Errors
+    ///
+    /// Always fails: see [`checkpoint_unsupported`]. A previous revision walked a
+    /// safetensors file, printed the shape of every tensor it found and then
+    /// returned `Ok(())` without assigning any of them, so a caller ended up
+    /// running the randomly initialised model believing it held pretrained
+    /// weights.
+    pub fn load_from_path(&mut self, _model_path: impl AsRef<std::path::Path>) -> Result<()> {
+        Err(checkpoint_unsupported(
+            "HierarchicalTransformer::load_from_path",
+        ))
     }
 
-    /// Enhanced weight loading from HuggingFace Hub with automatic download
-    pub fn load_from_huggingface(&mut self, model_name: &str) -> Result<()> {
-        let cache_dir = std::env::temp_dir().join("huggingface_cache");
-        let model_path = cache_dir.join(format!("models--{}", model_name.replace("/", "--")));
-
-        if model_path.exists() {
-            self.load_from_path(&model_path)
-        } else {
-            // Attempt to download the model from HuggingFace Hub
-            self.download_from_huggingface_hub(model_name, &model_path)?;
-            self.load_from_path(&model_path)
-        }
-    }
-
-    /// Download model from HuggingFace Hub
-    fn download_from_huggingface_hub(
-        &self,
-        model_name: &str,
-        model_path: &std::path::Path,
-    ) -> Result<()> {
-        use std::process::Command;
-
-        println!(
-            "Downloading Hierarchical model {} from HuggingFace Hub to {:?}",
-            model_name, model_path
-        );
-
-        // Create the model directory
-        std::fs::create_dir_all(model_path).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to create model directory: {}",
-                e
-            ))
-        })?;
-
-        // List of essential files for hierarchical models
-        let essential_files = vec![
-            "config.json",
-            "pytorch_model.bin",
-            "model.safetensors",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "vocab.txt",
-        ];
-
-        let mut successful_downloads = 0;
-
-        for file in &essential_files {
-            let url = format!(
-                "https://huggingface.co/{}/resolve/main/{}",
-                model_name, file
-            );
-            let output_path = model_path.join(file);
-            let output_path_str = output_path.to_str().ok_or_else(|| {
-                trustformers_core::errors::TrustformersError::io_error(format!(
-                    "Non-UTF-8 output path: {}",
-                    output_path.display()
-                ))
-            })?;
-
-            // Try curl first
-            let curl_result = Command::new("curl")
-                .args([
-                    "-L", // Follow redirects
-                    "-f", // Fail silently on HTTP errors
-                    "-o",
-                    output_path_str,
-                    &url,
-                ])
-                .output();
-
-            let success = match curl_result {
-                Ok(output) => output.status.success(),
-                Err(_) => {
-                    // Fallback to wget if curl is not available
-                    let wget_result = Command::new("wget")
-                        .args([
-                            "-q", // Quiet mode
-                            "-O",
-                            output_path_str,
-                            &url,
-                        ])
-                        .output();
-
-                    match wget_result {
-                        Ok(output) => output.status.success(),
-                        Err(_) => false,
-                    }
-                },
-            };
-
-            if success {
-                successful_downloads += 1;
-                println!("Downloaded {}", file);
-            } else {
-                eprintln!(
-                    "Failed to download {} (this may be normal if the file doesn't exist)",
-                    file
-                );
-            }
-        }
-
-        if successful_downloads == 0 {
-            return Err(trustformers_core::errors::TrustformersError::io_error(
-                "Failed to download any files from HuggingFace Hub. Please check the model name and your internet connection.".to_string()
-            ));
-        }
-
-        println!(
-            "Successfully downloaded {}/{} files for Hierarchical model",
-            successful_downloads,
-            essential_files.len()
-        );
-        Ok(())
+    /// Load weights for this model from a HuggingFace Hub repository.
+    ///
+    /// # Errors
+    ///
+    /// Always fails: there is nothing that could consume a downloaded checkpoint,
+    /// so no download is attempted either.
+    pub fn load_from_huggingface(&mut self, _model_name: &str) -> Result<()> {
+        Err(checkpoint_unsupported(
+            "HierarchicalTransformer::load_from_huggingface",
+        ))
     }
 }
 
@@ -352,47 +93,19 @@ impl Model for HierarchicalTransformer {
             hierarchical_positions: encoder_output.hierarchical_positions,
         })
     }
-    fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        let reader = reader;
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to read weight data: {}",
-                e
-            ))
-        })?;
-
-        // Validate that we have reasonable weight data
-        if buffer.len() < 1024 {
-            return Err(trustformers_core::errors::TrustformersError::io_error(
-                "Weight data appears to be too small".to_string(),
-            ));
-        }
-
-        // Create a temporary file for the weight loading system
-        let temp_file =
-            std::env::temp_dir().join(format!("hierarchical_weights_{}.bin", std::process::id()));
-        std::fs::write(&temp_file, &buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to write temporary weights: {}",
-                e
-            ))
-        })?;
-
-        // Use the enhanced loading system
-        let temp_file_str = temp_file.to_str().ok_or_else(|| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Non-UTF-8 temporary file path: {}",
-                temp_file.display()
-            ))
-        })?;
-        let result = self.load_from_path(temp_file_str);
-
-        // Clean up temporary file
-        let _ = std::fs::remove_file(&temp_file);
-
-        result
+    /// Loading a pretrained checkpoint is not implemented.
+    ///
+    /// # Errors
+    ///
+    /// Always fails: see [`checkpoint_unsupported`]. A previous revision spooled
+    /// the reader to a temporary file, printed
+    /// `Weight loading fallback - weights successfully processed`, deleted the
+    /// file and returned `Ok(())` — the model kept every randomly initialised
+    /// weight while the caller was told the load had succeeded.
+    fn load_pretrained(&mut self, _reader: &mut dyn std::io::Read) -> Result<()> {
+        Err(checkpoint_unsupported(
+            "HierarchicalTransformer::load_pretrained",
+        ))
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -442,29 +155,16 @@ impl PyramidTransformer {
         })
     }
 
-    /// Enhanced weight loading from file path for PyramidTransformer
-    pub fn load_from_path(&mut self, model_path: &str) -> Result<()> {
-        // Load each component systematically
-        self.load_pyramid_embeddings_weights(model_path)?;
-        self.load_pyramid_layers_weights(model_path)?;
-        self.load_pyramid_norm_weights(model_path)?;
-
-        Ok(())
-    }
-
-    fn load_pyramid_embeddings_weights(&mut self, _model_path: &str) -> Result<()> {
-        // Implementation would load actual embedding weights for pyramid model
-        Ok(())
-    }
-
-    fn load_pyramid_layers_weights(&mut self, _model_path: &str) -> Result<()> {
-        // Implementation would load actual pyramid layer weights
-        Ok(())
-    }
-
-    fn load_pyramid_norm_weights(&mut self, _model_path: &str) -> Result<()> {
-        // Implementation would load actual normalization weights for pyramid model
-        Ok(())
+    /// Load weights for this model from a local checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Always fails: see [`checkpoint_unsupported`]. A previous revision called
+    /// three private helpers whose entire bodies were `Ok(())` with a comment
+    /// saying an implementation "would" load the weights, so the model kept its
+    /// random initialisation while reporting a successful load.
+    pub fn load_from_path(&mut self, _model_path: &str) -> Result<()> {
+        Err(checkpoint_unsupported("PyramidTransformer::load_from_path"))
     }
 }
 
@@ -492,52 +192,19 @@ impl Model for PyramidTransformer {
             hierarchical_positions: None,
         })
     }
-    fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        let reader = reader;
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to read weight data: {}",
-                e
-            ))
-        })?;
-
-        // Validate that we have reasonable weight data
-        if buffer.len() < 1024 {
-            return Err(trustformers_core::errors::TrustformersError::io_error(
-                "Weight data appears to be too small".to_string(),
-            ));
-        }
-
-        // Create a temporary file for the weight loading system
-        let temp_file =
-            std::env::temp_dir().join(format!("hierarchical_weights_{}.bin", std::process::id()));
-        std::fs::write(&temp_file, &buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to write temporary weights: {}",
-                e
-            ))
-        })?;
-
-        // Use the enhanced loading system (delegate to existing load_from_path if available)
-        let result = if let Some(path_str) = temp_file.to_str() {
-            // Fallback implementation for models without specific load_from_path
-            println!(
-                "Weight loading fallback - weights successfully processed from {:?}",
-                path_str
-            );
-            Ok(())
-        } else {
-            Err(trustformers_core::errors::TrustformersError::io_error(
-                "Failed to convert temporary file path to string".to_string(),
-            ))
-        };
-
-        // Clean up temporary file
-        let _ = std::fs::remove_file(&temp_file);
-
-        result
+    /// Loading a pretrained checkpoint is not implemented.
+    ///
+    /// # Errors
+    ///
+    /// Always fails: see [`checkpoint_unsupported`]. A previous revision spooled
+    /// the reader to a temporary file, printed
+    /// `Weight loading fallback - weights successfully processed`, deleted the
+    /// file and returned `Ok(())` — the model kept every randomly initialised
+    /// weight while the caller was told the load had succeeded.
+    fn load_pretrained(&mut self, _reader: &mut dyn std::io::Read) -> Result<()> {
+        Err(checkpoint_unsupported(
+            "PyramidTransformer::load_pretrained",
+        ))
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -612,52 +279,17 @@ impl Model for TreeTransformer {
             hierarchical_positions: None,
         })
     }
-    fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        let reader = reader;
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to read weight data: {}",
-                e
-            ))
-        })?;
-
-        // Validate that we have reasonable weight data
-        if buffer.len() < 1024 {
-            return Err(trustformers_core::errors::TrustformersError::io_error(
-                "Weight data appears to be too small".to_string(),
-            ));
-        }
-
-        // Create a temporary file for the weight loading system
-        let temp_file =
-            std::env::temp_dir().join(format!("hierarchical_weights_{}.bin", std::process::id()));
-        std::fs::write(&temp_file, &buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to write temporary weights: {}",
-                e
-            ))
-        })?;
-
-        // Use the enhanced loading system (delegate to existing load_from_path if available)
-        let result = if let Some(path_str) = temp_file.to_str() {
-            // Fallback implementation for models without specific load_from_path
-            println!(
-                "Weight loading fallback - weights successfully processed from {:?}",
-                path_str
-            );
-            Ok(())
-        } else {
-            Err(trustformers_core::errors::TrustformersError::io_error(
-                "Failed to convert temporary file path to string".to_string(),
-            ))
-        };
-
-        // Clean up temporary file
-        let _ = std::fs::remove_file(&temp_file);
-
-        result
+    /// Loading a pretrained checkpoint is not implemented.
+    ///
+    /// # Errors
+    ///
+    /// Always fails: see [`checkpoint_unsupported`]. A previous revision spooled
+    /// the reader to a temporary file, printed
+    /// `Weight loading fallback - weights successfully processed`, deleted the
+    /// file and returned `Ok(())` — the model kept every randomly initialised
+    /// weight while the caller was told the load had succeeded.
+    fn load_pretrained(&mut self, _reader: &mut dyn std::io::Read) -> Result<()> {
+        Err(checkpoint_unsupported("TreeTransformer::load_pretrained"))
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -734,52 +366,17 @@ impl Model for NestedTransformer {
             hierarchical_positions: None,
         })
     }
-    fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        let reader = reader;
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to read weight data: {}",
-                e
-            ))
-        })?;
-
-        // Validate that we have reasonable weight data
-        if buffer.len() < 1024 {
-            return Err(trustformers_core::errors::TrustformersError::io_error(
-                "Weight data appears to be too small".to_string(),
-            ));
-        }
-
-        // Create a temporary file for the weight loading system
-        let temp_file =
-            std::env::temp_dir().join(format!("hierarchical_weights_{}.bin", std::process::id()));
-        std::fs::write(&temp_file, &buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to write temporary weights: {}",
-                e
-            ))
-        })?;
-
-        // Use the enhanced loading system (delegate to existing load_from_path if available)
-        let result = if let Some(path_str) = temp_file.to_str() {
-            // Fallback implementation for models without specific load_from_path
-            println!(
-                "Weight loading fallback - weights successfully processed from {:?}",
-                path_str
-            );
-            Ok(())
-        } else {
-            Err(trustformers_core::errors::TrustformersError::io_error(
-                "Failed to convert temporary file path to string".to_string(),
-            ))
-        };
-
-        // Clean up temporary file
-        let _ = std::fs::remove_file(&temp_file);
-
-        result
+    /// Loading a pretrained checkpoint is not implemented.
+    ///
+    /// # Errors
+    ///
+    /// Always fails: see [`checkpoint_unsupported`]. A previous revision spooled
+    /// the reader to a temporary file, printed
+    /// `Weight loading fallback - weights successfully processed`, deleted the
+    /// file and returned `Ok(())` — the model kept every randomly initialised
+    /// weight while the caller was told the load had succeeded.
+    fn load_pretrained(&mut self, _reader: &mut dyn std::io::Read) -> Result<()> {
+        Err(checkpoint_unsupported("NestedTransformer::load_pretrained"))
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -808,7 +405,6 @@ impl Model for NestedTransformer {
 pub struct HierarchicalForSequenceClassification {
     base_model: HierarchicalTransformer,
     classifier: Linear,
-    #[allow(dead_code)]
     num_labels: usize,
 }
 
@@ -822,6 +418,11 @@ impl HierarchicalForSequenceClassification {
             classifier,
             num_labels,
         })
+    }
+
+    /// Number of classification labels this head produces.
+    pub fn num_labels(&self) -> usize {
+        self.num_labels
     }
 }
 
@@ -839,52 +440,19 @@ impl Model for HierarchicalForSequenceClassification {
 
         Ok(logits)
     }
-    fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        let reader = reader;
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to read weight data: {}",
-                e
-            ))
-        })?;
-
-        // Validate that we have reasonable weight data
-        if buffer.len() < 1024 {
-            return Err(trustformers_core::errors::TrustformersError::io_error(
-                "Weight data appears to be too small".to_string(),
-            ));
-        }
-
-        // Create a temporary file for the weight loading system
-        let temp_file =
-            std::env::temp_dir().join(format!("hierarchical_weights_{}.bin", std::process::id()));
-        std::fs::write(&temp_file, &buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to write temporary weights: {}",
-                e
-            ))
-        })?;
-
-        // Use the enhanced loading system (delegate to existing load_from_path if available)
-        let result = if let Some(path_str) = temp_file.to_str() {
-            // Fallback implementation for models without specific load_from_path
-            println!(
-                "Weight loading fallback - weights successfully processed from {:?}",
-                path_str
-            );
-            Ok(())
-        } else {
-            Err(trustformers_core::errors::TrustformersError::io_error(
-                "Failed to convert temporary file path to string".to_string(),
-            ))
-        };
-
-        // Clean up temporary file
-        let _ = std::fs::remove_file(&temp_file);
-
-        result
+    /// Loading a pretrained checkpoint is not implemented.
+    ///
+    /// # Errors
+    ///
+    /// Always fails: see [`checkpoint_unsupported`]. A previous revision spooled
+    /// the reader to a temporary file, printed
+    /// `Weight loading fallback - weights successfully processed`, deleted the
+    /// file and returned `Ok(())` — the model kept every randomly initialised
+    /// weight while the caller was told the load had succeeded.
+    fn load_pretrained(&mut self, _reader: &mut dyn std::io::Read) -> Result<()> {
+        Err(checkpoint_unsupported(
+            "HierarchicalForSequenceClassification::load_pretrained",
+        ))
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -900,7 +468,6 @@ impl Model for HierarchicalForSequenceClassification {
 pub struct HierarchicalForLanguageModeling {
     base_model: HierarchicalTransformer,
     lm_head: Linear,
-    #[allow(dead_code)]
     vocab_size: usize,
 }
 
@@ -915,6 +482,11 @@ impl HierarchicalForLanguageModeling {
             vocab_size,
         })
     }
+
+    /// Size of the vocabulary this head projects onto.
+    pub fn vocab_size(&self) -> usize {
+        self.vocab_size
+    }
 }
 
 impl Model for HierarchicalForLanguageModeling {
@@ -928,52 +500,19 @@ impl Model for HierarchicalForLanguageModeling {
 
         Ok(logits)
     }
-    fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        // Read all data from the reader
-        let mut buffer = Vec::new();
-        let reader = reader;
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to read weight data: {}",
-                e
-            ))
-        })?;
-
-        // Validate that we have reasonable weight data
-        if buffer.len() < 1024 {
-            return Err(trustformers_core::errors::TrustformersError::io_error(
-                "Weight data appears to be too small".to_string(),
-            ));
-        }
-
-        // Create a temporary file for the weight loading system
-        let temp_file =
-            std::env::temp_dir().join(format!("hierarchical_weights_{}.bin", std::process::id()));
-        std::fs::write(&temp_file, &buffer).map_err(|e| {
-            trustformers_core::errors::TrustformersError::io_error(format!(
-                "Failed to write temporary weights: {}",
-                e
-            ))
-        })?;
-
-        // Use the enhanced loading system (delegate to existing load_from_path if available)
-        let result = if let Some(path_str) = temp_file.to_str() {
-            // Fallback implementation for models without specific load_from_path
-            println!(
-                "Weight loading fallback - weights successfully processed from {:?}",
-                path_str
-            );
-            Ok(())
-        } else {
-            Err(trustformers_core::errors::TrustformersError::io_error(
-                "Failed to convert temporary file path to string".to_string(),
-            ))
-        };
-
-        // Clean up temporary file
-        let _ = std::fs::remove_file(&temp_file);
-
-        result
+    /// Loading a pretrained checkpoint is not implemented.
+    ///
+    /// # Errors
+    ///
+    /// Always fails: see [`checkpoint_unsupported`]. A previous revision spooled
+    /// the reader to a temporary file, printed
+    /// `Weight loading fallback - weights successfully processed`, deleted the
+    /// file and returned `Ok(())` — the model kept every randomly initialised
+    /// weight while the caller was told the load had succeeded.
+    fn load_pretrained(&mut self, _reader: &mut dyn std::io::Read) -> Result<()> {
+        Err(checkpoint_unsupported(
+            "HierarchicalForLanguageModeling::load_pretrained",
+        ))
     }
 
     fn get_config(&self) -> &Self::Config {

@@ -1,7 +1,13 @@
+use crate::kto::{compute_kto_loss, KtoConfig, KtoExample};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Model;
+
+/// Default weight for the desirable (chosen) side of the KTO objective.
+fn default_kto_lambda() -> f32 {
+    1.0
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DPOConfig {
@@ -16,6 +22,12 @@ pub struct DPOConfig {
     pub max_target_length: Option<usize>,
     pub max_prompt_length: Option<usize>,
     pub generate_during_eval: bool,
+    /// KTO only: weight λ_w applied to the desirable (chosen) loss term.
+    #[serde(default = "default_kto_lambda")]
+    pub kto_lambda_preferred: f32,
+    /// KTO only: weight λ_l applied to the undesirable (rejected) loss term.
+    #[serde(default = "default_kto_lambda")]
+    pub kto_lambda_rejected: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +52,8 @@ impl Default for DPOConfig {
             max_target_length: Some(128),
             max_prompt_length: Some(128),
             generate_during_eval: false,
+            kto_lambda_preferred: 1.0,
+            kto_lambda_rejected: 1.0,
         }
     }
 }
@@ -62,6 +76,54 @@ impl<M: Model<Input = Tensor, Output = Tensor>> DPOTrainer<M> {
         }
     }
 
+    /// Build the KTO example batch implied by a paired preference batch.
+    ///
+    /// KTO itself is unpaired: it consumes `(policy_logp, reference_logp, is_preferred)`
+    /// triples. A DPO batch supplies exactly that information twice per row — the chosen
+    /// completion is a desirable example and the rejected completion an undesirable one —
+    /// so the pairing is unfolded here and the real prospect-theoretic objective in
+    /// [`crate::kto`] does the rest.
+    fn kto_examples(
+        policy_chosen_logps: &Tensor,
+        policy_rejected_logps: &Tensor,
+        reference_chosen_logps: &Tensor,
+        reference_rejected_logps: &Tensor,
+    ) -> Result<Vec<KtoExample>> {
+        let policy_chosen = policy_chosen_logps.data()?;
+        let policy_rejected = policy_rejected_logps.data()?;
+        let ref_chosen = reference_chosen_logps.data()?;
+        let ref_rejected = reference_rejected_logps.data()?;
+
+        if policy_chosen.len() != policy_rejected.len()
+            || policy_chosen.len() != ref_chosen.len()
+            || policy_chosen.len() != ref_rejected.len()
+        {
+            return Err(anyhow!(
+                "KTO loss: policy/reference log-prob tensors must have equal length \
+                 (policy_chosen={}, policy_rejected={}, ref_chosen={}, ref_rejected={})",
+                policy_chosen.len(),
+                policy_rejected.len(),
+                ref_chosen.len(),
+                ref_rejected.len()
+            ));
+        }
+
+        let mut examples = Vec::with_capacity(policy_chosen.len() * 2);
+        for i in 0..policy_chosen.len() {
+            examples.push(KtoExample {
+                policy_log_prob: policy_chosen[i],
+                reference_log_prob: ref_chosen[i],
+                is_preferred: true,
+            });
+            examples.push(KtoExample {
+                policy_log_prob: policy_rejected[i],
+                reference_log_prob: ref_rejected[i],
+                is_preferred: false,
+            });
+        }
+        Ok(examples)
+    }
+
     pub fn compute_loss(
         &self,
         policy_chosen_logps: &Tensor,
@@ -69,6 +131,26 @@ impl<M: Model<Input = Tensor, Output = Tensor>> DPOTrainer<M> {
         reference_chosen_logps: &Tensor,
         reference_rejected_logps: &Tensor,
     ) -> Result<Tensor> {
+        // KTO is not a re-parameterisation of the DPO logit; it needs the raw per-example
+        // log-ratios and an explicit reference point, so it is dispatched before the shared
+        // `logits` term is formed.
+        if matches!(self.config.loss_type, DPOLossType::Kto) {
+            let examples = Self::kto_examples(
+                policy_chosen_logps,
+                policy_rejected_logps,
+                reference_chosen_logps,
+                reference_rejected_logps,
+            )?;
+            let kto_config = KtoConfig {
+                beta: self.config.beta,
+                lambda_preferred: self.config.kto_lambda_preferred,
+                lambda_rejected: self.config.kto_lambda_rejected,
+                ..KtoConfig::default()
+            };
+            let result = compute_kto_loss(&examples, &kto_config)?;
+            return Ok(Tensor::new(vec![result.total_loss])?);
+        }
+
         let pi_logratios = policy_chosen_logps.sub(policy_rejected_logps)?;
         let ref_logratios = reference_chosen_logps.sub(reference_rejected_logps)?;
         let logits = pi_logratios.sub(&ref_logratios)?.mul_scalar(self.config.beta)?;
@@ -94,9 +176,11 @@ impl<M: Model<Input = Tensor, Output = Tensor>> DPOTrainer<M> {
                 Ok(loss.mean()?)
             },
             DPOLossType::Kto => {
-                // KTO loss: -log(sigmoid(logits))
-                let loss = logits.sigmoid()?.log()?.neg()?;
-                Ok(loss.mean()?)
+                // Handled above by the real prospect-theoretic objective in `crate::kto`;
+                // reaching this arm would mean the early dispatch was removed.
+                Err(anyhow!(
+                    "internal error: DPOLossType::Kto must be dispatched to crate::kto"
+                ))
             },
         }
     }
@@ -122,37 +206,122 @@ impl<M: Model<Input = Tensor, Output = Tensor>> DPOTrainer<M> {
         Ok(preferred.mean()?)
     }
 
+    /// Per-sequence log-probability of the label tokens under `logits`.
+    ///
+    /// This is the exact quantity the DPO/IPO/KTO objectives are defined on:
+    ///
+    /// ```text
+    /// logps[b] = Σ_t  m[b,t] · log_softmax(logits[b, t, :])[ labels[b, t] ]
+    /// ```
+    ///
+    /// with `m[b,t] = 0` wherever `labels[b,t] == config.label_pad_token_id` (padding and
+    /// prompt positions the caller masked out). When `average_log_prob` is `true` the sum is
+    /// divided by the number of unmasked positions in that sequence, giving a
+    /// length-normalised log-probability; a sequence with no unmasked position contributes
+    /// `0.0`.
+    ///
+    /// # Alignment contract
+    ///
+    /// `labels` are taken to be **already aligned** with `logits`: `labels[b, t]` is the token
+    /// scored by `logits[b, t, :]`. Any next-token shift (`logits[:, :-1]` vs `labels[:, 1:]`)
+    /// is the caller's responsibility — [`DPOExample`] carries `chosen_labels` separately from
+    /// `chosen_input_ids` precisely so that the shift can be baked into the labels.
+    ///
+    /// # Errors
+    ///
+    /// * `logits` is not rank 3 (`[batch, seq_len, vocab]`) or `labels` is not rank 2.
+    /// * the batch/sequence dimensions of `logits` and `labels` disagree.
+    /// * a non-padding label is negative or `>= vocab_size`.
     pub fn get_batch_logps(
         &self,
         logits: &Tensor,
         labels: &Tensor,
-        _average_log_prob: bool,
+        average_log_prob: bool,
     ) -> Result<Tensor> {
-        // Convert logits to log probabilities using log_softmax
-        let log_probs = logits.log_softmax(-1)?;
+        let logits_shape = logits.shape();
+        let labels_shape = labels.shape();
 
-        // Gather log probabilities for the target tokens
-        let batch_size = labels.shape()[0];
-        let _seq_len = labels.shape()[1];
+        if logits_shape.len() != 3 {
+            return Err(anyhow!(
+                "get_batch_logps: logits must be rank 3 [batch, seq_len, vocab], got {:?}",
+                logits_shape
+            ));
+        }
+        if labels_shape.len() != 2 {
+            return Err(anyhow!(
+                "get_batch_logps: labels must be rank 2 [batch, seq_len], got {:?}",
+                labels_shape
+            ));
+        }
+
+        let (batch_size, seq_len, vocab_size) = (logits_shape[0], logits_shape[1], logits_shape[2]);
+        if labels_shape[0] != batch_size || labels_shape[1] != seq_len {
+            return Err(anyhow!(
+                "get_batch_logps: labels shape {:?} does not match logits shape {:?}",
+                labels_shape,
+                logits_shape
+            ));
+        }
+        if vocab_size == 0 {
+            return Err(anyhow!("get_batch_logps: vocabulary dimension is empty"));
+        }
+
+        // Raw label ids. The collator stores them as f32, so round-trip through f32 here and
+        // validate before they are ever used as an index.
+        let raw_labels = labels.data()?;
+        let pad_id = self.config.label_pad_token_id as f32;
+
+        let mut mask = Vec::with_capacity(raw_labels.len());
+        // `Tensor::gather` indexes with `as usize`, so a padding id of -100 would wrap to a
+        // huge index. Padding positions are therefore clamped to 0 and removed afterwards by
+        // the mask; real ids are bounds-checked instead of clamped so that an out-of-range
+        // label surfaces as an error rather than as a silently wrong log-probability.
+        let mut index_values = Vec::with_capacity(raw_labels.len());
+        for (flat, &label) in raw_labels.iter().enumerate() {
+            if (label - pad_id).abs() < 0.5 {
+                mask.push(false);
+                index_values.push(0.0f32);
+                continue;
+            }
+            if label < 0.0 || label >= vocab_size as f32 {
+                let (b, t) = (flat / seq_len, flat % seq_len);
+                return Err(anyhow!(
+                    "get_batch_logps: label {label} at [{b}, {t}] is outside the vocabulary \
+                     [0, {vocab_size}) and is not the padding id {}",
+                    self.config.label_pad_token_id
+                ));
+            }
+            mask.push(true);
+            index_values.push(label);
+        }
+
+        // log_softmax over the vocabulary axis, then gather the label's entry at every
+        // position: index [B, T, 1] on dim 2 selects log_probs[b, t, labels[b, t]].
+        let log_probs = logits.log_softmax(-1)?;
+        let index = Tensor::from_vec(index_values, &[batch_size, seq_len, 1])?.to_i64()?;
+        let gathered = log_probs.gather(2, &index)?.data()?;
 
         let mut batch_logps = Vec::with_capacity(batch_size);
-
-        // Compute log probabilities by summing over sequence dimension
-        // Since we don't have tensor indexing, we'll use a simplified approach
-        // by computing the mean log probability for each sequence
-        for _i in 0..batch_size {
-            // Get the mean log probability for the i-th sequence
-            let sequence_logp = if log_probs.shape().len() >= 2 {
-                // For now, use a simple approximation based on tensor statistics
-                // In a full implementation, this would require proper tensor indexing
-                // to select log_probs[i, :] and labels[i, :] and compute their dot product
-                let mean_tensor = log_probs.mean()?;
-                // Extract scalar value from the 0-dimensional tensor
-                mean_tensor.get_scalar(&[])?
+        for b in 0..batch_size {
+            let mut sum = 0.0f32;
+            let mut count = 0usize;
+            for t in 0..seq_len {
+                let flat = b * seq_len + t;
+                if mask[flat] {
+                    sum += gathered[flat];
+                    count += 1;
+                }
+            }
+            let value = if average_log_prob {
+                if count == 0 {
+                    0.0
+                } else {
+                    sum / count as f32
+                }
             } else {
-                0.0f32
+                sum
             };
-            batch_logps.push(sequence_logp);
+            batch_logps.push(value);
         }
 
         Ok(Tensor::new(batch_logps)?)
@@ -355,6 +524,316 @@ pub struct DPOExample {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trustformers_core::traits::Config;
+    use trustformers_core::TrustformersError;
+
+    /// Minimal identity model so `DPOTrainer` can be constructed in tests. The DPO maths
+    /// under test operates on tensors that are handed to the trainer directly, so the model
+    /// only needs to satisfy the `Model` bound.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct EchoConfig;
+
+    impl Config for EchoConfig {
+        fn architecture(&self) -> &'static str {
+            "echo"
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct EchoModel {
+        config: EchoConfig,
+    }
+
+    impl Model for EchoModel {
+        type Config = EchoConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+        fn forward(
+            &self,
+            input: Self::Input,
+        ) -> std::result::Result<Self::Output, TrustformersError> {
+            Ok(input)
+        }
+        fn load_pretrained(
+            &mut self,
+            _r: &mut dyn std::io::Read,
+        ) -> std::result::Result<(), TrustformersError> {
+            Ok(())
+        }
+        fn get_config(&self) -> &Self::Config {
+            &self.config
+        }
+        fn num_parameters(&self) -> usize {
+            0
+        }
+    }
+
+    fn trainer_with(config: DPOConfig) -> DPOTrainer<EchoModel> {
+        DPOTrainer::new(EchoModel { config: EchoConfig }, None, config)
+    }
+
+    // ── get_batch_logps ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_batch_logps_hand_computed_single_position() {
+        // logits = [[[1, 2, 3], [10, 0, 0]]], labels = [[1, -100]].
+        // Position 0 is scored at label 1; position 1 is padding and must be dropped.
+        // Expected: log_softmax([1,2,3])[1] = 2 - ln(e^1 + e^2 + e^3).
+        let trainer = trainer_with(DPOConfig::default());
+        let logits = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 10.0, 0.0, 0.0], &[1, 2, 3])
+            .expect("tensor creation failed");
+        let labels =
+            Tensor::from_vec(vec![1.0f32, -100.0], &[1, 2]).expect("tensor creation failed");
+
+        let logps = trainer
+            .get_batch_logps(&logits, &labels, false)
+            .expect("get_batch_logps failed");
+        assert_eq!(logps.shape(), &[1]);
+
+        let denom = 1.0f32.exp() + 2.0f32.exp() + 3.0f32.exp();
+        let expected = 2.0 - denom.ln();
+        let got = logps.get_scalar(&[0]).expect("get_scalar failed");
+        assert!(
+            (got - expected).abs() < 1e-5,
+            "expected {expected}, got {got}"
+        );
+    }
+
+    #[test]
+    fn test_get_batch_logps_varies_with_labels() {
+        // Regression: the old implementation returned `log_probs.mean()` — the *same*
+        // scalar for every row, entirely ignoring `labels`. Two rows with identical logits
+        // but different labels must produce different log-probabilities.
+        let trainer = trainer_with(DPOConfig::default());
+        let row = [0.0f32, 1.0, 5.0];
+        let mut data = Vec::new();
+        data.extend_from_slice(&row); // batch 0, position 0
+        data.extend_from_slice(&row); // batch 1, position 0
+        let logits = Tensor::from_vec(data, &[2, 1, 3]).expect("tensor creation failed");
+        let labels = Tensor::from_vec(vec![0.0f32, 2.0], &[2, 1]).expect("tensor creation failed");
+
+        let logps = trainer
+            .get_batch_logps(&logits, &labels, false)
+            .expect("get_batch_logps failed");
+        let a = logps.get_scalar(&[0]).expect("get_scalar failed");
+        let b = logps.get_scalar(&[1]).expect("get_scalar failed");
+        assert!(
+            (a - b).abs() > 1.0,
+            "different labels must give different log-probs, got {a} and {b}"
+        );
+        // Label 2 has the largest logit, so it must have the larger log-probability.
+        assert!(b > a, "label 2 (logit 5) should beat label 0 (logit 0)");
+    }
+
+    #[test]
+    fn test_get_batch_logps_sum_vs_average() {
+        // Two unmasked positions, one padded: average must equal sum / 2.
+        let trainer = trainer_with(DPOConfig::default());
+        let logits = Tensor::from_vec(
+            vec![
+                1.0f32, 2.0, 3.0, // t = 0
+                4.0, 0.0, 1.0, // t = 1
+                0.0, 0.0, 0.0, // t = 2 (padded)
+            ],
+            &[1, 3, 3],
+        )
+        .expect("tensor creation failed");
+        let labels =
+            Tensor::from_vec(vec![2.0f32, 0.0, -100.0], &[1, 3]).expect("tensor creation failed");
+
+        let summed = trainer
+            .get_batch_logps(&logits, &labels, false)
+            .expect("sum failed")
+            .get_scalar(&[0])
+            .expect("get_scalar failed");
+        let averaged = trainer
+            .get_batch_logps(&logits, &labels, true)
+            .expect("average failed")
+            .get_scalar(&[0])
+            .expect("get_scalar failed");
+
+        let d0 = 1.0f32.exp() + 2.0f32.exp() + 3.0f32.exp();
+        let d1 = 4.0f32.exp() + 0.0f32.exp() + 1.0f32.exp();
+        let expected_sum = (3.0 - d0.ln()) + (4.0 - d1.ln());
+        assert!(
+            (summed - expected_sum).abs() < 1e-5,
+            "expected {expected_sum}, got {summed}"
+        );
+        assert!(
+            (averaged - expected_sum / 2.0).abs() < 1e-5,
+            "average must be sum/2 over the 2 unmasked positions, got {averaged}"
+        );
+    }
+
+    #[test]
+    fn test_get_batch_logps_all_padding_is_zero() {
+        let trainer = trainer_with(DPOConfig::default());
+        let logits =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0], &[1, 1, 3]).expect("tensor creation failed");
+        let labels = Tensor::from_vec(vec![-100.0f32], &[1, 1]).expect("tensor creation failed");
+        for average in [false, true] {
+            let v = trainer
+                .get_batch_logps(&logits, &labels, average)
+                .expect("get_batch_logps failed")
+                .get_scalar(&[0])
+                .expect("get_scalar failed");
+            assert_eq!(v, 0.0, "fully-masked sequence must contribute 0.0");
+        }
+    }
+
+    #[test]
+    fn test_get_batch_logps_rejects_out_of_range_label() {
+        let trainer = trainer_with(DPOConfig::default());
+        let logits =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0], &[1, 1, 3]).expect("tensor creation failed");
+        let labels = Tensor::from_vec(vec![7.0f32], &[1, 1]).expect("tensor creation failed");
+        assert!(
+            trainer.get_batch_logps(&logits, &labels, false).is_err(),
+            "a label outside the vocabulary must be an error, not a silent value"
+        );
+    }
+
+    #[test]
+    fn test_get_batch_logps_rejects_rank_mismatch() {
+        let trainer = trainer_with(DPOConfig::default());
+        let logits = Tensor::from_vec(vec![1.0f32, 2.0], &[1, 2]).expect("tensor creation failed");
+        let labels = Tensor::from_vec(vec![0.0f32], &[1, 1]).expect("tensor creation failed");
+        assert!(trainer.get_batch_logps(&logits, &labels, false).is_err());
+    }
+
+    // ── KTO wiring ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_kto_loss_differs_from_sigmoid_dpo() {
+        // Regression: `DPOLossType::Kto` used to be byte-identical to the sigmoid branch.
+        // With a non-zero KL reference point and asymmetric λ weights the prospect-theoretic
+        // objective cannot coincide with -log σ(β Δ).
+        let policy_chosen = Tensor::new(vec![1.5f32, 0.4, 2.2]).expect("tensor creation failed");
+        let policy_rejected = Tensor::new(vec![0.2f32, -0.9, 0.1]).expect("tensor creation failed");
+        let ref_chosen = Tensor::new(vec![0.1f32, 0.0, -0.3]).expect("tensor creation failed");
+        let ref_rejected = Tensor::new(vec![-0.4f32, 0.3, 0.6]).expect("tensor creation failed");
+
+        let sigmoid_trainer = trainer_with(DPOConfig {
+            beta: 0.5,
+            loss_type: DPOLossType::Sigmoid,
+            ..DPOConfig::default()
+        });
+        let kto_trainer = trainer_with(DPOConfig {
+            beta: 0.5,
+            loss_type: DPOLossType::Kto,
+            kto_lambda_preferred: 1.5,
+            kto_lambda_rejected: 0.5,
+            ..DPOConfig::default()
+        });
+
+        let sigmoid_loss: f32 = sigmoid_trainer
+            .compute_loss(&policy_chosen, &policy_rejected, &ref_chosen, &ref_rejected)
+            .expect("sigmoid loss failed")
+            .item()
+            .expect("item failed");
+        let kto_loss: f32 = kto_trainer
+            .compute_loss(&policy_chosen, &policy_rejected, &ref_chosen, &ref_rejected)
+            .expect("kto loss failed")
+            .item()
+            .expect("item failed");
+
+        assert!(
+            (sigmoid_loss - kto_loss).abs() > 1e-3,
+            "KTO must not equal sigmoid DPO: sigmoid={sigmoid_loss}, kto={kto_loss}"
+        );
+        assert!(kto_loss.is_finite());
+    }
+
+    #[test]
+    fn test_kto_loss_matches_reference_implementation() {
+        // The DPO wrapper must be a pure unfolding of the paired batch into KTO examples:
+        // computing the same batch directly through `crate::kto` must give the same number.
+        let policy_chosen = Tensor::new(vec![0.8f32, -0.2]).expect("tensor creation failed");
+        let policy_rejected = Tensor::new(vec![-0.5f32, 0.9]).expect("tensor creation failed");
+        let ref_chosen = Tensor::new(vec![0.1f32, 0.4]).expect("tensor creation failed");
+        let ref_rejected = Tensor::new(vec![0.3f32, -0.1]).expect("tensor creation failed");
+
+        let trainer = trainer_with(DPOConfig {
+            beta: 0.25,
+            loss_type: DPOLossType::Kto,
+            kto_lambda_preferred: 1.2,
+            kto_lambda_rejected: 0.7,
+            ..DPOConfig::default()
+        });
+        let wrapped: f32 = trainer
+            .compute_loss(&policy_chosen, &policy_rejected, &ref_chosen, &ref_rejected)
+            .expect("kto loss failed")
+            .item()
+            .expect("item failed");
+
+        let examples = vec![
+            KtoExample {
+                policy_log_prob: 0.8,
+                reference_log_prob: 0.1,
+                is_preferred: true,
+            },
+            KtoExample {
+                policy_log_prob: -0.5,
+                reference_log_prob: 0.3,
+                is_preferred: false,
+            },
+            KtoExample {
+                policy_log_prob: -0.2,
+                reference_log_prob: 0.4,
+                is_preferred: true,
+            },
+            KtoExample {
+                policy_log_prob: 0.9,
+                reference_log_prob: -0.1,
+                is_preferred: false,
+            },
+        ];
+        let direct = compute_kto_loss(
+            &examples,
+            &KtoConfig {
+                beta: 0.25,
+                lambda_preferred: 1.2,
+                lambda_rejected: 0.7,
+                ..KtoConfig::default()
+            },
+        )
+        .expect("direct kto failed");
+
+        assert!(
+            (wrapped - direct.total_loss).abs() < 1e-6,
+            "wrapper {wrapped} must match crate::kto {}",
+            direct.total_loss
+        );
+    }
+
+    #[test]
+    fn test_kto_loss_responds_to_lambda_weights() {
+        let policy_chosen = Tensor::new(vec![1.0f32, 0.5]).expect("tensor creation failed");
+        let policy_rejected = Tensor::new(vec![-1.0f32, 0.0]).expect("tensor creation failed");
+        let ref_chosen = Tensor::new(vec![0.0f32, 0.0]).expect("tensor creation failed");
+        let ref_rejected = Tensor::new(vec![0.0f32, 0.0]).expect("tensor creation failed");
+
+        let loss_for = |lw: f32, ll: f32| -> f32 {
+            trainer_with(DPOConfig {
+                beta: 0.4,
+                loss_type: DPOLossType::Kto,
+                kto_lambda_preferred: lw,
+                kto_lambda_rejected: ll,
+                ..DPOConfig::default()
+            })
+            .compute_loss(&policy_chosen, &policy_rejected, &ref_chosen, &ref_rejected)
+            .expect("kto loss failed")
+            .item()
+            .expect("item failed")
+        };
+
+        let balanced = loss_for(1.0, 1.0);
+        let preferred_heavy = loss_for(3.0, 1.0);
+        assert!(
+            preferred_heavy > balanced,
+            "raising λ_w must raise the loss: {preferred_heavy} vs {balanced}"
+        );
+    }
 
     #[test]
     fn test_dpo_config_default() {

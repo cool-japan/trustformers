@@ -8,12 +8,12 @@ use trustformers_core::{
     device::Device,
     errors::{invalid_config, tensor_op_error, Result, TrustformersError},
     layers::{LayerNorm, Linear},
-    ops::activations::{gelu as gelu_core, relu, silu},
     tensor::Tensor,
     traits::{Layer, WeightReader},
 };
 
 use super::model_core::{transpose_tensor, LayerCache};
+use super::model_ops::ActivationType;
 use crate::gpt2::config::Gpt2Config;
 
 #[derive(Clone)]
@@ -548,14 +548,21 @@ impl Gpt2Attention {
         self.c_proj.forward(merged).map(Some)
     }
 
+    /// Bind the fused QKV and output projections from a checkpoint.
+    ///
+    /// HuggingFace's GPT-2 uses `transformers.pytorch_utils.Conv1D`, not
+    /// `nn.Linear`, and `Conv1D` stores its weight as `[in_features,
+    /// out_features]` — the transpose of the `[out_features, in_features]`
+    /// layout [`trustformers_core::layers::Linear`] expects. Hence the
+    /// transposition on the weights and none on the biases, which are `[out]`
+    /// in both conventions.
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
-        // Load combined QKV weights
-        // PyTorch stores as [out, in], we need [in, out], so transpose
+        // Fused QKV projection: Conv1D [in, 3*in] -> Linear [3*in, in].
         let c_attn_weight = reader.read_tensor(&format!("{}.c_attn.weight", prefix))?;
         self.c_attn.set_weight(transpose_tensor(c_attn_weight)?)?;
         self.c_attn.set_bias(reader.read_tensor(&format!("{}.c_attn.bias", prefix))?)?;
 
-        // Load output projection weights (also needs transpose)
+        // Output projection: Conv1D [in, in] -> Linear [in, in], still transposed.
         let c_proj_weight = reader.read_tensor(&format!("{}.c_proj.weight", prefix))?;
         self.c_proj.set_weight(transpose_tensor(c_proj_weight)?)?;
         self.c_proj.set_bias(reader.read_tensor(&format!("{}.c_proj.bias", prefix))?)?;
@@ -563,18 +570,19 @@ impl Gpt2Attention {
         Ok(())
     }
 
+    /// Same binding as [`Gpt2Attention::load_weights`], driven by a
+    /// [`crate::weight_loading::WeightLoader`] instead of a `WeightReader`.
     fn load_weights_from_loader(
         &mut self,
         loader: &mut dyn crate::weight_loading::WeightLoader,
         prefix: &str,
     ) -> Result<()> {
-        // Load combined QKV weights
-        // PyTorch stores as [out, in], we need [in, out], so transpose
+        // Fused QKV projection: Conv1D [in, 3*in] -> Linear [3*in, in].
         let c_attn_weight = loader.load_tensor(&format!("{}.c_attn.weight", prefix))?;
         self.c_attn.set_weight(transpose_tensor(c_attn_weight)?)?;
         self.c_attn.set_bias(loader.load_tensor(&format!("{}.c_attn.bias", prefix))?)?;
 
-        // Load output projection weights (also needs transpose)
+        // Output projection: Conv1D [in, in] -> Linear [in, in], still transposed.
         let c_proj_weight = loader.load_tensor(&format!("{}.c_proj.weight", prefix))?;
         self.c_proj.set_weight(transpose_tensor(c_proj_weight)?)?;
         self.c_proj.set_bias(loader.load_tensor(&format!("{}.c_proj.bias", prefix))?)?;
@@ -639,20 +647,17 @@ impl Gpt2Attention {
                         let cached_shape = &k_metal.shape; // [batch, num_heads, cached_seq, head_dim]
                         let cached_seq = cached_shape[2];
                         #[cfg(debug_assertions)]
-                        eprintln!("🔗 GPU cache found: cached_seq={}", cached_seq);
                         (
                             Some(&k_metal.buffer_id),
                             Some(&v_metal.buffer_id),
                             cached_seq,
                         )
                     },
-                    _ => {
-                        // eprintln!("🚀 GPU attention (first token, no cache)");
-                        (None, None, 0)
-                    },
+                    // First token of a sequence: the cache holds nothing yet.
+                    _ => (None, None, 0),
                 }
             } else {
-                // eprintln!("🚀 GPU attention (no cache layer)");
+                // This layer has no cache slot, so there is nothing to extend.
                 (None, None, 0)
             };
 
@@ -723,8 +728,6 @@ impl Gpt2Attention {
                     shape: vec![batch_size, self.n_head, total_seq_len, self.d_head],
                     dtype: qkv_data.dtype,
                 }));
-                #[cfg(debug_assertions)]
-                eprintln!("✅ GPU cache updated: total_seq={}", total_seq_len);
             }
 
             // Wrap in Metal tensor and apply output projection
@@ -794,8 +797,6 @@ impl Gpt2Attention {
         let qkv = match &qkv {
             Tensor::Metal(qkv_data) => {
                 use trustformers_core::gpu_ops::metal::get_metal_backend;
-
-                eprintln!("⚠️  Attention: CPU path (has cache), downloading Q/K/V");
 
                 let backend = get_metal_backend()?;
 
@@ -1275,8 +1276,12 @@ impl Gpt2MLP {
         Ok(())
     }
 
+    /// Bind the two MLP projections from a checkpoint.
+    ///
+    /// Like the attention block, GPT-2's MLP is built from `Conv1D` layers whose
+    /// weights are stored `[in_features, out_features]`, so both need
+    /// transposing into the `[out_features, in_features]` layout `Linear` uses.
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
-        // Transpose MLP weights too
         let c_fc_weight = reader.read_tensor(&format!("{}.c_fc.weight", prefix))?;
         self.c_fc.set_weight(transpose_tensor(c_fc_weight)?)?;
         self.c_fc.set_bias(reader.read_tensor(&format!("{}.c_fc.bias", prefix))?)?;
@@ -1288,12 +1293,13 @@ impl Gpt2MLP {
         Ok(())
     }
 
+    /// Same binding as [`Gpt2MLP::load_weights`], driven by a
+    /// [`crate::weight_loading::WeightLoader`] instead of a `WeightReader`.
     fn load_weights_from_loader(
         &mut self,
         loader: &mut dyn crate::weight_loading::WeightLoader,
         prefix: &str,
     ) -> Result<()> {
-        // Transpose MLP weights too
         let c_fc_weight = loader.load_tensor(&format!("{}.c_fc.weight", prefix))?;
         self.c_fc.set_weight(transpose_tensor(c_fc_weight)?)?;
         self.c_fc.set_bias(loader.load_tensor(&format!("{}.c_fc.bias", prefix))?)?;
@@ -1423,556 +1429,9 @@ impl Gpt2MLP {
     }
 }
 
-/// Activation function types
-#[derive(Clone)]
-pub(crate) enum ActivationType {
-    Gelu,
-    Relu,
-    Swish,
-}
-
-impl ActivationType {
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "gelu" | "gelu_new" | "gelu_fast" => Ok(Self::Gelu),
-            "relu" => Ok(Self::Relu),
-            "swish" | "silu" => Ok(Self::Swish),
-            _ => Err(invalid_config(
-                "activation",
-                format!("Unknown activation: {}", s),
-            )),
-        }
-    }
-
-    fn apply(&self, x: Tensor) -> Result<Tensor> {
-        match self {
-            Self::Gelu => gelu_core(&x), // Use NaN-safe version from trustformers_core
-            Self::Relu => relu(&x),
-            Self::Swish => silu(&x), // SiLU = Swish
-        }
-    }
-}
-
-/// Create a causal mask for attention
-pub(crate) fn create_causal_mask(seq_len: usize) -> Result<Tensor> {
-    let mut mask = ArrayD::<f32>::zeros(IxDyn(&[1, 1, seq_len, seq_len]));
-
-    for i in 0..seq_len {
-        for j in (i + 1)..seq_len {
-            mask[[0, 0, i, j]] = f32::NEG_INFINITY;
-        }
-    }
-
-    Ok(Tensor::F32(mask))
-}
-
-/// Apply top-k filtering to logits
-pub(crate) fn apply_top_k_filtering(logits: ArrayD<f32>, k: usize) -> Result<ArrayD<f32>> {
-    let mut result = logits.clone();
-    let mut indices_and_values: Vec<(usize, f32)> =
-        logits.iter().enumerate().map(|(idx, &val)| (idx, val)).collect();
-
-    // Sort by value in descending order
-    indices_and_values.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Set all values outside top-k to -inf
-    for (idx, _) in indices_and_values.iter().skip(k) {
-        result[*idx] = f32::NEG_INFINITY;
-    }
-
-    Ok(result)
-}
-
-/// Apply top-p (nucleus) filtering to logits
-pub(crate) fn apply_top_p_filtering(logits: ArrayD<f32>, p: f32) -> Result<ArrayD<f32>> {
-    // Convert to probabilities
-    let probs = softmax(logits.clone())?;
-
-    let mut indices_and_probs: Vec<(usize, f32)> =
-        probs.iter().enumerate().map(|(idx, &prob)| (idx, prob)).collect();
-
-    // Sort by probability in descending order
-    indices_and_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Find the smallest set of tokens with cumulative probability > p
-    let mut cumsum = 0.0;
-    let mut cutoff_idx = indices_and_probs.len();
-
-    for (i, (_, prob)) in indices_and_probs.iter().enumerate() {
-        cumsum += prob;
-        if cumsum > p {
-            cutoff_idx = i + 1;
-            break;
-        }
-    }
-
-    // Create result with -inf for tokens outside the nucleus
-    let mut result = logits;
-    let selected_indices: std::collections::HashSet<_> =
-        indices_and_probs.iter().take(cutoff_idx).map(|(idx, _)| *idx).collect();
-
-    for (idx, val) in result.iter_mut().enumerate() {
-        if !selected_indices.contains(&idx) {
-            *val = f32::NEG_INFINITY;
-        }
-    }
-
-    Ok(result)
-}
-
-/// Sample from logits using multinomial sampling
-pub(crate) fn sample_from_logits(logits: ArrayD<f32>) -> Result<u32> {
-    use scirs2_core::random::*; // SciRS2 Integration Policy (includes WeightedIndex)
-
-    // Convert to probabilities
-    let probs = softmax(logits)?;
-
-    // Create weighted distribution
-    let weights: Vec<f32> = probs.iter().copied().collect();
-    let dist = WeightedIndex::new(weights).map_err(|e| {
-        TrustformersError::model_error(format!("Failed to create distribution: {}", e))
-    })?;
-
-    // Sample
-    let mut rng = thread_rng(); // From scirs2_core::random
-    Ok(rng.sample(&dist) as u32)
-}
-
-/// Compute softmax of logits
-pub(crate) fn softmax(logits: ArrayD<f32>) -> Result<ArrayD<f32>> {
-    // Find max for numerical stability
-    let max_val = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-
-    // Compute exp(x - max)
-    let exp_vals = logits.mapv(|x| (x - max_val).exp());
-
-    // Sum of exp values
-    let sum: f32 = exp_vals.iter().sum();
-
-    // Normalize
-    Ok(exp_vals / sum)
-}
-
-/// Compute log softmax of logits
-pub(crate) fn log_softmax(logits: ArrayD<f32>) -> Result<ArrayD<f32>> {
-    // Find max for numerical stability
-    let max_val = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-
-    // Compute log(sum(exp(x - max))) + max
-    let shifted = logits.mapv(|x| x - max_val);
-    let exp_sum = shifted.mapv(|x| x.exp()).sum();
-    let log_sum_exp = exp_sum.ln() + max_val;
-
-    // Return log probabilities
-    Ok(logits.mapv(|x| x - log_sum_exp))
-}
-
-/// Stack a vector of tensors into a batch tensor
-pub(crate) fn stack_tensors(tensors: &[Tensor]) -> Result<Tensor> {
-    if tensors.is_empty() {
-        return Err(tensor_op_error(
-            "tensor_operation",
-            "Cannot stack empty tensor list".to_string(),
-        ));
-    }
-
-    match &tensors[0] {
-        Tensor::F32(first_arr) => {
-            let first_shape = first_arr.shape();
-            let batch_size = tensors.len();
-
-            // Create new shape with batch dimension
-            let mut new_shape = vec![batch_size];
-            new_shape.extend_from_slice(first_shape);
-
-            // Collect all tensor data
-            let mut data = Vec::new();
-            for tensor in tensors {
-                match tensor {
-                    Tensor::F32(arr) => {
-                        if arr.shape() != first_shape {
-                            return Err(TrustformersError::shape_error(
-                                "All tensors must have the same shape for stacking".to_string(),
-                            ));
-                        }
-                        data.extend(arr.iter().cloned());
-                    },
-                    _ => {
-                        return Err(tensor_op_error(
-                            "tensor_operation",
-                            "All tensors must be F32 for stacking".to_string(),
-                        ))
-                    },
-                }
-            }
-
-            // Create stacked array
-            let stacked = ArrayD::from_shape_vec(IxDyn(&new_shape), data).map_err(|_| {
-                TrustformersError::shape_error("Failed to create stacked tensor".into())
-            })?;
-
-            Ok(Tensor::F32(stacked))
-        },
-        #[cfg(all(target_os = "macos", feature = "metal"))]
-        Tensor::Metal(first_data) => {
-            use trustformers_core::gpu_ops::metal::get_metal_backend;
-            use trustformers_core::tensor::MetalTensorData;
-
-            // Try to use GPU stacking kernel
-            if let Ok(backend) = get_metal_backend() {
-                // All tensors must have the same shape
-                let first_shape = &first_data.shape;
-                if first_shape.len() == 2 {
-                    let seq_len = first_shape[0];
-                    let hidden_size = first_shape[1];
-
-                    // Collect all buffer IDs
-                    let buffer_ids: Vec<_> = tensors
-                        .iter()
-                        .map(|t| match t {
-                            Tensor::Metal(data) => Ok(data.buffer_id),
-                            _ => Err(TrustformersError::tensor_op_error(
-                                "All tensors must be Metal for GPU stacking",
-                                "stack_tensors",
-                            )),
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-
-                    // Stack on GPU
-                    let stacked_buffer_id =
-                        backend.stack_gpu_buffers(&buffer_ids, seq_len, hidden_size)?;
-
-                    // Create output shape: [batch_size, seq_len, hidden_size]
-                    let output_shape = vec![tensors.len(), seq_len, hidden_size];
-
-                    return Ok(Tensor::Metal(MetalTensorData {
-                        buffer_id: stacked_buffer_id,
-                        shape: output_shape,
-                        dtype: first_data.dtype,
-                    }));
-                }
-            }
-
-            // Fallback: convert to CPU, stack, then convert back to Metal
-            let cpu_tensors: Vec<Tensor> = tensors
-                .iter()
-                .map(|t| t.to_device_enum(&Device::CPU))
-                .collect::<Result<Vec<_>>>()?;
-
-            let cpu_stacked = stack_tensors(&cpu_tensors)?;
-
-            let metal_device = Device::Metal(0);
-            let metal_stacked = cpu_stacked.to_device_enum(&metal_device)?;
-
-            Ok(metal_stacked)
-        },
-        _ => Err(tensor_op_error(
-            "tensor_operation",
-            "Only F32 tensors supported for stacking".to_string(),
-        )),
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::gpt2::config::Gpt2Config;
-    use scirs2_core::ndarray::{ArrayD, IxDyn};
-    use trustformers_core::tensor::Tensor;
-
-    // LCG PRNG: a=6364136223846793005, c=1442695040888963407
-    fn lcg_next(state: &mut u64) -> u64 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        *state
-    }
-
-    fn lcg_f32_range(state: &mut u64, lo: f32, hi: f32) -> f32 {
-        let raw = (lcg_next(state) >> 11) as f32 / (1u64 << 53) as f32;
-        lo + raw * (hi - lo)
-    }
-
-    fn make_array(shape: &[usize], seed: u64) -> ArrayD<f32> {
-        let mut state = seed;
-        let n: usize = shape.iter().product();
-        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -1.0, 1.0)).collect();
-        ArrayD::from_shape_vec(IxDyn(shape), data).expect("Failed to create array")
-    }
-
-    fn make_tensor(shape: &[usize], seed: u64) -> Tensor {
-        Tensor::F32(make_array(shape, seed))
-    }
-
-    // ---- create_causal_mask tests ----
-
-    #[test]
-    fn test_causal_mask_shape() {
-        let seq_len = 5;
-        let mask = create_causal_mask(seq_len).expect("create_causal_mask failed");
-        let shape = mask.shape();
-        assert_eq!(shape, &[1, 1, seq_len, seq_len]);
-    }
-
-    #[test]
-    fn test_causal_mask_diagonal_not_neg_inf() {
-        let seq_len = 4;
-        let mask = create_causal_mask(seq_len).expect("create_causal_mask failed");
-        if let Tensor::F32(arr) = &mask {
-            for i in 0..seq_len {
-                let val = arr[[0, 0, i, i]];
-                assert!(
-                    val.is_finite(),
-                    "Diagonal of causal mask must be finite at ({i},{i})"
-                );
-            }
-        } else {
-            panic!("Expected F32 tensor");
-        }
-    }
-
-    #[test]
-    fn test_causal_mask_future_tokens_are_neg_inf() {
-        let seq_len = 5;
-        let mask = create_causal_mask(seq_len).expect("create_causal_mask failed");
-        if let Tensor::F32(arr) = &mask {
-            for i in 0..seq_len {
-                for j in (i + 1)..seq_len {
-                    let val = arr[[0, 0, i, j]];
-                    assert!(
-                        val.is_infinite() && val < 0.0,
-                        "Future token at ({i},{j}) must be -inf, got {val}"
-                    );
-                }
-            }
-        } else {
-            panic!("Expected F32 tensor");
-        }
-    }
-
-    #[test]
-    fn test_causal_mask_past_tokens_are_zero() {
-        let seq_len = 4;
-        let mask = create_causal_mask(seq_len).expect("create_causal_mask failed");
-        if let Tensor::F32(arr) = &mask {
-            for i in 0..seq_len {
-                for j in 0..=i {
-                    let val = arr[[0, 0, i, j]];
-                    assert!(
-                        val == 0.0,
-                        "Past/current token at ({i},{j}) must be 0, got {val}"
-                    );
-                }
-            }
-        } else {
-            panic!("Expected F32 tensor");
-        }
-    }
-
-    #[test]
-    fn test_causal_mask_length_1() {
-        let mask = create_causal_mask(1).expect("create_causal_mask(1) failed");
-        if let Tensor::F32(arr) = &mask {
-            assert_eq!(arr[[0, 0, 0, 0]], 0.0);
-        }
-    }
-
-    // ---- softmax tests ----
-
-    #[test]
-    fn test_softmax_sums_to_one() {
-        let mut state = 7u64;
-        let n = 10;
-        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -2.0, 2.0)).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[n]), data).expect("array creation failed");
-        let result = softmax(arr).expect("softmax failed");
-        let sum: f32 = result.iter().sum();
-        assert!(
-            (sum - 1.0).abs() < 1e-5,
-            "softmax sum must be ~1.0, got {sum}"
-        );
-    }
-
-    #[test]
-    fn test_softmax_all_positive() {
-        let mut state = 13u64;
-        let n = 8;
-        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -3.0, 3.0)).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[n]), data).expect("array creation failed");
-        let result = softmax(arr).expect("softmax failed");
-        for val in result.iter() {
-            assert!(*val >= 0.0, "softmax output must be non-negative");
-        }
-    }
-
-    // ---- log_softmax tests ----
-
-    #[test]
-    fn test_log_softmax_non_positive() {
-        let mut state = 17u64;
-        let n = 8;
-        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -2.0, 2.0)).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[n]), data).expect("array creation failed");
-        let result = log_softmax(arr).expect("log_softmax failed");
-        for val in result.iter() {
-            assert!(
-                *val <= 0.0 + 1e-6,
-                "log_softmax output must be <= 0, got {val}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_log_softmax_exp_sums_to_one() {
-        let mut state = 31u64;
-        let n = 6;
-        let data: Vec<f32> = (0..n).map(|_| lcg_f32_range(&mut state, -1.0, 1.0)).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[n]), data).expect("array creation failed");
-        let result = log_softmax(arr).expect("log_softmax failed");
-        let sum_exp: f32 = result.iter().map(|x| x.exp()).sum();
-        assert!(
-            (sum_exp - 1.0).abs() < 1e-5,
-            "exp(log_softmax) must sum to 1, got {sum_exp}"
-        );
-    }
-
-    // ---- apply_top_k_filtering tests ----
-
-    #[test]
-    fn test_top_k_keeps_k_finite_values() {
-        let data: Vec<f32> = (0..10).map(|i| i as f32).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[10]), data).expect("array creation failed");
-        let k = 3;
-        let result = apply_top_k_filtering(arr, k).expect("top_k filter failed");
-        let finite_count = result.iter().filter(|&&v| v.is_finite()).count();
-        assert_eq!(finite_count, k, "top-k should keep exactly k finite values");
-    }
-
-    #[test]
-    fn test_top_k_largest_values_retained() {
-        // data: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        let data: Vec<f32> = (0..10).map(|i| i as f32).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[10]), data).expect("array failed");
-        let k = 3;
-        let result = apply_top_k_filtering(arr, k).expect("top_k filter failed");
-        // Top 3 values are 7, 8, 9 at indices 7, 8, 9
-        assert!(result[7].is_finite());
-        assert!(result[8].is_finite());
-        assert!(result[9].is_finite());
-        assert!(result[0].is_infinite());
-    }
-
-    // ---- apply_top_p_filtering tests ----
-
-    #[test]
-    fn test_top_p_at_least_one_finite() {
-        let data: Vec<f32> = (0..10).map(|i| i as f32 + 1.0).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[10]), data).expect("array failed");
-        let result = apply_top_p_filtering(arr, 0.5).expect("top_p filter failed");
-        let finite_count = result.iter().filter(|&&v| v.is_finite()).count();
-        assert!(finite_count >= 1, "top-p must keep at least one token");
-    }
-
-    #[test]
-    fn test_top_p_full_probability_keeps_all() {
-        let data: Vec<f32> = (0..5).map(|i| i as f32 + 1.0).collect();
-        let arr = ArrayD::from_shape_vec(IxDyn(&[5]), data).expect("array failed");
-        let result = apply_top_p_filtering(arr, 1.0).expect("top_p filter failed");
-        let finite_count = result.iter().filter(|&&v| v.is_finite()).count();
-        assert_eq!(finite_count, 5, "p=1.0 should keep all tokens");
-    }
-
-    // ---- stack_tensors tests ----
-
-    #[test]
-    fn test_stack_tensors_basic() {
-        let t1 = make_tensor(&[3, 4], 11);
-        let t2 = make_tensor(&[3, 4], 22);
-        let stacked = stack_tensors(&[t1, t2]).expect("stack_tensors failed");
-        let shape = stacked.shape();
-        assert_eq!(shape[0], 2, "Batch dim must be 2");
-        assert_eq!(shape[1], 3);
-        assert_eq!(shape[2], 4);
-    }
-
-    #[test]
-    fn test_stack_tensors_empty_fails() {
-        let result = stack_tensors(&[]);
-        assert!(result.is_err(), "Stacking empty list must fail");
-    }
-
-    #[test]
-    fn test_stack_tensors_shape_mismatch_fails() {
-        let t1 = make_tensor(&[3, 4], 11);
-        let t2 = make_tensor(&[4, 4], 22); // different shape
-        let result = stack_tensors(&[t1, t2]);
-        assert!(
-            result.is_err(),
-            "Stacking tensors with different shapes must fail"
-        );
-    }
-
-    // ---- Gpt2Block creation test ----
-
-    #[test]
-    fn test_gpt2_block_creates_ok() {
-        let cfg = Gpt2Config::default();
-        let block = Gpt2Block::new(&cfg);
-        assert!(
-            block.is_ok(),
-            "Gpt2Block::new should succeed with default config"
-        );
-    }
-
-    #[test]
-    fn test_gpt2_block_parameter_count_nonzero() {
-        let cfg = Gpt2Config::default();
-        let block = Gpt2Block::new(&cfg).expect("Block creation failed");
-        assert!(block.parameter_count() > 0, "Block must have parameters");
-    }
-
-    // ---- MLP inner dim test ----
-
-    #[test]
-    fn test_gpt2_mlp_inner_dim_4x() {
-        // When n_inner is None, inner dim = 4 * n_embd
-        let cfg = Gpt2Config::default();
-        assert!(cfg.n_inner.is_none(), "Default n_inner must be None");
-        // The MLP created with this config should have inner_dim = 4 * 768 = 3072
-        // We verify by checking the block can be created (it uses 4*n_embd internally)
-        let block = Gpt2Block::new(&cfg).expect("Block creation failed");
-        // The parameter count should reflect the 4x expansion
-        let count = block.parameter_count();
-        // rough lower bound: at least n_embd * 4 * n_embd for c_fc weight
-        assert!(
-            count > 768 * 3072,
-            "MLP param count must reflect 4x expansion"
-        );
-    }
-
-    // ---- ActivationType tests ----
-
-    #[test]
-    fn test_gelu_activation_on_zero() {
-        let t = Tensor::from_vec(vec![0.0f32], &[1]).expect("tensor creation failed");
-        let result = trustformers_core::ops::activations::gelu(&t).expect("gelu failed");
-        if let Tensor::F32(arr) = result {
-            assert!(arr[0].abs() < 1e-5, "gelu(0) must be ~0");
-        }
-    }
-
-    #[test]
-    fn test_silu_activation_on_positive() {
-        let t = Tensor::from_vec(vec![2.0f32], &[1]).expect("tensor creation failed");
-        let result = trustformers_core::ops::activations::silu(&t).expect("silu failed");
-        if let Tensor::F32(arr) = result {
-            // SiLU(2) = 2 * sigmoid(2) ≈ 1.762
-            assert!(
-                arr[0] > 1.5 && arr[0] < 2.0,
-                "SiLU(2) should be ~1.76, got {}",
-                arr[0]
-            );
-        }
-    }
-}
+#[path = "model_blocks_tests.rs"]
+mod tests;
 
 /// Parity tests for the fused Metal `matmul + bias + GELU` MLP path.
 ///
@@ -2038,7 +1497,6 @@ mod metal_fused_mlp_tests {
                 "element {i} differs: fused={x} separate={y} (diff={diff} > tol={tol})"
             );
         }
-        println!("fused-vs-separate max abs diff = {max_diff}");
         Ok(())
     }
 

@@ -252,16 +252,23 @@ impl MistralForTokenClassification {
 /// Apply a causal sliding window attention mask to a flat `seq_len × seq_len`
 /// score matrix (row-major).
 ///
-/// For each query position `qi`, positions `kj` that are more than
-/// `window_size` steps in the past are masked to `f32::NEG_INFINITY`.
-/// Future positions are always masked.
+/// Per Mistral's published sliding-window attention (Jiang et al. 2023), a
+/// window of size `window_size` covers exactly `window_size` key positions
+/// per query: `{qi - window_size + 1, ..., qi}`. Query position `qi` may
+/// attend to key `kj` iff `kj <= qi` (causal) AND `qi - kj < window_size`;
+/// every other position — including `kj` exactly `window_size` steps in the
+/// past — is masked to `f32::NEG_INFINITY`. This matches the boundary
+/// convention (`i - j >= w` excludes) used by every other sliding-window
+/// implementation in this crate (`gemma2`, `qwen`, `qwen2_5`), so a given
+/// `window_size` means the same thing everywhere.
 pub fn apply_sliding_window_mask(scores: &mut [f32], seq_len: usize, window_size: usize) {
     for qi in 0..seq_len {
         for kj in 0..seq_len {
             // Causal mask: no attending to future
             let is_future = kj > qi;
-            // Window mask: no attending to positions more than window_size behind
-            let is_outside_window = qi > kj && (qi - kj) > window_size;
+            // Window mask: no attending to positions `window_size` or more
+            // steps behind (a window of size W covers distances 0..W-1).
+            let is_outside_window = qi >= kj && (qi - kj) >= window_size;
             if is_future || is_outside_window {
                 scores[qi * seq_len + kj] = f32::NEG_INFINITY;
             }
@@ -272,6 +279,11 @@ pub fn apply_sliding_window_mask(scores: &mut [f32], seq_len: usize, window_size
 /// Compute the fraction of causal pairs `(qi, kj)` with `kj <= qi` that fall
 /// within the sliding window.
 ///
+/// Uses the same `distance < window_size` boundary as
+/// [`apply_sliding_window_mask`] (a window of size `window_size` covers
+/// `window_size` positions, distances `0..window_size`), so `window_size` is
+/// consistently defined between the mask and this coverage metric.
+///
 /// Returns a value in `[0.0, 1.0]`.
 pub fn sliding_window_coverage(seq_len: usize, window_size: usize) -> f32 {
     if seq_len == 0 {
@@ -281,7 +293,7 @@ pub fn sliding_window_coverage(seq_len: usize, window_size: usize) -> f32 {
     let mut covered = 0usize;
     for qi in 0..seq_len {
         for kj in 0..=qi {
-            if qi - kj <= window_size {
+            if qi - kj < window_size {
                 covered += 1;
             }
         }
@@ -524,11 +536,41 @@ mod tests {
         let window = 1;
         let mut scores = vec![1.0f32; seq_len * seq_len];
         apply_sliding_window_mask(&mut scores, seq_len, window);
-        // (4, 0): diff = 4 > 1 → -inf
+        // (4, 0): diff = 4 >= 1 → -inf
         let v = scores[4 * seq_len];
         assert!(
             v.is_infinite() && v < 0.0,
             "outside window must be -inf, got {v}"
+        );
+    }
+
+    /// Regression: a window of size W must cover EXACTLY W positions
+    /// (distances `0..W`), not `W + 1`. Before the fix, `is_outside_window`
+    /// used `diff > window_size` (inclusive of `diff == window_size`),
+    /// covering one extra position and disagreeing with every other
+    /// sliding-window implementation in this crate (`gemma2`, `qwen`,
+    /// `qwen2_5`), which all use `i - j >= w` to exclude. With
+    /// `window_size = 2`, key distance exactly 2 must now be masked, while
+    /// distance 1 (still inside) must remain visible — this test would have
+    /// FAILED (asserted the wrong value) against the old `> window_size`
+    /// boundary.
+    #[test]
+    fn test_sliding_window_mask_boundary_distance_equals_window_size_is_excluded() {
+        let seq_len = 5;
+        let window = 2;
+        let mut scores = vec![1.0f32; seq_len * seq_len];
+        apply_sliding_window_mask(&mut scores, seq_len, window);
+        // (4, 2): diff = 2 == window_size → must now be excluded (-inf).
+        let boundary = scores[4 * seq_len + 2];
+        assert!(
+            boundary.is_infinite() && boundary < 0.0,
+            "distance exactly equal to window_size must be masked, got {boundary}"
+        );
+        // (4, 3): diff = 1 < window_size → must remain visible.
+        let inside = scores[4 * seq_len + 3];
+        assert!(
+            (inside - 1.0).abs() < 1e-6,
+            "distance strictly less than window_size must stay visible, got {inside}"
         );
     }
 
@@ -545,16 +587,20 @@ mod tests {
 
     // ── 18. Sliding window zero window ───────────────────────────────────────
 
+    /// With `window_size = 0`, a window covers zero positions — not even
+    /// self (distance-0) — consistent with `gemma2`/`qwen`/`qwen2_5`'s
+    /// `i - j >= w` boundary, under which `w = 0` excludes every key
+    /// (including `i == j`). This degenerate case is why every caller in
+    /// this crate explicitly rejects `sliding_window == 0` as invalid
+    /// config (an empty softmax would otherwise result) rather than letting
+    /// it silently fall back to self-only attention.
     #[test]
     fn test_sliding_window_zero_window() {
-        // With window=0, only self-attention survives; coverage = 1/seq_len ... wait:
-        // total_causal = seq_len*(seq_len+1)/2; covered = seq_len (only diagonal)
         let seq_len = 5;
         let cov = sliding_window_coverage(seq_len, 0);
-        let expected = seq_len as f32 / (seq_len * (seq_len + 1) / 2) as f32;
         assert!(
-            (cov - expected).abs() < 1e-5,
-            "zero window coverage mismatch: {cov} vs {expected}"
+            cov.abs() < 1e-6,
+            "zero window must cover no positions at all, got {cov}"
         );
     }
 

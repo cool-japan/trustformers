@@ -432,6 +432,7 @@ pub mod onnx_export;
 pub mod optimizer;
 pub mod optimizer_surgery;
 pub mod parallel;
+pub mod param_id;
 pub mod pde_aware;
 pub mod per_layer_quant;
 pub mod performance_validation;
@@ -551,10 +552,21 @@ pub use hardware_aware::{
     CompressionRatio, EdgeOptimizer, GPUAdam, HardwareAwareConfig, HardwareTarget, MobileOptimizer,
     TPUOptimizer, TPUVersion,
 };
+/// Real collective communication algorithms (ring all-reduce, ring all-gather,
+/// ring reduce-scatter, binomial broadcast/reduce, barrier) over a pluggable
+/// point-to-point transport.
+pub use hierarchical_aggregation::collective;
+pub use hierarchical_aggregation::collective::{Collective, CollectiveError, ReduceOp};
+/// Pure-Rust point-to-point transports: shared-memory (multi-threaded ranks)
+/// and TCP (multi-process / multi-host ranks).
+pub use hierarchical_aggregation::transport;
+pub use hierarchical_aggregation::transport::{
+    InProcessSession, InProcessTransport, TcpTransport, Transport, TransportError,
+};
 pub use hierarchical_aggregation::{
-    AggregationStats, AggregationStrategy, ButterflyStructure, CommunicationGroups, FaultDetector,
-    HierarchicalAggregator, HierarchicalConfig, NodeTopology, RecoveryStrategy, RingStructure,
-    TreeStructure,
+    AggregationError, AggregationStats, AggregationStrategy, ButterflyStructure,
+    CommunicationGroups, FaultDetector, HierarchicalAggregator, HierarchicalConfig, NodeTopology,
+    RecoveryStrategy, RingStructure, TreeStructure,
 };
 pub use hn_adam::{HNAdam, HNAdamConfig};
 pub use hyperparameter_tuning::{

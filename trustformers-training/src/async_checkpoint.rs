@@ -159,10 +159,10 @@ impl AsyncCheckpointer {
                     if let Ok(mut sp) = saved_paths_clone.lock() {
                         sp.push((data.step, path));
                     }
-                }
+                },
                 Err(e) => {
                     h.error = Some(e.to_string());
-                }
+                },
             }
         });
 
@@ -187,9 +187,7 @@ impl AsyncCheckpointer {
                     .pending_handles
                     .lock()
                     .map_err(|e| CheckpointError::Thread(e.to_string()))?;
-                pending.iter().all(|h| {
-                    h.lock().map(|g| g.is_complete).unwrap_or(false)
-                })
+                pending.iter().all(|h| h.lock().map(|g| g.is_complete).unwrap_or(false))
             };
             if all_done {
                 break;
@@ -221,18 +219,14 @@ impl AsyncCheckpointer {
         let path = self.checkpoint_path(data.step);
         Self::write_to_disk(data, &path, &self.config.serialize_format)?;
         {
-            let mut sp = self
-                .saved_paths
-                .lock()
-                .map_err(|e| CheckpointError::Thread(e.to_string()))?;
+            let mut sp =
+                self.saved_paths.lock().map_err(|e| CheckpointError::Thread(e.to_string()))?;
             sp.push((data.step, path.clone()));
         }
         // Update best metric tracking
         if let Some(&metric_value) = data.metrics.get(&self.config.best_metric_name) {
-            let mut best = self
-                .best_metric
-                .lock()
-                .map_err(|e| CheckpointError::Thread(e.to_string()))?;
+            let mut best =
+                self.best_metric.lock().map_err(|e| CheckpointError::Thread(e.to_string()))?;
             *best = Some(match *best {
                 None => metric_value,
                 Some(prev) => match self.config.best_metric_mode {
@@ -253,26 +247,23 @@ impl AsyncCheckpointer {
             });
         }
         let content = std::fs::read_to_string(path)?;
-        serde_json::from_str(&content)
-            .map_err(|e| CheckpointError::Serialization(e.to_string()))
+        serde_json::from_str(&content).map_err(|e| CheckpointError::Serialization(e.to_string()))
     }
 
     /// List all saved checkpoints in step order.
     pub fn list_checkpoints(&self) -> Vec<(u64, PathBuf)> {
-        let mut result = self
-            .saved_paths
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
+        let mut result = self.saved_paths.lock().map(|g| g.clone()).unwrap_or_default();
         result.sort_by_key(|(step, _)| *step);
         result
     }
 
     /// Get the best checkpoint path (the one with the best tracked metric).
     pub fn best_checkpoint(&self) -> Option<PathBuf> {
-        let best_val = self.best_metric.lock().ok()?.and_then(|v| {
-            if v.is_nan() { None } else { Some(v) }
-        })?;
+        let best_val =
+            self.best_metric
+                .lock()
+                .ok()?
+                .and_then(|v| if v.is_nan() { None } else { Some(v) })?;
         let saved = self.saved_paths.lock().ok()?;
         // Find the checkpoint whose filename contains the step that produced the best metric.
         // We track the best value; we need to re-scan saved checkpoints and find
@@ -288,7 +279,7 @@ impl AsyncCheckpointer {
     /// Should we checkpoint at this step?
     pub fn should_checkpoint(&self, step: u64, current_metric: Option<f64>) -> bool {
         // Interval check
-        let interval_hit = step > 0 && step % self.config.save_interval_steps == 0;
+        let interval_hit = step > 0 && step.is_multiple_of(self.config.save_interval_steps);
         if !interval_hit {
             return false;
         }
@@ -316,10 +307,8 @@ impl AsyncCheckpointer {
     // ── Private helpers ──────────────────────────────────────────────────────
 
     fn cleanup_old_checkpoints(&self) -> Result<(), CheckpointError> {
-        let mut saved = self
-            .saved_paths
-            .lock()
-            .map_err(|e| CheckpointError::Thread(e.to_string()))?;
+        let mut saved =
+            self.saved_paths.lock().map_err(|e| CheckpointError::Thread(e.to_string()))?;
         saved.sort_by_key(|(s, _)| *s);
         while saved.len() > self.config.max_checkpoints_to_keep {
             let (_, old_path) = saved.remove(0);
@@ -331,9 +320,7 @@ impl AsyncCheckpointer {
     }
 
     fn checkpoint_path(&self, step: u64) -> PathBuf {
-        self.config
-            .checkpoint_dir
-            .join(format!("checkpoint_step_{step:010}.json"))
+        self.config.checkpoint_dir.join(format!("checkpoint_step_{step:010}.json"))
     }
 
     fn write_to_disk(
@@ -465,7 +452,7 @@ impl CheckpointManager {
     /// - `step > 0`
     /// - `step % save_every_n_steps == 0`
     pub fn should_save(&self, step: usize, save_every_n_steps: usize) -> bool {
-        save_every_n_steps > 0 && step > 0 && step % save_every_n_steps == 0
+        save_every_n_steps > 0 && step > 0 && step.is_multiple_of(save_every_n_steps)
     }
 
     /// Register a checkpoint. Pushes `meta` to the back of the queue.
@@ -480,11 +467,9 @@ impl CheckpointManager {
     ///
     /// Returns `None` if no checkpoints have been registered.
     pub fn get_best_checkpoint(&self) -> Option<&CheckpointMetadata> {
-        self.saved_checkpoints.iter().min_by(|a, b| {
-            a.loss
-                .partial_cmp(&b.loss)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        self.saved_checkpoints
+            .iter()
+            .min_by(|a, b| a.loss.partial_cmp(&b.loss).unwrap_or(std::cmp::Ordering::Equal))
     }
 
     /// Return a reference to the most recently registered checkpoint.
@@ -608,7 +593,10 @@ mod tests {
         let _h = ckpt.save_async(make_data(50)).unwrap();
         ckpt.wait_all().unwrap();
         let expected = dir.join("checkpoint_step_0000000050.json");
-        assert!(expected.exists(), "checkpoint file should exist at {expected:?}");
+        assert!(
+            expected.exists(),
+            "checkpoint file should exist at {expected:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -655,7 +643,12 @@ mod tests {
 
         let saved = ckpt.list_checkpoints();
         // Should keep only the 2 most recent
-        assert_eq!(saved.len(), 2, "should keep 2 checkpoints, got {}", saved.len());
+        assert_eq!(
+            saved.len(),
+            2,
+            "should keep 2 checkpoints, got {}",
+            saved.len()
+        );
         assert_eq!(saved[0].0, 30);
         assert_eq!(saved[1].0, 40);
 
@@ -850,10 +843,8 @@ mod tests {
     // 20. CheckpointMetadata::new sets all fields
     #[test]
     fn test_checkpoint_metadata_new() {
-        let ckpt_path = std::env::temp_dir()
-            .join("ckpt_step_100.json")
-            .to_string_lossy()
-            .into_owned();
+        let ckpt_path =
+            std::env::temp_dir().join("ckpt_step_100.json").to_string_lossy().into_owned();
         let before = std::time::SystemTime::now();
         let meta = CheckpointMetadata::new(ckpt_path.clone(), 100, 1, 0.42);
         let after = std::time::SystemTime::now();
@@ -933,7 +924,11 @@ mod tests {
             0.8,
         ));
         let best = mgr.get_best_checkpoint().expect("should have best");
-        assert!((best.loss - 0.3).abs() < 1e-6, "best loss should be 0.3, got {}", best.loss);
+        assert!(
+            (best.loss - 0.3).abs() < 1e-6,
+            "best loss should be 0.3, got {}",
+            best.loss
+        );
         assert_eq!(best.path, path_b);
     }
 

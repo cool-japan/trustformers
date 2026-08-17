@@ -2,8 +2,14 @@
 // retained intentionally for in-progress features; not yet on active call paths.
 #![allow(dead_code)]
 
+pub mod collective;
+pub mod transport;
+
 use anyhow::Result;
+use collective::{Collective, ReduceOp};
 use std::collections::HashMap;
+use std::sync::Arc;
+use transport::Transport;
 use trustformers_core::parallel::CommunicationBackend;
 use trustformers_core::tensor::Tensor;
 
@@ -12,6 +18,53 @@ use trustformers_core::tensor::Tensor;
 /// This module provides advanced hierarchical aggregation algorithms that optimize
 /// communication patterns for different network topologies and cluster configurations.
 /// It supports tree-based, ring-based, and butterfly aggregation patterns.
+///
+/// # Communication
+///
+/// Aggregation is performed over a real [`transport::Transport`] (in-process
+/// shared memory or TCP) through the algorithms in [`collective`]. A
+/// [`HierarchicalAggregator`] built without a transport can only service a
+/// world size of one; any larger configuration returns
+/// [`AggregationError::NoCommunicator`] instead of aggregating against
+/// fabricated data.
+
+/// Errors raised by hierarchical aggregation.
+#[derive(Debug, thiserror::Error)]
+pub enum AggregationError {
+    /// No transport was attached, so no peer data can be exchanged.
+    #[error(
+        "hierarchical aggregation over world size {world_size} requires a transport; \
+         build the aggregator with HierarchicalAggregator::with_transport"
+    )]
+    NoCommunicator {
+        /// Configured world size.
+        world_size: usize,
+    },
+
+    /// The attached transport disagrees with the configuration.
+    #[error(
+        "transport world size {transport_world_size} does not match the configured world size \
+         {config_world_size}"
+    )]
+    WorldSizeMismatch {
+        /// World size reported by the transport.
+        transport_world_size: usize,
+        /// World size derived from the configuration.
+        config_world_size: usize,
+        /// Rank reported by the transport.
+        transport_rank: usize,
+    },
+
+    /// Butterfly (recursive doubling) requires a power-of-two world size.
+    #[error(
+        "butterfly aggregation requires a power-of-two world size, got {world_size}; \
+         use AggregationStrategy::Ring or AggregationStrategy::BinaryTree"
+    )]
+    ButterflyRequiresPowerOfTwo {
+        /// Configured world size.
+        world_size: usize,
+    },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AggregationStrategy {
@@ -107,6 +160,7 @@ pub struct HierarchicalAggregator {
     communication_groups: CommunicationGroups,
     aggregation_stats: AggregationStats,
     fault_detector: Option<FaultDetector>,
+    communicator: Option<Collective<Arc<dyn Transport>>>,
 }
 
 /// Network topology representation
@@ -242,7 +296,58 @@ impl HierarchicalAggregator {
             communication_groups,
             aggregation_stats,
             fault_detector,
+            communicator: None,
         })
+    }
+
+    /// Build an aggregator bound to a real transport.
+    ///
+    /// The transport's world size must match `num_nodes * devices_per_node`
+    /// and its rank must match `global_rank`.
+    pub fn with_transport(
+        config: HierarchicalConfig,
+        transport: Arc<dyn Transport>,
+    ) -> Result<Self> {
+        let mut aggregator = Self::new(config)?;
+        aggregator.attach_transport(transport)?;
+        Ok(aggregator)
+    }
+
+    /// Attach (or replace) the transport used for aggregation.
+    pub fn attach_transport(&mut self, transport: Arc<dyn Transport>) -> Result<()> {
+        let config_world_size = self.config.world_size();
+        if transport.world_size() != config_world_size {
+            return Err(AggregationError::WorldSizeMismatch {
+                transport_world_size: transport.world_size(),
+                config_world_size,
+                transport_rank: transport.rank(),
+            }
+            .into());
+        }
+        self.communicator = Some(Collective::new(transport)?);
+        Ok(())
+    }
+
+    /// Whether a real communicator is attached.
+    pub fn has_communicator(&self) -> bool {
+        self.communicator.is_some()
+    }
+
+    /// Borrow the communicator, or explain why aggregation cannot proceed.
+    fn require_communicator(&self) -> Result<&Collective<Arc<dyn Transport>>> {
+        self.communicator.as_ref().ok_or_else(|| {
+            AggregationError::NoCommunicator {
+                world_size: self.config.world_size(),
+            }
+            .into()
+        })
+    }
+
+    /// Deterministic, rank-independent parameter ordering.
+    fn ordered_names(gradients: &HashMap<String, Tensor>) -> Vec<String> {
+        let mut names: Vec<String> = gradients.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Detect network topology and measure bandwidth/latency
@@ -470,8 +575,9 @@ impl HierarchicalAggregator {
         } else if total_data_size > 100 * 1024 * 1024 {
             // Large data: ring is bandwidth-optimal
             Ok(AggregationStrategy::Ring)
-        } else if num_nodes > 16 {
-            // Large clusters with small data: butterfly is latency-optimal
+        } else if num_nodes > 16 && world_size.is_power_of_two() {
+            // Large clusters with small data: butterfly (recursive doubling) is
+            // latency-optimal, but it is only defined for power-of-two sizes.
             Ok(AggregationStrategy::Butterfly)
         } else {
             // Default to tree for medium-sized clusters
@@ -479,175 +585,107 @@ impl HierarchicalAggregator {
         }
     }
 
-    /// Tree-based all-reduce (divide-and-conquer)
+    /// Tree-based all-reduce: a binomial-tree reduce to the root followed by a
+    /// binomial-tree broadcast back out.
+    ///
+    /// Latency scales as `2 * log2(world_size)` messages, which is why it is
+    /// preferred for small clusters and small payloads.
     fn tree_based_all_reduce(&mut self, gradients: &mut HashMap<String, Tensor>) -> Result<()> {
-        let tree = self.communication_groups.tree_structure.clone();
+        let communicator = self.require_communicator()?;
+        // The binomial tree built by `build_communication_groups` is rooted at
+        // global rank 0 (rank 0 is the only node with `parent == None`).
+        const TREE_ROOT: usize = 0;
+        let root = TREE_ROOT;
 
-        // Phase 1: Reduce up the tree
-        self.tree_reduce_up(gradients, &tree)?;
+        for name in Self::ordered_names(gradients) {
+            let Some(gradient) = gradients.get(&name) else {
+                continue;
+            };
+            let shape = gradient.shape();
+            let mut values = gradient.to_vec_f32()?;
 
-        // Phase 2: Broadcast down the tree
-        self.tree_broadcast_down(gradients, &tree)?;
+            communicator.reduce(&mut values, root, ReduceOp::Sum)?;
+            communicator.broadcast(&mut values, root)?;
+
+            if let Some(slot) = gradients.get_mut(&name) {
+                *slot = Tensor::from_slice(&values, &shape)?;
+            }
+        }
 
         Ok(())
     }
 
-    /// Ring-based all-reduce (bandwidth-optimal)
+    /// Ring all-reduce: reduce-scatter around the ring followed by all-gather.
+    ///
+    /// Each rank transmits `2 * (world_size - 1) / world_size` of the payload,
+    /// which is bandwidth-optimal and independent of the world size.
     fn ring_based_all_reduce(&mut self, gradients: &mut HashMap<String, Tensor>) -> Result<()> {
-        let ring = self.communication_groups.ring_structure.clone();
+        let communicator = self.require_communicator()?;
 
-        // Phase 1: Reduce-scatter
-        self.ring_reduce_scatter(gradients, &ring)?;
+        for name in Self::ordered_names(gradients) {
+            let Some(gradient) = gradients.get(&name) else {
+                continue;
+            };
+            let shape = gradient.shape();
+            let mut values = gradient.to_vec_f32()?;
 
-        // Phase 2: All-gather
-        self.ring_all_gather(gradients, &ring)?;
+            communicator.all_reduce(&mut values, ReduceOp::Sum)?;
+
+            if let Some(slot) = gradients.get_mut(&name) {
+                *slot = Tensor::from_slice(&values, &shape)?;
+            }
+        }
 
         Ok(())
     }
 
-    /// Butterfly-based all-reduce (latency-optimal)
+    /// Butterfly (recursive-doubling) all-reduce.
+    ///
+    /// At stage `s` every rank exchanges its full buffer with the partner whose
+    /// rank differs in bit `s` and combines the two, so after `log2(n)` stages
+    /// every rank holds the complete reduction. Requires a power-of-two world
+    /// size; other sizes return
+    /// [`AggregationError::ButterflyRequiresPowerOfTwo`].
     fn butterfly_based_all_reduce(
         &mut self,
         gradients: &mut HashMap<String, Tensor>,
     ) -> Result<()> {
+        let communicator = self.require_communicator()?;
+        let world_size = communicator.world_size();
+
+        if !world_size.is_power_of_two() {
+            return Err(AggregationError::ButterflyRequiresPowerOfTwo { world_size }.into());
+        }
+        if world_size == 1 {
+            return Ok(());
+        }
+
+        let rank = communicator.rank();
         let butterfly = self.communication_groups.butterfly_structure.clone();
 
-        // Butterfly all-reduce in multiple stages
-        for stage in 0..butterfly.num_stages {
-            self.butterfly_stage_operation(gradients, &butterfly, stage)?;
-        }
+        for name in Self::ordered_names(gradients) {
+            let Some(gradient) = gradients.get(&name) else {
+                continue;
+            };
+            let shape = gradient.shape();
+            let mut values = gradient.to_vec_f32()?;
 
-        Ok(())
-    }
-
-    /// Tree reduce-up phase
-    fn tree_reduce_up(
-        &mut self,
-        gradients: &mut HashMap<String, Tensor>,
-        tree: &TreeStructure,
-    ) -> Result<()> {
-        // Collect gradients from children
-        for &child_rank in &tree.children {
-            for (name, gradient) in gradients.iter_mut() {
-                // Simulate receiving gradient from child
-                let child_gradient = self.simulate_receive_gradient(child_rank, name)?;
-                *gradient = gradient.add(&child_gradient)?;
-            }
-        }
-
-        // Send reduced gradients to parent
-        if let Some(parent_rank) = tree.parent {
-            for (name, gradient) in gradients.iter() {
-                self.simulate_send_gradient(parent_rank, name, gradient)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Tree broadcast-down phase
-    fn tree_broadcast_down(
-        &mut self,
-        gradients: &mut HashMap<String, Tensor>,
-        tree: &TreeStructure,
-    ) -> Result<()> {
-        // Receive final gradients from parent
-        if let Some(parent_rank) = tree.parent {
-            for (name, gradient) in gradients.iter_mut() {
-                *gradient = self.simulate_receive_gradient(parent_rank, name)?;
-            }
-        }
-
-        // Broadcast to children
-        for &child_rank in &tree.children {
-            for (name, gradient) in gradients.iter() {
-                self.simulate_send_gradient(child_rank, name, gradient)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Ring reduce-scatter phase
-    fn ring_reduce_scatter(
-        &mut self,
-        gradients: &mut HashMap<String, Tensor>,
-        ring: &RingStructure,
-    ) -> Result<()> {
-        let num_chunks = ring.ring_size;
-        let rank = self.config.global_rank;
-
-        for step in 0..num_chunks - 1 {
-            let _send_chunk = (rank + ring.ring_size - step) % ring.ring_size;
-            let _recv_chunk = (rank + ring.ring_size - step - 1) % ring.ring_size;
-
-            // Send to next rank and receive from previous rank
-            for (name, gradient) in gradients.iter_mut() {
-                let chunk_gradient = self.simulate_receive_gradient(ring.prev_rank, name)?;
-                *gradient = gradient.add(&chunk_gradient)?;
-                self.simulate_send_gradient(ring.next_rank, name, gradient)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Ring all-gather phase
-    fn ring_all_gather(
-        &mut self,
-        gradients: &mut HashMap<String, Tensor>,
-        ring: &RingStructure,
-    ) -> Result<()> {
-        let num_chunks = ring.ring_size;
-
-        for _step in 0..num_chunks - 1 {
-            // Send to next rank and receive from previous rank
-            for (name, gradient) in gradients.iter_mut() {
-                let chunk_gradient = self.simulate_receive_gradient(ring.prev_rank, name)?;
-                *gradient = gradient.add(&chunk_gradient)?;
-                self.simulate_send_gradient(ring.next_rank, name, gradient)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Butterfly stage operation
-    fn butterfly_stage_operation(
-        &mut self,
-        gradients: &mut HashMap<String, Tensor>,
-        butterfly: &ButterflyStructure,
-        stage: usize,
-    ) -> Result<()> {
-        if stage < butterfly.connections.len() {
-            for &partner_rank in &butterfly.connections[stage] {
-                for (name, gradient) in gradients.iter_mut() {
-                    // Exchange gradients with partner
-                    let partner_gradient = self.simulate_receive_gradient(partner_rank, name)?;
-                    *gradient = gradient.add(&partner_gradient)?;
-                    self.simulate_send_gradient(partner_rank, name, gradient)?;
+            for stage in 0..butterfly.num_stages {
+                let partner = rank ^ (1usize << stage);
+                if partner >= world_size {
+                    continue;
+                }
+                let incoming = communicator.exchange(partner, &values)?;
+                for (slot, value) in values.iter_mut().zip(incoming) {
+                    *slot += value;
                 }
             }
+
+            if let Some(slot) = gradients.get_mut(&name) {
+                *slot = Tensor::from_slice(&values, &shape)?;
+            }
         }
 
-        Ok(())
-    }
-
-    /// Simulate receiving gradient from another rank
-    fn simulate_receive_gradient(&self, _from_rank: usize, _name: &str) -> Result<Tensor> {
-        // In a real implementation, this would use MPI or other communication backend
-        // For this implementation, we'll create a dummy tensor
-        Ok(Tensor::zeros(&[1])?)
-    }
-
-    /// Simulate sending gradient to another rank
-    fn simulate_send_gradient(
-        &self,
-        _to_rank: usize,
-        _name: &str,
-        _gradient: &Tensor,
-    ) -> Result<()> {
-        // In a real implementation, this would use MPI or other communication backend
         Ok(())
     }
 
@@ -700,7 +738,216 @@ impl HierarchicalAggregator {
 
 #[cfg(test)]
 mod tests {
+    use super::transport::InProcessSession;
     use super::*;
+
+    /// Run `body` on `world_size` ranks in parallel, each with its own
+    /// aggregator bound to a shared in-process transport.
+    fn spmd_aggregators<R, F>(
+        num_nodes: usize,
+        devices_per_node: usize,
+        strategy: AggregationStrategy,
+        body: F,
+    ) -> Vec<R>
+    where
+        R: Send + 'static,
+        F: Fn(usize, &mut HierarchicalAggregator) -> R + Send + Sync + 'static,
+    {
+        let world_size = num_nodes * devices_per_node;
+        let session = InProcessSession::new(world_size).expect("session must be created in test");
+        let body = std::sync::Arc::new(body);
+
+        let handles: Vec<_> = (0..world_size)
+            .map(|global_rank| {
+                let transport: Arc<dyn Transport> = Arc::new(
+                    session.transport(global_rank).expect("rank must be claimable in test"),
+                );
+                let mut config = HierarchicalConfig::new(
+                    num_nodes,
+                    devices_per_node,
+                    global_rank / devices_per_node,
+                    global_rank % devices_per_node,
+                );
+                config.strategy = strategy;
+                let body = std::sync::Arc::clone(&body);
+                std::thread::spawn(move || {
+                    let mut aggregator = HierarchicalAggregator::with_transport(config, transport)
+                        .expect("aggregator must build in test");
+                    body(global_rank, &mut aggregator)
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("rank thread must not panic in test"))
+            .collect()
+    }
+
+    fn gradient_map(rank: usize) -> HashMap<String, Tensor> {
+        let mut gradients = HashMap::new();
+        gradients.insert(
+            "layer.0.weight".to_string(),
+            Tensor::from_slice(&[rank as f32, rank as f32 + 1.0, rank as f32 + 2.0], &[3])
+                .expect("tensor must build in test"),
+        );
+        gradients.insert(
+            "layer.0.bias".to_string(),
+            Tensor::from_slice(&[rank as f32 * 0.5], &[1]).expect("tensor must build in test"),
+        );
+        gradients
+    }
+
+    /// Reference: elementwise sum over all ranks of `gradient_map`.
+    fn expected_sums(world_size: usize) -> HashMap<String, Vec<f32>> {
+        let mut expected = HashMap::new();
+        expected.insert(
+            "layer.0.weight".to_string(),
+            (0..3)
+                .map(|i| (0..world_size).map(|r| r as f32 + i as f32).sum::<f32>())
+                .collect::<Vec<f32>>(),
+        );
+        expected.insert(
+            "layer.0.bias".to_string(),
+            vec![(0..world_size).map(|r| r as f32 * 0.5).sum::<f32>()],
+        );
+        expected
+    }
+
+    fn assert_matches_reference(
+        results: &[HashMap<String, Tensor>],
+        world_size: usize,
+        label: &str,
+    ) {
+        let expected = expected_sums(world_size);
+        for (rank, gradients) in results.iter().enumerate() {
+            for (name, want) in &expected {
+                let got = gradients
+                    .get(name)
+                    .unwrap_or_else(|| panic!("{label}: rank {rank} lost `{name}`"))
+                    .to_vec_f32()
+                    .expect("tensor read must succeed in test");
+                assert_eq!(
+                    got.len(),
+                    want.len(),
+                    "{label}: rank {rank} `{name}` length"
+                );
+                for (got_value, want_value) in got.iter().zip(want) {
+                    approx::assert_relative_eq!(got_value, want_value, epsilon = 1e-4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ring_all_reduce_matches_elementwise_sum() {
+        let world_size = 4;
+        let results = spmd_aggregators(2, 2, AggregationStrategy::Ring, |rank, aggregator| {
+            let mut gradients = gradient_map(rank);
+            aggregator
+                .hierarchical_all_reduce(&mut gradients)
+                .expect("all-reduce must succeed in test");
+            gradients
+        });
+        assert_matches_reference(&results, world_size, "ring");
+    }
+
+    #[test]
+    fn tree_all_reduce_matches_elementwise_sum() {
+        let world_size = 4;
+        let results =
+            spmd_aggregators(1, 4, AggregationStrategy::BinaryTree, |rank, aggregator| {
+                let mut gradients = gradient_map(rank);
+                aggregator
+                    .hierarchical_all_reduce(&mut gradients)
+                    .expect("all-reduce must succeed in test");
+                gradients
+            });
+        assert_matches_reference(&results, world_size, "tree");
+    }
+
+    #[test]
+    fn butterfly_all_reduce_matches_elementwise_sum() {
+        let world_size = 4;
+        let results = spmd_aggregators(2, 2, AggregationStrategy::Butterfly, |rank, aggregator| {
+            let mut gradients = gradient_map(rank);
+            aggregator
+                .hierarchical_all_reduce(&mut gradients)
+                .expect("all-reduce must succeed in test");
+            gradients
+        });
+        assert_matches_reference(&results, world_size, "butterfly");
+    }
+
+    #[test]
+    fn all_reduce_result_depends_on_peer_data() {
+        // The previous implementation replaced every non-root gradient with a
+        // shape-[1] zero tensor, so this asserts both the shape and the fact
+        // that peers actually contribute.
+        let results = spmd_aggregators(1, 2, AggregationStrategy::Ring, |rank, aggregator| {
+            let mut gradients = HashMap::new();
+            gradients.insert(
+                "w".to_string(),
+                Tensor::from_slice(&[if rank == 0 { 1.0 } else { 10.0 }; 4], &[4])
+                    .expect("tensor must build in test"),
+            );
+            aggregator
+                .hierarchical_all_reduce(&mut gradients)
+                .expect("all-reduce must succeed in test");
+            gradients
+                .get("w")
+                .expect("gradient must survive")
+                .to_vec_f32()
+                .expect("tensor read must succeed in test")
+        });
+
+        for values in &results {
+            assert_eq!(values.len(), 4, "shape must be preserved");
+            assert_eq!(values, &vec![11.0f32; 4]);
+        }
+    }
+
+    #[test]
+    fn aggregation_without_transport_errors_instead_of_faking() {
+        let config = HierarchicalConfig::new(2, 2, 0, 0);
+        let mut aggregator =
+            HierarchicalAggregator::new(config).expect("aggregator must build in test");
+        assert!(!aggregator.has_communicator());
+
+        let mut gradients = gradient_map(0);
+        let err = aggregator
+            .hierarchical_all_reduce(&mut gradients)
+            .expect_err("aggregation without a transport must fail");
+        assert!(matches!(
+            err.downcast_ref::<AggregationError>(),
+            Some(AggregationError::NoCommunicator { .. })
+        ));
+    }
+
+    #[test]
+    fn transport_world_size_must_match_configuration() {
+        let session = InProcessSession::new(3).expect("session must be created in test");
+        let transport: Arc<dyn Transport> =
+            Arc::new(session.transport(0).expect("rank must be claimable in test"));
+        let config = HierarchicalConfig::new(2, 2, 0, 0); // world size 4, not 3
+        let err = match HierarchicalAggregator::with_transport(config, transport) {
+            Ok(_) => panic!("mismatched world size must be rejected"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err.downcast_ref::<AggregationError>(),
+            Some(AggregationError::WorldSizeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn butterfly_rejects_non_power_of_two_world_size() {
+        let results = spmd_aggregators(1, 3, AggregationStrategy::Butterfly, |rank, aggregator| {
+            let mut gradients = gradient_map(rank);
+            aggregator.hierarchical_all_reduce(&mut gradients).is_err()
+        });
+        assert!(results.iter().all(|failed| *failed));
+    }
 
     #[test]
     fn test_hierarchical_config() {

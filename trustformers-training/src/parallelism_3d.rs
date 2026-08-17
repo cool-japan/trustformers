@@ -120,7 +120,17 @@ pub struct Parallelism3D {
 
     // Memory management
     memory_manager: Arc<Mutex<MemoryManager>>,
+
+    // Per-stage computation supplied by the caller (see
+    // `Parallelism3D::set_stage_executor`).
+    stage_executor: Arc<RwLock<Option<StageExecutor>>>,
 }
+
+/// Computation executed by one pipeline stage: `(inputs, stage) -> outputs`.
+///
+/// 3D parallelism cannot discover a model's per-stage layers through the
+/// [`Model`] trait, so the caller supplies this.
+pub type StageExecutor = Box<dyn Fn(&[Tensor], usize) -> Result<Vec<Tensor>> + Send + Sync>;
 
 /// Pipeline execution state
 #[derive(Debug, Default)]
@@ -209,7 +219,26 @@ impl Parallelism3D {
             pipeline_state: Arc::new(RwLock::new(PipelineState::default())),
             comm_stats: Arc::new(Mutex::new(CommunicationStats::default())),
             memory_manager: Arc::new(Mutex::new(memory_manager)),
+            stage_executor: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Register the computation each pipeline stage performs.
+    ///
+    /// The closure receives the stage's inputs and its index and returns the
+    /// stage's outputs. Without it, [`Parallelism3D::forward_pass`] fails with
+    /// an explicit error rather than passing its inputs through unchanged.
+    pub fn set_stage_executor(&self, executor: StageExecutor) {
+        let mut slot = self.stage_executor.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(executor);
+    }
+
+    /// Whether a stage executor has been registered.
+    pub fn has_stage_executor(&self) -> bool {
+        self.stage_executor
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
     }
 
     /// Execute forward pass with 3D parallelism
@@ -265,9 +294,11 @@ impl Parallelism3D {
         let start_time = Instant::now();
 
         // Step 1: Reduce-scatter within model parallel group
-        if self.config.mp_size > 1 {
-            self.mp_reduce_scatter_gradients(gradients)?;
-        }
+        let shapes = if self.config.mp_size > 1 {
+            Some(self.mp_reduce_scatter_gradients(gradients)?)
+        } else {
+            None
+        };
 
         // Step 2: All-reduce within data parallel group
         if self.config.dp_size > 1 {
@@ -275,8 +306,8 @@ impl Parallelism3D {
         }
 
         // Step 3: All-gather within model parallel group
-        if self.config.mp_size > 1 {
-            self.mp_all_gather_gradients(gradients)?;
+        if let Some(shapes) = shapes {
+            self.mp_all_gather_gradients(gradients, &shapes)?;
         }
 
         // Update communication statistics
@@ -381,7 +412,7 @@ impl Parallelism3D {
         &self,
         model: &M,
         inputs: &[Tensor],
-        _micro_batch_id: usize,
+        micro_batch_id: usize,
     ) -> Result<Vec<Tensor>> {
         // GPipe: Sequential forward passes, then sequential backward passes
 
@@ -391,17 +422,17 @@ impl Parallelism3D {
 
             // Send to next stage
             if self.config.pp_size > 1 {
-                self.send_to_next_stage(&outputs)?;
+                self.send_to_next_stage(&outputs, micro_batch_id)?;
             }
 
             Ok(outputs)
         } else {
             // Intermediate/final stages: receive from previous, process, send to next
-            let received_inputs = self.receive_from_previous_stage()?;
+            let received_inputs = self.receive_from_previous_stage(micro_batch_id)?;
             let outputs = self.process_pipeline_stage(model, &received_inputs, self.pp_rank)?;
 
             if self.pp_rank < self.config.pp_size - 1 {
-                self.send_to_next_stage(&outputs)?;
+                self.send_to_next_stage(&outputs, micro_batch_id)?;
             }
 
             Ok(outputs)
@@ -510,57 +541,231 @@ impl Parallelism3D {
     }
 
     // Communication methods
-    fn mp_reduce_scatter_gradients(&self, gradients: &mut [Tensor]) -> Result<()> {
-        // Reduce-scatter operation within model parallel group
-        // This distributes the reduction computation across MP ranks
-        for _tensor in gradients.iter_mut() {
-            // Simplified: would implement actual reduce-scatter
+
+    /// Reduce-scatter every gradient within the model-parallel group.
+    ///
+    /// Each MP rank ends up owning a contiguous slice of every gradient, which
+    /// is what makes the subsequent data-parallel all-reduce cheaper by a factor
+    /// of `mp_size`. The original shapes are returned so
+    /// [`Self::mp_all_gather_gradients`] can restore them.
+    fn mp_reduce_scatter_gradients(&self, gradients: &mut [Tensor]) -> Result<Vec<Vec<usize>>> {
+        let mut shapes = Vec::with_capacity(gradients.len());
+        for tensor in gradients.iter_mut() {
+            shapes.push(tensor.shape());
+            *tensor = self.mp_group.reduce_scatter(tensor)?;
         }
-        Ok(())
+        Ok(shapes)
     }
 
+    /// All-reduce and average the gradients within the data-parallel group.
     fn dp_all_reduce_gradients(&self, gradients: &mut [Tensor]) -> Result<()> {
-        // All-reduce operation within data parallel group
         self.dp_group.all_reduce(gradients)?;
 
-        // Average gradients by DP group size
-        for _tensor in gradients.iter_mut() {
-            // tensor.div_scalar(self.config.dp_size as f32)?;
+        // `all_reduce` sums; data parallelism needs the mean.
+        let dp_size = self.dp_group.world_size().max(1);
+        if dp_size > 1 {
+            let scale = 1.0 / dp_size as f32;
+            for tensor in gradients.iter_mut() {
+                *tensor = tensor.scalar_mul(scale)?;
+            }
         }
 
         Ok(())
     }
 
-    fn mp_all_gather_gradients(&self, gradients: &mut [Tensor]) -> Result<()> {
-        // All-gather operation within model parallel group
-        // This assembles the full gradient tensors from scattered pieces
-        for _tensor in gradients.iter_mut() {
-            // Simplified: would implement actual all-gather
+    /// All-gather the scattered gradient slices back into full tensors.
+    fn mp_all_gather_gradients(
+        &self,
+        gradients: &mut [Tensor],
+        shapes: &[Vec<usize>],
+    ) -> Result<()> {
+        for (index, tensor) in gradients.iter_mut().enumerate() {
+            let shards = self.mp_group.all_gather(tensor)?;
+            let mut values = Vec::new();
+            for shard in &shards {
+                values.extend(shard.to_vec_f32()?);
+            }
+
+            let shape = shapes.get(index).cloned().unwrap_or_else(|| vec![values.len()]);
+            let expected: usize = shape.iter().product();
+            if values.len() != expected {
+                return Err(anyhow!(
+                    "model-parallel all-gather reassembled {} elements but the original gradient \
+                     had shape {:?} ({} elements)",
+                    values.len(),
+                    shape,
+                    expected
+                ));
+            }
+            *tensor = Tensor::from_slice(&values, &shape)?;
         }
         Ok(())
     }
 
-    fn send_to_next_stage(&self, _tensors: &[Tensor]) -> Result<()> {
-        // Send tensors to next pipeline stage
-        // In a real implementation, this would use the PP process group
+    /// Message tag for one pipeline transfer.
+    ///
+    /// Both endpoints derive the same value from the micro-batch id and the
+    /// message role, so no call-ordering convention is needed between stages
+    /// that execute different code paths.
+    fn pipeline_tag(micro_batch_id: usize, part: u64) -> u64 {
+        (micro_batch_id as u64) << 8 | part
+    }
+
+    /// Send `tensors` to the next pipeline stage.
+    ///
+    /// Wire protocol, in order:
+    /// 1. a one-element header holding the manifest length,
+    /// 2. the manifest `[count, ndim_0, dims_0…, ndim_1, dims_1…, …]`,
+    /// 3. each tensor flattened to `[n]`.
+    ///
+    /// Shapes travel with the data, so the receiver reconstructs exactly what
+    /// was sent.
+    fn send_to_next_stage(&self, tensors: &[Tensor], micro_batch_id: usize) -> Result<()> {
+        let next_rank = self.pp_rank + 1;
+        if next_rank >= self.config.pp_size {
+            return Err(anyhow!(
+                "pipeline stage {} is the last stage; there is no next stage to send to",
+                self.pp_rank
+            ));
+        }
+        self.require_pipeline_transport("send_to_next_stage")?;
+
+        let mut manifest: Vec<f32> = vec![tensors.len() as f32];
+        for tensor in tensors {
+            let shape = tensor.shape();
+            manifest.push(shape.len() as f32);
+            manifest.extend(shape.iter().map(|dim| *dim as f32));
+        }
+
+        let header = Tensor::from_slice(&[manifest.len() as f32], &[1])?;
+        self.pp_group.send(next_rank, Self::pipeline_tag(micro_batch_id, 0), &header)?;
+
+        let manifest_len = manifest.len();
+        let manifest_tensor = Tensor::from_slice(&manifest, &[manifest_len])?;
+        self.pp_group.send(
+            next_rank,
+            Self::pipeline_tag(micro_batch_id, 1),
+            &manifest_tensor,
+        )?;
+
+        for (index, tensor) in tensors.iter().enumerate() {
+            let values = tensor.to_vec_f32()?;
+            let length = values.len();
+            let flat = Tensor::from_slice(&values, &[length])?;
+            self.pp_group.send(
+                next_rank,
+                Self::pipeline_tag(micro_batch_id, 2 + index as u64),
+                &flat,
+            )?;
+        }
+
+        {
+            let mut stats = self.comm_stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            stats.total_bytes_communicated += tensors
+                .iter()
+                .map(|tensor| (tensor.len() * std::mem::size_of::<f32>()) as u64)
+                .sum::<u64>();
+        }
         Ok(())
     }
 
-    fn receive_from_previous_stage(&self) -> Result<Vec<Tensor>> {
-        // Receive tensors from previous pipeline stage
-        // In a real implementation, this would use the PP process group
-        Ok(vec![Tensor::zeros(&[1])?]) // Placeholder
+    /// Receive the tensors sent by the previous pipeline stage, restoring their
+    /// original shapes.
+    fn receive_from_previous_stage(&self, micro_batch_id: usize) -> Result<Vec<Tensor>> {
+        if self.pp_rank == 0 {
+            return Err(anyhow!(
+                "pipeline stage 0 has no previous stage to receive from"
+            ));
+        }
+        self.require_pipeline_transport("receive_from_previous_stage")?;
+        let previous_rank = self.pp_rank - 1;
+
+        let header = self
+            .pp_group
+            .recv(previous_rank, Self::pipeline_tag(micro_batch_id, 0), &[1])?
+            .to_vec_f32()?;
+        let manifest_len = *header
+            .first()
+            .ok_or_else(|| anyhow!("pipeline header from stage {previous_rank} was empty"))?
+            as usize;
+
+        let manifest = self
+            .pp_group
+            .recv(
+                previous_rank,
+                Self::pipeline_tag(micro_batch_id, 1),
+                &[manifest_len],
+            )?
+            .to_vec_f32()?;
+
+        let mut cursor = manifest.iter().copied();
+        let count = cursor.next().ok_or_else(|| anyhow!("pipeline manifest was empty"))? as usize;
+
+        let mut shapes = Vec::with_capacity(count);
+        for _ in 0..count {
+            let ndim = cursor
+                .next()
+                .ok_or_else(|| anyhow!("pipeline manifest ended before the rank count"))?
+                as usize;
+            let mut shape = Vec::with_capacity(ndim);
+            for _ in 0..ndim {
+                shape.push(
+                    cursor
+                        .next()
+                        .ok_or_else(|| anyhow!("pipeline manifest ended before the dimensions"))?
+                        as usize,
+                );
+            }
+            shapes.push(shape);
+        }
+
+        let mut tensors = Vec::with_capacity(count);
+        for (index, shape) in shapes.into_iter().enumerate() {
+            let elements: usize = shape.iter().product();
+            let flat = self.pp_group.recv(
+                previous_rank,
+                Self::pipeline_tag(micro_batch_id, 2 + index as u64),
+                &[elements],
+            )?;
+            tensors.push(Tensor::from_slice(&flat.to_vec_f32()?, &shape)?);
+        }
+
+        Ok(tensors)
     }
 
+    fn require_pipeline_transport(&self, operation: &str) -> Result<()> {
+        if self.config.pp_size > 1 && !self.pp_group.supports_point_to_point() {
+            return Err(anyhow!(
+                "`{operation}` needs a pipeline process group with a real transport; use \
+                 DistributedBackend::InProcess or DistributedBackend::Tcp"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Run one pipeline stage's computation.
+    ///
+    /// The [`Model`] trait exposes no per-layer API, so a stage's subset of
+    /// layers cannot be discovered generically. Callers therefore register the
+    /// per-stage computation with
+    /// [`Parallelism3D::set_stage_executor`]; without one this returns an error
+    /// rather than echoing its input and pretending the stage ran.
     fn process_pipeline_stage<M: Model>(
         &self,
         _model: &M,
         inputs: &[Tensor],
-        _stage: usize,
+        stage: usize,
     ) -> Result<Vec<Tensor>> {
-        // Process inputs through a specific pipeline stage
-        // This would involve running a subset of model layers
-        Ok(inputs.to_vec()) // Simplified
+        let executor = self.stage_executor.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        match executor.as_ref() {
+            Some(executor) => executor(inputs, stage),
+            None => Err(anyhow!(
+                "no stage executor registered for pipeline stage {stage}: the Model trait exposes \
+                 no per-layer API, so 3D parallelism cannot slice the model on its own. Register \
+                 the per-stage computation with Parallelism3D::set_stage_executor"
+            )),
+        }
     }
 
     // Memory optimization methods

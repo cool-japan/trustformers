@@ -77,43 +77,116 @@ impl GemmaRotaryEmbedding {
         }
     }
 
-    /// Apply rotary embedding to query and key tensors
+    /// Apply rotary embedding to query and key tensors.
+    ///
+    /// Implements RoPE (Su et al. 2021) with the standard "rotate-half"
+    /// convention: each head's `head_dim`-wide channel vector is split into
+    /// two halves `(x1, x2)` and rotated as
+    /// `(x1*cos - x2*sin, x1*sin + x2*cos)` using a position-dependent angle
+    /// `pos * base^(-2i/head_dim)`.
+    ///
+    /// `q` and `k` are expected to have shape `[seq_len, num_heads * head_dim]`
+    /// (q and k may have a different number of heads, e.g. under
+    /// grouped/multi-query attention); the number of heads for each tensor is
+    /// inferred from its last dimension so every head is rotated, not just
+    /// the first.
     pub fn apply_rotary_emb(
         &self,
         q: &Tensor,
         k: &Tensor,
         position_ids: &[usize],
     ) -> Result<(Tensor, Tensor)> {
-        // Simplified RoPE implementation
-        // In a production implementation, this would have proper complex number handling
-        let (rotated_q, rotated_k) = match (q, k) {
+        match (q, k) {
             (Tensor::F32(q_arr), Tensor::F32(k_arr)) => {
-                let rotated_q = q_arr.clone();
-                let rotated_k = k_arr.clone();
+                if self.dim == 0 {
+                    return Err(tensor_op_error("gemma_rope", "head_dim must be > 0"));
+                }
+                let q_shape = q_arr.shape().to_vec();
+                let k_shape = k_arr.shape().to_vec();
+                let q_last = *q_shape
+                    .last()
+                    .ok_or_else(|| tensor_op_error("gemma_rope", "q tensor has no dimensions"))?;
+                let k_last = *k_shape
+                    .last()
+                    .ok_or_else(|| tensor_op_error("gemma_rope", "k tensor has no dimensions"))?;
+                if !q_last.is_multiple_of(self.dim) || !k_last.is_multiple_of(self.dim) {
+                    return Err(tensor_op_error(
+                        "gemma_rope",
+                        format!(
+                            "last dim (q={q_last}, k={k_last}) must be a multiple of head_dim={}",
+                            self.dim
+                        ),
+                    ));
+                }
+                let q_heads = q_last / self.dim;
+                let k_heads = k_last / self.dim;
 
-                // Apply rotary embedding (simplified)
-                for &pos in position_ids.iter() {
-                    for head in 0..(self.dim / 2) {
-                        let freq = 1.0 / self.base.powf(2.0 * head as f32 / self.dim as f32);
-                        let angle = pos as f32 * freq;
-                        let _cos_val = angle.cos();
-                        let _sin_val = angle.sin();
+                let mut q_data = q_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gemma_rope", "q tensor not contiguous"))?
+                    .to_vec();
+                let mut k_data = k_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gemma_rope", "k tensor not contiguous"))?
+                    .to_vec();
 
-                        // Apply rotation (simplified - would need proper tensor operations)
-                    }
+                let seq_len_q = q_data.len() / q_last.max(1);
+                let seq_len_k = k_data.len() / k_last.max(1);
+                if seq_len_q != position_ids.len() || seq_len_k != position_ids.len() {
+                    return Err(tensor_op_error(
+                        "gemma_rope",
+                        "position_ids length must match the sequence length of q and k",
+                    ));
                 }
 
-                (Tensor::F32(rotated_q), Tensor::F32(rotated_k))
-            },
-            _ => {
-                return Err(tensor_op_error(
-                    "tensor_operation",
-                    "Unsupported tensor types for RoPE",
+                apply_rope_rotate_half(&mut q_data, q_heads, self.dim, self.base, position_ids);
+                apply_rope_rotate_half(&mut k_data, k_heads, self.dim, self.base, position_ids);
+
+                Ok((
+                    Tensor::from_vec(q_data, &q_shape)?,
+                    Tensor::from_vec(k_data, &k_shape)?,
                 ))
             },
-        };
+            _ => Err(tensor_op_error(
+                "tensor_operation",
+                "Unsupported tensor types for RoPE",
+            )),
+        }
+    }
+}
 
-        Ok((rotated_q, rotated_k))
+/// Rotate `data` (row-major, shape `[seq_len, num_heads * head_dim]`) in
+/// place using the "rotate-half" RoPE convention. Each of the `num_heads`
+/// blocks in every row is rotated independently using the same
+/// position-dependent angles, so multi-head tensors are fully rotated (not
+/// just the first head).
+fn apply_rope_rotate_half(
+    data: &mut [f32],
+    num_heads: usize,
+    head_dim: usize,
+    base: f32,
+    position_ids: &[usize],
+) {
+    let half = head_dim / 2;
+    if half == 0 {
+        return;
+    }
+    let row_width = num_heads * head_dim;
+    for (row, &pos) in position_ids.iter().enumerate() {
+        let row_off = row * row_width;
+        for h in 0..num_heads {
+            let head_off = row_off + h * head_dim;
+            for i in 0..half {
+                let freq = 1.0 / base.powf(2.0 * i as f32 / head_dim as f32);
+                let angle = pos as f32 * freq;
+                let cos_v = angle.cos();
+                let sin_v = angle.sin();
+                let x1 = data[head_off + i];
+                let x2 = data[head_off + i + half];
+                data[head_off + i] = x1 * cos_v - x2 * sin_v;
+                data[head_off + i + half] = x1 * sin_v + x2 * cos_v;
+            }
+        }
     }
 }
 
@@ -190,14 +263,12 @@ impl Layer for GemmaMLP {
 }
 
 /// Gemma Attention layer with multi-query attention support
-#[allow(dead_code)]
 pub struct GemmaAttention {
     q_proj: Linear,
     k_proj: Linear,
     v_proj: Linear,
     o_proj: Linear,
     rotary_emb: GemmaRotaryEmbedding,
-    #[allow(dead_code)]
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -269,6 +340,12 @@ impl Layer for GemmaAttention {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Real scaled dot-product attention with causal masking and
+    /// grouped/multi-query KV head repetition.
+    ///
+    /// Shapes: `input: [seq_len, hidden_size]`, `q: [seq_len, num_heads *
+    /// head_dim]`, `k, v: [seq_len, num_kv_heads * head_dim]`. Each query
+    /// head `h` reads from KV head `h / (num_heads / num_kv_heads)`.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         let shape = input.shape();
         let seq_len = shape[shape.len() - 2];
@@ -284,13 +361,76 @@ impl Layer for GemmaAttention {
         // Apply rotary embedding
         let (q_rope, k_rope) = self.rotary_emb.apply_rotary_emb(&q, &k, &position_ids)?;
 
-        // Simplified attention mechanism (would need proper multi-query attention in production)
         match (&q_rope, &k_rope, &v) {
-            (Tensor::F32(q_arr), Tensor::F32(_k_arr), Tensor::F32(v_arr)) => {
-                // Simplified attention: scale and combine
-                let scaled_q = q_arr.mapv(|x| x * self.scaling);
-                let attention_output = &scaled_q + v_arr; // Simplified combination
-                self.o_proj.forward(Tensor::F32(attention_output))
+            (Tensor::F32(q_arr), Tensor::F32(k_arr), Tensor::F32(v_arr)) => {
+                let q_data = q_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gemma_attn", "q tensor not contiguous"))?;
+                let k_data = k_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gemma_attn", "k tensor not contiguous"))?;
+                let v_data = v_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gemma_attn", "v tensor not contiguous"))?;
+
+                if self.num_heads == 0
+                    || self.num_kv_heads == 0
+                    || !self.num_heads.is_multiple_of(self.num_kv_heads)
+                {
+                    return Err(tensor_op_error(
+                        "gemma_attn",
+                        "num_heads must be a positive multiple of num_kv_heads",
+                    ));
+                }
+                let q_width = self.num_heads * self.head_dim;
+                let kv_width = self.num_kv_heads * self.head_dim;
+                if q_data.len() != seq_len * q_width {
+                    return Err(tensor_op_error("gemma_attn", "unexpected q tensor size"));
+                }
+                if k_data.len() != seq_len * kv_width || v_data.len() != seq_len * kv_width {
+                    return Err(tensor_op_error(
+                        "gemma_attn",
+                        "unexpected k/v tensor size for the configured num_kv_heads",
+                    ));
+                }
+                let group = self.num_heads / self.num_kv_heads;
+
+                let mut out = vec![0f32; seq_len * q_width];
+                for h in 0..self.num_heads {
+                    let kv_h = h / group;
+                    for i in 0..seq_len {
+                        let q_off = i * q_width + h * self.head_dim;
+                        // Causal: query position i attends to keys 0..=i only.
+                        let mut scores = Vec::with_capacity(i + 1);
+                        for j in 0..=i {
+                            let k_off = j * kv_width + kv_h * self.head_dim;
+                            let dot: f32 = (0..self.head_dim)
+                                .map(|d| q_data[q_off + d] * k_data[k_off + d])
+                                .sum();
+                            scores.push(dot * self.scaling);
+                        }
+                        let max_val = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                        let mut weights = vec![0f32; scores.len()];
+                        let mut sum = 0f32;
+                        for (idx, &s) in scores.iter().enumerate() {
+                            let e = (s - max_val).exp();
+                            weights[idx] = e;
+                            sum += e;
+                        }
+                        let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+                        let out_off = i * q_width + h * self.head_dim;
+                        for (j, &w) in weights.iter().enumerate() {
+                            let wn = w * inv_sum;
+                            let v_off = j * kv_width + kv_h * self.head_dim;
+                            for d in 0..self.head_dim {
+                                out[out_off + d] += wn * v_data[v_off + d];
+                            }
+                        }
+                    }
+                }
+
+                let attended = Tensor::from_vec(out, &[seq_len, q_width])?;
+                self.o_proj.forward(attended)
             },
             _ => Err(tensor_op_error(
                 "tensor_operation",

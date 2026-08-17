@@ -207,7 +207,7 @@ impl Optimizer for EVA {
 
         match (parameter, grad) {
             (Tensor::F32(param), Tensor::F32(grad_data)) => {
-                let param_id = format!("{:p}", param.as_ptr());
+                let param_id = self.state.param_key(param.as_ptr() as usize, param.len())?;
                 let size = grad_data.len();
 
                 // Initialize state if needed

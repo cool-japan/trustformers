@@ -39,7 +39,7 @@ impl fmt::Display for AwqError {
             AwqError::EmptyWeight => write!(f, "AWQ: weight matrix is empty"),
             AwqError::DimensionMismatch => {
                 write!(f, "AWQ: weight dimensions do not match rows × cols")
-            }
+            },
             AwqError::InvalidConfig(msg) => write!(f, "AWQ: invalid configuration — {msg}"),
             AwqError::ActivationChannelMismatch {
                 weight_cols,
@@ -51,7 +51,7 @@ impl fmt::Display for AwqError {
             ),
             AwqError::QuantizationFailed(msg) => {
                 write!(f, "AWQ: quantization failed — {msg}")
-            }
+            },
         }
     }
 }
@@ -341,11 +341,7 @@ fn quantize_and_reconstruct(
 /// Frobenius norm of the element-wise difference between two equally-shaped
 /// flat matrices.
 fn frobenius_error(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).powi(2))
-        .sum::<f32>()
-        .sqrt()
+    a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f32>().sqrt()
 }
 
 // ---------------------------------------------------------------------------
@@ -392,11 +388,7 @@ pub fn awq_search_scales(
     // Generate candidate α values in log-space.
     let log_lo = lo.ln();
     let log_hi = hi.ln();
-    let step = if n > 1 {
-        (log_hi - log_lo) / (n as f32 - 1.0)
-    } else {
-        0.0
-    };
+    let step = if n > 1 { (log_hi - log_lo) / (n as f32 - 1.0) } else { 0.0 };
 
     let candidates: Vec<f32> = (0..n).map(|i| (log_lo + step * i as f32).exp()).collect();
 
@@ -431,16 +423,13 @@ pub fn awq_search_scales(
             .collect();
 
         // Quantize + dequantize the scaled weight.
-        let (w_dequant_scaled, _, _) =
-            quantize_and_reconstruct(&w_scaled, rows, cols, config);
+        let (w_dequant_scaled, _, _) = quantize_and_reconstruct(&w_scaled, rows, cols, config);
 
         // Rescale back: W_dequant[r,c] = W_dequant_scaled[r,c] * s_c
         let cs2 = &channel_scales;
         let wds = &w_dequant_scaled;
         let w_dequant: Vec<f32> = (0..rows)
-            .flat_map(|r| {
-                (0..cols).map(move |c| wds[r * cols + c] * cs2[c])
-            })
+            .flat_map(|r| (0..cols).map(move |c| wds[r * cols + c] * cs2[c]))
             .collect();
 
         let err = frobenius_error(weight, &w_dequant);
@@ -514,7 +503,12 @@ fn pack_codes_to_i32(values: &[i64], bits: u32, asymmetric: bool) -> Vec<i32> {
 /// Unpack `num_elements` codes from i32 packed words.
 ///
 /// Returns signed i64 values, undoing the offset applied during packing.
-fn unpack_codes_from_i32(packed: &[i32], bits: u32, num_elements: usize, asymmetric: bool) -> Vec<i64> {
+fn unpack_codes_from_i32(
+    packed: &[i32],
+    bits: u32,
+    num_elements: usize,
+    asymmetric: bool,
+) -> Vec<i64> {
     let vals_per_word = 32 / bits as usize;
     let offset: i64 = if asymmetric { 0 } else { 1i64 << (bits - 1) };
     let mask = (1u64 << bits) - 1;
@@ -599,9 +593,7 @@ pub fn awq_quantize_layer(
         for g in 0..num_groups {
             let r_start = g * config.group_size;
             let r_end = (r_start + config.group_size).min(rows);
-            let group: Vec<f32> = (r_start..r_end)
-                .map(|r| w_awq[r * cols + col])
-                .collect();
+            let group: Vec<f32> = (r_start..r_end).map(|r| w_awq[r * cols + col]).collect();
             let (sc, zp) = group_scale_zp(&group, min_q, max_q, asymmetric);
             group_scales[g * cols + col] = sc;
             group_zeros[g * cols + col] = zp;
@@ -660,11 +652,8 @@ pub fn awq_dequantize_layer(layer: &AwqQuantizedLayer) -> Result<Vec<f32>, AwqEr
             let q = q_vals[row * layer.cols + col];
             // Dequantize the AWQ-transformed weight, then rescale.
             let w_awq = dequantize_i64_val(q, sc, zp);
-            let input_scale = if col < layer.input_scales.len() {
-                layer.input_scales[col]
-            } else {
-                1.0_f32
-            };
+            let input_scale =
+                if col < layer.input_scales.len() { layer.input_scales[col] } else { 1.0_f32 };
             output[row * layer.cols + col] = w_awq * input_scale;
         }
     }
@@ -734,10 +723,7 @@ mod tests {
 
     #[test]
     fn test_dominant_channels() {
-        let activations: Vec<Vec<f32>> = vec![
-            vec![1.0, 10.0, 2.0, 5.0],
-            vec![1.5, 9.0, 3.0, 6.0],
-        ];
+        let activations: Vec<Vec<f32>> = vec![vec![1.0, 10.0, 2.0, 5.0], vec![1.5, 9.0, 3.0, 6.0]];
         let stats = AwqActivationStats::from_activations(&activations, 4);
         let top2 = stats.dominant_channels(2);
         assert_eq!(top2.len(), 2);
@@ -754,15 +740,9 @@ mod tests {
         let rows = 4;
         let cols = 4;
         let weight: Vec<f32> = vec![
-            0.1, -0.5, 0.3, -0.2,
-            -0.4, 0.8, -0.1, 0.6,
-            0.7, -0.3, 0.5, -0.9,
-            -0.2, 0.4, -0.7, 0.1,
+            0.1, -0.5, 0.3, -0.2, -0.4, 0.8, -0.1, 0.6, 0.7, -0.3, 0.5, -0.9, -0.2, 0.4, -0.7, 0.1,
         ];
-        let activations: Vec<Vec<f32>> = vec![
-            vec![1.0, 2.0, 0.5, 3.0],
-            vec![1.5, 2.5, 0.8, 2.5],
-        ];
+        let activations: Vec<Vec<f32>> = vec![vec![1.0, 2.0, 0.5, 3.0], vec![1.5, 2.5, 0.8, 2.5]];
         let stats = AwqActivationStats::from_activations(&activations, cols);
         let config = AwqConfig {
             bits: 4,
@@ -770,8 +750,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = awq_search_scales(&weight, rows, cols, &stats, &config)
-            .expect("scale search failed");
+        let result =
+            awq_search_scales(&weight, rows, cols, &stats, &config).expect("scale search failed");
         assert_eq!(result.scales.len(), cols);
         assert!(result.best_grid_error >= 0.0);
         assert_eq!(result.num_groups, 1);
@@ -791,9 +771,7 @@ mod tests {
         // relative to naively quantizing the original weights.
         let rows = 8;
         let cols = 8;
-        let weight: Vec<f32> = (0..rows * cols)
-            .map(|i| ((i as f32) - 32.0) * 0.05)
-            .collect();
+        let weight: Vec<f32> = (0..rows * cols).map(|i| ((i as f32) - 32.0) * 0.05).collect();
 
         // High-variance activations on some channels
         let activations: Vec<Vec<f32>> = (0..10)
@@ -836,9 +814,7 @@ mod tests {
     fn test_quantize_dequantize_round_trip() {
         let rows = 8;
         let cols = 8;
-        let weight: Vec<f32> = (0..rows * cols)
-            .map(|i| ((i as f32) - 32.0) / 32.0)
-            .collect();
+        let weight: Vec<f32> = (0..rows * cols).map(|i| ((i as f32) - 32.0) / 32.0).collect();
 
         let config = AwqConfig {
             bits: 4,
@@ -959,7 +935,10 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(AwqError::ActivationChannelMismatch { weight_cols: 4, activation_channels: 3 })
+                Err(AwqError::ActivationChannelMismatch {
+                    weight_cols: 4,
+                    activation_channels: 3
+                })
             ),
             "expected ActivationChannelMismatch, got {:?}",
             result
@@ -970,9 +949,7 @@ mod tests {
     fn test_awq_error_display() {
         assert!(AwqError::EmptyWeight.to_string().contains("empty"));
         assert!(AwqError::DimensionMismatch.to_string().contains("dimension"));
-        assert!(AwqError::InvalidConfig("bad bits".to_string())
-            .to_string()
-            .contains("bad bits"));
+        assert!(AwqError::InvalidConfig("bad bits".to_string()).to_string().contains("bad bits"));
         let e = AwqError::ActivationChannelMismatch {
             weight_cols: 8,
             activation_channels: 4,

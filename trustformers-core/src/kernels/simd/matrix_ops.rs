@@ -30,9 +30,9 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
     // Row-major B(k×n) reinterpreted as col-major is Bᵀ(n×k), lda=n.
     // Row-major C(m×n) reinterpreted as col-major is Cᵀ(n×m), lda=n.
     // gemm(Bᵀ, Aᵀ) → Cᵀ = Bᵀ·Aᵀ = (A·B)ᵀ, so C buffer holds A·B. ✓
-    let a_t = MatRef::new(a.as_ptr(), k, m, k);
-    let b_t = MatRef::new(b.as_ptr(), n, k, n);
-    let c_t = MatMut::new(c.as_mut_ptr(), n, m, n);
+    let a_t = MatRef::from_column_major(a, k, m).expect("A slice must hold m*k elements");
+    let b_t = MatRef::from_column_major(b, n, k).expect("B slice must hold k*n elements");
+    let c_t = MatMut::from_column_major(c, n, m).expect("C slice must hold m*n elements");
 
     // GEMM: Cᵀ = 1.0 * Bᵀ * Aᵀ + 0.0 * Cᵀ
     gemm(1.0, b_t, a_t, 0.0, c_t);

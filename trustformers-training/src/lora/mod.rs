@@ -95,9 +95,10 @@ impl std::error::Error for LoraError {}
 // ─── Enums ───────────────────────────────────────────────────────────────────
 
 /// Which bias parameters to include when applying LoRA.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum LoraBias {
     /// No bias parameters are trainable.
+    #[default]
     None,
     /// All bias parameters (base + LoRA layers) are trainable.
     All,
@@ -105,16 +106,11 @@ pub enum LoraBias {
     LoraOnly,
 }
 
-impl Default for LoraBias {
-    fn default() -> Self {
-        LoraBias::None
-    }
-}
-
 /// The downstream task type that LoRA is being applied to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum LoraTaskType {
     /// Causal language modelling (auto-regressive generation).
+    #[default]
     CausalLm,
     /// Sequence classification.
     SeqCls,
@@ -124,30 +120,19 @@ pub enum LoraTaskType {
     FeatureExtraction,
 }
 
-impl Default for LoraTaskType {
-    fn default() -> Self {
-        LoraTaskType::CausalLm
-    }
-}
-
 /// Initialisation method for the LoRA A matrix.
 ///
 /// The B matrix is always initialised to zeros so that the merged model
 /// is identical to the base model at the start of training.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum LoraInitMethod {
     /// Sample A from N(0, σ²) with σ = 1/√in_features (standard Gaussian).
     Gaussian,
     /// Kaiming uniform initialisation: A ~ Uniform(-√(1/fan_in), √(1/fan_in)).
+    #[default]
     KaimingUniform,
     /// Initialise A to zeros (used for ablation studies).
     Zero,
-}
-
-impl Default for LoraInitMethod {
-    fn default() -> Self {
-        LoraInitMethod::KaimingUniform
-    }
 }
 
 // ─── LoraConfig ───────────────────────────────────────────────────────────────
@@ -1192,7 +1177,11 @@ mod tests {
     fn test_pseudo_rand_unit_range() {
         for i in 0..1000usize {
             let v = pseudo_rand_unit(0xABCD_EF01, i);
-            assert!(v >= 0.0 && v < 1.0, "pseudo_rand_unit out of range: {}", v);
+            assert!(
+                (0.0..1.0).contains(&v),
+                "pseudo_rand_unit out of range: {}",
+                v
+            );
         }
     }
 

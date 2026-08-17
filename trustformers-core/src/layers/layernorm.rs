@@ -6,7 +6,7 @@ use crate::device::Device;
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use crate::traits::Layer;
-use scirs2_core::ndarray::{Array2, ArrayView1, ArrayView2, Axis, IxDyn};
+use scirs2_core::ndarray::{Array2, ArrayD, ArrayView1, ArrayView2, Axis, IxDyn};
 use scirs2_core::simd::normalization::simd_layer_norm_f32;
 
 /// Layer Normalization
@@ -277,63 +277,15 @@ impl Layer for LayerNorm {
                     },
                 };
 
-                // Process on CPU directly (inline to avoid recursion)
-                let ndim = input_arr.ndim();
-                let norm_ndim = self.normalized_shape.len();
-                let axes: Vec<usize> = ((ndim - norm_ndim)..ndim).collect();
-
-                // Compute mean
-                let mut mean = input_arr.clone();
-                for &axis in axes.iter().rev() {
-                    mean = mean
-                        .mean_axis(Axis(axis))
-                        .ok_or_else(|| {
-                            crate::errors::compute_error(
-                                "forward",
-                                "axis must be valid for normalization",
-                            )
-                        })?
-                        .insert_axis(Axis(axis));
-                }
-
-                // Compute variance
-                let diff = &input_arr - &mean;
-                let mut var = (&diff * &diff).to_owned();
-                for &axis in axes.iter().rev() {
-                    var = var
-                        .mean_axis(Axis(axis))
-                        .ok_or_else(|| {
-                            crate::errors::compute_error(
-                                "forward",
-                                "axis must be valid for normalization",
-                            )
-                        })?
-                        .insert_axis(Axis(axis));
-                }
-
-                // Normalize
-                let normalized = &diff / (var + self.eps).mapv(f32::sqrt);
-
-                // Broadcast weight and bias
-                let mut broadcast_shape = vec![1; ndim];
-                for (i, &dim) in self.normalized_shape.iter().enumerate() {
-                    broadcast_shape[ndim - norm_ndim + i] = dim;
-                }
-
-                let w_broadcast = weight_arr
-                    .view()
-                    .into_shape_with_order(IxDyn(&broadcast_shape))
-                    .map_err(|e| {
-                        TrustformersError::shape_error(format!("Failed to broadcast weight: {}", e))
-                    })?;
-                let b_broadcast = bias_arr
-                    .view()
-                    .into_shape_with_order(IxDyn(&broadcast_shape))
-                    .map_err(|e| {
-                        TrustformersError::shape_error(format!("Failed to broadcast bias: {}", e))
-                    })?;
-
-                let output = &normalized * &w_broadcast + &b_broadcast;
+                // Process on CPU directly (inline to avoid recursion).
+                // Fused single-pass normalisation (see `layer_norm_f32_cpu`).
+                let output = layer_norm_f32_cpu(
+                    &input_arr,
+                    &weight_arr,
+                    &bias_arr,
+                    &self.normalized_shape,
+                    self.eps,
+                )?;
                 Ok(Tensor::F32(output))
             },
 
@@ -426,63 +378,15 @@ impl Layer for LayerNorm {
                     },
                 };
 
-                // Process on CPU directly (inline to avoid recursion)
-                let ndim = input_arr.ndim();
-                let norm_ndim = self.normalized_shape.len();
-                let axes: Vec<usize> = ((ndim - norm_ndim)..ndim).collect();
-
-                // Compute mean
-                let mut mean = input_arr.clone();
-                for &axis in axes.iter().rev() {
-                    mean = mean
-                        .mean_axis(Axis(axis))
-                        .ok_or_else(|| {
-                            crate::errors::compute_error(
-                                "forward",
-                                "axis must be valid for normalization",
-                            )
-                        })?
-                        .insert_axis(Axis(axis));
-                }
-
-                // Compute variance
-                let diff = &input_arr - &mean;
-                let mut var = (&diff * &diff).to_owned();
-                for &axis in axes.iter().rev() {
-                    var = var
-                        .mean_axis(Axis(axis))
-                        .ok_or_else(|| {
-                            crate::errors::compute_error(
-                                "forward",
-                                "axis must be valid for normalization",
-                            )
-                        })?
-                        .insert_axis(Axis(axis));
-                }
-
-                // Normalize
-                let normalized = &diff / (var + self.eps).mapv(f32::sqrt);
-
-                // Broadcast weight and bias
-                let mut broadcast_shape = vec![1; ndim];
-                for (i, &dim) in self.normalized_shape.iter().enumerate() {
-                    broadcast_shape[ndim - norm_ndim + i] = dim;
-                }
-
-                let w_broadcast = weight_arr
-                    .view()
-                    .into_shape_with_order(IxDyn(&broadcast_shape))
-                    .map_err(|e| {
-                        TrustformersError::shape_error(format!("Failed to broadcast weight: {}", e))
-                    })?;
-                let b_broadcast = bias_arr
-                    .view()
-                    .into_shape_with_order(IxDyn(&broadcast_shape))
-                    .map_err(|e| {
-                        TrustformersError::shape_error(format!("Failed to broadcast bias: {}", e))
-                    })?;
-
-                let output = &normalized * &w_broadcast + &b_broadcast;
+                // Process on CPU directly (inline to avoid recursion).
+                // Fused single-pass normalisation (see `layer_norm_f32_cpu`).
+                let output = layer_norm_f32_cpu(
+                    &input_arr,
+                    &weight_arr,
+                    &bias_arr,
+                    &self.normalized_shape,
+                    self.eps,
+                )?;
                 Ok(Tensor::F32(output))
             },
 
@@ -629,42 +533,9 @@ impl Layer for LayerNorm {
                     }
                 }
 
-                // Fallback to standard CPU implementation for other cases
-                // For LayerNorm, we normalize over the last norm_ndim dimensions
-                // Calculate mean and variance
-                let axes: Vec<usize> = ((ndim - norm_ndim)..ndim).collect();
-
-                // Compute mean across the normalized dimensions
-                let mut mean = arr.clone();
-                for &axis in axes.iter().rev() {
-                    mean = mean
-                        .mean_axis(Axis(axis))
-                        .ok_or_else(|| {
-                            crate::errors::compute_error(
-                                "forward",
-                                "axis must be valid for normalization",
-                            )
-                        })?
-                        .insert_axis(Axis(axis));
-                }
-
-                // Compute variance
-                let diff = arr - &mean;
-                let mut var = (&diff * &diff).to_owned();
-                for &axis in axes.iter().rev() {
-                    var = var
-                        .mean_axis(Axis(axis))
-                        .ok_or_else(|| {
-                            crate::errors::compute_error(
-                                "forward",
-                                "axis must be valid for normalization",
-                            )
-                        })?
-                        .insert_axis(Axis(axis));
-                }
-
-                // Normalize
-                let normalized = &diff / (var + self.eps).mapv(f32::sqrt);
+                // Fallback to standard CPU implementation for other cases:
+                // `layer_norm_f32_cpu` derives the normalized axes from
+                // `self.normalized_shape` itself.
 
                 // Convert weight/bias to F32 if needed
                 let weight_f32 = match &self.weight {
@@ -739,26 +610,14 @@ impl Layer for LayerNorm {
                     },
                 };
 
-                // Handle broadcasting for weight and bias
-                let mut broadcast_shape = vec![1; ndim];
-                for (i, &dim) in self.normalized_shape.iter().enumerate() {
-                    broadcast_shape[ndim - norm_ndim + i] = dim;
-                }
-
-                let w_broadcast = weight_f32
-                    .view()
-                    .into_shape_with_order(IxDyn(&broadcast_shape))
-                    .map_err(|e| {
-                        TrustformersError::shape_error(format!("Failed to broadcast weight: {}", e))
-                    })?;
-                let b_broadcast = bias_f32
-                    .view()
-                    .into_shape_with_order(IxDyn(&broadcast_shape))
-                    .map_err(|e| {
-                        TrustformersError::shape_error(format!("Failed to broadcast bias: {}", e))
-                    })?;
-
-                let output = &normalized * &w_broadcast + &b_broadcast;
+                // Fused single-pass normalisation (see `layer_norm_f32_cpu`).
+                let output = layer_norm_f32_cpu(
+                    arr,
+                    &weight_f32,
+                    &bias_f32,
+                    &self.normalized_shape,
+                    self.eps,
+                )?;
                 Ok(Tensor::F32(output))
             },
             _ => Err(TrustformersError::tensor_op_error(
@@ -767,6 +626,94 @@ impl Layer for LayerNorm {
             )),
         }
     }
+}
+
+/// Fused CPU LayerNorm over the trailing `normalized_shape` axes.
+///
+/// Computes `y = gamma * (x - mean) / sqrt(var + eps) + beta` in a **single**
+/// streaming pass per normalized group, writing into one output buffer.
+///
+/// The three call sites in `LayerNorm::forward` previously each ran the same
+/// five-array recipe: `input.clone()` purely to seed a reduction accumulator
+/// (its contents discarded by the very next statement), `&input - &mean`,
+/// `(&diff * &diff).to_owned()` (an extra copy of an already-owned product),
+/// `&diff / (var + eps).sqrt()`, and finally the broadcast scale/shift. For a
+/// `[1, 2048, 4096]` hidden state that is ~160 MiB of temporaries per call.
+fn layer_norm_f32_cpu(
+    input: &ArrayD<f32>,
+    weight: &ArrayD<f32>,
+    bias: &ArrayD<f32>,
+    normalized_shape: &[usize],
+    eps: f32,
+) -> Result<ArrayD<f32>> {
+    let input_shape = input.shape();
+    let norm_ndim = normalized_shape.len();
+    if norm_ndim == 0 || norm_ndim > input_shape.len() {
+        return Err(TrustformersError::shape_error(format!(
+            "LayerNorm normalized_shape {:?} is not a suffix of input shape {:?}",
+            normalized_shape, input_shape
+        )));
+    }
+    let split = input_shape.len() - norm_ndim;
+    if input_shape[split..] != *normalized_shape {
+        return Err(TrustformersError::shape_error(format!(
+            "LayerNorm normalized_shape {:?} is not a suffix of input shape {:?}",
+            normalized_shape, input_shape
+        )));
+    }
+
+    let norm_len: usize = normalized_shape.iter().product();
+    if norm_len == 0 {
+        return Err(TrustformersError::shape_error(
+            "LayerNorm normalized_shape must not contain a zero dimension".to_string(),
+        ));
+    }
+    if weight.len() != norm_len || bias.len() != norm_len {
+        return Err(TrustformersError::shape_error(format!(
+            "LayerNorm weight ({}) and bias ({}) must both hold {} values",
+            weight.len(),
+            bias.len(),
+            norm_len
+        )));
+    }
+
+    let weight_contiguous = weight.as_standard_layout();
+    let bias_contiguous = bias.as_standard_layout();
+    let weight_slice = weight_contiguous.as_slice().ok_or_else(|| {
+        TrustformersError::tensor_op_error(
+            "LayerNorm weight is not contiguous",
+            "LayerNorm::forward",
+        )
+    })?;
+    let bias_slice = bias_contiguous.as_slice().ok_or_else(|| {
+        TrustformersError::tensor_op_error("LayerNorm bias is not contiguous", "LayerNorm::forward")
+    })?;
+
+    let mut output = input.as_standard_layout().into_owned();
+    {
+        let values = output.as_slice_mut().ok_or_else(|| {
+            TrustformersError::tensor_op_error(
+                "LayerNorm output buffer is not contiguous",
+                "LayerNorm::forward",
+            )
+        })?;
+
+        let inverse_count = 1.0f32 / norm_len as f32;
+        for group in values.chunks_mut(norm_len) {
+            let mean = group.iter().sum::<f32>() * inverse_count;
+            let variance =
+                group.iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>() * inverse_count;
+            let inverse_std = 1.0 / (variance + eps).sqrt();
+
+            for ((value, &gamma), &beta) in
+                group.iter_mut().zip(weight_slice.iter()).zip(bias_slice.iter())
+            {
+                *value = (*value - mean) * inverse_std * gamma + beta;
+            }
+        }
+    }
+
+    Ok(output)
 }
 
 /// Root Mean Square Layer Normalization

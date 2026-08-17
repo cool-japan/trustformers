@@ -296,20 +296,26 @@ impl OptimizedRoPE {
             },
         };
 
-        // Precompute cos/sin for all positions
-        let mut cos_vals = Vec::new();
-        let mut sin_vals = Vec::new();
-
+        // Precompute cos/sin for all positions.
+        //
+        // Layout: row-major [max_seq_len, half_dim * 2], where each row `pos`
+        // holds that position's `half_dim` cos values followed by its
+        // `half_dim` sin values: row(pos) = [cos_0..cos_{h-1}, sin_0..sin_{h-1}].
+        // This must interleave per-position (not stack all cos rows followed by
+        // all sin rows globally), since `forward_with_precomputed` slices this
+        // tensor along dim 1 assuming exactly this per-row layout.
+        let mut all_vals = Vec::with_capacity(config.max_seq_len * half_dim * 2);
         for pos in 0..config.max_seq_len {
             for &freq in scaled_freqs.iter() {
                 let angle = pos as f32 * freq;
-                cos_vals.push(angle.cos());
-                sin_vals.push(angle.sin());
+                all_vals.push(angle.cos());
+            }
+            for &freq in scaled_freqs.iter() {
+                let angle = pos as f32 * freq;
+                all_vals.push(angle.sin());
             }
         }
 
-        // Create a simple flat tensor for now
-        let all_vals = [cos_vals, sin_vals].concat();
         Ok(Tensor::from_vec(
             all_vals,
             &[config.max_seq_len, half_dim * 2],
@@ -330,23 +336,62 @@ impl OptimizedRoPE {
         position_ids: &Tensor,
         precomputed: &Tensor,
     ) -> Result<Tensor> {
-        // Enhanced implementation using precomputed cos/sin values
         let batch_size = x.shape()[0];
         let seq_len = x.shape()[1];
         let hidden_size = x.shape()[2];
         let half_dim = hidden_size / 2;
 
-        // Extract cos and sin from precomputed tensor
-        let cos_precomputed = precomputed.slice(1, 0, half_dim)?;
-        let sin_precomputed = precomputed.slice(1, half_dim, half_dim * 2)?;
+        if half_dim * 2 != self.config.dim {
+            anyhow::bail!(
+                "OptimizedRoPE::forward_with_precomputed: input hidden_size {} (half_dim {}) \
+                 does not match the configured RoPE dim {} used to build the precomputed table",
+                hidden_size,
+                half_dim,
+                self.config.dim
+            );
+        }
 
-        // Gather cos/sin values for the given positions
-        let position_indices =
-            position_ids.reshape(&[position_ids.shape().iter().product::<usize>()])?;
-        let cos_embed = cos_precomputed.clone() // Simplified approach
-            .reshape(&[batch_size, seq_len, half_dim])?;
-        let sin_embed = sin_precomputed.clone() // Simplified approach
-            .reshape(&[batch_size, seq_len, half_dim])?;
+        let pos_shape = position_ids.shape();
+        if pos_shape != [batch_size, seq_len] {
+            anyhow::bail!(
+                "OptimizedRoPE::forward_with_precomputed: position_ids shape {:?} does not \
+                 match x's [batch_size, seq_len] = [{}, {}]",
+                pos_shape,
+                batch_size,
+                seq_len
+            );
+        }
+
+        // `precomputed` is [max_seq_len, half_dim * 2]; each row `pos` holds
+        // [cos_0..cos_{h-1}, sin_0..sin_{h-1}] for that position (see
+        // `precompute_frequencies`). Gather the rows selected by `position_ids`
+        // instead of reshaping the whole table, so the actual requested
+        // positions (which need not be sequential or dense) drive the result.
+        let cos_precomputed = precomputed.slice(1, 0, half_dim)?; // [max_seq_len, half_dim]
+        let sin_precomputed = precomputed.slice(1, half_dim, half_dim * 2)?; // [max_seq_len, half_dim]
+        let cos_table = cos_precomputed.data()?;
+        let sin_table = sin_precomputed.data()?;
+        let position_data = position_ids.data()?;
+
+        let mut cos_gathered = Vec::with_capacity(batch_size * seq_len * half_dim);
+        let mut sin_gathered = Vec::with_capacity(batch_size * seq_len * half_dim);
+        for &pos_f in &position_data {
+            let pos = pos_f.round();
+            if pos < 0.0 || pos as usize >= self.config.max_seq_len {
+                anyhow::bail!(
+                    "OptimizedRoPE::forward_with_precomputed: position {} is out of bounds \
+                     for max_seq_len {}",
+                    pos_f,
+                    self.config.max_seq_len
+                );
+            }
+            let row_start = pos as usize * half_dim;
+            cos_gathered.extend_from_slice(&cos_table[row_start..row_start + half_dim]);
+            sin_gathered.extend_from_slice(&sin_table[row_start..row_start + half_dim]);
+        }
+
+        let cos_embed = Tensor::from_vec(cos_gathered, &[batch_size, seq_len, half_dim])?;
+        let sin_embed = Tensor::from_vec(sin_gathered, &[batch_size, seq_len, half_dim])?;
 
         // Split input tensor for rotation
         let x_first_half = x.slice(2, 0, half_dim)?;
@@ -408,5 +453,82 @@ mod tests {
 
         assert_eq!(config.dim, 64);
         assert_eq!(config.max_seq_len, 512);
+    }
+
+    /// Regression test for the precomputed-frequency path ignoring
+    /// `position_ids`. Before the fix, `forward_with_precomputed` reshaped the
+    /// flat `[max_seq_len, half_dim*2]` table directly (ignoring the actual
+    /// position values) and the table itself was laid out incorrectly (all
+    /// cos rows stacked before all sin rows, rather than interleaved
+    /// per-position). With non-sequential position ids and `max_seq_len !=
+    /// batch_size * seq_len`, the old code would either error out on the
+    /// reshape or silently produce wrong rotations. The fixed
+    /// `OptimizedRoPE::forward` (precomputed path) must match
+    /// `VectorizedRoPE::forward` (which computes cos/sin directly from
+    /// `position_ids` with no precomputed table) for the same inputs.
+    #[test]
+    fn test_optimized_rope_precomputed_matches_dynamic_for_arbitrary_positions() -> Result<()> {
+        let dim = 8;
+        let max_seq_len = 16;
+        let base = 10000.0;
+        let config = RoPEConfig {
+            dim,
+            max_seq_len,
+            base,
+            scaling_factor: 1.0,
+            scaling_type: RoPEScalingType::None,
+        };
+        let rope = OptimizedRoPE::with_precomputed_freqs(config)?;
+
+        let batch_size = 2;
+        let seq_len = 3;
+        let hidden_size = dim;
+
+        // Distinct, non-monotonic values so mixing up rows/positions is detectable.
+        let x_vals: Vec<f32> = (0..(batch_size * seq_len * hidden_size))
+            .map(|i| i as f32 * 0.1 - 1.0)
+            .collect();
+        let x = Tensor::from_vec(x_vals, &[batch_size, seq_len, hidden_size])?;
+
+        // Deliberately unordered, non-sequential positions (and
+        // batch_size * seq_len = 6 != max_seq_len = 16, which previously
+        // broke the naive reshape).
+        let position_vals: Vec<f32> = vec![5.0, 0.0, 9.0, 2.0, 12.0, 7.0];
+        let position_ids = Tensor::from_vec(position_vals, &[batch_size, seq_len])?;
+
+        let precomputed_out = rope.forward(&x, &position_ids)?;
+
+        let vectorized_rope = VectorizedRoPE::new(dim, max_seq_len, base)?;
+        let dynamic_out = vectorized_rope.forward(&x, &position_ids)?;
+
+        assert_eq!(precomputed_out.shape(), dynamic_out.shape());
+
+        let a = precomputed_out.data()?;
+        let b = dynamic_out.data()?;
+        assert_eq!(a.len(), b.len());
+        for (i, (av, bv)) in a.iter().zip(b.iter()).enumerate() {
+            assert!(
+                (av - bv).abs() < 1e-4,
+                "mismatch at flat index {}: precomputed={}, dynamic={}",
+                i,
+                av,
+                bv
+            );
+        }
+
+        // Sanity check: the output must actually depend on which position was
+        // used (i.e. this isn't trivially passing because everything is
+        // zero). Swapping to all-zero positions must give a different result
+        // for at least one element, since cos(0)=1, sin(0)=0 differs from the
+        // arbitrary positions above.
+        let zero_positions =
+            Tensor::from_vec(vec![0.0; batch_size * seq_len], &[batch_size, seq_len])?;
+        let zero_pos_out = rope.forward(&x, &zero_positions)?.data()?;
+        assert!(
+            zero_pos_out.iter().zip(a.iter()).any(|(z, o)| (z - o).abs() > 1e-4),
+            "output does not vary with position_ids"
+        );
+
+        Ok(())
     }
 }

@@ -12,11 +12,125 @@ use trustformers_core::{
     tensor::Tensor,
 };
 
+use super::checkpoint::Checkpoint;
 use super::config::{
-    CacheStrategy, DistributedConfig, FaultToleranceConfig, LoadBalancingStrategy, NodeConfig,
-    WeightLoadingConfig,
+    CacheEvictionPolicy, CacheStrategy, DistributedConfig, FaultToleranceConfig,
+    LoadBalancingStrategy, NodeConfig, WeightLoadingConfig,
 };
 use super::huggingface::{TensorMetadata, WeightLoader};
+
+/// Default number of tensors held in the distributed cache.
+///
+/// `DistributedCacheConfig` carries no capacity field, so this is the documented
+/// default; use [`DistributedWeightLoader::with_cache_capacity`] to change it.
+pub const DEFAULT_CACHE_CAPACITY: usize = 1024;
+
+/// Lifetime used by [`CacheEvictionPolicy::TTL`].
+///
+/// The configuration exposes no per-entry lifetime, so this documented default
+/// stands in for one; entries older than this are dropped first, and if that
+/// frees nothing the oldest entry goes (FIFO) so the cache still respects its
+/// capacity.
+pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// One cached tensor plus the bookkeeping the eviction policies need.
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    tensor: Tensor,
+    inserted_at: Instant,
+    last_access: Instant,
+    accesses: u64,
+}
+
+/// Tensor cache with a real, configurable eviction policy.
+///
+/// A previous revision ignored the configured [`CacheEvictionPolicy`] entirely:
+/// past a hardcoded limit of 1000 entries it dropped whichever key
+/// `HashMap::keys().next()` happened to yield.
+#[derive(Debug, Default)]
+struct TensorCache {
+    entries: HashMap<String, CacheEntry>,
+}
+
+impl TensorCache {
+    /// Look a tensor up, recording the access for LRU/LFU.
+    fn get(&mut self, name: &str) -> Option<Tensor> {
+        let entry = self.entries.get_mut(name)?;
+        entry.last_access = Instant::now();
+        entry.accesses += 1;
+        Some(entry.tensor.clone())
+    }
+
+    /// Insert or replace a tensor.
+    fn insert(&mut self, name: String, tensor: Tensor) {
+        let now = Instant::now();
+        self.entries.insert(
+            name,
+            CacheEntry {
+                tensor,
+                inserted_at: now,
+                last_access: now,
+                accesses: 0,
+            },
+        );
+    }
+
+    /// Number of cached tensors.
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Evict entries until the cache is within `capacity`, per `policy`.
+    fn evict(&mut self, policy: &CacheEvictionPolicy, capacity: usize) {
+        if capacity == 0 {
+            self.entries.clear();
+            return;
+        }
+
+        if matches!(policy, CacheEvictionPolicy::TTL) {
+            let now = Instant::now();
+            self.entries
+                .retain(|_, entry| now.duration_since(entry.inserted_at) < DEFAULT_CACHE_TTL);
+        }
+
+        while self.entries.len() > capacity {
+            let Some(victim) = self.select_victim(policy) else {
+                break;
+            };
+            self.entries.remove(&victim);
+        }
+    }
+
+    /// Pick the entry this policy would drop next.
+    fn select_victim(&self, policy: &CacheEvictionPolicy) -> Option<String> {
+        match policy {
+            CacheEvictionPolicy::LRU => self
+                .entries
+                .iter()
+                .min_by_key(|(name, entry)| (entry.last_access, (*name).clone()))
+                .map(|(name, _)| name.clone()),
+            CacheEvictionPolicy::LFU => self
+                .entries
+                .iter()
+                .min_by_key(|(name, entry)| (entry.accesses, entry.last_access, (*name).clone()))
+                .map(|(name, _)| name.clone()),
+            // TTL falls back to FIFO once every expired entry has already gone.
+            CacheEvictionPolicy::FIFO | CacheEvictionPolicy::TTL => self
+                .entries
+                .iter()
+                .min_by_key(|(name, entry)| (entry.inserted_at, (*name).clone()))
+                .map(|(name, _)| name.clone()),
+            CacheEvictionPolicy::Random => {
+                let names: Vec<&String> = self.entries.keys().collect();
+                if names.is_empty() {
+                    None
+                } else {
+                    names.get(fastrand::usize(..names.len())).map(|name| (*name).clone())
+                }
+            },
+        }
+    }
+}
 
 /// Distributed weight loader for loading across multiple nodes
 pub struct DistributedWeightLoader {
@@ -26,7 +140,8 @@ pub struct DistributedWeightLoader {
     node_connections: HashMap<String, tokio::net::TcpStream>,
     load_balancer: LoadBalancer,
     health_monitor: HealthMonitor,
-    tensor_cache: Arc<Mutex<HashMap<String, Tensor>>>,
+    tensor_cache: Arc<Mutex<TensorCache>>,
+    cache_capacity: usize,
     stats: DistributedStats,
 }
 
@@ -44,20 +159,44 @@ impl DistributedWeightLoader {
             node_connections: HashMap::new(),
             load_balancer,
             health_monitor,
-            tensor_cache: Arc::new(Mutex::new(HashMap::new())),
+            tensor_cache: Arc::new(Mutex::new(TensorCache::default())),
+            cache_capacity: DEFAULT_CACHE_CAPACITY,
             stats: DistributedStats::new(),
         })
     }
 
+    /// Set how many tensors the cache holds before evicting.
+    pub fn with_cache_capacity(mut self, capacity: usize) -> Self {
+        self.cache_capacity = capacity;
+        self
+    }
+
+    /// Number of tensors currently held in the distributed cache.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the cache lock is poisoned.
+    pub fn cached_tensor_count(&self) -> Result<usize> {
+        let cache = self
+            .tensor_cache
+            .lock()
+            .map_err(|_| TrustformersError::lock_error("Cache lock poisoned".to_string()))?;
+        Ok(cache.len())
+    }
+
     /// Initialize connections to all nodes
+    ///
+    /// With failover enabled an unreachable node does not abort the whole
+    /// initialisation; the failure is recorded in
+    /// [`DistributedStats::connection_failures`] instead of being written to
+    /// stderr by this library.
     pub async fn initialize(&mut self) -> Result<()> {
         for node in &self.distributed_config.nodes.clone() {
             if let Err(e) = self.connect_to_node(node).await {
                 if !self.distributed_config.fault_tolerance.enable_failover {
                     return Err(e);
                 }
-                // Log warning but continue with other nodes
-                eprintln!("Warning: Failed to connect to node {}: {}", node.id, e);
+                self.stats.connection_failures.push((node.id.clone(), e.to_string()));
             }
         }
 
@@ -207,14 +346,26 @@ impl DistributedWeightLoader {
         loader.load_tensor(name)
     }
 
-    /// Stream tensor from node in chunks
+    /// Read a node's checkpoint file asynchronously and extract one tensor.
+    ///
+    /// The whole container is read before parsing because both supported
+    /// containers need their header — and, for a PyTorch archive, the ZIP
+    /// central directory at the end of the file — before any tensor's byte range
+    /// is known. Chunked reads are the job of
+    /// [`super::streaming::StreamingLoader`], which groups tensors and evicts
+    /// them under a memory budget; this path exists so that a remote node's file
+    /// is read off the async runtime rather than blocking it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be opened or read, when it is not a checkpoint
+    /// this crate can parse, or when it does not contain `name`.
     async fn stream_tensor_from_node(
         &mut self,
         _node: &NodeConfig,
         file_path: &PathBuf,
         name: &str,
     ) -> Result<Tensor> {
-        // Open file for streaming
         let mut file = tokio::fs::File::open(file_path).await.map_err(|e| {
             TrustformersError::file_not_found(format!(
                 "Failed to open {}: {}",
@@ -223,34 +374,37 @@ impl DistributedWeightLoader {
             ))
         })?;
 
-        // For simplicity, load the entire tensor
-        // In practice, this would stream chunks and reconstruct the tensor
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)
             .await
             .map_err(|e| TrustformersError::io_error(e.to_string()))?;
 
-        // Parse tensor from bytes (simplified)
         self.parse_tensor_from_bytes(buffer, name)
     }
 
-    /// Parse tensor from raw bytes
-    fn parse_tensor_from_bytes(&self, data: Vec<u8>, _name: &str) -> Result<Tensor> {
-        // Simplified tensor parsing - in practice this would handle different formats
-        if data.len() < 4 {
-            return Err(TrustformersError::invalid_format_simple(
-                "Insufficient data for tensor".to_string(),
-            ));
-        }
-
-        // For demo purposes, create a simple tensor
-        let shape = vec![data.len() / 4]; // Assume f32 data
-        let floats: Vec<f32> = data
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect();
-
-        Tensor::from_vec(floats, &shape)
+    /// Extract one named tensor from a checkpoint held in memory.
+    ///
+    /// The buffer is parsed as the checkpoint it actually is — the container
+    /// format is detected, the index is honoured and the requested tensor is
+    /// decoded with its own dtype and shape.
+    ///
+    /// A previous revision ignored `name` entirely and reinterpreted the whole
+    /// file as a flat `f32` array (`shape = vec![data.len() / 4]`), so every
+    /// tensor streamed through this path came back with the wrong rank, the wrong
+    /// shape and — for anything but an f32 payload — meaningless values.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the buffer is not a checkpoint this crate can parse, or when
+    /// it does not contain `name`.
+    fn parse_tensor_from_bytes(&self, data: Vec<u8>, name: &str) -> Result<Tensor> {
+        let checkpoint = Checkpoint::from_bytes(&data)?;
+        checkpoint.get(name).cloned().ok_or_else(|| {
+            TrustformersError::weight_load_error(format!(
+                "streamed checkpoint does not contain tensor {name}; it holds {} tensor(s)",
+                checkpoint.len()
+            ))
+        })
     }
 
     /// Check if tensor should be cached
@@ -265,25 +419,31 @@ impl DistributedWeightLoader {
     }
 
     /// Check cache for tensor
+    ///
+    /// A hit records the access so that the LRU and LFU policies have real data
+    /// to work from.
     async fn check_cache(&self, name: &str) -> Result<Option<Tensor>> {
-        let cache = self
-            .tensor_cache
-            .lock()
-            .map_err(|_| TrustformersError::lock_error("Cache lock poisoned".to_string()))?;
-        Ok(cache.get(name).cloned())
-    }
-
-    /// Cache tensor with replication
-    async fn cache_tensor(&self, name: &str, tensor: &Tensor) -> Result<()> {
         let mut cache = self
             .tensor_cache
             .lock()
             .map_err(|_| TrustformersError::lock_error("Cache lock poisoned".to_string()))?;
+        Ok(cache.get(name))
+    }
 
-        // Apply eviction policy if cache is full
-        self.apply_eviction_policy(&mut cache)?;
+    /// Cache tensor with replication
+    async fn cache_tensor(&self, name: &str, tensor: &Tensor) -> Result<()> {
+        {
+            let mut cache = self
+                .tensor_cache
+                .lock()
+                .map_err(|_| TrustformersError::lock_error("Cache lock poisoned".to_string()))?;
 
-        cache.insert(name.to_string(), tensor.clone());
+            cache.insert(name.to_string(), tensor.clone());
+            cache.evict(
+                &self.distributed_config.distributed_cache.eviction_policy,
+                self.cache_capacity,
+            );
+        }
 
         // Replicate to other nodes based on replication factor
         if self.distributed_config.distributed_cache.replication_factor > 1 {
@@ -293,31 +453,25 @@ impl DistributedWeightLoader {
         Ok(())
     }
 
-    /// Apply cache eviction policy
-    fn apply_eviction_policy(&self, cache: &mut HashMap<String, Tensor>) -> Result<()> {
-        // Simplified eviction - remove random entry if cache is too large
-        if cache.len() > 1000 {
-            // Arbitrary limit
-            if let Some(key) = cache.keys().next().cloned() {
-                cache.remove(&key);
-            }
-        }
-        Ok(())
-    }
-
-    /// Replicate tensor to other nodes
+    /// Replicate a cached tensor onto peer nodes.
+    ///
+    /// Not implemented: this loader has no wire protocol for pushing tensor data
+    /// to a peer, only for pulling it from a node's local storage paths. A
+    /// previous revision printed `"Replicating tensor X to node Y"` and returned
+    /// `Ok(())`, so a configured `replication_factor > 1` reported replication
+    /// that never happened.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`TrustformersError::not_implemented`]. Set
+    /// `replication_factor` to 1 to disable replication.
     async fn replicate_tensor(&self, name: &str, _tensor: &Tensor) -> Result<()> {
-        let replication_count = (self.distributed_config.distributed_cache.replication_factor
-            as usize)
-            .min(self.distributed_config.nodes.len());
-
-        // Select nodes for replication (simplified)
-        for node in self.distributed_config.nodes.iter().take(replication_count) {
-            // In practice, this would send the tensor data to the node
-            println!("Replicating tensor {} to node {}", name, node.id);
-        }
-
-        Ok(())
+        Err(TrustformersError::not_implemented(format!(
+            "distributed cache replication (replication_factor = {}, requested while caching \
+             tensor {name}): this loader can read weights from a node's storage paths but has no \
+             protocol for pushing tensor data to a peer",
+            self.distributed_config.distributed_cache.replication_factor
+        )))
     }
 
     /// Find backup node for failover
@@ -532,6 +686,8 @@ pub struct DistributedStats {
     pub total_load_time: Duration,
     pub node_load_times: HashMap<String, Vec<Duration>>,
     pub bytes_transferred: u64,
+    /// Nodes that could not be reached during `initialize`, with the reason.
+    pub connection_failures: Vec<(String, String)>,
 }
 
 impl DistributedStats {
@@ -839,5 +995,171 @@ mod tests {
             loader.is_ok(),
             "ReadThrough cache strategy must be constructible"
         );
+    }
+    // ── Tensor parsing, eviction and replication ─────────────────────────────
+
+    use crate::weight_loading::test_support::{build_safetensors, F32Tensor};
+
+    fn loader_with(policy: CacheEvictionPolicy) -> DistributedWeightLoader {
+        let mut config = make_distributed_config(vec![make_node("a")]);
+        config.distributed_cache.eviction_policy = policy;
+        config.distributed_cache.replication_factor = 1;
+        DistributedWeightLoader::new(WeightLoadingConfig::default(), config)
+            .expect("loader must build")
+    }
+
+    #[test]
+    fn streamed_checkpoints_are_parsed_by_name_shape_and_dtype() {
+        // Regression: this used to ignore the name and reinterpret the whole file
+        // as a flat f32 array of length `bytes / 4`.
+        let loader = loader_with(CacheEvictionPolicy::LRU);
+        let bytes = build_safetensors(&[
+            F32Tensor::new("first.weight", &[2, 2], vec![1.0, 2.0, 3.0, 4.0]),
+            F32Tensor::new("second.bias", &[3], vec![9.0, 8.0, 7.0]),
+        ]);
+
+        let tensor = loader
+            .parse_tensor_from_bytes(bytes.clone(), "second.bias")
+            .expect("named tensor must be recoverable");
+        assert_eq!(tensor.shape(), vec![3]);
+        match tensor {
+            Tensor::F32(arr) => {
+                assert_eq!(
+                    arr.iter().copied().collect::<Vec<f32>>(),
+                    vec![9.0, 8.0, 7.0]
+                );
+            },
+            other => panic!("expected an F32 tensor, got {other:?}"),
+        }
+
+        let first = loader
+            .parse_tensor_from_bytes(bytes, "first.weight")
+            .expect("named tensor must be recoverable");
+        assert_eq!(first.shape(), vec![2, 2]);
+    }
+
+    #[test]
+    fn streaming_an_unknown_tensor_name_is_an_error() {
+        let loader = loader_with(CacheEvictionPolicy::LRU);
+        let bytes = build_safetensors(&[F32Tensor::new("only", &[1], vec![1.0])]);
+        let err = loader
+            .parse_tensor_from_bytes(bytes, "missing")
+            .expect_err("an absent tensor must not be invented");
+        assert!(
+            err.to_string().contains("missing"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn streaming_a_non_checkpoint_buffer_is_an_error() {
+        let loader = loader_with(CacheEvictionPolicy::LRU);
+        let err = loader
+            .parse_tensor_from_bytes(vec![0x11; 4096], "anything")
+            .expect_err("raw bytes must not be reinterpreted as a tensor");
+        assert!(
+            err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected error: {err}"
+        );
+    }
+
+    fn tensor(value: f32) -> Tensor {
+        Tensor::from_vec(vec![value], &[1]).expect("tensor must build")
+    }
+
+    #[test]
+    fn lru_eviction_drops_the_least_recently_used_entry() {
+        let mut cache = TensorCache::default();
+        cache.insert("a".to_string(), tensor(1.0));
+        std::thread::sleep(Duration::from_millis(2));
+        cache.insert("b".to_string(), tensor(2.0));
+        std::thread::sleep(Duration::from_millis(2));
+        cache.insert("c".to_string(), tensor(3.0));
+        // Touch "a" so that "b" becomes the least recently used.
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(cache.get("a").is_some());
+
+        cache.evict(&CacheEvictionPolicy::LRU, 2);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get("b").is_none(), "LRU must drop the stalest entry");
+        assert!(cache.get("a").is_some());
+        assert!(cache.get("c").is_some());
+    }
+
+    #[test]
+    fn lfu_eviction_drops_the_least_frequently_used_entry() {
+        let mut cache = TensorCache::default();
+        cache.insert("hot".to_string(), tensor(1.0));
+        cache.insert("cold".to_string(), tensor(2.0));
+        for _ in 0..3 {
+            assert!(cache.get("hot").is_some());
+        }
+
+        cache.evict(&CacheEvictionPolicy::LFU, 1);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get("hot").is_some(), "LFU must keep the hot entry");
+    }
+
+    #[test]
+    fn fifo_eviction_drops_the_oldest_insertion() {
+        let mut cache = TensorCache::default();
+        cache.insert("first".to_string(), tensor(1.0));
+        std::thread::sleep(Duration::from_millis(2));
+        cache.insert("second".to_string(), tensor(2.0));
+        // Reading "first" must not save it from a FIFO eviction.
+        assert!(cache.get("first").is_some());
+
+        cache.evict(&CacheEvictionPolicy::FIFO, 1);
+        assert_eq!(cache.len(), 1);
+        assert!(
+            cache.get("second").is_some(),
+            "FIFO must drop the oldest entry"
+        );
+    }
+
+    #[test]
+    fn eviction_respects_the_configured_capacity() {
+        for policy in [
+            CacheEvictionPolicy::LRU,
+            CacheEvictionPolicy::LFU,
+            CacheEvictionPolicy::FIFO,
+            CacheEvictionPolicy::Random,
+            CacheEvictionPolicy::TTL,
+        ] {
+            let mut cache = TensorCache::default();
+            for i in 0..10 {
+                cache.insert(format!("t{i}"), tensor(i as f32));
+            }
+            cache.evict(&policy, 4);
+            assert_eq!(cache.len(), 4, "{policy:?} must respect the capacity");
+        }
+    }
+
+    #[tokio::test]
+    async fn replication_reports_that_it_is_not_implemented() {
+        // Regression: this used to print "Replicating tensor X to node Y" and
+        // return Ok, so a configured replication factor silently did nothing.
+        let mut config = make_distributed_config(vec![make_node("a"), make_node("b")]);
+        config.distributed_cache.replication_factor = 2;
+        let loader = DistributedWeightLoader::new(WeightLoadingConfig::default(), config)
+            .expect("loader must build");
+
+        let err = loader
+            .cache_tensor("w", &tensor(1.0))
+            .await
+            .expect_err("replication must not be silently skipped");
+        assert!(
+            err.to_string().contains("replication"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn caching_without_replication_stores_the_tensor() {
+        let loader = loader_with(CacheEvictionPolicy::LRU);
+        loader.cache_tensor("w", &tensor(4.0)).await.expect("caching must succeed");
+        assert_eq!(loader.cached_tensor_count().expect("count"), 1);
+        let cached = loader.check_cache("w").await.expect("lookup must succeed");
+        assert!(cached.is_some());
     }
 }

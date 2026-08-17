@@ -1,23 +1,126 @@
+//! Byte-level BPE (GPT-2 / RoBERTa style) tokenizer.
+//!
+//! The implementation follows the reference GPT-2 encoder:
+//!
+//! 1. text is split with the exact GPT-2 pre-tokenizer pattern (which needs a
+//!    lookahead, hence `fancy_regex`),
+//! 2. each pre-token is mapped byte-by-byte through the GPT-2
+//!    `bytes_to_unicode` alphabet,
+//! 3. merges are applied in rank order until no ranked pair remains.
+
 use crate::vocab::Vocab;
+use fancy_regex::Regex as FancyRegex;
 use once_cell::sync::Lazy;
-use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::RwLock;
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::traits::{TokenizedInput, Tokenizer};
 use unicode_normalization::UnicodeNormalization;
 
+/// Separator used to key merge ranks by a single joined string.
+///
+/// Byte-level BPE symbols only ever contain characters from the
+/// `bytes_to_unicode` alphabet (`U+0021..=U+00FF` minus a few holes, plus
+/// `U+0100..=U+01FF`), so `U+0001` can never occur inside a symbol and is a
+/// safe, allocation-free separator for `(first, second)` lookups.
+const MERGE_KEY_SEPARATOR: char = '\u{1}';
+
+/// Upper bound on the number of cached pre-token BPE results.
+///
+/// The cache is keyed on arbitrary input substrings, so it must be bounded or a
+/// long-running service leaks one entry per distinct pre-token. When the bound
+/// is hit the cache is cleared wholesale (cheap, and BPE results are trivially
+/// recomputable).
+const BPE_CACHE_CAPACITY: usize = 1 << 16;
+
+/// Words shorter than this many bytes are cheaper to re-merge than to look up
+/// under the shared lock, so they bypass the cache entirely.
+const BPE_CACHE_MIN_LEN: usize = 4;
+
+/// Exact GPT-2 byte-level BPE pre-tokenizer pattern.
+///
+/// `\s+(?!\S)` is load-bearing: it makes a run of whitespace that is followed by
+/// a non-space character give its *last* space to the following pre-token, which
+/// is what produces the familiar `Ġword` pieces. `regex` cannot express the
+/// lookahead, so the pure-Rust backtracking engine `fancy_regex` is used.
+static GPT2_PATTERN: Lazy<FancyRegex> = Lazy::new(|| {
+    // reason: compile-time-constant pattern; a `static` initializer has no
+    // fallible channel to propagate an error through.
+    FancyRegex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+")
+        .expect("built-in GPT-2 byte-level BPE regex must compile")
+});
+
+/// GPT-2 `bytes_to_unicode()` table: byte value -> printable character.
+static BYTE_ENCODER: Lazy<[char; 256]> = Lazy::new(build_byte_encoder);
+
+/// Inverse of [`BYTE_ENCODER`], indexed by code point (all entries are < 512).
+static BYTE_DECODER: Lazy<[Option<u8>; 512]> = Lazy::new(build_byte_decoder);
+
+fn build_byte_encoder() -> [char; 256] {
+    let mut table = ['\0'; 256];
+    let mut next_code_point = 256u32;
+
+    for (byte, slot) in table.iter_mut().enumerate() {
+        let byte = byte as u8;
+        if (33..=126).contains(&byte) || (161..=172).contains(&byte) || byte >= 174 {
+            *slot = byte as char;
+        } else {
+            // reason: `next_code_point` stays inside 256..=511, a range that
+            // contains no surrogate code points, so `from_u32` is always `Some`.
+            *slot = char::from_u32(next_code_point)
+                .expect("code points 256..=511 are valid Unicode scalar values");
+            next_code_point += 1;
+        }
+    }
+
+    table
+}
+
+fn build_byte_decoder() -> [Option<u8>; 512] {
+    let mut table = [None; 512];
+    let encoder = build_byte_encoder();
+    for (b, &ch) in encoder.iter().enumerate() {
+        let code_point = ch as usize;
+        debug_assert!(code_point < 512, "byte-level alphabet stays below U+0200");
+        if code_point < 512 {
+            table[code_point] = Some(b as u8);
+        }
+    }
+    table
+}
+
+/// Map a single byte to its GPT-2 byte-level alphabet character.
+#[inline]
+pub fn byte_to_unicode(byte: u8) -> char {
+    BYTE_ENCODER[byte as usize]
+}
+
+/// Map a GPT-2 byte-level alphabet character back to its byte.
+#[inline]
+pub fn unicode_to_byte(ch: char) -> Option<u8> {
+    let code_point = ch as usize;
+    if code_point < 512 {
+        BYTE_DECODER[code_point]
+    } else {
+        None
+    }
+}
+
+/// Encode a raw byte slice into the GPT-2 byte-level alphabet.
+pub fn bytes_to_unicode_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| byte_to_unicode(b)).collect()
+}
+
 #[derive(Debug)]
 pub struct BPETokenizer {
     vocab: Vocab,
     merges: Vec<(String, String)>,
-    merge_ranks: HashMap<(String, String), usize>,
+    /// `first \u{1} second -> rank`, so a merge lookup needs no allocation.
+    merge_ranks: HashMap<String, usize>,
     unk_token: String,
     pad_token: String,
     bos_token: String,
     eos_token: String,
-    byte_encoder: HashMap<u8, char>,
-    byte_decoder: HashMap<char, u8>,
     cache: RwLock<HashMap<String, Vec<String>>>,
     // Enhanced byte-level BPE features
     normalize_unicode: bool,
@@ -25,15 +128,6 @@ pub struct BPETokenizer {
     handle_chinese_chars: bool,
     max_input_chars_per_word: usize,
 }
-
-// GPT-2 uses a special byte-level BPE
-// reason: compile-time-constant pattern; `Regex::new` cannot fail at runtime and
-// a `static` initializer has no fallible channel to propagate an error through.
-static GPT2_PATTERN: Lazy<Regex> = Lazy::new(|| {
-    // Simplified regex without lookahead - matches the same patterns but less precisely
-    Regex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+")
-        .expect("built-in GPT-2 byte-level BPE regex must compile")
-});
 
 impl Clone for BPETokenizer {
     fn clone(&self) -> Self {
@@ -45,8 +139,6 @@ impl Clone for BPETokenizer {
             pad_token: self.pad_token.clone(),
             bos_token: self.bos_token.clone(),
             eos_token: self.eos_token.clone(),
-            byte_encoder: self.byte_encoder.clone(),
-            byte_decoder: self.byte_decoder.clone(),
             cache: RwLock::new(HashMap::new()), // Create new cache for clone
             normalize_unicode: self.normalize_unicode,
             preserve_case: self.preserve_case,
@@ -57,13 +149,13 @@ impl Clone for BPETokenizer {
 }
 
 impl BPETokenizer {
+    /// Create a byte-level BPE tokenizer.
+    ///
+    /// Byte-level BPE (GPT-2 / RoBERTa) is case sensitive and must not alter the
+    /// byte stream, so case folding and CJK space padding are **off** by
+    /// default. Use [`BPETokenizer::with_options`] to opt into them.
     pub fn new(vocab: HashMap<String, u32>, merges: Vec<(String, String)>) -> Self {
-        let mut merge_ranks = HashMap::new();
-        for (i, merge) in merges.iter().enumerate() {
-            merge_ranks.insert(merge.clone(), i);
-        }
-
-        let (byte_encoder, byte_decoder) = Self::create_byte_encoder();
+        let merge_ranks = Self::build_merge_ranks(&merges);
 
         Self {
             vocab: Vocab::from_map(vocab),
@@ -73,14 +165,28 @@ impl BPETokenizer {
             pad_token: "<|endoftext|>".to_string(),
             bos_token: "<|endoftext|>".to_string(),
             eos_token: "<|endoftext|>".to_string(),
-            byte_encoder,
-            byte_decoder,
             cache: RwLock::new(HashMap::new()),
             normalize_unicode: true,
-            preserve_case: false,
-            handle_chinese_chars: true,
+            preserve_case: true,
+            handle_chinese_chars: false,
             max_input_chars_per_word: 100,
         }
+    }
+
+    fn build_merge_ranks(merges: &[(String, String)]) -> HashMap<String, usize> {
+        let mut merge_ranks = HashMap::with_capacity(merges.len());
+        for (rank, (first, second)) in merges.iter().enumerate() {
+            merge_ranks.insert(Self::merge_key(first, second), rank);
+        }
+        merge_ranks
+    }
+
+    fn merge_key(first: &str, second: &str) -> String {
+        let mut key = String::with_capacity(first.len() + second.len() + 1);
+        key.push_str(first);
+        key.push(MERGE_KEY_SEPARATOR);
+        key.push_str(second);
+        key
     }
 
     /// Create a new BPE tokenizer with custom options
@@ -100,6 +206,21 @@ impl BPETokenizer {
         tokenizer
     }
 
+    /// Override the special tokens (used when restoring a saved tokenizer).
+    pub fn with_special_tokens(
+        mut self,
+        unk_token: String,
+        pad_token: String,
+        bos_token: String,
+        eos_token: String,
+    ) -> Self {
+        self.unk_token = unk_token;
+        self.pad_token = pad_token;
+        self.bos_token = bos_token;
+        self.eos_token = eos_token;
+        self
+    }
+
     /// Get the vocabulary
     pub fn get_vocab_ref(&self) -> &Vocab {
         &self.vocab
@@ -113,6 +234,46 @@ impl BPETokenizer {
     /// Get the vocabulary mapping
     pub fn get_vocab_map(&self) -> &HashMap<String, u32> {
         self.vocab.get_token_to_id_map()
+    }
+
+    /// Whether Unicode (NFC) normalization is applied before tokenization.
+    pub fn normalizes_unicode(&self) -> bool {
+        self.normalize_unicode
+    }
+
+    /// Whether the original casing is preserved (required for byte-level BPE).
+    pub fn preserves_case(&self) -> bool {
+        self.preserve_case
+    }
+
+    /// Whether CJK characters get space padding before tokenization.
+    pub fn handles_chinese_chars(&self) -> bool {
+        self.handle_chinese_chars
+    }
+
+    /// Maximum number of characters processed as a single word.
+    pub fn max_input_chars_per_word(&self) -> usize {
+        self.max_input_chars_per_word
+    }
+
+    /// The unknown-token string.
+    pub fn unk_token(&self) -> &str {
+        &self.unk_token
+    }
+
+    /// The padding-token string.
+    pub fn pad_token(&self) -> &str {
+        &self.pad_token
+    }
+
+    /// The beginning-of-sequence token string.
+    pub fn bos_token(&self) -> &str {
+        &self.bos_token
+    }
+
+    /// The end-of-sequence token string.
+    pub fn eos_token(&self) -> &str {
+        &self.eos_token
     }
 
     pub fn from_files(vocab_path: &str, merges_path: &str) -> Result<Self> {
@@ -194,9 +355,6 @@ impl BPETokenizer {
         tokenizer.pad_token = "<pad>".to_string();
         tokenizer.bos_token = "<s>".to_string();
         tokenizer.eos_token = "</s>".to_string();
-        tokenizer.normalize_unicode = true;
-        tokenizer.preserve_case = true;
-        tokenizer.handle_chinese_chars = false; // RoBERTa typically doesn't handle Chinese specially
 
         Ok(tokenizer)
     }
@@ -257,57 +415,50 @@ impl BPETokenizer {
         (0x2F800..=0x2FA1F).contains(&cp) // CJK Compatibility Supplement
     }
 
-    /// Improved byte encoding with better Unicode support
-    fn encode_as_bytes(&self, text: &str) -> Vec<u8> {
-        // First normalize the text
-        let normalized = self.normalize_text(text);
-
-        // Convert to UTF-8 bytes
-        normalized.as_bytes().to_vec()
-    }
-
-    /// Create byte-level encoder/decoder for GPT-2 style tokenization
-    fn create_byte_encoder() -> (HashMap<u8, char>, HashMap<char, u8>) {
-        let mut byte_encoder = HashMap::new();
-        let mut byte_decoder = HashMap::new();
-
-        // Printable ASCII characters (33-126) map to themselves
-        let _n = 0;
-        for b in 0..=255u8 {
-            if (33..=126).contains(&b) || (161..=172).contains(&b) || b >= 174 {
-                byte_encoder.insert(b, b as char);
-                byte_decoder.insert(b as char, b);
+    /// Byte spans of the GPT-2 pre-tokens of `text`.
+    ///
+    /// If the backtracking engine ever bails out (backtrack limit), the
+    /// remaining suffix is returned as one span instead of being dropped, so no
+    /// input is ever silently lost.
+    fn pre_token_spans(text: &str) -> Vec<(usize, usize)> {
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for matched in GPT2_PATTERN.find_iter(text) {
+            match matched {
+                Ok(m) => spans.push((m.start(), m.end())),
+                Err(_) => {
+                    let resume = spans.last().map(|&(_, end)| end).unwrap_or(0);
+                    if resume < text.len() {
+                        spans.push((resume, text.len()));
+                    }
+                    break;
+                },
             }
         }
-
-        // Other bytes map to unicode characters starting from 256
-        let mut char_val = 256u32;
-        for b in 0..=255u8 {
-            if let std::collections::hash_map::Entry::Vacant(e) = byte_encoder.entry(b) {
-                // char_val stays within 256..=511 here, which contains no surrogate
-                // code points, so `from_u32` always yields `Some`; skip gracefully
-                // rather than panicking on the impossible `None`.
-                if let Some(ch) = char::from_u32(char_val) {
-                    e.insert(ch);
-                    byte_decoder.insert(ch, b);
-                    char_val += 1;
-                }
-            }
-        }
-
-        (byte_encoder, byte_decoder)
+        spans
     }
 
+    /// Split `text` into GPT-2 pre-tokens (public for testing and inspection).
+    pub fn pre_tokenize<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        Self::pre_token_spans(text).into_iter().map(|(s, e)| &text[s..e]).collect()
+    }
+
+    /// Apply the BPE merge sequence to one (already normalized) pre-token.
+    ///
+    /// The input is interpreted as raw UTF-8 bytes mapped through the GPT-2
+    /// byte-level alphabet; no further normalization happens here (the caller
+    /// normalizes once for the whole text).
     fn bpe(&self, token: &str) -> Vec<String> {
-        // Check cache first
-        if let Ok(cache) = self.cache.read() {
-            if let Some(cached) = cache.get(token) {
-                return cached.clone();
-            }
-        }
-
         if token.is_empty() {
             return vec![];
+        }
+
+        let cacheable = token.len() >= BPE_CACHE_MIN_LEN;
+        if cacheable {
+            if let Ok(cache) = self.cache.read() {
+                if let Some(cached) = cache.get(token) {
+                    return cached.clone();
+                }
+            }
         }
 
         // Limit input length to prevent excessive processing
@@ -327,126 +478,175 @@ impl BPETokenizer {
             return result;
         }
 
-        // Use improved byte encoding
-        let word_bytes = self.encode_as_bytes(token);
-        let mut word: Vec<String> =
-            word_bytes.iter().map(|&b| self.byte_encoder[&b].to_string()).collect();
+        // Every BPE symbol is a contiguous run of the byte-encoded word, so the
+        // whole merge loop runs over `(start, end)` spans of one buffer: one
+        // allocation for the buffer, none per input byte and none per candidate
+        // pair. Only the final pieces become owned `String`s.
+        let encoded: String = token.as_bytes().iter().map(|&b| byte_to_unicode(b)).collect();
+        let mut symbols: Vec<(usize, usize)> = encoded
+            .char_indices()
+            .map(|(offset, ch)| (offset, offset + ch.len_utf8()))
+            .collect();
 
-        if word.len() == 1 {
-            return word;
+        if symbols.len() > 1 {
+            self.apply_merges(&encoded, &mut symbols);
         }
 
-        // Optimized BPE algorithm with early termination
-        loop {
-            let pairs = Self::get_pairs(&word);
-            if pairs.is_empty() {
-                break;
-            }
+        let word: Vec<String> =
+            symbols.iter().map(|&(start, end)| encoded[start..end].to_string()).collect();
 
-            // Find the best pair to merge with improved efficiency
-            let mut min_rank = usize::MAX;
-            let mut best_pair: Option<(String, String)> = None;
-
-            for pair in &pairs {
-                if let Some(&rank) = self.merge_ranks.get(pair) {
-                    if rank < min_rank {
-                        min_rank = rank;
-                        best_pair = Some(pair.clone());
-                    }
+        if cacheable {
+            if let Ok(mut cache) = self.cache.write() {
+                if cache.len() >= BPE_CACHE_CAPACITY {
+                    cache.clear();
                 }
+                cache.insert(token.to_string(), word.clone());
             }
-
-            let (first, second) = match best_pair {
-                Some(pair) => pair,
-                None => break,
-            };
-            let mut new_word = Vec::with_capacity(word.len());
-            let mut i = 0;
-
-            while i < word.len() {
-                if i < word.len() - 1 && word[i] == first && word[i + 1] == second {
-                    new_word.push(format!("{}{}", first, second));
-                    i += 2;
-                } else {
-                    new_word.push(word[i].clone());
-                    i += 1;
-                }
-            }
-
-            word = new_word;
-            if word.len() == 1 {
-                break;
-            }
-        }
-
-        // Cache the result
-        if let Ok(mut cache) = self.cache.write() {
-            cache.insert(token.to_string(), word.clone());
         }
 
         word
     }
 
-    fn get_pairs(word: &[String]) -> HashSet<(String, String)> {
-        let mut pairs = HashSet::new();
-        for i in 0..word.len().saturating_sub(1) {
-            pairs.insert((word[i].clone(), word[i + 1].clone()));
+    /// Repeatedly merge the lowest-ranked adjacent pair, in place.
+    ///
+    /// `symbols` are `(start, end)` byte spans of `encoded`, which tile it
+    /// completely and in order; merging two adjacent symbols is therefore just
+    /// joining two adjacent spans. Nothing is allocated per candidate pair: the
+    /// lookup key is built into one reusable buffer and the spans are `Copy`.
+    fn apply_merges(&self, encoded: &str, symbols: &mut Vec<(usize, usize)>) {
+        if self.merge_ranks.is_empty() {
+            return;
         }
-        pairs
+
+        let mut key = String::new();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(symbols.len());
+
+        while symbols.len() > 1 {
+            let mut best_rank = usize::MAX;
+            let mut best_index: Option<usize> = None;
+
+            for i in 0..symbols.len() - 1 {
+                key.clear();
+                key.push_str(&encoded[symbols[i].0..symbols[i].1]);
+                key.push(MERGE_KEY_SEPARATOR);
+                key.push_str(&encoded[symbols[i + 1].0..symbols[i + 1].1]);
+
+                if let Some(&rank) = self.merge_ranks.get(key.as_str()) {
+                    if rank < best_rank {
+                        best_rank = rank;
+                        best_index = Some(i);
+                    }
+                }
+            }
+
+            let Some(first_index) = best_index else {
+                break;
+            };
+
+            // Merge *every* occurrence of the winning pair in one pass, exactly
+            // like the reference GPT-2 implementation.
+            let (first_start, first_end) = symbols[first_index];
+            let (second_start, second_end) = symbols[first_index + 1];
+            let first_text = &encoded[first_start..first_end];
+            let second_text = &encoded[second_start..second_end];
+
+            merged.clear();
+            let mut i = 0;
+            while i < symbols.len() {
+                let matches_pair = i + 1 < symbols.len()
+                    && &encoded[symbols[i].0..symbols[i].1] == first_text
+                    && &encoded[symbols[i + 1].0..symbols[i + 1].1] == second_text;
+
+                if matches_pair {
+                    merged.push((symbols[i].0, symbols[i + 1].1));
+                    i += 2;
+                } else {
+                    merged.push(symbols[i]);
+                    i += 1;
+                }
+            }
+
+            std::mem::swap(symbols, &mut merged);
+        }
     }
 
     fn tokenize(&self, text: &str) -> Vec<String> {
-        let mut tokens = vec![];
-
-        // Apply normalization first
         let normalized_text = self.normalize_text(text);
 
-        // Use GPT-2 regex pattern to split text
-        for mat in GPT2_PATTERN.find_iter(&normalized_text) {
-            let word = mat.as_str();
-            let bpe_tokens = self.bpe(word);
-            tokens.extend(bpe_tokens);
+        let mut tokens = vec![];
+        for (start, end) in Self::pre_token_spans(&normalized_text) {
+            tokens.extend(self.bpe(&normalized_text[start..end]));
         }
 
         tokens
     }
 
-    /// Enhanced tokenization with offset tracking
+    /// Tokenization with byte offsets into the **original** text.
+    ///
+    /// Pre-tokenization runs on the caller's string (never on a normalized
+    /// copy), so the returned spans index the input directly. Within a
+    /// pre-token, each BPE piece covers exactly as many bytes as it has symbol
+    /// characters (one symbol == one source byte), and those exact byte
+    /// positions are what the cursor advances by — the reported span is only
+    /// widened outward to the enclosing character boundaries so that
+    /// `&text[start..end]` never panics. A piece that splits a multi-byte
+    /// character therefore reports the whole character (as HuggingFace does)
+    /// without shifting the pieces that follow it.
+    ///
+    /// If normalization changed a pre-token, byte lengths no longer line up and
+    /// every piece of that pre-token conservatively reports the whole pre-token
+    /// span.
     pub fn tokenize_with_offsets(&self, text: &str) -> (Vec<String>, Vec<(usize, usize)>) {
         let mut tokens = vec![];
         let mut offsets = vec![];
 
-        let normalized_text = self.normalize_text(text);
-        let mut current_offset = 0;
+        for (start, end) in Self::pre_token_spans(text) {
+            let word = &text[start..end];
+            let normalized_word = self.normalize_text(word);
+            let pieces = self.bpe(&normalized_word);
+            let byte_exact = normalized_word == word;
 
-        // Use GPT-2 regex pattern to split text
-        for mat in GPT2_PATTERN.find_iter(&normalized_text) {
-            let word = mat.as_str();
-            let start = current_offset;
-            let end = start + word.len();
+            // Exact byte cursor: never adjusted for character boundaries, so the
+            // spans of successive pieces stay perfectly tiled.
+            let mut cursor = start;
 
-            let bpe_tokens = self.bpe(word);
+            for piece in &pieces {
+                let span = if !byte_exact {
+                    (start, end)
+                } else {
+                    let piece_end = (cursor + piece.chars().count()).min(end);
+                    let span = (
+                        Self::floor_char_boundary(text, cursor),
+                        Self::ceil_char_boundary(text, piece_end),
+                    );
+                    cursor = piece_end;
+                    span
+                };
 
-            // Distribute the word offset across its BPE tokens
-            let token_count = bpe_tokens.len();
-            if token_count > 0 {
-                let chars_per_token = word.chars().count().checked_div(token_count).unwrap_or(0);
-                let mut token_start = start;
-
-                for (i, token) in bpe_tokens.iter().enumerate() {
-                    let token_end =
-                        if i == token_count - 1 { end } else { token_start + chars_per_token };
-
-                    tokens.push(token.clone());
-                    offsets.push((token_start, token_end));
-                    token_start = token_end;
-                }
+                tokens.push(piece.clone());
+                offsets.push(span);
             }
-
-            current_offset = end;
         }
 
         (tokens, offsets)
+    }
+
+    /// Largest character boundary of `text` that is `<= index`.
+    fn floor_char_boundary(text: &str, index: usize) -> usize {
+        let mut index = index.min(text.len());
+        while index > 0 && !text.is_char_boundary(index) {
+            index -= 1;
+        }
+        index
+    }
+
+    /// Smallest character boundary of `text` that is `>= index`.
+    fn ceil_char_boundary(text: &str, index: usize) -> usize {
+        let mut index = index.min(text.len());
+        while index < text.len() && !text.is_char_boundary(index) {
+            index += 1;
+        }
+        index
     }
 }
 
@@ -485,10 +685,10 @@ impl Tokenizer for BPETokenizer {
 
         // Join tokens and decode bytes
         let text = tokens.join("");
-        let mut bytes = Vec::new();
+        let mut bytes = Vec::with_capacity(text.len());
 
         for ch in text.chars() {
-            if let Some(&byte) = self.byte_decoder.get(&ch) {
+            if let Some(byte) = unicode_to_byte(ch) {
                 bytes.push(byte);
             }
         }
@@ -536,6 +736,124 @@ mod tests {
         BPETokenizer::new(vocab, merges)
     }
 
+    /// Round-trip and pin the GPT-2 `bytes_to_unicode` table.
+    #[test]
+    fn test_byte_encoder_table_is_gpt2_bytes_to_unicode() {
+        let mut seen = std::collections::HashSet::new();
+        for b in 0..=255u8 {
+            let ch = byte_to_unicode(b);
+            assert!(seen.insert(ch), "byte {} produced a duplicate character", b);
+            assert_eq!(
+                unicode_to_byte(ch),
+                Some(b),
+                "byte {} did not round-trip through the byte alphabet",
+                b
+            );
+        }
+        assert_eq!(seen.len(), 256);
+
+        // Canonical anchors of the GPT-2 table.
+        assert_eq!(byte_to_unicode(b' '), '\u{0120}'); // 'Ġ'
+        assert_eq!(byte_to_unicode(0), '\u{0100}'); // 'Ā'
+        assert_eq!(byte_to_unicode(b'a'), 'a');
+        assert_eq!(byte_to_unicode(b'\n'), '\u{010a}');
+    }
+
+    /// Byte-level round-trip: every byte string maps to symbols and back.
+    #[test]
+    fn test_bytes_to_unicode_string_round_trip() {
+        let samples: [&[u8]; 4] = [
+            b"Hello, world!",
+            b"\xf0\x9f\x98\x80",
+            b"\x00\x01\x02",
+            b" \t\n",
+        ];
+        for sample in samples {
+            let encoded = bytes_to_unicode_string(sample);
+            let decoded: Vec<u8> = encoded.chars().filter_map(unicode_to_byte).collect::<Vec<u8>>();
+            assert_eq!(decoded.as_slice(), sample);
+        }
+    }
+
+    /// Regression: the old pattern lacked `\s+(?!\S)`, so a whitespace run was
+    /// consumed whole and the following word never got its leading space.
+    #[test]
+    fn test_gpt2_pattern_gives_trailing_space_to_next_word() {
+        let tokenizer = create_test_tokenizer();
+
+        assert_eq!(tokenizer.pre_tokenize("a   b"), vec!["a", "  ", " b"]);
+        assert_eq!(
+            tokenizer.pre_tokenize("hello world"),
+            vec!["hello", " world"]
+        );
+        // Trailing whitespace at end of input is kept as a single run.
+        assert_eq!(tokenizer.pre_tokenize("hi   "), vec!["hi", "   "]);
+    }
+
+    /// Regression: `new()` used to lowercase everything, corrupting byte-level BPE.
+    #[test]
+    fn test_new_preserves_case_and_bytes() {
+        let tokenizer = BPETokenizer::new(HashMap::new(), Vec::new());
+        assert!(tokenizer.preserves_case());
+        assert!(!tokenizer.handles_chinese_chars());
+
+        let text = "Hello WORLD";
+        let tokens = tokenizer.tokenize(text);
+        let joined: String = tokens.concat();
+        let bytes: Vec<u8> = joined.chars().filter_map(unicode_to_byte).collect();
+        assert_eq!(
+            String::from_utf8(bytes).expect("byte-level BPE must round-trip UTF-8"),
+            text
+        );
+    }
+
+    /// CJK input must not be silently space-padded by the default constructor.
+    #[test]
+    fn test_new_does_not_pad_cjk() {
+        let tokenizer = BPETokenizer::new(HashMap::new(), Vec::new());
+        let text = "hello世界world";
+        let tokens = tokenizer.tokenize(text);
+        let joined: String = tokens.concat();
+        let bytes: Vec<u8> = joined.chars().filter_map(unicode_to_byte).collect();
+        assert_eq!(String::from_utf8(bytes).expect("valid UTF-8"), text);
+    }
+
+    #[test]
+    fn test_merges_are_applied_in_rank_order() {
+        // "ab" merges before "bc": with word = a b c the result must be ["ab", "c"].
+        let merges = vec![
+            ("a".to_string(), "b".to_string()),
+            ("b".to_string(), "c".to_string()),
+        ];
+        let tokenizer = BPETokenizer::new(HashMap::new(), merges);
+        assert_eq!(
+            tokenizer.bpe("abc"),
+            vec!["ab".to_string(), "c".to_string()]
+        );
+
+        // Reverse the ranks and the segmentation flips.
+        let merges = vec![
+            ("b".to_string(), "c".to_string()),
+            ("a".to_string(), "b".to_string()),
+        ];
+        let tokenizer = BPETokenizer::new(HashMap::new(), merges);
+        assert_eq!(
+            tokenizer.bpe("abc"),
+            vec!["a".to_string(), "bc".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_merge_applies_to_all_occurrences_in_one_pass() {
+        let merges = vec![("a".to_string(), "a".to_string())];
+        let tokenizer = BPETokenizer::new(HashMap::new(), merges);
+        assert_eq!(
+            tokenizer.bpe("aaaa"),
+            vec!["aa".to_string(), "aa".to_string()],
+            "a single merge rank must be applied to every occurrence before re-ranking"
+        );
+    }
+
     #[test]
     fn test_enhanced_bpe_unicode_normalization() {
         let tokenizer = create_test_tokenizer();
@@ -577,22 +895,77 @@ mod tests {
         assert!(!tokenizer.is_chinese_char(' '));
     }
 
+    /// Offsets must index the ORIGINAL text and follow real piece boundaries.
     #[test]
-    fn test_tokenize_with_offsets() {
-        let tokenizer = create_test_tokenizer();
+    fn test_tokenize_with_offsets_indexes_original_text() {
+        // "he" is a merge, so "Hello" splits into pieces of unequal length and a
+        // uniform division of the word length would be wrong.
+        let merges = vec![("l".to_string(), "l".to_string())];
+        let tokenizer = BPETokenizer::new(HashMap::new(), merges);
 
-        let text = "hello world";
+        let text = "Hello World";
         let (tokens, offsets) = tokenizer.tokenize_with_offsets(text);
 
         assert_eq!(tokens.len(), offsets.len());
         assert!(!tokens.is_empty());
-        assert!(!offsets.is_empty());
 
-        // Check that offsets are reasonable
-        for &(start, end) in &offsets {
-            assert!(start <= end);
-            assert!(end <= text.len());
+        for (token, &(start, end)) in tokens.iter().zip(offsets.iter()) {
+            assert!(start <= end, "offset span must be ordered");
+            assert!(end <= text.len(), "offset must index the original text");
+            // Each symbol character corresponds to exactly one source byte.
+            assert_eq!(
+                &text.as_bytes()[start..end],
+                token.chars().filter_map(unicode_to_byte).collect::<Vec<u8>>().as_slice(),
+                "token {:?} must cover exactly the bytes it encodes",
+                token
+            );
         }
+
+        // Case is preserved: the first token starts at byte 0 of "Hello".
+        assert_eq!(offsets[0].0, 0);
+        // The offsets tile the pre-tokens contiguously.
+        assert_eq!(offsets[offsets.len() - 1].1, text.len());
+    }
+
+    /// A BPE piece may split a multi-byte character. The reported span must then
+    /// widen to the enclosing character (so `&text[start..end]` is valid) without
+    /// shifting the pieces that follow it.
+    #[test]
+    fn test_tokenize_with_offsets_handles_multibyte_characters() {
+        let tokenizer = BPETokenizer::new(HashMap::new(), Vec::new());
+
+        // 'é' is U+00E9 = bytes C3 A9, so it becomes two byte-level symbols.
+        let text = "aé";
+        assert_eq!(text.len(), 3);
+
+        let (tokens, offsets) = tokenizer.tokenize_with_offsets(text);
+        assert_eq!(tokens.len(), 3, "one symbol per source byte");
+        assert_eq!(offsets.len(), tokens.len());
+
+        // Every span must be a valid, non-empty slice of the original text.
+        for (token, &(start, end)) in tokens.iter().zip(offsets.iter()) {
+            assert!(
+                start < end,
+                "token {:?} must not report an empty span",
+                token
+            );
+            assert!(text.is_char_boundary(start) && text.is_char_boundary(end));
+            let _ = &text[start..end];
+        }
+
+        assert_eq!(offsets[0], (0, 1), "the ASCII 'a' keeps its exact span");
+        // Both halves of 'é' report the whole character rather than drifting.
+        assert_eq!(offsets[1], (1, 3));
+        assert_eq!(offsets[2], (1, 3));
+        assert_eq!(offsets[offsets.len() - 1].1, text.len());
+
+        // A merge that straddles the character boundary must not shift the rest.
+        let merges = vec![("a".to_string(), byte_to_unicode(0xC3).to_string())];
+        let merged = BPETokenizer::new(HashMap::new(), merges);
+        let (tokens, offsets) = merged.tokenize_with_offsets(text);
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(offsets[0], (0, 3));
+        assert_eq!(offsets[1], (1, 3));
     }
 
     #[test]
@@ -607,10 +980,10 @@ mod tests {
             50,    // max_input_chars_per_word
         );
 
-        assert!(!tokenizer.normalize_unicode);
-        assert!(tokenizer.preserve_case);
-        assert!(!tokenizer.handle_chinese_chars);
-        assert_eq!(tokenizer.max_input_chars_per_word, 50);
+        assert!(!tokenizer.normalizes_unicode());
+        assert!(tokenizer.preserves_case());
+        assert!(!tokenizer.handles_chinese_chars());
+        assert_eq!(tokenizer.max_input_chars_per_word(), 50);
     }
 
     #[test]
@@ -655,5 +1028,28 @@ mod tests {
 
         assert_ne!(preserved, lowered);
         assert_eq!(lowered, text.to_lowercase());
+    }
+
+    /// The pre-token cache must stay bounded under high-cardinality input.
+    #[test]
+    fn test_bpe_cache_is_bounded() {
+        let tokenizer = BPETokenizer::new(HashMap::new(), Vec::new());
+        for i in 0..(BPE_CACHE_CAPACITY + 16) {
+            let _ = tokenizer.bpe(&format!("token{}", i));
+        }
+        let cache_len = tokenizer.cache.read().map(|c| c.len()).unwrap_or(usize::MAX);
+        assert!(
+            cache_len <= BPE_CACHE_CAPACITY,
+            "cache must never exceed its bound"
+        );
+        assert!(
+            cache_len < BPE_CACHE_CAPACITY + 16,
+            "cache must have evicted once the bound was reached"
+        );
+
+        // Short pre-tokens bypass the cache entirely.
+        let _ = tokenizer.bpe("ab");
+        let cache = tokenizer.cache.read().expect("cache lock must not be poisoned");
+        assert!(!cache.contains_key("ab"));
     }
 }

@@ -2,6 +2,8 @@
 #[cfg(test)]
 mod tests {
     use crate::generation::cache::{Beam, KVCache};
+    use crate::tensor::Tensor;
+    use std::sync::Arc;
 
     // ---- KVCache tests ----
 
@@ -183,5 +185,78 @@ mod tests {
             cache.clear();
         }
         assert_eq!(cache.seq_len, 0);
+    }
+
+    #[test]
+    fn test_kvcache_push_layer_does_not_move_the_sequence_forward() {
+        // Regression: `append` used to bump `seq_len` once per *layer*, so a
+        // 32-layer model reported 32 cached positions after a single token.
+        let mut cache = KVCache::new();
+        for _ in 0..4 {
+            let key = Tensor::from_vec(vec![0.0_f32; 2], &[2]).expect("tensor");
+            let value = Tensor::from_vec(vec![0.0_f32; 2], &[2]).expect("tensor");
+            cache.push_layer(key, value).expect("push layer");
+        }
+        assert_eq!(cache.num_layers(), 4);
+        assert_eq!(cache.seq_len, 0, "layers are not token positions");
+
+        cache.advance(1);
+        assert_eq!(cache.seq_len, 1);
+    }
+
+    #[test]
+    fn test_kvcache_set_layer_out_of_range_is_error() {
+        let mut cache = KVCache::new();
+        let key = Tensor::from_vec(vec![0.0_f32], &[1]).expect("tensor");
+        let value = Tensor::from_vec(vec![0.0_f32], &[1]).expect("tensor");
+        assert!(cache.set_layer(0, key, value).is_err());
+    }
+
+    #[test]
+    fn test_beam_extend_shares_the_cache_instead_of_deep_copying() {
+        // Regression: `extend` deep-cloned every cached key/value tensor of
+        // every layer for every candidate expansion.
+        let mut cache = KVCache::new();
+        let key = Tensor::from_vec(vec![1.0_f32; 64], &[64]).expect("tensor");
+        let value = Tensor::from_vec(vec![2.0_f32; 64], &[64]).expect("tensor");
+        cache.push_layer(key, value).expect("push layer");
+        cache.advance(1);
+
+        let beam = Beam::new(vec![1], 0.0).with_cache(cache);
+        let child = beam.extend(2, -0.5);
+
+        let parent_cache = beam.cache.as_ref().expect("parent cache");
+        let child_cache = child.cache.as_ref().expect("child cache");
+        assert!(
+            Arc::ptr_eq(parent_cache, child_cache),
+            "extend must share the cache allocation"
+        );
+        assert_eq!(child.tokens, vec![1, 2]);
+        assert!((child.score - (-0.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_beam_cache_mut_is_copy_on_write() {
+        let mut cache = KVCache::new();
+        cache.advance(3);
+        let beam = Beam::new(vec![1], 0.0).with_cache(cache);
+        let mut child = beam.extend(2, 0.0);
+
+        child.cache_mut().expect("cache").advance(1);
+
+        assert_eq!(beam.cache.as_ref().expect("parent").seq_len, 3);
+        assert_eq!(child.cache.as_ref().expect("child").seq_len, 4);
+        assert!(!Arc::ptr_eq(
+            beam.cache.as_ref().expect("parent"),
+            child.cache.as_ref().expect("child")
+        ));
+    }
+
+    #[test]
+    fn test_beam_length_normalized_score_uses_the_penalty() {
+        let short = Beam::new(vec![1, 2], -2.0);
+        let long = Beam::new(vec![1, 2, 3, 4], -4.0);
+        assert!(short.length_normalized_score(0.5) > long.length_normalized_score(0.5));
+        assert!(long.length_normalized_score(2.0) > short.length_normalized_score(2.0));
     }
 }

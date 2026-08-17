@@ -1,10 +1,31 @@
 // Core ML export functionality for iOS deployment
-#![allow(unused_variables)] // CoreML export
+//! # Why no `.mlmodel` is written
+//!
+//! A Core ML model is an operation graph (`NeuralNetwork` / `MLProgram`) serialised
+//! as an Apple protobuf. [`Model`] exposes parameters (via
+//! [`Model::named_tensors`]) but not topology, so the layer list cannot be derived.
+//!
+//! Earlier revisions emitted a fixed 768-wide, 12-block transformer whose every
+//! weight was `sin(i * 0.001)`, wrote it under the `.mlmodel` extension and
+//! reported success. That artifact described a model that did not exist, so it is
+//! no longer produced: [`CoreMLExporter::export`] returns a structured
+//! [`ErrorKind::UnsupportedOperation`](crate::errors::ErrorKind::UnsupportedOperation).
+//!
+//! Use the GGUF or GGML exporters to write the model's real parameters; they are
+//! tensor containers and need no topology.
 
 use super::{ExportConfig, ExportFormat, ModelExporter};
+use crate::errors::unsupported_operation;
 use crate::traits::Model;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
+
+/// Explanation attached to every refusal to write a Core ML model.
+pub const COREML_UNSUPPORTED_REASON: &str =
+    "a Core ML model is an operation graph serialised as an Apple protobuf; the \
+     `Model` trait exposes parameters only (`named_tensors`), so TrustformeRS will \
+     not emit a synthesized layer graph under a real model's name. Convert an ONNX \
+     export with `coremltools` instead.";
 
 /// Core ML model representation
 #[derive(Debug, Clone)]
@@ -534,470 +555,21 @@ impl CoreMLExporter {
         self.optimization_enabled = enabled;
         self
     }
-
-    fn create_coreml_model<M: Model>(
-        &self,
-        model: &M,
-        config: &ExportConfig,
-    ) -> Result<CoreMLModel> {
-        let mut layers = Vec::new();
-
-        // Create model description
-        let description = self.create_model_description(config)?;
-
-        // Convert model to Core ML layers
-        self.convert_model_to_layers(model, &mut layers, config)?;
-
-        let neural_network = CoreMLNeuralNetwork {
-            layers,
-            preprocessing: Vec::new(),
-            array_inputs: vec!["input_ids".to_string()],
-        };
-
-        Ok(CoreMLModel {
-            specification_version: 5, // Core ML specification version
-            description,
-            neural_network: neural_network.clone(),
-            model_type: CoreMLModelType::NeuralNetwork(neural_network),
-        })
-    }
-
-    fn create_model_description(&self, config: &ExportConfig) -> Result<CoreMLModelDescription> {
-        let mut metadata = HashMap::new();
-        metadata.insert("author".to_string(), "TrustformeRS".to_string());
-        metadata.insert("license".to_string(), "MIT".to_string());
-        metadata.insert(
-            "description".to_string(),
-            "Transformer model exported from TrustformeRS".to_string(),
-        );
-        metadata.insert("version".to_string(), "1.0".to_string());
-
-        let input_shape = vec![
-            config.batch_size.unwrap_or(1) as i64,
-            config.sequence_length.unwrap_or(512) as i64,
-        ];
-
-        let output_shape = vec![
-            config.batch_size.unwrap_or(1) as i64,
-            config.sequence_length.unwrap_or(512) as i64,
-            50257i64, // vocab size
-        ];
-
-        let input = vec![CoreMLFeatureDescription {
-            name: "input_ids".to_string(),
-            short_description: "Input token IDs".to_string(),
-            feature_type: CoreMLFeatureType::MultiArray(CoreMLArrayFeatureType {
-                shape: input_shape,
-                data_type: CoreMLArrayDataType::Int32,
-                default_optional_value: None,
-            }),
-        }];
-
-        let output = vec![CoreMLFeatureDescription {
-            name: "logits".to_string(),
-            short_description: "Output logits".to_string(),
-            feature_type: CoreMLFeatureType::MultiArray(CoreMLArrayFeatureType {
-                shape: output_shape,
-                data_type: match config.precision {
-                    super::ExportPrecision::FP32 => CoreMLArrayDataType::Float32,
-                    super::ExportPrecision::FP16 => CoreMLArrayDataType::Float16,
-                    _ => CoreMLArrayDataType::Float32, // Fallback for unsupported types
-                },
-                default_optional_value: None,
-            }),
-        }];
-
-        Ok(CoreMLModelDescription {
-            input,
-            output,
-            predicted_feature_name: Some("logits".to_string()),
-            predicted_probabilities_name: None,
-            training_input: Vec::new(),
-            metadata,
-        })
-    }
-
-    fn convert_model_to_layers<M: Model>(
-        &self,
-        model: &M,
-        layers: &mut Vec<CoreMLNeuralNetworkLayer>,
-        config: &ExportConfig,
-    ) -> Result<()> {
-        // Embedding layer
-        layers.push(CoreMLNeuralNetworkLayer {
-            name: "embedding".to_string(),
-            input: vec!["input_ids".to_string()],
-            output: vec!["embeddings".to_string()],
-            layer_type: CoreMLLayerType::EmbeddingND(CoreMLEmbeddingNDLayer {
-                vocab_size: 50257,
-                embedding_size: 768,
-                has_bias: false,
-                weights: self.create_dummy_weights(50257 * 768)?,
-                bias: None,
-            }),
-        });
-
-        // Transformer layers
-        let mut current_input = "embeddings".to_string();
-        for i in 0..12 {
-            current_input = self.add_transformer_block(layers, i, &current_input)?;
-        }
-
-        // Final layer norm
-        layers.push(CoreMLNeuralNetworkLayer {
-            name: "final_norm".to_string(),
-            input: vec![current_input.clone()],
-            output: vec!["normalized_output".to_string()],
-            layer_type: CoreMLLayerType::Normalization(CoreMLNormalizationLayer {
-                normalization_type: CoreMLNormalizationType::LayerNorm {
-                    normalized_shape: vec![768],
-                    eps: 1e-5,
-                    gamma: Some(self.create_dummy_weights(768)?),
-                    beta: Some(self.create_dummy_weights(768)?),
-                },
-            }),
-        });
-
-        // Output projection
-        layers.push(CoreMLNeuralNetworkLayer {
-            name: "lm_head".to_string(),
-            input: vec!["normalized_output".to_string()],
-            output: vec!["logits".to_string()],
-            layer_type: CoreMLLayerType::InnerProduct(CoreMLInnerProductLayer {
-                input_channels: 768,
-                output_channels: 50257,
-                has_bias: false,
-                weights: self.create_dummy_weights(768 * 50257)?,
-                bias: None,
-            }),
-        });
-
-        Ok(())
-    }
-
-    fn add_transformer_block(
-        &self,
-        layers: &mut Vec<CoreMLNeuralNetworkLayer>,
-        block_idx: usize,
-        input_name: &str,
-    ) -> Result<String> {
-        let prefix = format!("block_{}", block_idx);
-
-        // Multi-head attention (simplified as matrix multiplication)
-        let attention_output = format!("{}_attention", prefix);
-        layers.push(CoreMLNeuralNetworkLayer {
-            name: attention_output.clone(),
-            input: vec![input_name.to_string()],
-            output: vec![attention_output.clone()],
-            layer_type: CoreMLLayerType::BatchedMatMul(CoreMLBatchedMatMulLayer {
-                transpose_a: false,
-                transpose_b: true,
-                weight_matrix_first_dimension: 768,
-                weight_matrix_second_dimension: 768,
-                has_bias: true,
-                weights: self.create_dummy_weights(768 * 768)?,
-                bias: Some(self.create_dummy_weights(768)?),
-            }),
-        });
-
-        // Residual connection
-        let add_output = format!("{}_add1", prefix);
-        layers.push(CoreMLNeuralNetworkLayer {
-            name: add_output.clone(),
-            input: vec![input_name.to_string(), attention_output],
-            output: vec![add_output.clone()],
-            layer_type: CoreMLLayerType::Add(CoreMLAddLayer { alpha: 1.0 }),
-        });
-
-        // Layer normalization
-        let norm_output = format!("{}_norm1", prefix);
-        layers.push(CoreMLNeuralNetworkLayer {
-            name: norm_output.clone(),
-            input: vec![add_output.clone()],
-            output: vec![norm_output.clone()],
-            layer_type: CoreMLLayerType::Normalization(CoreMLNormalizationLayer {
-                normalization_type: CoreMLNormalizationType::LayerNorm {
-                    normalized_shape: vec![768],
-                    eps: 1e-5,
-                    gamma: Some(self.create_dummy_weights(768)?),
-                    beta: Some(self.create_dummy_weights(768)?),
-                },
-            }),
-        });
-
-        // Feed-forward layer 1
-        let ff1_output = format!("{}_ff1", prefix);
-        layers.push(CoreMLNeuralNetworkLayer {
-            name: ff1_output.clone(),
-            input: vec![norm_output.clone()],
-            output: vec![ff1_output.clone()],
-            layer_type: CoreMLLayerType::InnerProduct(CoreMLInnerProductLayer {
-                input_channels: 768,
-                output_channels: 3072,
-                has_bias: true,
-                weights: self.create_dummy_weights(768 * 3072)?,
-                bias: Some(self.create_dummy_weights(3072)?),
-            }),
-        });
-
-        // Activation
-        let activation_output = format!("{}_activation", prefix);
-        layers.push(CoreMLNeuralNetworkLayer {
-            name: activation_output.clone(),
-            input: vec![ff1_output],
-            output: vec![activation_output.clone()],
-            layer_type: CoreMLLayerType::Activation(CoreMLActivationLayer {
-                activation_type: CoreMLActivationType::ReLU,
-            }),
-        });
-
-        // Feed-forward layer 2
-        let ff2_output = format!("{}_ff2", prefix);
-        layers.push(CoreMLNeuralNetworkLayer {
-            name: ff2_output.clone(),
-            input: vec![activation_output],
-            output: vec![ff2_output.clone()],
-            layer_type: CoreMLLayerType::InnerProduct(CoreMLInnerProductLayer {
-                input_channels: 3072,
-                output_channels: 768,
-                has_bias: true,
-                weights: self.create_dummy_weights(3072 * 768)?,
-                bias: Some(self.create_dummy_weights(768)?),
-            }),
-        });
-
-        // Final residual connection
-        let final_output = format!("{}_output", prefix);
-        layers.push(CoreMLNeuralNetworkLayer {
-            name: final_output.clone(),
-            input: vec![norm_output, ff2_output],
-            output: vec![final_output.clone()],
-            layer_type: CoreMLLayerType::Add(CoreMLAddLayer { alpha: 1.0 }),
-        });
-
-        Ok(final_output)
-    }
-
-    fn create_dummy_weights(&self, size: usize) -> Result<CoreMLWeightParams> {
-        let weights: Vec<f32> = (0..size).map(|i| (i as f32 * 0.001).sin()).collect();
-
-        Ok(CoreMLWeightParams {
-            quantization: None,
-            float_value: weights,
-            float16_value: Vec::new(),
-            raw_value: Vec::new(),
-        })
-    }
-
-    fn serialize_coreml_model(&self, model: &CoreMLModel, output_path: &str) -> Result<()> {
-        // Generate JSON representation for debugging and compatibility
-        let json_content = self.generate_json_representation(model)?;
-        std::fs::write(format!("{}.mlmodel.json", output_path), json_content)?;
-
-        // Create a proper binary Core ML model file with protocol buffer format
-        let binary_content = self.generate_binary_mlmodel(model)?;
-        std::fs::write(format!("{}.mlmodel", output_path), binary_content)?;
-
-        // Also create a Python script for conversion using Core ML Tools
-        let conversion_script = self.generate_conversion_script(output_path)?;
-        std::fs::write(format!("{}_conversion.py", output_path), conversion_script)?;
-
-        Ok(())
-    }
-
-    fn generate_binary_mlmodel(&self, model: &CoreMLModel) -> Result<Vec<u8>> {
-        // This creates a simplified Core ML protobuf binary format
-        // In production, you would use the official Core ML protobuf definitions
-
-        let mut buffer = Vec::new();
-
-        // Core ML model header (simplified protobuf-like format)
-        buffer.extend_from_slice(b"COREML\x00\x01"); // Magic number and version
-
-        // Specification version
-        buffer.extend_from_slice(&model.specification_version.to_le_bytes());
-
-        // Model description length and data
-        let description_json = format!(
-            "{{\"metadata\":{}}}",
-            serde_json::to_string(&model.description.metadata)?
-        );
-        let desc_bytes = description_json.as_bytes();
-        buffer.extend_from_slice(&(desc_bytes.len() as u32).to_le_bytes());
-        buffer.extend_from_slice(desc_bytes);
-
-        // Model type
-        buffer.push(match &model.model_type {
-            CoreMLModelType::NeuralNetwork(_) => 1,
-            CoreMLModelType::Pipeline(_) => 2,
-            CoreMLModelType::MLProgram(_) => 3,
-        });
-
-        // Serialize the model type specific data
-        match &model.model_type {
-            CoreMLModelType::NeuralNetwork(nn) => {
-                // Number of layers
-                buffer.extend_from_slice(&(nn.layers.len() as u32).to_le_bytes());
-
-                // Serialize each layer
-                for layer in &nn.layers {
-                    let layer_data = format!("{{\"layer_type\":\"{:?}\"}}", layer.layer_type);
-                    let layer_bytes = layer_data.as_bytes();
-                    buffer.extend_from_slice(&(layer_bytes.len() as u32).to_le_bytes());
-                    buffer.extend_from_slice(layer_bytes);
-                }
-
-                // Preprocessing
-                let preprocessing_data =
-                    format!("{{\"preprocessing_count\":{}}}", nn.preprocessing.len());
-                let prep_bytes = preprocessing_data.as_bytes();
-                buffer.extend_from_slice(&(prep_bytes.len() as u32).to_le_bytes());
-                buffer.extend_from_slice(prep_bytes);
-            },
-            CoreMLModelType::Pipeline(pipeline) => {
-                // Number of models in pipeline
-                buffer.extend_from_slice(&(pipeline.models.len() as u32).to_le_bytes());
-
-                // Serialize pipeline metadata
-                let pipeline_data = format!("{{\"models_count\":{}}}", pipeline.models.len());
-                let pipeline_bytes = pipeline_data.as_bytes();
-                buffer.extend_from_slice(&(pipeline_bytes.len() as u32).to_le_bytes());
-                buffer.extend_from_slice(pipeline_bytes);
-            },
-            CoreMLModelType::MLProgram(program) => {
-                // Serialize ML Program
-                let program_data = format!("{{\"functions_count\":{}}}", program.functions.len());
-                let program_bytes = program_data.as_bytes();
-                buffer.extend_from_slice(&(program_bytes.len() as u32).to_le_bytes());
-                buffer.extend_from_slice(program_bytes);
-            },
-        }
-
-        // Add checksum for integrity
-        let checksum = self.calculate_checksum(&buffer)?;
-        buffer.extend_from_slice(&checksum.to_le_bytes());
-
-        Ok(buffer)
-    }
-
-    fn calculate_checksum(&self, data: &[u8]) -> Result<u32> {
-        // Simple CRC32-like checksum
-        let mut checksum = 0u32;
-        for &byte in data {
-            checksum = checksum.wrapping_mul(31).wrapping_add(byte as u32);
-        }
-        Ok(checksum)
-    }
-
-    fn generate_conversion_script(&self, output_path: &str) -> Result<String> {
-        let script = format!(
-            r#"#!/usr/bin/env python3
-"""
-Core ML Model Conversion Script
-Generated by TrustformeRS Core ML Exporter
-
-This script can be used to convert the exported JSON representation
-to a proper Core ML model using Apple's Core ML Tools.
-"""
-
-import json
-import coremltools as ct
-from coremltools.models.model import MLModel
-from coremltools.models import neural_network
-
-def convert_to_coreml():
-    # Load the JSON representation
-    with open("{}.mlmodel.json", "r") as f:
-        model_json = json.load(f)
-
-    print("Converting TrustformeRS model to Core ML format...")
-    print(f"Model specification version: {{model_json['specificationVersion']}}")
-
-    # Create Core ML model from specification
-    # This is a template - actual implementation depends on your model structure
-
-    spec = ct.proto.Model_pb2.Model()
-    spec.specificationVersion = model_json['specificationVersion']
-
-    # Set model description
-    spec.description.metadata.shortDescription = "TrustformeRS Exported Model"
-    spec.description.metadata.author = "TrustformeRS"
-    spec.description.metadata.license = "Model-specific license"
-    spec.description.metadata.versionString = "1.0"
-
-    # Note: You'll need to implement the actual model conversion logic
-    # based on your specific model architecture and the JSON representation
-
-    # Create the Core ML model
-    mlmodel = MLModel(spec)
-
-    # Save the model
-    mlmodel.save("{}.mlmodel")
-    print(f"Core ML model saved as {}.mlmodel")
-
-if __name__ == "__main__":
-    convert_to_coreml()
-"#,
-            output_path, output_path, output_path
-        );
-
-        Ok(script)
-    }
-
-    fn generate_json_representation(&self, model: &CoreMLModel) -> Result<String> {
-        let mut json = String::new();
-
-        json.push_str("{\n");
-        json.push_str(&format!(
-            "  \"specificationVersion\": {},\n",
-            model.specification_version
-        ));
-        json.push_str("  \"description\": {\n");
-        json.push_str(&format!(
-            "    \"metadata\": {:?},\n",
-            model.description.metadata
-        ));
-        json.push_str(&format!(
-            "    \"inputs\": {},\n",
-            model.description.input.len()
-        ));
-        json.push_str(&format!(
-            "    \"outputs\": {}\n",
-            model.description.output.len()
-        ));
-        json.push_str("  },\n");
-        json.push_str("  \"neuralNetwork\": {\n");
-        json.push_str(&format!(
-            "    \"layers\": {},\n",
-            model.neural_network.layers.len()
-        ));
-        json.push_str(&format!(
-            "    \"arrayInputs\": {:?}\n",
-            model.neural_network.array_inputs
-        ));
-        json.push_str("  }\n");
-        json.push_str("}\n");
-
-        Ok(json)
-    }
 }
 
 impl ModelExporter for CoreMLExporter {
+    /// Always fails with a structured `UnsupportedOperation` error.
+    ///
+    /// See the [module documentation](self) for why no `.mlmodel` is written.
     fn export<M: Model>(&self, model: &M, config: &ExportConfig) -> Result<()> {
         if config.format != ExportFormat::CoreML {
             return Err(anyhow!("CoreMLExporter only supports Core ML format"));
         }
 
-        let coreml_model = self.create_coreml_model(model, config)?;
-        self.serialize_coreml_model(&coreml_model, &config.output_path)?;
-
-        println!("Core ML model exported to {}.mlmodel", config.output_path);
-        println!(
-            "JSON representation saved to {}.mlmodel.json",
-            config.output_path
-        );
-
-        Ok(())
+        // Surface the "no weights at all" problem first: it is the caller's bug,
+        // whereas the missing topology is a limitation of the `Model` trait.
+        let _tensors = crate::export::collect_model_tensors(model)?;
+        Err(unsupported_operation("Core ML model export", COREML_UNSUPPORTED_REASON).into())
     }
 
     fn supported_formats(&self) -> Vec<ExportFormat> {
@@ -1091,14 +663,48 @@ mod tests {
         }
     }
 
+    /// Regression test for the exporter that used to write a fixed 12-block
+    /// transformer whose weights were `sin(i * 0.001)` for any model.
     #[test]
-    fn test_coreml_weight_params() {
-        let exporter = CoreMLExporter::new();
-        let weights = exporter.create_dummy_weights(100).expect("operation failed in test");
+    fn export_refuses_to_write_a_synthesized_mlmodel() {
+        let dir = std::env::temp_dir().join("trustformers_coreml_export_test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let output = dir.join("model");
 
-        assert_eq!(weights.float_value.len(), 100);
-        assert!(weights.float16_value.is_empty());
-        assert!(weights.raw_value.is_empty());
-        assert!(weights.quantization.is_none());
+        let exporter = CoreMLExporter::new();
+        let model = crate::export::test_support::TestModel::with_seed(5.0);
+        let config = ExportConfig {
+            format: ExportFormat::CoreML,
+            output_path: output.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let err = exporter.export(&model, &config).expect_err("must not fabricate a model");
+        assert!(
+            err.to_string().contains("Unsupported operation"),
+            "expected UnsupportedOperation, got: {err}"
+        );
+        assert!(
+            !output.with_extension("mlmodel").exists(),
+            "no .mlmodel may be produced"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_reports_missing_weights_before_missing_topology() {
+        let exporter = CoreMLExporter::new();
+        let model = crate::export::test_support::TestModel::empty();
+        let config = ExportConfig {
+            format: ExportFormat::CoreML,
+            ..Default::default()
+        };
+
+        let err = exporter.export(&model, &config).expect_err("no weights, no export");
+        assert!(
+            err.to_string().contains("named_tensors"),
+            "expected the missing-weights diagnostic, got: {err}"
+        );
     }
 }

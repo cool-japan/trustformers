@@ -1,6 +1,7 @@
 use crate::blip2::config::{Blip2Config, Blip2QFormerConfig, Blip2TextConfig, Blip2VisionConfig};
 use trustformers_core::{
     device::Device,
+    errors::TrustformersError,
     kernels::fused_ops::ActivationType,
     layers::{
         attention::{AttentionConfig, MultiHeadAttention},
@@ -11,6 +12,82 @@ use trustformers_core::{
     tensor::{DType, Tensor},
     traits::Layer,
 };
+
+/// Shifted causal-LM cross-entropy loss.
+///
+/// `logits` is `[batch, total_len, vocab]` and `labels` carries `batch * label_len`
+/// token ids. BLIP-2 prepends visual (or encoder) tokens to the text sequence, so
+/// the labels are aligned to the **trailing** `label_len` positions: position
+/// `t` predicts `labels[t + 1]`. Labels below zero are ignored (the HuggingFace
+/// `-100` convention).
+///
+/// Returns a scalar tensor holding the mean negative log-likelihood.
+fn shifted_cross_entropy(
+    logits: &Tensor,
+    labels: &Tensor,
+) -> Result<Tensor, Box<dyn std::error::Error>> {
+    let shape = logits.shape().to_vec();
+    if shape.len() != 3 {
+        return Err(Box::new(TrustformersError::tensor_op_error(
+            &format!("expected logits [batch, seq_len, vocab], got {shape:?}"),
+            "blip2::shifted_cross_entropy",
+        )));
+    }
+    let (batch_size, total_len, vocab_size) = (shape[0], shape[1], shape[2]);
+
+    let label_values = labels.to_vec_f32()?;
+    if batch_size == 0 || !label_values.len().is_multiple_of(batch_size) {
+        return Err(Box::new(TrustformersError::tensor_op_error(
+            &format!(
+                "{} labels cannot be split across {batch_size} sequences",
+                label_values.len()
+            ),
+            "blip2::shifted_cross_entropy",
+        )));
+    }
+    let label_len = label_values.len() / batch_size;
+    if label_len < 2 || label_len > total_len {
+        return Err(Box::new(TrustformersError::tensor_op_error(
+            &format!("need 2..={total_len} labels per sequence to shift, got {label_len}"),
+            "blip2::shifted_cross_entropy",
+        )));
+    }
+
+    // Labels describe the tail of the sequence (visual prefix tokens are not predicted).
+    let offset = total_len - label_len;
+    let logit_values = logits.to_vec_f32()?;
+    let mut total = 0.0f32;
+    let mut counted = 0usize;
+    for b in 0..batch_size {
+        for t in 0..label_len - 1 {
+            let target = label_values[b * label_len + t + 1];
+            if target < 0.0 {
+                continue;
+            }
+            let target_idx = target as usize;
+            if target_idx >= vocab_size {
+                return Err(Box::new(TrustformersError::tensor_op_error(
+                    &format!("label {target_idx} is outside the vocabulary ({vocab_size})"),
+                    "blip2::shifted_cross_entropy",
+                )));
+            }
+            let row_start = (b * total_len + offset + t) * vocab_size;
+            let row = &logit_values[row_start..row_start + vocab_size];
+            let max_logit = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let sum_exp: f32 = row.iter().map(|&x| (x - max_logit).exp()).sum();
+            total -= row[target_idx] - max_logit - sum_exp.ln();
+            counted += 1;
+        }
+    }
+
+    if counted == 0 {
+        return Err(Box::new(TrustformersError::tensor_op_error(
+            "every label was masked out; no loss could be computed",
+            "blip2::shifted_cross_entropy",
+        )));
+    }
+    Ok(Tensor::scalar(total / counted as f32)?)
+}
 
 /// BLIP-2 model for vision-language tasks
 #[derive(Debug, Clone)]
@@ -607,6 +684,9 @@ impl Blip2VisionTransformerLayer {
             dropout_prob: config.attention_dropout as f32,
             bias: true,
             max_seq_len: None,
+            // Inference path: attention dropout stays off so logits are
+            // reproducible. Training code sets this explicitly.
+            training: false,
         };
 
         let self_attention = MultiHeadAttention::new(
@@ -678,6 +758,11 @@ pub struct Blip2QFormerModel {
     pub encoder_layers: Vec<Blip2QFormerLayer>,
     /// Pooler
     pub pooler: Linear,
+    /// Language-modelling head (`hidden_size -> vocab_size`).
+    ///
+    /// Owned by the model so its weights persist across calls and can be
+    /// replaced by a checkpoint through [`Blip2QFormerModel::set_lm_head_weight`].
+    pub lm_head: Linear,
     /// Device
     device: Device,
 }
@@ -701,14 +786,32 @@ impl Blip2QFormerModel {
         }
 
         let pooler = Linear::new(config.hidden_size, config.hidden_size, true);
+        let lm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
 
         Ok(Self {
             config,
             embeddings,
             encoder_layers,
             pooler,
+            lm_head,
             device,
         })
+    }
+
+    /// Replace the language-modelling head weight (`[vocab_size, hidden_size]`).
+    pub fn set_lm_head_weight(&mut self, weight: Tensor) -> Result<(), Box<dyn std::error::Error>> {
+        let shape = weight.shape().to_vec();
+        if shape != vec![self.config.vocab_size, self.config.hidden_size] {
+            return Err(Box::new(TrustformersError::tensor_op_error(
+                &format!(
+                    "expected an LM head of shape [{}, {}], got {shape:?}",
+                    self.config.vocab_size, self.config.hidden_size
+                ),
+                "Blip2QFormerModel::set_lm_head_weight",
+            )));
+        }
+        self.lm_head.set_weight(weight)?;
+        Ok(())
     }
 
     /// Create new Q-Former model (defaults to CPU)
@@ -748,9 +851,10 @@ impl Blip2QFormerModel {
         let pooler_output = self.pooler.forward(hidden_states.select(1, 0)?)?;
         let pooler_output = pooler_output.tanh()?;
 
-        // Create logits (placeholder for language modeling head)
-        let logits = Linear::new(self.config.hidden_size, self.config.vocab_size, false)
-            .forward(hidden_states.clone())?;
+        // Language-modelling head: a persistent, loadable layer. Constructing a
+        // fresh randomly-initialised `Linear` here would re-randomise the logits
+        // on every call and allocate a vocab-sized matrix per forward pass.
+        let logits = self.lm_head.forward(hidden_states.clone())?;
 
         Ok(Blip2QFormerOutput {
             last_hidden_state: hidden_states,
@@ -864,7 +968,8 @@ impl Blip2QFormerEmbeddings {
         // Layer norm and dropout
         let embeddings = self.layer_norm.forward(embeddings)?;
 
-        // Apply dropout (placeholder - would need proper dropout implementation)
+        // No dropout: this path is inference-only, and dropout is the identity at
+        // inference time. Training-mode dropout is not modelled here.
         Ok(embeddings)
     }
 }
@@ -904,6 +1009,9 @@ impl Blip2QFormerLayer {
             dropout_prob: config.attention_probs_dropout_prob as f32,
             bias: true,
             max_seq_len: None,
+            // Inference path: attention dropout stays off so logits are
+            // reproducible. Training code sets this explicitly.
+            training: false,
         };
 
         let self_attention = MultiHeadAttention::new(
@@ -1208,11 +1316,9 @@ impl LanguageModel for Blip2OptLanguageModel {
         let logits = self.lm_head.forward(hidden_states.clone())?;
 
         // Calculate loss if labels provided
-        let loss = if let Some(_labels) = labels {
-            // Cross entropy loss (placeholder)
-            Some(Tensor::scalar(1.0)?)
-        } else {
-            None
+        let loss = match labels {
+            Some(labels) => Some(shifted_cross_entropy(&logits, labels)?),
+            None => None,
         };
 
         Ok(LanguageModelOutput {
@@ -1251,6 +1357,9 @@ impl Blip2OptLayer {
             dropout_prob: config.attention_dropout as f32,
             bias: true,
             max_seq_len: None,
+            // Inference path: attention dropout stays off so logits are
+            // reproducible. Training code sets this explicitly.
+            training: false,
         };
 
         let self_attention = MultiHeadAttention::new(
@@ -1409,11 +1518,9 @@ impl LanguageModel for Blip2T5LanguageModel {
         let logits = self.lm_head.forward(hidden_states.clone())?;
 
         // Calculate loss if labels provided
-        let loss = if let Some(_labels) = labels {
-            // Cross entropy loss (placeholder)
-            Some(Tensor::scalar(1.0)?)
-        } else {
-            None
+        let loss = match labels {
+            Some(labels) => Some(shifted_cross_entropy(&logits, labels)?),
+            None => None,
         };
 
         Ok(LanguageModelOutput {
@@ -1474,6 +1581,148 @@ pub struct LanguageModelOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Small Q-Former config so the forward pass stays cheap in tests.
+    fn tiny_qformer_config() -> Blip2QFormerConfig {
+        Blip2QFormerConfig {
+            vocab_size: 32,
+            hidden_size: 16,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 32,
+            hidden_act: "gelu".to_string(),
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            max_position_embeddings: 16,
+            type_vocab_size: 2,
+            initializer_range: 0.02,
+            layer_norm_eps: 1e-12,
+            position_embedding_type: "absolute".to_string(),
+            cross_attention_frequency: 2,
+            encoder_width: 16,
+        }
+    }
+
+    /// The LM head must be a persistent layer. The old code built a fresh
+    /// `Linear::new(...)` inside `forward`, so two identical calls produced
+    /// different logits and leaked a vocab-sized allocation per call.
+    #[test]
+    fn test_qformer_lm_head_is_persistent() {
+        let config = tiny_qformer_config();
+        let model = Blip2QFormerModel::new(config).expect("qformer");
+        let input_ids = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("input ids");
+
+        let first = model.forward(&input_ids, None, None, None).expect("first forward");
+        let second = model.forward(&input_ids, None, None, None).expect("second forward");
+
+        let a = first.logits.to_vec_f32().expect("logits a");
+        let b = second.logits.to_vec_f32().expect("logits b");
+        assert_eq!(a.len(), b.len(), "logits shape must be stable");
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert!(
+                (x - y).abs() < 1e-6,
+                "logit {i} changed between calls ({x} vs {y}) — the head is being re-randomised"
+            );
+        }
+    }
+
+    #[test]
+    fn test_qformer_lm_head_weight_is_loadable() {
+        let config = tiny_qformer_config();
+        let (vocab, hidden) = (config.vocab_size, config.hidden_size);
+        let mut model = Blip2QFormerModel::new(config).expect("qformer");
+
+        let weight = Tensor::zeros(&[vocab, hidden]).expect("zero head");
+        model.set_lm_head_weight(weight).expect("load head");
+
+        let input_ids = Tensor::from_vec(vec![1.0, 2.0], &[1, 2]).expect("input ids");
+        let out = model.forward(&input_ids, None, None, None).expect("forward");
+        for logit in out.logits.to_vec_f32().expect("logits") {
+            assert!(
+                logit.abs() < 1e-6,
+                "a zeroed head must produce zero logits, got {logit}"
+            );
+        }
+
+        // A wrongly shaped head must be rejected rather than silently accepted.
+        let bad = Tensor::zeros(&[hidden, vocab]).expect("bad head");
+        assert!(model.set_lm_head_weight(bad).is_err());
+    }
+
+    // ── Cross-entropy loss ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_shifted_cross_entropy_matches_hand_computation() {
+        // [batch=1, seq=2, vocab=3]
+        let logits =
+            Tensor::from_vec(vec![0.0, 1.0, 2.0, 3.0, 0.0, 0.0], &[1, 2, 3]).expect("logits");
+        let labels = Tensor::from_vec(vec![0.0, 2.0], &[1, 2]).expect("labels");
+        let loss = shifted_cross_entropy(&logits, &labels).expect("loss");
+        let value = loss.to_vec_f32().expect("loss data")[0];
+
+        let expected = ((0.0f32).exp() + (1.0f32).exp() + (2.0f32).exp()).ln() - 2.0;
+        assert!(
+            (value - expected).abs() < 1e-5,
+            "loss {value} != hand-computed {expected}"
+        );
+    }
+
+    /// A constant `Tensor::scalar(1.0)` placeholder would pass any smoke test;
+    /// the loss must actually depend on the labels.
+    #[test]
+    fn test_shifted_cross_entropy_depends_on_labels() {
+        let logits =
+            Tensor::from_vec(vec![0.0, 1.0, 5.0, 3.0, 0.0, 0.0], &[1, 2, 3]).expect("logits");
+        let good = Tensor::from_vec(vec![0.0, 2.0], &[1, 2]).expect("good labels");
+        let bad = Tensor::from_vec(vec![0.0, 0.0], &[1, 2]).expect("bad labels");
+        let good_loss =
+            shifted_cross_entropy(&logits, &good).expect("good").to_vec_f32().expect("data")[0];
+        let bad_loss =
+            shifted_cross_entropy(&logits, &bad).expect("bad").to_vec_f32().expect("data")[0];
+        assert!(
+            good_loss < bad_loss,
+            "predicting the high-logit token must cost less ({good_loss} vs {bad_loss})"
+        );
+        assert!(
+            (good_loss - 1.0).abs() > 1e-6 || (bad_loss - 1.0).abs() > 1e-6,
+            "the loss must not be a constant 1.0"
+        );
+    }
+
+    #[test]
+    fn test_shifted_cross_entropy_aligns_labels_to_sequence_tail() {
+        // Visual prefix of one token: labels cover only the last two positions.
+        let logits = Tensor::from_vec(
+            vec![9.0, 9.0, 9.0, 0.0, 1.0, 2.0, 3.0, 0.0, 0.0],
+            &[1, 3, 3],
+        )
+        .expect("logits");
+        let labels = Tensor::from_vec(vec![0.0, 2.0], &[1, 2]).expect("labels");
+        let value = shifted_cross_entropy(&logits, &labels)
+            .expect("loss")
+            .to_vec_f32()
+            .expect("data")[0];
+        let expected = ((0.0f32).exp() + (1.0f32).exp() + (2.0f32).exp()).ln() - 2.0;
+        assert!((value - expected).abs() < 1e-5, "{value} != {expected}");
+    }
+
+    #[test]
+    fn test_shifted_cross_entropy_rejects_impossible_inputs() {
+        let logits = Tensor::from_vec(vec![0.0, 1.0, 2.0], &[1, 1, 3]).expect("logits");
+        let labels = Tensor::from_vec(vec![1.0], &[1, 1]).expect("labels");
+        assert!(
+            shifted_cross_entropy(&logits, &labels).is_err(),
+            "a single position cannot be shifted"
+        );
+
+        let logits =
+            Tensor::from_vec(vec![0.0, 1.0, 2.0, 3.0, 0.0, 0.0], &[1, 2, 3]).expect("logits");
+        let out_of_range = Tensor::from_vec(vec![0.0, 7.0], &[1, 2]).expect("labels");
+        assert!(
+            shifted_cross_entropy(&logits, &out_of_range).is_err(),
+            "labels outside the vocabulary must be an error"
+        );
+    }
 
     #[test]
     #[ignore] // Heavy test - large model creation (~17s), run with --ignored

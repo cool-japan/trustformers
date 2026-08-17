@@ -50,22 +50,25 @@ impl fmt::Display for ContrastiveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ContrastiveError::EmptyCandidates => {
-                write!(f, "Contrastive search error: no candidates provided for this step")
-            }
+                write!(
+                    f,
+                    "Contrastive search error: no candidates provided for this step"
+                )
+            },
             ContrastiveError::EmbeddingDimensionMismatch { expected, got } => {
                 write!(
                     f,
                     "Contrastive search error: embedding dimension mismatch — \
                      expected {expected}, got {got}"
                 )
-            }
+            },
             ContrastiveError::MaxLengthReached => {
                 write!(
                     f,
                     "Contrastive search error: max_length has been reached; \
                      no more tokens can be generated"
                 )
-            }
+            },
         }
     }
 }
@@ -241,9 +244,7 @@ pub fn select_contrastive_token(
         .max_by(|a, b| {
             let sa = contrastive_score(a, context_embeddings, alpha);
             let sb = contrastive_score(b, context_embeddings, alpha);
-            sa.total_score
-                .partial_cmp(&sb.total_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            sa.total_score.partial_cmp(&sb.total_score).unwrap_or(std::cmp::Ordering::Equal)
         })
         .expect("candidates is non-empty");
 
@@ -301,10 +302,7 @@ impl ContrastiveDecoder {
     /// Returns [`ContrastiveError::MaxLengthReached`] if `is_finished()` was
     /// already true before this call.
     /// Propagates errors from `select_contrastive_token`.
-    pub fn step(
-        &mut self,
-        candidates: Vec<CandidateToken>,
-    ) -> Result<u32, ContrastiveError> {
+    pub fn step(&mut self, candidates: Vec<CandidateToken>) -> Result<u32, ContrastiveError> {
         if self.is_finished() {
             return Err(ContrastiveError::MaxLengthReached);
         }
@@ -460,7 +458,10 @@ mod tests {
     fn test_cosine_similarity_identical() {
         let v = vec![1.0_f32, 2.0, 3.0];
         let sim = cosine_similarity(&v, &v);
-        assert!((sim - 1.0).abs() < 1e-5, "identical vectors should give 1.0, got {sim}");
+        assert!(
+            (sim - 1.0).abs() < 1e-5,
+            "identical vectors should give 1.0, got {sim}"
+        );
     }
 
     #[test]
@@ -468,7 +469,10 @@ mod tests {
         let a = vec![1.0_f32, 0.0];
         let b = vec![0.0_f32, 1.0];
         let sim = cosine_similarity(&a, &b);
-        assert!(sim.abs() < 1e-6, "orthogonal vectors should give 0.0, got {sim}");
+        assert!(
+            sim.abs() < 1e-6,
+            "orthogonal vectors should give 0.0, got {sim}"
+        );
     }
 
     #[test]
@@ -484,7 +488,10 @@ mod tests {
         let a = vec![1.0_f32, 0.0];
         let b = vec![-1.0_f32, 0.0];
         let sim = cosine_similarity(&a, &b);
-        assert!((sim - (-1.0)).abs() < 1e-5, "opposite vectors should give -1.0, got {sim}");
+        assert!(
+            (sim - (-1.0)).abs() < 1e-5,
+            "opposite vectors should give -1.0, got {sim}"
+        );
     }
 
     // ── contrastive_score ────────────────────────────────────────────────
@@ -497,7 +504,10 @@ mod tests {
 
         let expected_conf = (1.0 - alpha) * 0.8;
         assert!((score.model_confidence - expected_conf).abs() < 1e-6);
-        assert!((score.degeneration_penalty).abs() < 1e-8, "no context → no penalty");
+        assert!(
+            (score.degeneration_penalty).abs() < 1e-8,
+            "no context → no penalty"
+        );
         assert!((score.total_score - expected_conf).abs() < 1e-6);
         assert_eq!(score.token_id, 42);
     }
@@ -558,9 +568,11 @@ mod tests {
             make_candidate(2, 0.7, vec![0.0, 1.0]),
             make_candidate(3, 0.5, vec![0.5, 0.5]),
         ];
-        let selected = select_contrastive_token(&candidates, &[], &cfg)
-            .expect("selection failed");
-        assert_eq!(selected.token_id, 2, "highest prob token should be selected with no context");
+        let selected = select_contrastive_token(&candidates, &[], &cfg).expect("selection failed");
+        assert_eq!(
+            selected.token_id, 2,
+            "highest prob token should be selected with no context"
+        );
     }
 
     #[test]
@@ -592,8 +604,8 @@ mod tests {
             make_candidate(2, 0.5, vec![0.0, 1.0]),
         ];
 
-        let selected = select_contrastive_token(&candidates, &context, &cfg)
-            .expect("selection failed");
+        let selected =
+            select_contrastive_token(&candidates, &context, &cfg).expect("selection failed");
 
         // With high alpha, the non-repetitive token should win despite lower prob
         assert_eq!(
@@ -644,7 +656,10 @@ mod tests {
             let candidates = vec![make_candidate(i, 1.0, vec![1.0_f32])];
             decoder.step(candidates).expect("step failed");
         }
-        assert!(decoder.is_finished(), "max_length should mark decoder as finished");
+        assert!(
+            decoder.is_finished(),
+            "max_length should mark decoder as finished"
+        );
 
         // Next step should error
         let candidates = vec![make_candidate(99, 1.0, vec![1.0_f32])];
@@ -713,9 +728,7 @@ mod tests {
         let cfg = ContrastiveSearchConfig::default();
 
         let steps: Vec<Vec<CandidateToken>> = (0..3)
-            .map(|i| {
-                vec![make_candidate(i as u32, 0.8, vec![i as f32, 0.0])]
-            })
+            .map(|i| vec![make_candidate(i as u32, 0.8, vec![i as f32, 0.0])])
             .collect();
 
         let out = contrastive_decode(steps, &cfg).expect("decode failed");
@@ -732,10 +745,19 @@ mod tests {
         let e1 = ContrastiveError::EmptyCandidates;
         assert!(e1.to_string().contains("candidates"));
 
-        let e2 = ContrastiveError::EmbeddingDimensionMismatch { expected: 4, got: 3 };
+        let e2 = ContrastiveError::EmbeddingDimensionMismatch {
+            expected: 4,
+            got: 3,
+        };
         let msg = e2.to_string();
-        assert!(msg.contains("4"), "message should mention expected dim: {msg}");
-        assert!(msg.contains("3"), "message should mention actual dim: {msg}");
+        assert!(
+            msg.contains("4"),
+            "message should mention expected dim: {msg}"
+        );
+        assert!(
+            msg.contains("3"),
+            "message should mention actual dim: {msg}"
+        );
 
         let e3 = ContrastiveError::MaxLengthReached;
         assert!(e3.to_string().contains("max_length"));
@@ -750,7 +772,10 @@ mod tests {
         let a = vec![1.0_f32, 0.0];
         let b = vec![1.0_f32, 0.0];
         let alignment = cosine_similarity(&a, &b);
-        assert!((alignment - 1.0).abs() < 1e-6, "perfect alignment should be 1.0, got {alignment}");
+        assert!(
+            (alignment - 1.0).abs() < 1e-6,
+            "perfect alignment should be 1.0, got {alignment}"
+        );
     }
 
     /// Alignment between orthogonal embeddings is 0.
@@ -759,7 +784,10 @@ mod tests {
         let a = vec![1.0_f32, 0.0];
         let b = vec![0.0_f32, 1.0];
         let alignment = cosine_similarity(&a, &b);
-        assert!(alignment.abs() < 1e-6, "orthogonal alignment should be 0, got {alignment}");
+        assert!(
+            alignment.abs() < 1e-6,
+            "orthogonal alignment should be 0, got {alignment}"
+        );
     }
 
     /// Uniformity proxy: mean pairwise log-exp distance over a batch.
@@ -767,11 +795,7 @@ mod tests {
     /// For identical embeddings, all distances are 0 → exp(0)=1 → log(1)=0 (worst uniformity).
     #[test]
     fn test_uniformity_identical_embeddings_worst_case() {
-        let embs = vec![
-            vec![1.0_f32, 0.0],
-            vec![1.0_f32, 0.0],
-            vec![1.0_f32, 0.0],
-        ];
+        let embs = [vec![1.0_f32, 0.0], vec![1.0_f32, 0.0], vec![1.0_f32, 0.0]];
         // Uniformity = log( mean_ij exp(-2 ||ei - ej||^2) ) — for identical vecs = log(1) = 0.
         let n = embs.len();
         let mut sum = 0.0_f32;
@@ -779,8 +803,8 @@ mod tests {
         for i in 0..n {
             for j in 0..n {
                 if i != j {
-                    let dist_sq: f32 = embs[i].iter().zip(embs[j].iter())
-                        .map(|(a, b)| (a - b).powi(2)).sum();
+                    let dist_sq: f32 =
+                        embs[i].iter().zip(embs[j].iter()).map(|(a, b)| (a - b).powi(2)).sum();
                     sum += (-2.0 * dist_sq).exp();
                     count += 1;
                 }
@@ -797,7 +821,7 @@ mod tests {
     #[test]
     fn test_uniformity_spread_embeddings_better() {
         // Spread across 4 orthogonal directions.
-        let embs = vec![
+        let embs = [
             vec![1.0_f32, 0.0],
             vec![-1.0_f32, 0.0],
             vec![0.0_f32, 1.0],
@@ -809,15 +833,18 @@ mod tests {
         for i in 0..n {
             for j in 0..n {
                 if i != j {
-                    let dist_sq: f32 = embs[i].iter().zip(embs[j].iter())
-                        .map(|(a, b)| (a - b).powi(2)).sum();
+                    let dist_sq: f32 =
+                        embs[i].iter().zip(embs[j].iter()).map(|(a, b)| (a - b).powi(2)).sum();
                     sum += (-2.0 * dist_sq).exp();
                     count += 1;
                 }
             }
         }
         let uniformity = (sum / count as f32).ln();
-        assert!(uniformity < 0.0, "spread embeddings should have negative uniformity, got {uniformity}");
+        assert!(
+            uniformity < 0.0,
+            "spread embeddings should have negative uniformity, got {uniformity}"
+        );
     }
 
     /// NT-Xent loss for a single positive pair over in-batch negatives.
@@ -826,47 +853,43 @@ mod tests {
     fn test_nt_xent_loss_single_pair() {
         let tau = 0.07_f32;
         // Anchor z identical to z+, negatives orthogonal.
-        let z     = vec![1.0_f32, 0.0];
+        let z = vec![1.0_f32, 0.0];
         let z_pos = vec![1.0_f32, 0.0];
-        let negatives: Vec<Vec<f32>> = vec![
-            vec![0.0_f32, 1.0],
-            vec![0.0_f32, -1.0],
-        ];
+        let negatives: Vec<Vec<f32>> = vec![vec![0.0_f32, 1.0], vec![0.0_f32, -1.0]];
 
         let sim_pos = cosine_similarity(&z, &z_pos) / tau;
-        let neg_sims: Vec<f32> = negatives.iter()
-            .map(|n| cosine_similarity(&z, n) / tau)
-            .collect();
+        let neg_sims: Vec<f32> = negatives.iter().map(|n| cosine_similarity(&z, n) / tau).collect();
 
         // Numerically stable log-sum-exp.
-        let all_sims: Vec<f32> = std::iter::once(sim_pos)
-            .chain(neg_sims.iter().cloned())
-            .collect();
+        let all_sims: Vec<f32> = std::iter::once(sim_pos).chain(neg_sims.iter().cloned()).collect();
         let max_s = all_sims.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let log_sum_exp = max_s + all_sims.iter().map(|s| (s - max_s).exp()).sum::<f32>().ln();
         let loss = -(sim_pos - log_sum_exp);
 
         assert!(loss >= 0.0, "NT-Xent loss must be non-negative, got {loss}");
-        assert!(loss < 0.1, "perfect alignment should give near-zero loss, got {loss}");
+        assert!(
+            loss < 0.1,
+            "perfect alignment should give near-zero loss, got {loss}"
+        );
     }
 
     /// NT-Xent loss increases when positive pair is dissimilar.
     #[test]
     fn test_nt_xent_loss_worse_for_dissimilar_positive() {
         let tau = 0.5_f32;
-        let neg = vec![vec![0.0_f32, 1.0]];
+        let neg = [vec![0.0_f32, 1.0]];
 
         let compute_loss = |z: &[f32], z_pos: &[f32]| {
             let sim_pos = cosine_similarity(z, z_pos) / tau;
             let neg_sim = cosine_similarity(z, &neg[0]) / tau;
-            let all = vec![sim_pos, neg_sim];
+            let all = [sim_pos, neg_sim];
             let max_s = all.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let lse = max_s + all.iter().map(|s| (s - max_s).exp()).sum::<f32>().ln();
             -(sim_pos - lse)
         };
 
-        let loss_good = compute_loss(&[1.0_f32, 0.0], &[1.0_f32, 0.0]);  // identical
-        let loss_bad  = compute_loss(&[1.0_f32, 0.0], &[-1.0_f32, 0.0]); // opposite
+        let loss_good = compute_loss(&[1.0_f32, 0.0], &[1.0_f32, 0.0]); // identical
+        let loss_bad = compute_loss(&[1.0_f32, 0.0], &[-1.0_f32, 0.0]); // opposite
         assert!(
             loss_bad > loss_good,
             "dissimilar positive should give higher NT-Xent loss: bad={loss_bad} good={loss_good}"
@@ -885,14 +908,15 @@ mod tests {
         let mut cfg_high = ContrastiveSearchConfig::default();
         cfg_high.degeneration_penalty = 0.9;
 
-        let score_low  = contrastive_score(&cand, &context, cfg_low.degeneration_penalty);
+        let score_low = contrastive_score(&cand, &context, cfg_low.degeneration_penalty);
         let score_high = contrastive_score(&cand, &context, cfg_high.degeneration_penalty);
 
         // Higher penalty → larger degeneration component.
         assert!(
             score_high.degeneration_penalty > score_low.degeneration_penalty,
             "higher alpha should increase penalty: {} vs {}",
-            score_high.degeneration_penalty, score_low.degeneration_penalty
+            score_high.degeneration_penalty,
+            score_low.degeneration_penalty
         );
     }
 
@@ -903,14 +927,16 @@ mod tests {
         let anchor = vec![1.0_f32, 0.0];
         // Candidates at various similarities.
         let candidates = vec![
-            (0usize, vec![1.0_f32, 0.0]),    // sim=1.0 (positive / hard negative)
-            (1usize, vec![0.7_f32, 0.7]),    // sim≈0.707
-            (2usize, vec![0.0_f32, 1.0]),    // sim=0.0
-            (3usize, vec![-1.0_f32, 0.0]),   // sim=-1.0 (easy negative)
+            (0usize, vec![1.0_f32, 0.0]),  // sim=1.0 (positive / hard negative)
+            (1usize, vec![0.7_f32, 0.7]),  // sim≈0.707
+            (2usize, vec![0.0_f32, 1.0]),  // sim=0.0
+            (3usize, vec![-1.0_f32, 0.0]), // sim=-1.0 (easy negative)
         ];
 
         // Hard negative = max cosine similarity (excluding the positive at index 0).
-        let hard_neg_idx = candidates.iter().skip(1)
+        let hard_neg_idx = candidates
+            .iter()
+            .skip(1)
             .max_by(|(_, a), (_, b)| {
                 cosine_similarity(&anchor, a)
                     .partial_cmp(&cosine_similarity(&anchor, b))
@@ -920,7 +946,10 @@ mod tests {
             .expect("non-empty");
 
         // Candidate 1 has sim≈0.707 which is highest among the negatives.
-        assert_eq!(hard_neg_idx, 1, "hard negative should be the most similar, got {hard_neg_idx}");
+        assert_eq!(
+            hard_neg_idx, 1,
+            "hard negative should be the most similar, got {hard_neg_idx}"
+        );
     }
 
     /// Contrastive accuracy: fraction of steps where the positive pair ranks highest.
@@ -928,23 +957,28 @@ mod tests {
     fn test_contrastive_accuracy_all_correct() {
         // Build a trivial scenario: 3 steps, each step the first candidate is the
         // designated "positive" and has the highest model confidence + lowest penalty.
-        let cfg = ContrastiveSearchConfig { degeneration_penalty: 0.0, ..Default::default() };
+        let cfg = ContrastiveSearchConfig {
+            degeneration_penalty: 0.0,
+            ..Default::default()
+        };
 
-        let steps: Vec<(u32, Vec<CandidateToken>)> = (0..3u32).map(|t| {
-            // Positive: high prob; negatives: low prob. No context → highest prob wins.
-            let positive_id = t * 10;
-            let candidates = vec![
-                make_candidate(positive_id,     0.9, vec![1.0_f32]),
-                make_candidate(positive_id + 1, 0.1, vec![0.0_f32]),
-            ];
-            (positive_id, candidates)
-        }).collect();
+        let steps: Vec<(u32, Vec<CandidateToken>)> = (0..3u32)
+            .map(|t| {
+                // Positive: high prob; negatives: low prob. No context → highest prob wins.
+                let positive_id = t * 10;
+                let candidates = vec![
+                    make_candidate(positive_id, 0.9, vec![1.0_f32]),
+                    make_candidate(positive_id + 1, 0.1, vec![0.0_f32]),
+                ];
+                (positive_id, candidates)
+            })
+            .collect();
 
         let total = steps.len();
         let mut correct = 0usize;
         for (positive_id, candidates) in &steps {
-            let selected = select_contrastive_token(candidates, &[], &cfg)
-                .expect("selection should succeed");
+            let selected =
+                select_contrastive_token(candidates, &[], &cfg).expect("selection should succeed");
             if selected.token_id == *positive_id {
                 correct += 1;
             }
@@ -972,13 +1006,19 @@ mod tests {
         for _ in 0..2 {
             let candidates = vec![make_candidate(99, 1.0, vec![1.0_f32])];
             decoder.step(candidates).expect("step failed");
-            assert!(!decoder.is_finished(), "EOS before min_length should not finish decoder");
+            assert!(
+                !decoder.is_finished(),
+                "EOS before min_length should not finish decoder"
+            );
         }
 
         // Third step also produces EOS → now len == min_length → should finish.
         let candidates = vec![make_candidate(99, 1.0, vec![1.0_f32])];
         decoder.step(candidates).expect("step failed");
-        assert!(decoder.is_finished(), "EOS at min_length should finish decoder");
+        assert!(
+            decoder.is_finished(),
+            "EOS at min_length should finish decoder"
+        );
     }
 
     // ── multi-step context accumulation ──────────────────────────────────────
@@ -995,8 +1035,16 @@ mod tests {
             decoder.step(candidates).expect("step failed");
         }
 
-        assert_eq!(decoder.context_embeddings.len(), 4, "context should have one entry per step");
-        assert_eq!(decoder.generated_tokens.len(), 4, "should have generated 4 tokens");
+        assert_eq!(
+            decoder.context_embeddings.len(),
+            4,
+            "context should have one entry per step"
+        );
+        assert_eq!(
+            decoder.generated_tokens.len(),
+            4,
+            "should have generated 4 tokens"
+        );
     }
 
     // ── RepBERT margin loss proxy ─────────────────────────────────────────────
@@ -1008,7 +1056,7 @@ mod tests {
         let margin = 0.5_f32;
         let anchor = vec![1.0_f32, 0.0];
         let positive = vec![0.9_f32, 0.44]; // sim≈0.9
-        let negative  = vec![0.8_f32, 0.6]; // sim≈0.8
+        let negative = vec![0.8_f32, 0.6]; // sim≈0.8
 
         let sim_pos = cosine_similarity(&anchor, &positive);
         let sim_neg = cosine_similarity(&anchor, &negative);
@@ -1021,8 +1069,8 @@ mod tests {
     fn test_repbert_margin_loss_satisfied() {
         let margin = 0.1_f32;
         let anchor = vec![1.0_f32, 0.0];
-        let positive = vec![1.0_f32, 0.0];  // sim=1.0
-        let negative  = vec![0.0_f32, 1.0]; // sim=0.0
+        let positive = vec![1.0_f32, 0.0]; // sim=1.0
+        let negative = vec![0.0_f32, 1.0]; // sim=0.0
 
         let sim_pos = cosine_similarity(&anchor, &positive);
         let sim_neg = cosine_similarity(&anchor, &negative);

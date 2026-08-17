@@ -941,6 +941,8 @@ pub struct StreamingDataset {
     pub config: StreamingDatasetConfig,
     pub buffer: VecDeque<DataSample>,
     pub stats: StreamingStats,
+    /// Whether [`DataPipeline::get_batch`] may draw from this dataset.
+    pub active: bool,
 }
 
 pub struct DynamicAugmentationManager {
@@ -1067,19 +1069,419 @@ impl DataPipeline {
         }
     }
 
-    pub async fn start_streaming(&self, _dataset_id: &str) -> Result<()> {
-        // Start streaming for the specified dataset
+    /// Register a streaming dataset under `dataset_id`.
+    ///
+    /// The dataset starts inactive; call [`DataPipeline::start_streaming`] to make it eligible
+    /// for [`DataPipeline::get_batch`].
+    pub fn register_dataset(&self, dataset_id: &str, config: StreamingDatasetConfig) -> Result<()> {
+        let mut datasets = self
+            .streaming_datasets
+            .lock()
+            .map_err(|_| anyhow::anyhow!("streaming dataset registry lock poisoned"))?;
+        if datasets.contains_key(dataset_id) {
+            return Err(anyhow::anyhow!(
+                "dataset '{dataset_id}' is already registered"
+            ));
+        }
+        datasets.insert(dataset_id.to_string(), StreamingDataset::new(config));
         Ok(())
     }
 
-    pub async fn get_batch(&self, _batch_size: usize) -> Result<Vec<DataSample>> {
-        // Get a batch of processed data samples
-        Ok(vec![])
+    /// Ids of every registered dataset.
+    pub fn dataset_ids(&self) -> Result<Vec<String>> {
+        let datasets = self
+            .streaming_datasets
+            .lock()
+            .map_err(|_| anyhow::anyhow!("streaming dataset registry lock poisoned"))?;
+        let mut ids: Vec<String> = datasets.keys().cloned().collect();
+        ids.sort();
+        Ok(ids)
     }
 
-    pub async fn validate_batch(&self, _samples: &[DataSample]) -> Result<Vec<ValidationResult>> {
-        // Validate a batch of samples
-        Ok(vec![])
+    /// Push samples into a registered dataset's buffer.
+    ///
+    /// This is how a producer (file reader, network stream, generator, …) hands data to the
+    /// pipeline. Samples beyond `buffer_size` are rejected rather than silently dropped.
+    pub fn push_samples(&self, dataset_id: &str, samples: Vec<DataSample>) -> Result<usize> {
+        let mut datasets = self
+            .streaming_datasets
+            .lock()
+            .map_err(|_| anyhow::anyhow!("streaming dataset registry lock poisoned"))?;
+        let dataset = datasets.get_mut(dataset_id).ok_or_else(|| {
+            anyhow::anyhow!("unknown dataset '{dataset_id}'; register it with register_dataset")
+        })?;
+        dataset.push_samples(samples)
+    }
+
+    /// Mark a registered dataset as streaming.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `dataset_id` names a dataset that was never registered — previously this
+    /// returned `Ok(())` for any string at all.
+    pub async fn start_streaming(&self, dataset_id: &str) -> Result<()> {
+        let mut datasets = self
+            .streaming_datasets
+            .lock()
+            .map_err(|_| anyhow::anyhow!("streaming dataset registry lock poisoned"))?;
+        let dataset = datasets.get_mut(dataset_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot start streaming: dataset '{dataset_id}' is not registered \
+                 (register it with DataPipeline::register_dataset first)"
+            )
+        })?;
+        dataset.active = true;
+        Ok(())
+    }
+
+    /// Stop streaming a dataset without discarding its buffered samples.
+    pub async fn stop_streaming(&self, dataset_id: &str) -> Result<()> {
+        let mut datasets = self
+            .streaming_datasets
+            .lock()
+            .map_err(|_| anyhow::anyhow!("streaming dataset registry lock poisoned"))?;
+        let dataset = datasets
+            .get_mut(dataset_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown dataset '{dataset_id}'"))?;
+        dataset.active = false;
+        Ok(())
+    }
+
+    /// Draw up to `batch_size` samples from the active streaming datasets.
+    ///
+    /// Samples are taken round-robin from every active dataset (so no single source starves
+    /// the others), validated with [`DataPipeline::validate_batch`], and filtered according to
+    /// the validator's `error_handling` policy:
+    ///
+    /// * `Strict` — the first invalid sample aborts the batch with an error;
+    /// * `Skip` / `Fix` — invalid samples are dropped from the batch;
+    /// * `LogAndContinue` — invalid samples are kept and logged.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `batch_size` is zero, when no dataset is streaming, or under a `Strict`
+    /// validation policy when a sample is invalid.
+    pub async fn get_batch(&self, batch_size: usize) -> Result<Vec<DataSample>> {
+        if batch_size == 0 {
+            return Err(anyhow::anyhow!("batch_size must be greater than zero"));
+        }
+
+        let collected = {
+            let mut datasets = self
+                .streaming_datasets
+                .lock()
+                .map_err(|_| anyhow::anyhow!("streaming dataset registry lock poisoned"))?;
+
+            let mut active_ids: Vec<String> =
+                datasets.iter().filter(|(_, d)| d.active).map(|(id, _)| id.clone()).collect();
+            if active_ids.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "no dataset is streaming; call DataPipeline::start_streaming first"
+                ));
+            }
+            active_ids.sort();
+
+            let mut collected = Vec::with_capacity(batch_size);
+            let mut exhausted = 0usize;
+            let mut cursor = 0usize;
+            while collected.len() < batch_size && exhausted < active_ids.len() {
+                let id = &active_ids[cursor % active_ids.len()];
+                cursor += 1;
+                let Some(dataset) = datasets.get_mut(id) else {
+                    exhausted += 1;
+                    continue;
+                };
+                match dataset.pop_sample() {
+                    Some(sample) => {
+                        exhausted = 0;
+                        collected.push(sample);
+                    },
+                    None => exhausted += 1,
+                }
+            }
+            collected
+        };
+
+        if collected.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let results = self.validate_batch(&collected).await?;
+        let error_handling = {
+            let validator =
+                self.validator.lock().map_err(|_| anyhow::anyhow!("validator lock poisoned"))?;
+            validator.config.error_handling.clone()
+        };
+
+        let mut batch = Vec::with_capacity(collected.len());
+        for (sample, result) in collected.into_iter().zip(results.into_iter()) {
+            if result.is_valid {
+                batch.push(sample);
+                continue;
+            }
+            match error_handling {
+                ErrorHandling::Strict => {
+                    return Err(anyhow::anyhow!(
+                        "sample '{}' failed validation: {}",
+                        sample.id,
+                        result
+                            .errors
+                            .iter()
+                            .map(|e| e.message.clone())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ));
+                },
+                ErrorHandling::Skip | ErrorHandling::Fix => {},
+                ErrorHandling::LogAndContinue => {
+                    log::warn!(
+                        "data_pipeline: keeping invalid sample '{}': {}",
+                        sample.id,
+                        result
+                            .errors
+                            .iter()
+                            .map(|e| e.message.clone())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    );
+                    batch.push(sample);
+                },
+            }
+        }
+
+        Ok(batch)
+    }
+
+    /// Validate a batch of samples against the configured validator.
+    ///
+    /// Every sample is checked against the declarative rules in `DataValidationConfig.rules`
+    /// **and** against every registered [`Validator`] trait object; the returned vector is
+    /// aligned one-to-one with `samples`.
+    pub async fn validate_batch(&self, samples: &[DataSample]) -> Result<Vec<ValidationResult>> {
+        let mut validator =
+            self.validator.lock().map_err(|_| anyhow::anyhow!("validator lock poisoned"))?;
+        let mut results = Vec::with_capacity(samples.len());
+        for sample in samples {
+            results.push(validator.validate_sample(sample)?);
+        }
+        Ok(results)
+    }
+
+    /// Borrow the pipeline configuration.
+    pub fn config(&self) -> &DataPipelineConfig {
+        &self.config
+    }
+}
+
+impl StreamingDataset {
+    /// Create an inactive streaming dataset with an empty buffer.
+    pub fn new(config: StreamingDatasetConfig) -> Self {
+        Self {
+            config,
+            buffer: VecDeque::new(),
+            stats: StreamingStats {
+                samples_processed: 0,
+                bytes_processed: 0,
+                processing_time: Duration::from_secs(0),
+                error_count: 0,
+            },
+            active: false,
+        }
+    }
+
+    /// Append samples, respecting `config.buffer_size`.
+    ///
+    /// Returns the number of samples accepted. A full buffer is reported as an error rather
+    /// than silently discarding data.
+    pub fn push_samples(&mut self, samples: Vec<DataSample>) -> Result<usize> {
+        let capacity = self.config.buffer_size.max(1);
+        let free = capacity.saturating_sub(self.buffer.len());
+        if samples.len() > free {
+            return Err(anyhow::anyhow!(
+                "streaming buffer is full: {} free slot(s) for {} sample(s) (buffer_size = {})",
+                free,
+                samples.len(),
+                capacity
+            ));
+        }
+        let accepted = samples.len();
+        for sample in samples {
+            let bytes: u64 = sample
+                .data
+                .values()
+                .map(|t| (t.size() * std::mem::size_of::<f32>()) as u64)
+                .sum();
+            self.stats.bytes_processed += bytes;
+            self.buffer.push_back(sample);
+        }
+        Ok(accepted)
+    }
+
+    /// Pop the oldest buffered sample, counting it as processed.
+    pub fn pop_sample(&mut self) -> Option<DataSample> {
+        let sample = self.buffer.pop_front()?;
+        self.stats.samples_processed += 1;
+        Some(sample)
+    }
+
+    /// Number of samples currently buffered.
+    pub fn buffered(&self) -> usize {
+        self.buffer.len()
+    }
+}
+
+impl DataValidator {
+    /// Validate one sample against the declarative rules and the registered validators.
+    ///
+    /// Rule semantics (all parameters come from `ValidationRule::parameters`):
+    ///
+    /// | rule | parameters | check |
+    /// |------|------------|-------|
+    /// | `Schema` | `field` | the sample must carry that tensor |
+    /// | `Range` | `field`, `min`, `max` | every element must lie inside `[min, max]` |
+    /// | `Format` | `field`, `shape` (comma-separated) | the tensor must have that shape |
+    /// | `Quality` | `field` | the tensor must be non-empty and free of `NaN`/`inf` |
+    /// | `Consistency` | `field`, `matches` | the two tensors must share a shape |
+    /// | `Custom` | `validator_name` | delegated to a registered [`Validator`] of that name |
+    ///
+    /// `ValidationSeverity::Error` produces a [`ValidationError`] (and marks the sample
+    /// invalid); `Warning` and `Info` produce a [`ValidationWarning`].
+    pub fn validate_sample(&mut self, sample: &DataSample) -> Result<ValidationResult> {
+        let started = std::time::Instant::now();
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+
+        for rule in &self.config.rules {
+            if let Some(message) = Self::check_rule(rule, sample) {
+                match rule.severity {
+                    ValidationSeverity::Error => errors.push(ValidationError {
+                        rule_name: rule.name.clone(),
+                        message,
+                        severity: ValidationSeverity::Error,
+                    }),
+                    ValidationSeverity::Warning | ValidationSeverity::Info => {
+                        warnings.push(ValidationWarning {
+                            rule_name: rule.name.clone(),
+                            message,
+                        })
+                    },
+                }
+            }
+        }
+
+        for validator in &self.validators {
+            let result = validator.validate(sample)?;
+            errors.extend(result.errors);
+            warnings.extend(result.warnings);
+        }
+
+        self.stats.samples_validated += 1;
+        self.stats.validation_time += started.elapsed();
+        for error in &errors {
+            *self.stats.errors_detected.entry(error.rule_name.clone()).or_insert(0) += 1;
+        }
+
+        Ok(ValidationResult {
+            is_valid: errors.is_empty(),
+            errors,
+            warnings,
+        })
+    }
+
+    /// Evaluate one declarative rule, returning a message when it fails.
+    fn check_rule(rule: &ValidationRule, sample: &DataSample) -> Option<String> {
+        let field = rule.parameters.get("field").map(String::as_str);
+
+        match &rule.rule_type {
+            ValidationRuleType::Schema => {
+                let field = field?;
+                if sample.data.contains_key(field) {
+                    None
+                } else {
+                    Some(format!("required field `{field}` is missing"))
+                }
+            },
+            ValidationRuleType::Range => {
+                let field = field?;
+                let tensor = sample.data.get(field)?;
+                let min = rule.parameters.get("min").and_then(|v| v.parse::<f32>().ok());
+                let max = rule.parameters.get("max").and_then(|v| v.parse::<f32>().ok());
+                let values = tensor.data().ok()?;
+                for value in values {
+                    if let Some(min) = min {
+                        if value < min {
+                            return Some(format!("`{field}` value {value} is below minimum {min}"));
+                        }
+                    }
+                    if let Some(max) = max {
+                        if value > max {
+                            return Some(format!("`{field}` value {value} exceeds maximum {max}"));
+                        }
+                    }
+                }
+                None
+            },
+            ValidationRuleType::Format => {
+                let field = field?;
+                let tensor = sample.data.get(field)?;
+                let expected: Vec<usize> = rule
+                    .parameters
+                    .get("shape")?
+                    .split(',')
+                    .filter_map(|part| part.trim().parse::<usize>().ok())
+                    .collect();
+                if tensor.shape() == expected.as_slice() {
+                    None
+                } else {
+                    Some(format!(
+                        "`{field}` has shape {:?}, expected {:?}",
+                        tensor.shape(),
+                        expected
+                    ))
+                }
+            },
+            ValidationRuleType::Quality => {
+                let field = field?;
+                let tensor = sample.data.get(field)?;
+                let values = tensor.data().ok()?;
+                if values.is_empty() {
+                    return Some(format!("`{field}` is empty"));
+                }
+                if values.iter().any(|v| !v.is_finite()) {
+                    return Some(format!("`{field}` contains NaN or inf"));
+                }
+                None
+            },
+            ValidationRuleType::Consistency => {
+                let field = field?;
+                let other_name = rule.parameters.get("matches")?;
+                let a = sample.data.get(field)?;
+                let b = sample.data.get(other_name)?;
+                if a.shape() == b.shape() {
+                    None
+                } else {
+                    Some(format!(
+                        "`{field}` shape {:?} is inconsistent with `{other_name}` shape {:?}",
+                        a.shape(),
+                        b.shape()
+                    ))
+                }
+            },
+            ValidationRuleType::Custom { validator_name } => Some(format!(
+                "custom rule `{validator_name}` has no registered Validator; \
+                 add one to DataValidator::validators"
+            )),
+        }
+    }
+
+    /// Register a [`Validator`] trait object that runs on every sample.
+    pub fn add_validator(&mut self, validator: Box<dyn Validator>) {
+        self.validators.push(validator);
+    }
+
+    /// Replace the declarative validation configuration.
+    pub fn set_config(&mut self, config: DataValidationConfig) {
+        self.config = config;
     }
 }
 
@@ -1257,6 +1659,341 @@ impl DataValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_with(id: &str, field: &str, values: Vec<f32>, shape: &[usize]) -> DataSample {
+        let mut data = HashMap::new();
+        data.insert(
+            field.to_string(),
+            Tensor::from_vec(values, shape).expect("tensor creation failed"),
+        );
+        DataSample {
+            id: id.to_string(),
+            data,
+            metadata: HashMap::new(),
+            timestamp: SystemTime::now(),
+        }
+    }
+
+    fn minimal_streaming_config(buffer_size: usize) -> StreamingDatasetConfig {
+        StreamingDatasetConfig {
+            sources: vec![],
+            buffer_size,
+            prefetch_size: 0,
+            shuffle: ShuffleConfig {
+                enabled: false,
+                buffer_size: 0,
+                seed: None,
+                strategy: ShuffleStrategy::Random,
+            },
+            batching: BatchingConfig {
+                batch_size: 2,
+                drop_last: false,
+                dynamic_batching: false,
+                max_tokens: None,
+                strategy: BatchingStrategy::Fixed,
+            },
+            caching: CachingConfig {
+                enabled: false,
+                cache_size: 0,
+                cache_type: CacheType::Memory,
+                eviction_policy: EvictionPolicy::LRU,
+            },
+        }
+    }
+
+    fn pipeline_with_dataset(buffer_size: usize) -> DataPipeline {
+        let config = DataPipelineConfig {
+            streaming: minimal_streaming_config(buffer_size),
+            augmentation: DynamicAugmentationConfig {
+                strategies: vec![],
+                adaptive: AdaptiveAugmentationConfig {
+                    enabled: false,
+                    strategy: AdaptationStrategy::PerformanceBased {
+                        metric: "loss".to_string(),
+                        threshold: 0.0,
+                    },
+                    frequency: 0,
+                    success_criteria: SuccessCriteria {
+                        min_improvement: 0.0,
+                        evaluation_window: 0,
+                        confidence_level: 0.0,
+                    },
+                },
+                scheduling: AugmentationScheduling {
+                    schedule_type: ScheduleType::Constant,
+                    parameters: HashMap::new(),
+                },
+                preprocessing: PreprocessingConfig {
+                    steps: vec![],
+                    normalization: NormalizationConfig {
+                        norm_type: NormalizationType::Standard,
+                        parameters: HashMap::new(),
+                        per_feature: false,
+                    },
+                    feature_extraction: FeatureExtractionConfig {
+                        methods: vec![],
+                        dimensions: HashMap::new(),
+                        caching: false,
+                    },
+                },
+            },
+            curriculum: CurriculumLearningConfig {
+                strategy: CurriculumStrategy::Manual { stages: vec![] },
+                difficulty_assessment: DifficultyAssessment::Static {
+                    score_field: "difficulty".to_string(),
+                },
+                pacing: PacingFunction {
+                    pacing_type: PacingType::Linear,
+                    parameters: HashMap::new(),
+                },
+                scheduling: CurriculumScheduling {
+                    strategy: CurriculumSchedulingStrategy::EpochBased,
+                    update_frequency: 1,
+                },
+            },
+            active_learning: ActiveLearningConfig {
+                query_strategy: QueryStrategy::UncertaintySampling {
+                    uncertainty_measure: UncertaintyMeasure::Entropy,
+                },
+                sampling: SamplingConfig {
+                    batch_size: 1,
+                    budget: 1,
+                    diversity_constraint: None,
+                },
+                annotation: AnnotationConfig {
+                    source: AnnotationSource::Human {
+                        annotator_pool: vec![],
+                    },
+                    quality_control: QualityControl {
+                        multi_annotation: false,
+                        agreement_threshold: 0.0,
+                        assessment_method: QualityAssessmentMethod::InterAnnotatorAgreement,
+                    },
+                },
+                integration: ActiveLearningIntegration {
+                    update_frequency: 1,
+                    min_new_samples: 1,
+                    retrain_from_scratch: false,
+                },
+            },
+            multimodal: MultiModalConfig {
+                modalities: vec![],
+                fusion_strategy: FusionStrategy::Early,
+                alignment: AlignmentConfig {
+                    method: AlignmentMethod::Temporal,
+                    parameters: HashMap::new(),
+                },
+                missing_modality: MissingModalityHandling::Skip,
+            },
+            validation: DataValidationConfig {
+                rules: vec![],
+                strategy: ValidationStrategy::All,
+                error_handling: ErrorHandling::Skip,
+            },
+            distributed: DistributedProcessingConfig {
+                num_workers: 1,
+                backend: ProcessingBackend::Threading,
+                load_balancing: LoadBalancingStrategy::RoundRobin,
+                synchronization: SynchronizationConfig {
+                    sync_frequency: 1,
+                    barrier: false,
+                    timeout: Duration::from_secs(1),
+                },
+            },
+        };
+        let pipeline = DataPipeline::new(config);
+        pipeline
+            .register_dataset("train", minimal_streaming_config(buffer_size))
+            .expect("register failed");
+        pipeline
+    }
+
+    // ── Streaming / batching / validation ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_start_streaming_rejects_an_unknown_dataset() {
+        // Regression: `start_streaming` used to return Ok(()) for any string.
+        let pipeline = pipeline_with_dataset(8);
+        assert!(
+            pipeline.start_streaming("does-not-exist").await.is_err(),
+            "an unknown dataset id must be an error"
+        );
+        assert!(pipeline.start_streaming("train").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_batch_returns_the_pushed_samples() {
+        // Regression: `get_batch` returned an empty vector no matter what.
+        let pipeline = pipeline_with_dataset(8);
+        pipeline
+            .push_samples(
+                "train",
+                vec![
+                    sample_with("a", "x", vec![1.0, 2.0], &[2]),
+                    sample_with("b", "x", vec![3.0, 4.0], &[2]),
+                    sample_with("c", "x", vec![5.0, 6.0], &[2]),
+                ],
+            )
+            .expect("push failed");
+        pipeline.start_streaming("train").await.expect("start failed");
+
+        let batch = pipeline.get_batch(2).await.expect("get_batch failed");
+        assert_eq!(batch.len(), 2, "the batch must contain the pushed samples");
+        assert_eq!(batch[0].id, "a");
+        assert_eq!(batch[1].id, "b");
+
+        let rest = pipeline.get_batch(2).await.expect("get_batch failed");
+        assert_eq!(rest.len(), 1, "only one sample is left");
+        assert_eq!(rest[0].id, "c");
+
+        let empty = pipeline.get_batch(2).await.expect("get_batch failed");
+        assert!(empty.is_empty(), "a drained stream yields an empty batch");
+    }
+
+    #[tokio::test]
+    async fn test_get_batch_errors_when_nothing_is_streaming() {
+        let pipeline = pipeline_with_dataset(8);
+        pipeline
+            .push_samples("train", vec![sample_with("a", "x", vec![1.0], &[1])])
+            .expect("push failed");
+        assert!(
+            pipeline.get_batch(1).await.is_err(),
+            "get_batch must not silently return an empty stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_batch_rejects_zero_batch_size() {
+        let pipeline = pipeline_with_dataset(8);
+        pipeline.start_streaming("train").await.expect("start failed");
+        assert!(pipeline.get_batch(0).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_batch_runs_the_configured_rules() {
+        // Regression: `validate_batch` returned an empty vector, so nothing was ever checked.
+        let pipeline = pipeline_with_dataset(8);
+        {
+            let mut validator = pipeline.validator.lock().expect("validator lock");
+            validator.set_config(DataValidationConfig {
+                rules: vec![
+                    ValidationRule {
+                        name: "x_present".to_string(),
+                        rule_type: ValidationRuleType::Schema,
+                        severity: ValidationSeverity::Error,
+                        parameters: HashMap::from([("field".to_string(), "x".to_string())]),
+                    },
+                    ValidationRule {
+                        name: "x_range".to_string(),
+                        rule_type: ValidationRuleType::Range,
+                        severity: ValidationSeverity::Error,
+                        parameters: HashMap::from([
+                            ("field".to_string(), "x".to_string()),
+                            ("min".to_string(), "0.0".to_string()),
+                            ("max".to_string(), "1.0".to_string()),
+                        ]),
+                    },
+                ],
+                strategy: ValidationStrategy::All,
+                error_handling: ErrorHandling::Skip,
+            });
+        }
+
+        let samples = vec![
+            sample_with("good", "x", vec![0.25, 0.75], &[2]),
+            sample_with("out_of_range", "x", vec![0.25, 9.0], &[2]),
+            sample_with("wrong_field", "y", vec![0.25], &[1]),
+        ];
+        let results = pipeline.validate_batch(&samples).await.expect("validate_batch failed");
+
+        assert_eq!(results.len(), 3, "one result per sample");
+        assert!(results[0].is_valid, "in-range sample must pass");
+        assert!(!results[1].is_valid, "out-of-range sample must fail");
+        assert!(!results[2].is_valid, "missing field must fail");
+        assert!(results[1].errors.iter().any(|e| e.rule_name == "x_range"));
+        assert!(results[2].errors.iter().any(|e| e.rule_name == "x_present"));
+    }
+
+    #[tokio::test]
+    async fn test_get_batch_skips_invalid_samples_under_the_skip_policy() {
+        let pipeline = pipeline_with_dataset(8);
+        {
+            let mut validator = pipeline.validator.lock().expect("validator lock");
+            validator.set_config(DataValidationConfig {
+                rules: vec![ValidationRule {
+                    name: "finite".to_string(),
+                    rule_type: ValidationRuleType::Quality,
+                    severity: ValidationSeverity::Error,
+                    parameters: HashMap::from([("field".to_string(), "x".to_string())]),
+                }],
+                strategy: ValidationStrategy::All,
+                error_handling: ErrorHandling::Skip,
+            });
+        }
+        pipeline
+            .push_samples(
+                "train",
+                vec![
+                    sample_with("ok", "x", vec![1.0], &[1]),
+                    sample_with("nan", "x", vec![f32::NAN], &[1]),
+                ],
+            )
+            .expect("push failed");
+        pipeline.start_streaming("train").await.expect("start failed");
+
+        let batch = pipeline.get_batch(2).await.expect("get_batch failed");
+        assert_eq!(batch.len(), 1, "the NaN sample must be skipped");
+        assert_eq!(batch[0].id, "ok");
+    }
+
+    #[tokio::test]
+    async fn test_get_batch_aborts_under_the_strict_policy() {
+        let pipeline = pipeline_with_dataset(8);
+        {
+            let mut validator = pipeline.validator.lock().expect("validator lock");
+            validator.set_config(DataValidationConfig {
+                rules: vec![ValidationRule {
+                    name: "finite".to_string(),
+                    rule_type: ValidationRuleType::Quality,
+                    severity: ValidationSeverity::Error,
+                    parameters: HashMap::from([("field".to_string(), "x".to_string())]),
+                }],
+                strategy: ValidationStrategy::All,
+                error_handling: ErrorHandling::Strict,
+            });
+        }
+        pipeline
+            .push_samples("train", vec![sample_with("nan", "x", vec![f32::NAN], &[1])])
+            .expect("push failed");
+        pipeline.start_streaming("train").await.expect("start failed");
+        assert!(pipeline.get_batch(1).await.is_err());
+    }
+
+    #[test]
+    fn test_push_samples_respects_the_buffer_size() {
+        let pipeline = pipeline_with_dataset(2);
+        assert!(pipeline
+            .push_samples(
+                "train",
+                vec![
+                    sample_with("a", "x", vec![1.0], &[1]),
+                    sample_with("b", "x", vec![1.0], &[1]),
+                    sample_with("c", "x", vec![1.0], &[1]),
+                ]
+            )
+            .is_err());
+        assert!(pipeline
+            .push_samples("train", vec![sample_with("a", "x", vec![1.0], &[1])])
+            .is_ok());
+    }
+
+    #[test]
+    fn test_push_samples_rejects_unknown_dataset() {
+        let pipeline = pipeline_with_dataset(4);
+        assert!(pipeline
+            .push_samples("nope", vec![sample_with("a", "x", vec![1.0], &[1])])
+            .is_err());
+    }
 
     #[test]
     fn test_data_pipeline_creation() {

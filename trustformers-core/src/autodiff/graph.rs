@@ -8,7 +8,7 @@
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Unique identifier for nodes in the computation graph
 pub type NodeId = usize;
@@ -98,6 +98,20 @@ pub enum OperationType {
     LayerNorm(f32), // epsilon
     Dropout(f32),   // probability
     BatchNorm(f32), // epsilon
+
+    /// Rounding with a straight-through gradient estimator.
+    ///
+    /// Forward: `round(x)`. Backward: identity. This is what makes learned
+    /// (trainable) quantization work -- the rounding itself has zero derivative
+    /// almost everywhere, so the STE substitutes the identity so that gradients
+    /// reach the quantization parameters.
+    RoundStraightThrough,
+
+    /// Clamping with a clipped straight-through gradient estimator.
+    ///
+    /// Forward: `clamp(x, min, max)`. Backward: identity inside `[min, max]`,
+    /// zero outside (the value was saturated, so it cannot influence the loss).
+    ClampStraightThrough(f32, f32),
 
     /// Custom operation
     Custom(String),
@@ -517,15 +531,132 @@ impl ComputationGraph {
                 let grad_input = grad_output.permute(&inverse_permutation)?;
                 Ok(vec![grad_input])
             },
-            _ => {
-                // For unimplemented operations, return zero gradients
-                let zero_grads = parent_values
+            OperationType::Negate => {
+                Self::expect_unary(&parent_values, "Negate")?;
+                Ok(vec![grad_output.neg()?])
+            },
+            OperationType::Reciprocal => {
+                // d/dx (1/x) = -1 / x^2
+                let input = Self::expect_unary(&parent_values, "Reciprocal")?;
+                let squared = input.mul(input)?;
+                Ok(vec![grad_output.div(&squared)?.neg()?])
+            },
+            OperationType::Square => {
+                // d/dx x^2 = 2x
+                let input = Self::expect_unary(&parent_values, "Square")?;
+                Ok(vec![grad_output.mul(input)?.scalar_mul(2.0)?])
+            },
+            OperationType::Sqrt => {
+                // d/dx sqrt(x) = 1 / (2 sqrt(x))
+                let input = Self::expect_unary(&parent_values, "Sqrt")?;
+                let root = input.sqrt()?;
+                Ok(vec![grad_output.div(&root)?.scalar_mul(0.5)?])
+            },
+            OperationType::Log => {
+                // d/dx log(x) = 1/x
+                let input = Self::expect_unary(&parent_values, "Log")?;
+                Ok(vec![grad_output.div(input)?])
+            },
+            OperationType::Exp => {
+                // d/dx exp(x) = exp(x)
+                let input = Self::expect_unary(&parent_values, "Exp")?;
+                Ok(vec![grad_output.mul(&input.exp()?)?])
+            },
+            OperationType::Softmax => {
+                // dx = s * (g - sum(g * s)) over the softmax axis (the last one)
+                let input = Self::expect_unary(&parent_values, "Softmax")?;
+                let softmax_out = input.softmax(-1)?;
+                let weighted = grad_output.mul(&softmax_out)?;
+                let summed = Self::sum_last_axis_keepdim(&weighted)?;
+                Ok(vec![softmax_out.mul(&grad_output.sub(&summed)?)?])
+            },
+            OperationType::LogSoftmax => {
+                // dx = g - softmax(x) * sum(g) over the last axis
+                let input = Self::expect_unary(&parent_values, "LogSoftmax")?;
+                let softmax_out = input.softmax(-1)?;
+                let summed = Self::sum_last_axis_keepdim(grad_output)?;
+                Ok(vec![grad_output.sub(&softmax_out.mul(&summed)?)?])
+            },
+            OperationType::RoundStraightThrough => {
+                // Straight-through: the rounding is transparent to gradients.
+                Self::expect_unary(&parent_values, "RoundStraightThrough")?;
+                Ok(vec![grad_output.clone()])
+            },
+            OperationType::ClampStraightThrough(min_value, max_value) => {
+                // Clipped straight-through: saturated entries receive no gradient.
+                let input = Self::expect_unary(&parent_values, "ClampStraightThrough")?;
+                let values = input.to_vec_f32()?;
+                let mask_values: Vec<f32> = values
                     .iter()
-                    .map(|input| Tensor::zeros(&input.shape()))
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(zero_grads)
+                    .map(
+                        |&value| {
+                            if value >= *min_value && value <= *max_value {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        },
+                    )
+                    .collect();
+                let mask = Tensor::from_vec(mask_values, &input.shape())?;
+                Ok(vec![grad_output.mul(&mask)?])
+            },
+            OperationType::LayerNorm(epsilon) => {
+                // LayerNorm is registered with (input, weight, bias) parents.
+                if parent_values.len() != 3 {
+                    return Err(TrustformersError::tensor_op_error(
+                        "LayerNorm operation requires exactly 3 inputs (input, weight, bias)",
+                        "ComputationGraph::compute_operation_gradients",
+                    ));
+                }
+                crate::autodiff::operations::grad_fn::layer_norm_backward(
+                    grad_output,
+                    parent_values[0],
+                    parent_values[1],
+                    parent_values[2],
+                    *epsilon,
+                )
+            },
+            unsupported => {
+                // Never fabricate zeros here: a zero gradient is indistinguishable
+                // from "this parameter does not affect the loss", which silently
+                // freezes whatever sits upstream of the operation.
+                Err(TrustformersError::not_implemented(format!(
+                    "Backward pass for autodiff operation {:?} is not implemented; \
+                     the gradient would have to be invented",
+                    unsupported
+                )))
             },
         }
+    }
+
+    /// Check that an operation has exactly one parent and return it.
+    fn expect_unary<'a>(parent_values: &[&'a Tensor], operation: &str) -> Result<&'a Tensor> {
+        match parent_values {
+            [single] => Ok(single),
+            other => Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "{} operation requires exactly 1 input, got {}",
+                    operation,
+                    other.len()
+                ),
+                "ComputationGraph::compute_operation_gradients",
+            )),
+        }
+    }
+
+    /// Sum a tensor over its last axis, keeping the rank (so the result
+    /// broadcasts back over the original tensor).
+    fn sum_last_axis_keepdim(tensor: &Tensor) -> Result<Tensor> {
+        let shape = tensor.shape();
+        if shape.is_empty() {
+            return Ok(tensor.clone());
+        }
+        let last_axis = shape.len() - 1;
+        let reduced = tensor.sum_axes(&[last_axis])?;
+        let mut keepdim_shape = shape.clone();
+        keepdim_shape[last_axis] = 1;
+        reduced.reshape(&keepdim_shape)?.broadcast_to(&shape)
     }
 
     /// Broadcast gradient back to original shape
@@ -565,6 +696,74 @@ impl ComputationGraph {
     }
 
     /// Clear all gradients in the graph
+    /// Remove nodes that cannot influence any output of the graph.
+    ///
+    /// A node is *live* when it is an output (registered via
+    /// [`ComputationGraph::set_leaf_node`], or -- when no output has been
+    /// registered -- any node with no children) or an ancestor of one. Everything
+    /// else is dead: it was computed, never consumed, and cannot receive or
+    /// contribute a gradient.
+    ///
+    /// Returns the number of nodes removed. Parent/child links, the root list and
+    /// the topological order are all repaired, so the graph stays consistent for a
+    /// subsequent backward pass.
+    pub fn eliminate_dead_nodes(&mut self) -> usize {
+        if self.nodes.is_empty() {
+            return 0;
+        }
+
+        // Outputs: explicitly registered leaves, or every childless node.
+        let outputs: Vec<NodeId> = if self.leaf_nodes.is_empty() {
+            self.nodes
+                .iter()
+                .filter(|(_, node)| node.children.is_empty())
+                .map(|(id, _)| *id)
+                .collect()
+        } else {
+            self.leaf_nodes.clone()
+        };
+
+        // Walk backwards from the outputs through the parent edges.
+        let mut live: HashSet<NodeId> = HashSet::new();
+        let mut stack: Vec<NodeId> = outputs;
+        while let Some(id) = stack.pop() {
+            if !live.insert(id) {
+                continue;
+            }
+            if let Some(node) = self.nodes.get(&id) {
+                for &parent in &node.parents {
+                    if !live.contains(&parent) {
+                        stack.push(parent);
+                    }
+                }
+            }
+        }
+
+        let dead: Vec<NodeId> =
+            self.nodes.keys().copied().filter(|id| !live.contains(id)).collect();
+        if dead.is_empty() {
+            return 0;
+        }
+
+        for id in &dead {
+            // Detach the dead node from any surviving parent's child list.
+            let parents = self.nodes.get(id).map(|node| node.parents.clone()).unwrap_or_default();
+            for parent in parents {
+                if let Some(parent_node) = self.nodes.get_mut(&parent) {
+                    parent_node.children.retain(|child| child != id);
+                }
+            }
+            self.nodes.remove(id);
+        }
+
+        self.root_nodes.retain(|id| live.contains(id));
+        self.leaf_nodes.retain(|id| live.contains(id));
+        self.topological_order.retain(|id| live.contains(id));
+        self.dirty = true;
+
+        dead.len()
+    }
+
     pub fn zero_grad(&mut self) {
         for node in self.nodes.values_mut() {
             node.gradient = None;

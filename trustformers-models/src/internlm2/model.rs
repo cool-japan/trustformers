@@ -82,36 +82,142 @@ impl InternLm2RotaryEmbedding {
         seq_len: usize,
         head_dim: usize,
     ) -> (Vec<f32>, Vec<f32>) {
-        if q.is_empty() || k.is_empty() || head_dim < 2 {
+        if q.is_empty() || k.is_empty() || head_dim < 2 || seq_len == 0 {
             return (q.to_vec(), k.to_vec());
         }
 
+        let mut q_out = q.to_vec();
+        let mut k_out = k.to_vec();
+        self.rotate_in_place(&mut q_out, seq_len, head_dim);
+        self.rotate_in_place(&mut k_out, seq_len, head_dim);
+        (q_out, k_out)
+    }
+
+    /// Rotate a flat `[seq_len, num_heads, head_dim]` buffer in place.
+    ///
+    /// `num_heads` is inferred from the buffer length, so every head of a given
+    /// token is rotated with that token's position (query and key tensors may
+    /// carry different head counts under GQA).
+    pub fn rotate_in_place(&self, data: &mut [f32], seq_len: usize, head_dim: usize) {
+        if data.is_empty() || head_dim < 2 || seq_len == 0 {
+            return;
+        }
+        let num_vectors = data.len() / head_dim;
+        if num_vectors == 0 || !num_vectors.is_multiple_of(seq_len) {
+            return;
+        }
+        let num_heads = num_vectors / seq_len;
         let freqs = self.compute_freqs(head_dim);
         let half = head_dim / 2;
 
-        let rotate_single = |src: &[f32]| -> Vec<f32> {
-            let mut out = src.to_vec();
-            // src layout: [seq_len, num_heads?, head_dim] – we rotate pairs (x, x+half)
-            // treating the entire tensor as a sequence of head_dim-sized vectors.
-            let num_vectors = src.len() / head_dim;
-            for vec_idx in 0..num_vectors {
-                // position within the sequence (one vector per position in simplification)
-                let pos = vec_idx % seq_len;
-                let base = vec_idx * head_dim;
+        for pos in 0..seq_len {
+            for head in 0..num_heads {
+                let base = (pos * num_heads + head) * head_dim;
                 for i in 0..half {
                     let angle = pos as f32 * freqs[i] as f32;
-                    let cos_a = angle.cos();
-                    let sin_a = angle.sin();
-                    let x0 = src[base + i];
-                    let x1 = src[base + i + half];
-                    out[base + i] = x0 * cos_a - x1 * sin_a;
-                    out[base + i + half] = x0 * sin_a + x1 * cos_a;
+                    let (sin_a, cos_a) = angle.sin_cos();
+                    let x0 = data[base + i];
+                    let x1 = data[base + i + half];
+                    data[base + i] = x0 * cos_a - x1 * sin_a;
+                    data[base + i + half] = x0 * sin_a + x1 * cos_a;
                 }
             }
-            out
-        };
+        }
+    }
+}
 
-        (rotate_single(q), rotate_single(k))
+// ─────────────────────────────────────────────────────────────────────────────
+// Dense weight matrices
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A row-major `[out_dim, in_dim]` weight matrix with a real matrix-vector product.
+#[derive(Clone, Debug)]
+pub struct InternLm2Linear {
+    weight: Vec<f32>,
+    out_dim: usize,
+    in_dim: usize,
+}
+
+impl InternLm2Linear {
+    /// Create a matrix with deterministic pseudo-random weights.
+    ///
+    /// Zero-initialised projections make every output identical regardless of
+    /// the input, which is indistinguishable from a broken layer; a reproducible
+    /// `1/sqrt(fan_in)`-scaled draw keeps the module exercisable before real
+    /// checkpoint weights are loaded through [`set_weight`](Self::set_weight).
+    pub fn new(out_dim: usize, in_dim: usize, seed: u64) -> Self {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(0x1234_5678);
+        let scale = 1.0 / (in_dim.max(1) as f32).sqrt();
+        let weight = (0..out_dim * in_dim)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let unit = ((state >> 33) as f32) / (u32::MAX as f32) * 2.0 - 1.0;
+                unit * scale
+            })
+            .collect();
+        Self {
+            weight,
+            out_dim,
+            in_dim,
+        }
+    }
+
+    /// Output dimension (rows).
+    pub fn out_dim(&self) -> usize {
+        self.out_dim
+    }
+
+    /// Input dimension (columns).
+    pub fn in_dim(&self) -> usize {
+        self.in_dim
+    }
+
+    /// Raw row-major weights.
+    pub fn weight(&self) -> &[f32] {
+        &self.weight
+    }
+
+    /// Replace the weights; the buffer must be `out_dim * in_dim` long.
+    pub fn set_weight(&mut self, weight: Vec<f32>) -> Result<(), InternLm2Error> {
+        if weight.len() != self.out_dim * self.in_dim {
+            return Err(InternLm2Error::InvalidInput(format!(
+                "expected {} weights ({}x{}), got {}",
+                self.out_dim * self.in_dim,
+                self.out_dim,
+                self.in_dim,
+                weight.len()
+            )));
+        }
+        self.weight = weight;
+        Ok(())
+    }
+
+    /// `out = W x` for a single vector of length `in_dim`.
+    pub fn forward_vec(&self, input: &[f32]) -> Vec<f32> {
+        let mut out = vec![0.0f32; self.out_dim];
+        for (row, slot) in out.iter_mut().enumerate() {
+            let base = row * self.in_dim;
+            let mut acc = 0.0f32;
+            for (i, &x) in input.iter().take(self.in_dim).enumerate() {
+                acc += self.weight[base + i] * x;
+            }
+            *slot = acc;
+        }
+        out
+    }
+
+    /// Apply the matrix to every `in_dim`-sized row of a flat buffer.
+    pub fn forward_rows(&self, input: &[f32]) -> Vec<f32> {
+        let mut out = Vec::with_capacity(input.len() / self.in_dim.max(1) * self.out_dim);
+        for row in input.chunks(self.in_dim) {
+            out.extend_from_slice(&self.forward_vec(row));
+        }
+        out
+    }
+
+    /// Number of stored parameters.
+    pub fn parameter_count(&self) -> usize {
+        self.weight.len()
     }
 }
 
@@ -150,15 +256,14 @@ pub struct InternLm2Attention {
     pub config: InternLm2Config,
     /// Index of this layer (0-based).
     pub layer_idx: usize,
-    /// Placeholder query projection weight (hidden_size × hidden_size).
-    #[allow(dead_code)]
-    q_weight: Vec<f32>,
-    /// Placeholder KV projection weight.
-    #[allow(dead_code)]
-    kv_weight: Vec<f32>,
-    /// Placeholder output projection weight.
-    #[allow(dead_code)]
-    o_weight: Vec<f32>,
+    /// Query projection `[num_attention_heads * head_dim, hidden_size]`.
+    q_proj: InternLm2Linear,
+    /// Key projection `[num_key_value_heads * head_dim, hidden_size]`.
+    k_proj: InternLm2Linear,
+    /// Value projection `[num_key_value_heads * head_dim, hidden_size]`.
+    v_proj: InternLm2Linear,
+    /// Output projection `[hidden_size, num_attention_heads * head_dim]`.
+    o_proj: InternLm2Linear,
     /// RoPE module.
     rope: InternLm2RotaryEmbedding,
     /// Layer-norm weight for pre-attention norm.
@@ -166,15 +271,23 @@ pub struct InternLm2Attention {
 }
 
 impl InternLm2Attention {
-    /// Create a new attention layer with identity (ones) weights.
+    /// Create a new attention layer.
+    ///
+    /// Projections carry deterministic pseudo-random weights (see
+    /// [`InternLm2Linear::new`]) and the pre-attention norm starts at ones.
     pub fn new(config: InternLm2Config, layer_idx: usize) -> Self {
         let h = config.hidden_size;
+        let head_dim = config.head_dim();
+        let q_dim = config.num_attention_heads * head_dim;
+        let kv_dim = config.num_key_value_heads * head_dim;
         let norm_weight = vec![1.0_f32; h];
         let rope = InternLm2RotaryEmbedding::new(config.rope_theta, config.rope_scaling);
+        let seed = 0x51E1_0000 ^ (layer_idx as u64 + 1);
         Self {
-            q_weight: vec![0.0_f32; h * h],
-            kv_weight: vec![0.0_f32; h * h],
-            o_weight: vec![0.0_f32; h * h],
+            q_proj: InternLm2Linear::new(q_dim, h, seed),
+            k_proj: InternLm2Linear::new(kv_dim, h, seed ^ 0x11),
+            v_proj: InternLm2Linear::new(kv_dim, h, seed ^ 0x22),
+            o_proj: InternLm2Linear::new(h, q_dim, seed ^ 0x33),
             rope,
             norm_weight,
             config,
@@ -188,14 +301,83 @@ impl InternLm2Attention {
         q_head / ratio
     }
 
-    /// Simplified forward pass.
+    /// Mutable access to the query projection (for weight loading).
+    pub fn q_proj_mut(&mut self) -> &mut InternLm2Linear {
+        &mut self.q_proj
+    }
+
+    /// Mutable access to the key projection (for weight loading).
+    pub fn k_proj_mut(&mut self) -> &mut InternLm2Linear {
+        &mut self.k_proj
+    }
+
+    /// Mutable access to the value projection (for weight loading).
+    pub fn v_proj_mut(&mut self) -> &mut InternLm2Linear {
+        &mut self.v_proj
+    }
+
+    /// Mutable access to the output projection (for weight loading).
+    pub fn o_proj_mut(&mut self) -> &mut InternLm2Linear {
+        &mut self.o_proj
+    }
+
+    /// Replace the pre-attention RMSNorm weight (`hidden_size` values).
+    pub fn set_norm_weight(&mut self, weight: Vec<f32>) -> Result<(), InternLm2Error> {
+        if weight.len() != self.config.hidden_size {
+            return Err(InternLm2Error::InvalidInput(format!(
+                "attention norm weight must have {} values, got {}",
+                self.config.hidden_size,
+                weight.len()
+            )));
+        }
+        self.norm_weight = weight;
+        Ok(())
+    }
+
+    /// Number of parameters in this attention block.
+    pub fn parameter_count(&self) -> usize {
+        self.q_proj.parameter_count()
+            + self.k_proj.parameter_count()
+            + self.v_proj.parameter_count()
+            + self.o_proj.parameter_count()
+            + self.norm_weight.len()
+    }
+
+    /// Causal grouped-query self-attention.
     ///
-    /// In this reference implementation the projection matrices are zero-initialised,
-    /// so the attention output is the input scaled by a learned RMS norm — the purpose
-    /// is to exercise the control-flow correctly so that tests can verify shapes and
-    /// GQA head mapping without loading actual weights.
+    /// `hidden_states` is a flat `[seq_len * hidden_size]` buffer. The block
+    /// performs a pre-attention RMSNorm, projects Q/K/V with real weights, rotates
+    /// Q and K with RoPE, and computes
+    /// `softmax(mask(Q Kᵀ) / sqrt(head_dim)) V` where query head `q` reads KV head
+    /// `q / gqa_ratio`. The result is projected back with `o_proj`.
     pub fn forward(&self, hidden_states: &[f32], seq_len: usize) -> Vec<f32> {
+        match self.try_forward(hidden_states, seq_len) {
+            Ok(output) => output,
+            // The public signature is infallible; a malformed input yields an
+            // all-zero block rather than a panic. `try_forward` reports the
+            // reason for callers that can handle it.
+            Err(_) => vec![0.0_f32; seq_len * self.config.hidden_size],
+        }
+    }
+
+    /// Fallible variant of [`forward`](Self::forward).
+    pub fn try_forward(
+        &self,
+        hidden_states: &[f32],
+        seq_len: usize,
+    ) -> Result<Vec<f32>, InternLm2Error> {
         let h = self.config.hidden_size;
+        if seq_len == 0 {
+            return Ok(Vec::new());
+        }
+        if hidden_states.len() != seq_len * h {
+            return Err(InternLm2Error::InvalidInput(format!(
+                "expected {} hidden values, got {}",
+                seq_len * h,
+                hidden_states.len()
+            )));
+        }
+
         // Pre-attention RMS norm applied per token.
         let normed: Vec<f32> = hidden_states
             .chunks(h)
@@ -204,58 +386,60 @@ impl InternLm2Attention {
             })
             .collect();
 
-        // Compute Q, K, V via linear projection (zero weights → zero projections).
-        // We add `normed` to avoid a completely dead path and represent residual flow.
         let head_dim = self.config.head_dim();
         let num_q_heads = self.config.num_attention_heads;
         let num_kv_heads = self.config.num_key_value_heads;
+        let q_width = num_q_heads * head_dim;
+        let kv_width = num_kv_heads * head_dim;
 
-        // Build Q/K as normed input (simplified stand-in for projection).
-        let q_proj: Vec<f32> = normed.iter().map(|v| v * 0.1).collect();
-        let k_proj: Vec<f32> = normed.iter().map(|v| v * 0.1).collect();
+        // Real projections: [seq_len, heads * head_dim]
+        let mut queries = self.q_proj.forward_rows(&normed);
+        let mut keys = self.k_proj.forward_rows(&normed);
+        let values = self.v_proj.forward_rows(&normed);
 
-        let (q_rot, _k_rot) = self.rope.apply(&q_proj, &k_proj, seq_len, head_dim);
+        // RoPE on queries and keys (values are never rotated).
+        self.rope.rotate_in_place(&mut queries, seq_len, head_dim);
+        self.rope.rotate_in_place(&mut keys, seq_len, head_dim);
 
-        // Scaled-dot-product attention (simplified: identity output per head).
-        // Shape: [seq_len, num_q_heads, head_dim] — we process head by head.
+        // Causal scaled dot-product attention with GQA head sharing.
         let scale = (head_dim as f32).sqrt().recip();
-        let mut attn_out = vec![0.0_f32; seq_len * h];
+        let mut context = vec![0.0_f32; seq_len * q_width];
+        let mut scores = vec![0.0_f32; seq_len];
 
-        for pos in 0..seq_len {
-            for q_head in 0..num_q_heads {
-                let kv_head = self.kv_head_for_q(q_head);
-                // Each token attends to all previous tokens (simplified: attend only to self).
-                // score = Q[pos,q_head] · K[pos,kv_head] * scale
-                let q_base = pos * h + q_head * head_dim;
-                let k_base = pos * h + kv_head * head_dim;
-
-                // Dot-product score
-                let score: f32 = (0..head_dim)
-                    .map(|i| {
-                        let qi = q_rot.get(q_base + i).copied().unwrap_or(0.0);
-                        let ki = k_proj.get(k_base + i).copied().unwrap_or(0.0);
-                        qi * ki
-                    })
-                    .sum::<f32>()
-                    * scale;
-
-                let _softmax_weight = score.exp(); // simplified (single-token: weight = 1)
-
-                // Write attention value into output
-                let out_base = pos * h + q_head * head_dim;
-                let v_base = pos * h + kv_head * head_dim;
-                for i in 0..head_dim {
-                    let v_val = normed.get(v_base + i).copied().unwrap_or(0.0);
-                    if let Some(slot) = attn_out.get_mut(out_base + i) {
-                        *slot += v_val * scale;
+        for q_head in 0..num_q_heads {
+            let kv_head = self.kv_head_for_q(q_head).min(num_kv_heads.saturating_sub(1));
+            for pos in 0..seq_len {
+                let q_base = pos * q_width + q_head * head_dim;
+                let mut max_score = f32::NEG_INFINITY;
+                for (key_pos, score) in scores.iter_mut().take(pos + 1).enumerate() {
+                    let k_base = key_pos * kv_width + kv_head * head_dim;
+                    let dot: f32 =
+                        (0..head_dim).map(|i| queries[q_base + i] * keys[k_base + i]).sum::<f32>()
+                            * scale;
+                    *score = dot;
+                    if dot > max_score {
+                        max_score = dot;
                     }
                 }
-                // suppress unused warning for kv_head
-                let _ = num_kv_heads;
+
+                let mut sum = 0.0_f32;
+                for score in scores.iter_mut().take(pos + 1) {
+                    *score = (*score - max_score).exp();
+                    sum += *score;
+                }
+                let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+
+                for (key_pos, score) in scores.iter().take(pos + 1).enumerate() {
+                    let weight = score * inv_sum;
+                    let v_base = key_pos * kv_width + kv_head * head_dim;
+                    for i in 0..head_dim {
+                        context[q_base + i] += weight * values[v_base + i];
+                    }
+                }
             }
         }
 
-        attn_out
+        Ok(self.o_proj.forward_rows(&context))
     }
 }
 
@@ -269,31 +453,28 @@ impl InternLm2Attention {
 pub struct InternLm2MLP {
     hidden_size: usize,
     intermediate_size: usize,
-    /// Placeholder gate projection (intermediate_size × hidden_size).
-    #[allow(dead_code)]
-    gate_weight: Vec<f32>,
-    /// Placeholder up projection (intermediate_size × hidden_size).
-    #[allow(dead_code)]
-    up_weight: Vec<f32>,
-    /// Placeholder down projection (hidden_size × intermediate_size).
-    #[allow(dead_code)]
-    down_weight: Vec<f32>,
+    /// Gate projection `[intermediate_size, hidden_size]`.
+    gate_proj: InternLm2Linear,
+    /// Up projection `[intermediate_size, hidden_size]`.
+    up_proj: InternLm2Linear,
+    /// Down projection `[hidden_size, intermediate_size]`.
+    down_proj: InternLm2Linear,
     /// Layer-norm weight for pre-MLP norm.
     norm_weight: Vec<f32>,
     rms_norm_eps: f64,
 }
 
 impl InternLm2MLP {
-    /// Create a new MLP with identity (ones) norm weights.
+    /// Create a new MLP with deterministic projections and ones norm weights.
     pub fn new(config: &InternLm2Config) -> Self {
         let h = config.hidden_size;
         let i = config.intermediate_size;
         Self {
             hidden_size: h,
             intermediate_size: i,
-            gate_weight: vec![0.0_f32; i * h],
-            up_weight: vec![0.0_f32; i * h],
-            down_weight: vec![0.0_f32; h * i],
+            gate_proj: InternLm2Linear::new(i, h, 0x3F1E_0001),
+            up_proj: InternLm2Linear::new(i, h, 0x3F1E_0002),
+            down_proj: InternLm2Linear::new(h, i, 0x3F1E_0003),
             norm_weight: vec![1.0_f32; h],
             rms_norm_eps: config.rms_norm_eps,
         }
@@ -305,38 +486,72 @@ impl InternLm2MLP {
         x / (1.0 + (-x).exp())
     }
 
+    /// Hidden size this MLP maps from and back to.
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+
+    /// Width of the SwiGLU intermediate projection.
+    pub fn intermediate_size(&self) -> usize {
+        self.intermediate_size
+    }
+
+    /// Mutable access to the gate projection (for weight loading).
+    pub fn gate_proj_mut(&mut self) -> &mut InternLm2Linear {
+        &mut self.gate_proj
+    }
+
+    /// Mutable access to the up projection (for weight loading).
+    pub fn up_proj_mut(&mut self) -> &mut InternLm2Linear {
+        &mut self.up_proj
+    }
+
+    /// Mutable access to the down projection (for weight loading).
+    pub fn down_proj_mut(&mut self) -> &mut InternLm2Linear {
+        &mut self.down_proj
+    }
+
+    /// Replace the pre-MLP RMSNorm weight (`hidden_size` values).
+    pub fn set_norm_weight(&mut self, weight: Vec<f32>) -> Result<(), InternLm2Error> {
+        if weight.len() != self.hidden_size {
+            return Err(InternLm2Error::InvalidInput(format!(
+                "MLP norm weight must have {} values, got {}",
+                self.hidden_size,
+                weight.len()
+            )));
+        }
+        self.norm_weight = weight;
+        Ok(())
+    }
+
+    /// Number of parameters in this MLP.
+    pub fn parameter_count(&self) -> usize {
+        self.gate_proj.parameter_count()
+            + self.up_proj.parameter_count()
+            + self.down_proj.parameter_count()
+            + self.norm_weight.len()
+    }
+
     /// Forward pass: pre-norm → gate/up projection → SwiGLU → down projection.
     ///
     /// Accepts a flat `[seq_len * hidden_size]` input and returns the same shape.
-    /// With zero-init weights the gate/up projections are all zeros, so the output
-    /// retains only the residual signal through the norm. Tests verify shape correctness.
+    /// The SwiGLU is `down(silu(gate(x)) * up(x))`, matching the reference
+    /// implementation.
     pub fn forward(&self, x: &[f32]) -> Vec<f32> {
-        // x may have shape [seq_len * hidden_size]; process token by token.
         let total = x.len();
-        if total == 0 {
+        if total == 0 || !total.is_multiple_of(self.hidden_size) {
             return Vec::new();
         }
         let h = self.hidden_size;
-        let num_tokens = total / h;
-        let mut out = vec![0.0_f32; total];
+        let mut out = Vec::with_capacity(total);
 
-        for tok in 0..num_tokens {
-            let x_tok = &x[tok * h..(tok + 1) * h];
+        for x_tok in x.chunks(h) {
             let normed = InternLm2RmsNorm::forward(x_tok, &self.norm_weight, self.rms_norm_eps);
-
-            // gate_proj * silu(up_proj) — with zero weights both are zero.
-            let gate: Vec<f32> = vec![0.0_f32; self.intermediate_size];
-            let up: Vec<f32> = vec![0.0_f32; self.intermediate_size];
-
-            let swiglu: Vec<f32> =
-                gate.iter().zip(up.iter()).map(|(g, u)| g * Self::silu(*u)).collect();
-
-            // down_proj: intermediate_size → hidden_size.
-            let out_tok = &mut out[tok * h..(tok + 1) * h];
-            for (i, slot) in out_tok.iter_mut().enumerate() {
-                *slot = normed.get(i).copied().unwrap_or(0.0) * 0.0
-                    + swiglu.get(i % self.intermediate_size).copied().unwrap_or(0.0);
-            }
+            let gate = self.gate_proj.forward_vec(&normed);
+            let up = self.up_proj.forward_vec(&normed);
+            let activated: Vec<f32> =
+                gate.iter().zip(up.iter()).map(|(g, u)| Self::silu(*g) * u).collect();
+            out.extend_from_slice(&self.down_proj.forward_vec(&activated));
         }
         out
     }
@@ -371,6 +586,21 @@ impl InternLm2DecoderLayer {
         let mlp_out = self.mlp.forward(&after_attn);
         after_attn.iter().zip(mlp_out.iter()).map(|(h, m)| h + m).collect()
     }
+
+    /// Mutable access to the attention block (for weight loading).
+    pub fn attention_mut(&mut self) -> &mut InternLm2Attention {
+        &mut self.attention
+    }
+
+    /// Mutable access to the MLP block (for weight loading).
+    pub fn mlp_mut(&mut self) -> &mut InternLm2MLP {
+        &mut self.mlp
+    }
+
+    /// Number of parameters in this decoder layer.
+    pub fn parameter_count(&self) -> usize {
+        self.attention.parameter_count() + self.mlp.parameter_count()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -385,13 +615,16 @@ pub struct InternLm2Model {
     pub layers: Vec<InternLm2DecoderLayer>,
     /// Final RMS norm weight.
     final_norm_weight: Vec<f32>,
-    /// Token embedding table (vocab_size × hidden_size, zero-init).
-    #[allow(dead_code)]
+    /// Token embedding table, row-major `[vocab_size, hidden_size]`.
     embed_weight: Vec<f32>,
 }
 
 impl InternLm2Model {
     /// Create a new model with the given configuration.
+    ///
+    /// The embedding table and every projection start from a deterministic
+    /// pseudo-random draw so the forward pass is exercisable before checkpoint
+    /// weights are loaded; a zero table would make every token embed identically.
     pub fn new(config: InternLm2Config) -> Self {
         let num_layers = config.num_hidden_layers;
         let h = config.hidden_size;
@@ -401,12 +634,59 @@ impl InternLm2Model {
             .map(|idx| InternLm2DecoderLayer::new(config.clone(), idx))
             .collect();
 
+        // Reuse the matrix initialiser: an embedding table is a [vocab, hidden] matrix.
+        let embed_weight = InternLm2Linear::new(v, h, 0x0EBE_D000).weight().to_vec();
+
         Self {
             final_norm_weight: vec![1.0_f32; h],
-            embed_weight: vec![0.0_f32; v * h],
+            embed_weight,
             layers,
             config,
         }
+    }
+
+    /// Replace the token embedding table (`vocab_size * hidden_size` values).
+    pub fn set_embed_weight(&mut self, weight: Vec<f32>) -> Result<(), InternLm2Error> {
+        let expected = self.config.vocab_size * self.config.hidden_size;
+        if weight.len() != expected {
+            return Err(InternLm2Error::InvalidInput(format!(
+                "embedding table must have {expected} values, got {}",
+                weight.len()
+            )));
+        }
+        self.embed_weight = weight;
+        Ok(())
+    }
+
+    /// Replace the final RMSNorm weight (`hidden_size` values).
+    pub fn set_final_norm_weight(&mut self, weight: Vec<f32>) -> Result<(), InternLm2Error> {
+        if weight.len() != self.config.hidden_size {
+            return Err(InternLm2Error::InvalidInput(format!(
+                "final norm weight must have {} values, got {}",
+                self.config.hidden_size,
+                weight.len()
+            )));
+        }
+        self.final_norm_weight = weight;
+        Ok(())
+    }
+
+    /// Look up the embedding row of `token_id`.
+    pub fn embed_token(&self, token_id: usize) -> Result<&[f32], InternLm2Error> {
+        let h = self.config.hidden_size;
+        let start = token_id * h;
+        self.embed_weight.get(start..start + h).ok_or_else(|| {
+            InternLm2Error::InvalidInput(format!(
+                "token id {token_id} is out of vocabulary range {}",
+                self.config.vocab_size
+            ))
+        })
+    }
+
+    /// Total number of parameters held by the base model.
+    pub fn parameter_count(&self) -> usize {
+        let layer_params: usize = self.layers.iter().map(|l| l.parameter_count()).sum();
+        self.embed_weight.len() + layer_params + self.final_norm_weight.len()
     }
 
     /// Run the model on a sequence of token IDs.
@@ -423,7 +703,7 @@ impl InternLm2Model {
         let h = self.config.hidden_size;
         let v = self.config.vocab_size;
 
-        // Token embedding lookup (zero-init weights → zero embeddings as placeholder).
+        // Token embedding lookup from the real embedding table.
         let mut hidden: Vec<f32> = Vec::with_capacity(seq_len * h);
         for &tok in input_ids {
             let tok_id = tok as usize;
@@ -432,12 +712,7 @@ impl InternLm2Model {
                     "token id {tok_id} is out of vocabulary range {v}"
                 )));
             }
-            // With zero embedding table, each token embeds to zeros.
-            // We add a small signal proportional to the token id so that
-            // the output is not degenerate in tests.
-            let embedding: Vec<f32> =
-                (0..h).map(|dim| (tok_id as f32 * 0.001) * ((dim + 1) as f32 * 0.01)).collect();
-            hidden.extend_from_slice(&embedding);
+            hidden.extend_from_slice(self.embed_token(tok_id)?);
         }
 
         // Pass through decoder layers.
@@ -619,6 +894,255 @@ mod tests {
             cfg.hidden_size,
             "attention output must have hidden_size elements"
         );
+    }
+
+    // -- Real attention: weights, cross-token reads, causality, reference math --
+
+    /// Zero-initialised projections would make the output identically zero.
+    #[test]
+    fn test_internlm2_attention_output_is_not_zero() {
+        let cfg = tiny_internlm2_config();
+        let attn = InternLm2Attention::new(cfg.clone(), 0);
+        let hidden = lcg_vec(2 * cfg.hidden_size, 81);
+        let out = attn.forward(&hidden, 2);
+        let magnitude = out.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+        assert!(
+            magnitude > 1e-6,
+            "attention must use real projection weights (max |out| = {magnitude})"
+        );
+    }
+
+    /// Each token must attend over the whole causal prefix. The old code computed
+    /// a single self-score and discarded it, so earlier tokens had no influence.
+    #[test]
+    fn test_internlm2_attention_reads_previous_tokens() {
+        let cfg = tiny_internlm2_config();
+        let attn = InternLm2Attention::new(cfg.clone(), 0);
+        let seq_len = 3;
+        let h = cfg.hidden_size;
+        let base = lcg_vec(seq_len * h, 82);
+
+        let out_a = attn.forward(&base, seq_len);
+        let mut perturbed = base.clone();
+        for value in perturbed.iter_mut().take(h) {
+            *value += 1.0;
+        }
+        let out_b = attn.forward(&perturbed, seq_len);
+
+        let last = (seq_len - 1) * h;
+        let diff = out_a[last..]
+            .iter()
+            .zip(out_b[last..].iter())
+            .fold(0.0f32, |acc, (a, b)| acc.max((a - b).abs()));
+        assert!(
+            diff > 1e-6,
+            "the last token must attend to earlier tokens (diff {diff})"
+        );
+    }
+
+    #[test]
+    fn test_internlm2_attention_is_causal() {
+        let cfg = tiny_internlm2_config();
+        let attn = InternLm2Attention::new(cfg.clone(), 0);
+        let seq_len = 3;
+        let h = cfg.hidden_size;
+        let base = lcg_vec(seq_len * h, 83);
+
+        let out_a = attn.forward(&base, seq_len);
+        let mut perturbed = base.clone();
+        for value in perturbed.iter_mut().skip((seq_len - 1) * h) {
+            *value += 1.5;
+        }
+        let out_b = attn.forward(&perturbed, seq_len);
+
+        for i in 0..(seq_len - 1) * h {
+            assert!(
+                (out_a[i] - out_b[i]).abs() < 1e-5,
+                "position {} must not see the future",
+                i / h
+            );
+        }
+    }
+
+    /// Recompute the block by hand from its own weights and compare.
+    #[test]
+    fn test_internlm2_attention_matches_naive_reference() {
+        let cfg = tiny_internlm2_config();
+        let attn = InternLm2Attention::new(cfg.clone(), 0);
+        let seq_len = 3;
+        let h = cfg.hidden_size;
+        let head_dim = cfg.head_dim();
+        let num_q = cfg.num_attention_heads;
+        let num_kv = cfg.num_key_value_heads;
+        let ratio = cfg.gqa_ratio();
+        let x = lcg_vec(seq_len * h, 84);
+
+        let got = attn.try_forward(&x, seq_len).expect("forward");
+
+        // Reference implementation.
+        let normed: Vec<f32> = x
+            .chunks(h)
+            .flat_map(|chunk| InternLm2RmsNorm::forward(chunk, &attn.norm_weight, cfg.rms_norm_eps))
+            .collect();
+        let mut q = attn.q_proj.forward_rows(&normed);
+        let mut k = attn.k_proj.forward_rows(&normed);
+        let v = attn.v_proj.forward_rows(&normed);
+        attn.rope.rotate_in_place(&mut q, seq_len, head_dim);
+        attn.rope.rotate_in_place(&mut k, seq_len, head_dim);
+
+        let q_width = num_q * head_dim;
+        let kv_width = num_kv * head_dim;
+        let scale = (head_dim as f32).sqrt().recip();
+        let mut context = vec![0.0f32; seq_len * q_width];
+        for q_head in 0..num_q {
+            let kv_head = q_head / ratio;
+            for pos in 0..seq_len {
+                let q_base = pos * q_width + q_head * head_dim;
+                let mut weights = Vec::with_capacity(pos + 1);
+                for key_pos in 0..=pos {
+                    let k_base = key_pos * kv_width + kv_head * head_dim;
+                    weights.push(
+                        (0..head_dim).map(|i| q[q_base + i] * k[k_base + i]).sum::<f32>() * scale,
+                    );
+                }
+                let max = weights.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let exps: Vec<f32> = weights.iter().map(|w| (w - max).exp()).collect();
+                let sum: f32 = exps.iter().sum();
+                for (key_pos, e) in exps.iter().enumerate() {
+                    let weight = e / sum;
+                    let v_base = key_pos * kv_width + kv_head * head_dim;
+                    for i in 0..head_dim {
+                        context[q_base + i] += weight * v[v_base + i];
+                    }
+                }
+            }
+        }
+        let expected = attn.o_proj.forward_rows(&context);
+
+        for (i, (a, b)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-5, "element {i}: got {a}, expected {b}");
+        }
+    }
+
+    #[test]
+    fn test_internlm2_attention_rejects_bad_input_length() {
+        let cfg = tiny_internlm2_config();
+        let attn = InternLm2Attention::new(cfg, 0);
+        assert!(attn.try_forward(&[0.0, 1.0, 2.0], 2).is_err());
+    }
+
+    #[test]
+    fn test_internlm2_linear_matvec_reference() {
+        let mut linear = InternLm2Linear::new(2, 3, 5);
+        linear.set_weight(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("weights");
+        let out = linear.forward_vec(&[1.0, 0.5, -1.0]);
+        // Row 0: 1*1 + 2*0.5 + 3*(-1) = -1 ; Row 1: 4*1 + 5*0.5 + 6*(-1) = 0.5
+        assert!((out[0] + 1.0).abs() < 1e-6, "got {}", out[0]);
+        assert!((out[1] - 0.5).abs() < 1e-6, "got {}", out[1]);
+        assert!(linear.set_weight(vec![1.0]).is_err());
+    }
+
+    /// RoPE must derive the angle from the **token** position, not from the flat
+    /// vector index: every head of a token shares one position.
+    #[test]
+    fn test_internlm2_rope_position_is_per_token_not_per_head() {
+        let rope = InternLm2RotaryEmbedding::new(10000.0, None);
+        let head_dim = 2;
+        let seq_len = 2;
+        let num_heads = 2;
+        let original: Vec<f32> = vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+        let mut data = original.clone();
+        rope.rotate_in_place(&mut data, seq_len, head_dim);
+
+        // Token 0 (both heads): angle 0 → unchanged.
+        for i in 0..num_heads * head_dim {
+            assert!(
+                (data[i] - original[i]).abs() < 1e-6,
+                "head {} of token 0 must not be rotated",
+                i / head_dim
+            );
+        }
+        // Token 1 (both heads): rotated by the same non-zero angle.
+        let head0 = &data[num_heads * head_dim..num_heads * head_dim + head_dim];
+        let head1 = &data[num_heads * head_dim + head_dim..];
+        assert!((head0[0] - head1[0]).abs() < 1e-6);
+        assert!((head0[1] - head1[1]).abs() < 1e-6);
+        assert!(
+            (head0[0] - 1.0).abs() > 1e-6 || head0[1].abs() > 1e-6,
+            "token 1 must actually be rotated"
+        );
+    }
+
+    // -- MLP with real weights --
+
+    #[test]
+    fn test_internlm2_mlp_output_is_input_dependent() {
+        let cfg = tiny_internlm2_config();
+        let mlp = InternLm2MLP::new(&cfg);
+        let a = mlp.forward(&lcg_vec(cfg.hidden_size, 85));
+        let b = mlp.forward(&lcg_vec(cfg.hidden_size, 86));
+        let magnitude = a.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+        assert!(magnitude > 1e-6, "the MLP must not return all zeros");
+        let diff = a.iter().zip(b.iter()).fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+        assert!(diff > 1e-6, "the MLP output must depend on its input");
+    }
+
+    #[test]
+    fn test_internlm2_mlp_matches_naive_reference() {
+        let cfg = tiny_internlm2_config();
+        let mlp = InternLm2MLP::new(&cfg);
+        let x = lcg_vec(cfg.hidden_size, 87);
+        let got = mlp.forward(&x);
+
+        let normed = InternLm2RmsNorm::forward(&x, &mlp.norm_weight, cfg.rms_norm_eps);
+        let gate = mlp.gate_proj.forward_vec(&normed);
+        let up = mlp.up_proj.forward_vec(&normed);
+        let activated: Vec<f32> =
+            gate.iter().zip(up.iter()).map(|(g, u)| (g / (1.0 + (-g).exp())) * u).collect();
+        let expected = mlp.down_proj.forward_vec(&activated);
+
+        for (i, (a, b)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-5, "element {i}: {a} vs {b}");
+        }
+    }
+
+    // -- Embeddings --
+
+    #[test]
+    fn test_internlm2_embeddings_differ_per_token() {
+        let cfg = tiny_internlm2_config();
+        let model = InternLm2Model::new(cfg.clone());
+        let first = model.embed_token(0).expect("token 0").to_vec();
+        let second = model.embed_token(1).expect("token 1").to_vec();
+        let magnitude = first.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+        assert!(magnitude > 1e-6, "embeddings must not be all zero");
+        let diff = first
+            .iter()
+            .zip(second.iter())
+            .fold(0.0f32, |acc, (a, b)| acc.max((a - b).abs()));
+        assert!(diff > 1e-6, "different tokens need different embeddings");
+    }
+
+    #[test]
+    fn test_internlm2_set_embed_weight_validates_length() {
+        let cfg = tiny_internlm2_config();
+        let mut model = InternLm2Model::new(cfg.clone());
+        let good = vec![0.25f32; cfg.vocab_size * cfg.hidden_size];
+        assert!(model.set_embed_weight(good).is_ok());
+        assert!(model.set_embed_weight(vec![0.0; 3]).is_err());
+    }
+
+    #[test]
+    fn test_internlm2_model_output_depends_on_input_ids() {
+        let cfg = tiny_internlm2_config();
+        let model = InternLm2Model::new(cfg.clone());
+        let a = model.forward(&[1u32, 2, 3]).expect("forward a");
+        let b = model.forward(&[3u32, 2, 1]).expect("forward b");
+        let diff = a.iter().zip(b.iter()).fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+        assert!(diff > 1e-6, "hidden states must depend on the input tokens");
+        for value in a {
+            assert!(value.is_finite(), "hidden states must stay finite");
+        }
     }
 
     // -- InternLm2MLP --

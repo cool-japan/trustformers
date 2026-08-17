@@ -139,7 +139,11 @@ pub enum TokenDpoError {
     /// Example has empty chosen or rejected sequence.
     EmptySequence { field: &'static str },
     /// Log-prob vectors are length-mismatched for the given field.
-    LengthMismatch { field: &'static str, expected: usize, got: usize },
+    LengthMismatch {
+        field: &'static str,
+        expected: usize,
+        got: usize,
+    },
     /// A log-probability or reward value was not finite.
     NonFiniteValue { field: &'static str },
     /// Credit weights provided but length doesn't match sequence.
@@ -151,14 +155,18 @@ impl fmt::Display for TokenDpoError {
         match self {
             TokenDpoError::EmptySequence { field } => {
                 write!(f, "Token-DPO: empty sequence for field '{field}'")
-            }
-            TokenDpoError::LengthMismatch { field, expected, got } => write!(
+            },
+            TokenDpoError::LengthMismatch {
+                field,
+                expected,
+                got,
+            } => write!(
                 f,
                 "Token-DPO: length mismatch for '{field}': expected {expected}, got {got}"
             ),
             TokenDpoError::NonFiniteValue { field } => {
                 write!(f, "Token-DPO: non-finite value in field '{field}'")
-            }
+            },
             TokenDpoError::CreditWeightLengthMismatch { expected, got } => write!(
                 f,
                 "Token-DPO: credit_weights length mismatch: expected {expected}, got {got}"
@@ -179,11 +187,7 @@ impl std::error::Error for TokenDpoError {}
 /// For methods marked "normalised" (Uniform, Discounted) the weights sum to 1.
 /// LastToken places all mass on the last position.
 /// Attention falls back to Uniform in the absence of attention data.
-pub fn compute_token_credits(
-    length: usize,
-    method: &CreditAssignment,
-    gamma: f32,
-) -> Vec<f32> {
+pub fn compute_token_credits(length: usize, method: &CreditAssignment, gamma: f32) -> Vec<f32> {
     if length == 0 {
         return vec![];
     }
@@ -191,17 +195,16 @@ pub fn compute_token_credits(
         CreditAssignment::Uniform => {
             let w = 1.0 / length as f32;
             vec![w; length]
-        }
+        },
         CreditAssignment::LastToken => {
             let mut weights = vec![0.0_f32; length];
             weights[length - 1] = 1.0;
             weights
-        }
+        },
         CreditAssignment::Discounted => {
             // weight_t = γ^(T−1−t), then normalise to sum = 1
-            let mut weights: Vec<f32> = (0..length)
-                .map(|t| gamma.powi((length - 1 - t) as i32))
-                .collect();
+            let mut weights: Vec<f32> =
+                (0..length).map(|t| gamma.powi((length - 1 - t) as i32)).collect();
             let total: f32 = weights.iter().sum();
             if total > 1e-12 {
                 for w in &mut weights {
@@ -209,12 +212,12 @@ pub fn compute_token_credits(
                 }
             }
             weights
-        }
+        },
         CreditAssignment::Attention => {
             // Without external attention data, fall back to uniform
             let w = 1.0 / length as f32;
             vec![w; length]
-        }
+        },
     }
 }
 
@@ -294,12 +297,16 @@ pub fn compute_token_dpo_loss(
     // Validate finiteness
     for lp in example.chosen_log_probs.iter().chain(example.chosen_ref_log_probs.iter()) {
         if !lp.is_finite() {
-            return Err(TokenDpoError::NonFiniteValue { field: "chosen_log_probs" });
+            return Err(TokenDpoError::NonFiniteValue {
+                field: "chosen_log_probs",
+            });
         }
     }
     for lp in example.rejected_log_probs.iter().chain(example.rejected_ref_log_probs.iter()) {
         if !lp.is_finite() {
-            return Err(TokenDpoError::NonFiniteValue { field: "rejected_log_probs" });
+            return Err(TokenDpoError::NonFiniteValue {
+                field: "rejected_log_probs",
+            });
         }
     }
 
@@ -314,7 +321,7 @@ pub fn compute_token_dpo_loss(
                 });
             }
             w.clone()
-        }
+        },
         None => compute_token_credits(chosen_len, credit_method, gamma),
     };
 
@@ -334,8 +341,7 @@ pub fn compute_token_dpo_loss(
     let mut positive_adv_count = 0usize;
 
     for t in 0..chosen_len {
-        let chosen_log_ratio_t =
-            example.chosen_log_probs[t] - example.chosen_ref_log_probs[t];
+        let chosen_log_ratio_t = example.chosen_log_probs[t] - example.chosen_ref_log_probs[t];
         // advantage_t: chosen ratio − rejected mean ratio
         let advantage_t = chosen_log_ratio_t - rejected_log_ratio;
         let token_loss_t = -sigmoid(beta * advantage_t).ln() * credits[t];
@@ -382,7 +388,11 @@ pub struct TokenDpoTrainer {
 impl TokenDpoTrainer {
     /// Create a new trainer.
     pub fn new(config: TokenDpoConfig) -> Self {
-        Self { config, step: 0, history: Vec::new() }
+        Self {
+            config,
+            step: 0,
+            history: Vec::new(),
+        }
     }
 
     /// Compute token-level DPO loss for a batch of examples, accumulating history.
@@ -489,7 +499,9 @@ mod tests {
             assert!(
                 credits[i] <= credits[i + 1],
                 "credits[{i}]={} > credits[{}]={}",
-                credits[i], i + 1, credits[i + 1]
+                credits[i],
+                i + 1,
+                credits[i + 1]
             );
         }
     }
@@ -507,15 +519,18 @@ mod tests {
     fn test_basic_token_dpo_loss() {
         // chosen better than rejected (positive log-ratio difference)
         let ex = make_example(
-            vec![-0.5],      // chosen_lp
-            vec![-2.0],      // rejected_lp
-            vec![-1.0],      // chosen_ref_lp  → chosen ratio = -0.5 - (-1.0) = 0.5
-            vec![-1.0],      // rejected_ref_lp → rejected ratio = -2.0 - (-1.0) = -1.0
+            vec![-0.5], // chosen_lp
+            vec![-2.0], // rejected_lp
+            vec![-1.0], // chosen_ref_lp  → chosen ratio = -0.5 - (-1.0) = 0.5
+            vec![-1.0], // rejected_ref_lp → rejected ratio = -2.0 - (-1.0) = -1.0
         );
         // advantage = 0.5 - (-1.0) = 1.5  (positive → chosen preferred)
         let out = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::LastToken, 0.9)
             .expect("should succeed");
-        assert_eq!(out.accuracy, 1.0, "all tokens should have positive advantage");
+        assert_eq!(
+            out.accuracy, 1.0,
+            "all tokens should have positive advantage"
+        );
         assert!(out.total_loss > 0.0, "loss should be positive");
     }
 
@@ -523,14 +538,8 @@ mod tests {
     #[test]
     fn test_negative_advantage_accuracy_zero() {
         // chosen worse than rejected
-        let ex = make_example(
-            vec![-2.0],
-            vec![-0.5],
-            vec![-1.0],
-            vec![-1.0],
-        );
-        let out = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9)
-            .expect("ok");
+        let ex = make_example(vec![-2.0], vec![-0.5], vec![-1.0], vec![-1.0]);
+        let out = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).expect("ok");
         assert_eq!(out.accuracy, 0.0);
     }
 
@@ -548,7 +557,10 @@ mod tests {
             credit_weights: None,
         };
         let err = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).unwrap_err();
-        assert!(matches!(err, TokenDpoError::EmptySequence { field: "chosen" }));
+        assert!(matches!(
+            err,
+            TokenDpoError::EmptySequence { field: "chosen" }
+        ));
     }
 
     // ── Test 9: length mismatch error ─────────────────────────────────────
@@ -601,16 +613,28 @@ mod tests {
 
         let e2 = format!(
             "{}",
-            TokenDpoError::LengthMismatch { field: "foo", expected: 3, got: 2 }
+            TokenDpoError::LengthMismatch {
+                field: "foo",
+                expected: 3,
+                got: 2
+            }
         );
         assert!(e2.contains("foo"), "got: {e2}");
 
-        let e3 = format!("{}", TokenDpoError::NonFiniteValue { field: "chosen_log_probs" });
+        let e3 = format!(
+            "{}",
+            TokenDpoError::NonFiniteValue {
+                field: "chosen_log_probs"
+            }
+        );
         assert!(e3.contains("chosen"), "got: {e3}");
 
         let e4 = format!(
             "{}",
-            TokenDpoError::CreditWeightLengthMismatch { expected: 5, got: 3 }
+            TokenDpoError::CreditWeightLengthMismatch {
+                expected: 5,
+                got: 3
+            }
         );
         assert!(e4.contains("5"), "got: {e4}");
     }
@@ -624,8 +648,7 @@ mod tests {
             vec![-1.0, -1.0, -1.0],
             vec![-1.0],
         );
-        let out = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9)
-            .expect("ok");
+        let out = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).expect("ok");
         assert_eq!(out.per_token_losses.len(), 3);
         assert_eq!(out.per_token_advantages.len(), 3);
     }
@@ -633,18 +656,15 @@ mod tests {
     // ── Test 14: pre-computed credit weights override ─────────────────────
     #[test]
     fn test_precomputed_credit_weights() {
-        let mut ex = make_example(
-            vec![-1.0, -1.0],
-            vec![-2.0],
-            vec![-1.0, -1.0],
-            vec![-1.0],
-        );
+        let mut ex = make_example(vec![-1.0, -1.0], vec![-2.0], vec![-1.0, -1.0], vec![-1.0]);
         // Assign all credit to first token
         ex.credit_weights = Some(vec![1.0, 0.0]);
-        let out = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9)
-            .expect("ok");
+        let out = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).expect("ok");
         // Second token loss should be 0 (credit=0)
-        assert!((out.per_token_losses[1]).abs() < 1e-6, "second token loss should be 0");
+        assert!(
+            (out.per_token_losses[1]).abs() < 1e-6,
+            "second token loss should be 0"
+        );
     }
 
     // ── Test 15: mean_recent_accuracy tracking ────────────────────────────
@@ -672,14 +692,18 @@ mod tests {
         // advantage_t = (chosen_lp[t] - chosen_ref_lp[t]) - mean(rejected_lp - rejected_ref_lp)
         // With single rejected token: rejected_log_ratio = rejected_lp - rejected_ref_lp
         let ex = make_example(
-            vec![-1.0],   // chosen_lp
-            vec![-2.0],   // rejected_lp
-            vec![-2.0],   // chosen_ref_lp → chosen_ratio = -1 - (-2) = 1.0
-            vec![-1.5],   // rejected_ref_lp → rejected_ratio = -2 - (-1.5) = -0.5
+            vec![-1.0], // chosen_lp
+            vec![-2.0], // rejected_lp
+            vec![-2.0], // chosen_ref_lp → chosen_ratio = -1 - (-2) = 1.0
+            vec![-1.5], // rejected_ref_lp → rejected_ratio = -2 - (-1.5) = -0.5
         );
         // advantage = 1.0 - (-0.5) = 1.5
         let out = compute_token_dpo_loss(&ex, 1.0, &CreditAssignment::Uniform, 0.9).expect("ok");
-        assert!((out.per_token_advantages[0] - 1.5).abs() < 1e-5, "advantage={}", out.per_token_advantages[0]);
+        assert!(
+            (out.per_token_advantages[0] - 1.5).abs() < 1e-5,
+            "advantage={}",
+            out.per_token_advantages[0]
+        );
     }
 
     #[test]
@@ -694,7 +718,12 @@ mod tests {
         );
         let out = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).expect("ok");
         let manual_sum: f32 = out.per_token_losses.iter().sum();
-        assert!((out.total_loss - manual_sum).abs() < 1e-5, "total_loss={} sum={}", out.total_loss, manual_sum);
+        assert!(
+            (out.total_loss - manual_sum).abs() < 1e-5,
+            "total_loss={} sum={}",
+            out.total_loss,
+            manual_sum
+        );
     }
 
     #[test]
@@ -709,10 +738,21 @@ mod tests {
         // Only middle token gets credit
         ex.credit_weights = Some(vec![0.0, 1.0, 0.0]);
         let out = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).expect("ok");
-        assert!((out.per_token_losses[0]).abs() < 1e-6, "first token loss should be 0, got {}", out.per_token_losses[0]);
-        assert!((out.per_token_losses[2]).abs() < 1e-6, "third token loss should be 0, got {}", out.per_token_losses[2]);
+        assert!(
+            (out.per_token_losses[0]).abs() < 1e-6,
+            "first token loss should be 0, got {}",
+            out.per_token_losses[0]
+        );
+        assert!(
+            (out.per_token_losses[2]).abs() < 1e-6,
+            "third token loss should be 0, got {}",
+            out.per_token_losses[2]
+        );
         // total_loss = only middle token's loss
-        assert!((out.total_loss - out.per_token_losses[1]).abs() < 1e-6, "total should equal middle token loss");
+        assert!(
+            (out.total_loss - out.per_token_losses[1]).abs() < 1e-6,
+            "total should equal middle token loss"
+        );
     }
 
     #[test]
@@ -723,7 +763,8 @@ mod tests {
         assert!(
             credits[3] > credits[0],
             "last token {} should have more credit than first {}",
-            credits[3], credits[0]
+            credits[3],
+            credits[0]
         );
     }
 
@@ -731,17 +772,17 @@ mod tests {
     fn test_alignment_with_sequence_level_when_uniform_weight() {
         // With uniform weights, total_loss should equal sum of per-token sigmoid losses / T
         // verify algebraically
-        let ex = make_example(
-            vec![-1.0, -2.0],
-            vec![-1.5],
-            vec![-1.5, -1.5],
-            vec![-1.5],
-        );
+        let ex = make_example(vec![-1.0, -2.0], vec![-1.5], vec![-1.5, -1.5], vec![-1.5]);
         let beta = 0.5_f32;
         let out = compute_token_dpo_loss(&ex, beta, &CreditAssignment::Uniform, 0.9).expect("ok");
         // Each token credit = 0.5; verify total = sum(credit * individual_loss)
         let expected_total: f32 = out.per_token_losses.iter().sum();
-        assert!((out.total_loss - expected_total).abs() < 1e-5, "total mismatch: {} vs {}", out.total_loss, expected_total);
+        assert!(
+            (out.total_loss - expected_total).abs() < 1e-5,
+            "total mismatch: {} vs {}",
+            out.total_loss,
+            expected_total
+        );
     }
 
     #[test]
@@ -765,49 +806,58 @@ mod tests {
         // Simulating "sum" aggregation: set credits proportional to sequence length
         // (multiply each by T to get sum instead of mean)
         let t = 3_usize;
-        let mut ex = make_example(
-            vec![-1.0; t],
-            vec![-2.0],
-            vec![-1.5; t],
-            vec![-1.5],
-        );
+        let mut ex = make_example(vec![-1.0; t], vec![-2.0], vec![-1.5; t], vec![-1.5]);
         // Sum strategy: credit_t = 1.0 (each token contributes full weight)
         ex.credit_weights = Some(vec![1.0; t]);
-        let out_sum = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).expect("sum ok");
+        let out_sum =
+            compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).expect("sum ok");
 
         // Uniform: each token has credit 1/T
         let mut ex_uniform = ex.clone();
         ex_uniform.credit_weights = None;
-        let out_uniform = compute_token_dpo_loss(&ex_uniform, 0.1, &CreditAssignment::Uniform, 0.9).expect("uniform ok");
+        let out_uniform = compute_token_dpo_loss(&ex_uniform, 0.1, &CreditAssignment::Uniform, 0.9)
+            .expect("uniform ok");
 
         // Sum loss = T * uniform_total (since each credit is T times larger)
-        assert!((out_sum.total_loss - t as f32 * out_uniform.total_loss).abs() < 1e-4,
-            "sum={} expected {}*uniform={}", out_sum.total_loss, t, t as f32 * out_uniform.total_loss);
+        assert!(
+            (out_sum.total_loss - t as f32 * out_uniform.total_loss).abs() < 1e-4,
+            "sum={} expected {}*uniform={}",
+            out_sum.total_loss,
+            t,
+            t as f32 * out_uniform.total_loss
+        );
     }
 
     #[test]
     fn test_last_token_credit_loss_equals_full_loss_for_single_token() {
         // With a single-token sequence, LastToken and Uniform should give the same result
         let ex = make_example(vec![-1.0], vec![-2.0], vec![-1.5], vec![-1.5]);
-        let out_last = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::LastToken, 0.9).expect("ok");
-        let out_uniform = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).expect("ok");
+        let out_last =
+            compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::LastToken, 0.9).expect("ok");
+        let out_uniform =
+            compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).expect("ok");
         // LastToken: credit=1.0; Uniform: credit=1/1=1.0 → same
-        assert!((out_last.total_loss - out_uniform.total_loss).abs() < 1e-6,
-            "single-token: LastToken={} Uniform={}", out_last.total_loss, out_uniform.total_loss);
+        assert!(
+            (out_last.total_loss - out_uniform.total_loss).abs() < 1e-6,
+            "single-token: LastToken={} Uniform={}",
+            out_last.total_loss,
+            out_uniform.total_loss
+        );
     }
 
     #[test]
     fn test_credit_weight_length_mismatch_error() {
-        let mut ex = make_example(
-            vec![-1.0, -1.0],
-            vec![-2.0],
-            vec![-1.5, -1.5],
-            vec![-1.5],
-        );
+        let mut ex = make_example(vec![-1.0, -1.0], vec![-2.0], vec![-1.5, -1.5], vec![-1.5]);
         // Wrong length credit weights (3 instead of 2)
         ex.credit_weights = Some(vec![0.5, 0.3, 0.2]);
         let err = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).unwrap_err();
-        assert!(matches!(err, TokenDpoError::CreditWeightLengthMismatch { expected: 2, got: 3 }));
+        assert!(matches!(
+            err,
+            TokenDpoError::CreditWeightLengthMismatch {
+                expected: 2,
+                got: 3
+            }
+        ));
     }
 
     #[test]
@@ -823,12 +873,20 @@ mod tests {
             credit_weights: None,
         };
         let err = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).unwrap_err();
-        assert!(matches!(err, TokenDpoError::EmptySequence { field: "rejected" }));
+        assert!(matches!(
+            err,
+            TokenDpoError::EmptySequence { field: "rejected" }
+        ));
     }
 
     #[test]
     fn test_non_finite_log_prob_in_chosen_returns_error() {
-        let mut ex = make_example(vec![-1.0, f32::NAN], vec![-2.0], vec![-1.5, -1.5], vec![-1.5]);
+        let mut ex = make_example(
+            vec![-1.0, f32::NAN],
+            vec![-2.0],
+            vec![-1.5, -1.5],
+            vec![-1.5],
+        );
         ex.chosen_log_probs[1] = f32::NAN;
         let err = compute_token_dpo_loss(&ex, 0.1, &CreditAssignment::Uniform, 0.9).unwrap_err();
         assert!(matches!(err, TokenDpoError::NonFiniteValue { .. }));
@@ -851,7 +909,10 @@ mod tests {
             vec![-99.0], // ignored in reference-free
         );
         let outs = trainer.compute_batch_loss(&[ex]).expect("ok");
-        assert_eq!(outs[0].accuracy, 1.0, "ref-free: advantage should be positive");
+        assert_eq!(
+            outs[0].accuracy, 1.0,
+            "ref-free: advantage should be positive"
+        );
     }
 
     #[test]
@@ -870,9 +931,16 @@ mod tests {
         // With γ=0: weight_t = 0^(T-1-t); only t=T-1 gives 0^0=1, others 0
         let n = 4;
         let credits = compute_token_credits(n, &CreditAssignment::Discounted, 0.0);
-        assert!((credits[n - 1] - 1.0).abs() < 1e-5, "last credit should be 1.0 for gamma=0");
+        assert!(
+            (credits[n - 1] - 1.0).abs() < 1e-5,
+            "last credit should be 1.0 for gamma=0"
+        );
         for &c in &credits[..n - 1] {
-            assert!(c < 1e-5, "earlier credits should be ~0 for gamma=0, got {}", c);
+            assert!(
+                c < 1e-5,
+                "earlier credits should be ~0 for gamma=0, got {}",
+                c
+            );
         }
     }
 
@@ -887,6 +955,10 @@ mod tests {
             accuracy: 1.0,
         };
         let s = format!("{}", out);
-        assert!(s.contains("0.5000") || s.contains("total"), "display format: {}", s);
+        assert!(
+            s.contains("0.5000") || s.contains("total"),
+            "display format: {}",
+            s
+        );
     }
 }

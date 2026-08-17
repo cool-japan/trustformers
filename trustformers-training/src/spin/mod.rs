@@ -38,20 +38,26 @@ impl fmt::Display for SpinError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SpinError::EmptyBatch => {
-                write!(f, "SPIN error: batch is empty; at least one example is required")
-            }
+                write!(
+                    f,
+                    "SPIN error: batch is empty; at least one example is required"
+                )
+            },
             SpinError::LogitsDimensionMismatch { expected, got } => {
                 write!(
                     f,
                     "SPIN error: logits dimension mismatch — expected {expected}, got {got}"
                 )
-            }
+            },
             SpinError::VocabSizeMismatch => {
-                write!(f, "SPIN error: vocab size is inconsistent with provided logits")
-            }
+                write!(
+                    f,
+                    "SPIN error: vocab size is inconsistent with provided logits"
+                )
+            },
             SpinError::InvalidConfig(msg) => {
                 write!(f, "SPIN invalid config: {msg}")
-            }
+            },
         }
     }
 }
@@ -357,7 +363,11 @@ pub struct SpinTrainer {
 impl SpinTrainer {
     /// Create a new SPIN trainer at iteration 0.
     pub fn new(config: SpinConfig) -> Self {
-        Self { config, iteration: 0, history: Vec::new() }
+        Self {
+            config,
+            iteration: 0,
+            history: Vec::new(),
+        }
     }
 
     /// Compute the SPIN batch loss using this trainer's configuration.
@@ -478,7 +488,10 @@ mod tests {
         // Without length normalization: should be log(0.25) = -ln(4)
         let lp = SpinLoss::compute_log_probs(&logits, &labels, vocab_size, false);
         let expected = -(vocab_size as f32).ln();
-        assert!((lp - expected).abs() < 1e-5, "Expected {expected}, got {lp}");
+        assert!(
+            (lp - expected).abs() < 1e-5,
+            "Expected {expected}, got {lp}"
+        );
     }
 
     #[test]
@@ -490,7 +503,10 @@ mod tests {
 
         let lp = SpinLoss::compute_log_probs(&logits, &labels, vocab_size, false);
         // log_prob should be very close to 0
-        assert!(lp > -0.01, "peaked logit should give log_prob ≈ 0, got {lp}");
+        assert!(
+            lp > -0.01,
+            "peaked logit should give log_prob ≈ 0, got {lp}"
+        );
     }
 
     #[test]
@@ -506,7 +522,8 @@ mod tests {
         // Normalized should be half of unnormalized (2 tokens)
         assert!(
             (lp_norm - lp_unnorm / 2.0).abs() < 1e-5,
-            "length normalized should be unnorm/2: {lp_norm} vs {}", lp_unnorm / 2.0
+            "length normalized should be unnorm/2: {lp_norm} vs {}",
+            lp_unnorm / 2.0
         );
     }
 
@@ -514,7 +531,11 @@ mod tests {
     fn test_compute_log_probs_empty_labels() {
         let logits = vec![1.0_f32, 2.0, 3.0];
         let lp = SpinLoss::compute_log_probs(&logits, &[], 3, false);
-        assert_eq!(lp, f32::NEG_INFINITY, "empty labels should give NEG_INFINITY");
+        assert_eq!(
+            lp,
+            f32::NEG_INFINITY,
+            "empty labels should give NEG_INFINITY"
+        );
     }
 
     // ── SPIN loss formula ─────────────────────────────────────────────────────
@@ -534,25 +555,43 @@ mod tests {
     #[test]
     fn test_spin_loss_positive_margin_less_than_log2() {
         // When real > gen (positive margin), loss < log(2)
-        let config = SpinConfig { beta: 1.0, ..SpinConfig::default() };
+        let config = SpinConfig {
+            beta: 1.0,
+            ..SpinConfig::default()
+        };
         let loss = SpinLoss::compute_spin_loss(2.0, 0.0, &config);
         let log2 = 2.0_f32.ln();
-        assert!(loss < log2, "positive margin should reduce loss below log(2): {loss} vs {log2}");
+        assert!(
+            loss < log2,
+            "positive margin should reduce loss below log(2): {loss} vs {log2}"
+        );
     }
 
     #[test]
     fn test_spin_loss_large_positive_margin_near_zero() {
         // Very large positive margin → loss ≈ 0
-        let config = SpinConfig { beta: 1.0, ..SpinConfig::default() };
+        let config = SpinConfig {
+            beta: 1.0,
+            ..SpinConfig::default()
+        };
         let loss = SpinLoss::compute_spin_loss(100.0, 0.0, &config);
-        assert!(loss < 1e-6, "huge positive margin should give loss ≈ 0, got {loss}");
+        assert!(
+            loss < 1e-6,
+            "huge positive margin should give loss ≈ 0, got {loss}"
+        );
     }
 
     #[test]
     fn test_spin_loss_beta_scaling() {
         // Higher β amplifies the margin, reducing loss faster
-        let cfg_low = SpinConfig { beta: 0.1, ..SpinConfig::default() };
-        let cfg_high = SpinConfig { beta: 2.0, ..SpinConfig::default() };
+        let cfg_low = SpinConfig {
+            beta: 0.1,
+            ..SpinConfig::default()
+        };
+        let cfg_high = SpinConfig {
+            beta: 2.0,
+            ..SpinConfig::default()
+        };
         let margin_real = 3.0_f32;
         let margin_gen = 0.0_f32;
 
@@ -592,9 +631,13 @@ mod tests {
         let logits_real = vec![make_uniform_logits(real_len, vocab_size)];
         let logits_gen = vec![make_uniform_logits(gen_len, vocab_size)];
 
-        let config = SpinConfig { beta: 1.0, ..SpinConfig::default() };
-        let out = SpinLoss::compute_batch_loss(&batch, &logits_real, &logits_gen, vocab_size, &config)
-            .expect("should succeed");
+        let config = SpinConfig {
+            beta: 1.0,
+            ..SpinConfig::default()
+        };
+        let out =
+            SpinLoss::compute_batch_loss(&batch, &logits_real, &logits_gen, vocab_size, &config)
+                .expect("should succeed");
 
         let expected_loss = 2.0_f32.ln();
         assert!(
@@ -622,7 +665,13 @@ mod tests {
         let config = SpinConfig::default();
         let result = SpinLoss::compute_batch_loss(&batch, &logits_real, &logits_gen, 4, &config);
         assert!(
-            matches!(result, Err(SpinError::LogitsDimensionMismatch { expected: 2, got: 1 })),
+            matches!(
+                result,
+                Err(SpinError::LogitsDimensionMismatch {
+                    expected: 2,
+                    got: 1
+                })
+            ),
             "got: {result:?}"
         );
     }
@@ -635,7 +684,13 @@ mod tests {
         let config = SpinConfig::default();
         let result = SpinLoss::compute_batch_loss(&batch, &logits_real, &logits_gen, 4, &config);
         assert!(
-            matches!(result, Err(SpinError::LogitsDimensionMismatch { expected: 2, got: 1 })),
+            matches!(
+                result,
+                Err(SpinError::LogitsDimensionMismatch {
+                    expected: 2,
+                    got: 1
+                })
+            ),
             "got: {result:?}"
         );
     }
@@ -658,9 +713,14 @@ mod tests {
         let logits_real = vec![real_logits_step.clone(); n];
         let logits_gen = vec![gen_logits_step.clone(); n];
 
-        let config = SpinConfig { beta: 1.0, use_length_normalization: false, ..SpinConfig::default() };
-        let out = SpinLoss::compute_batch_loss(&batch, &logits_real, &logits_gen, vocab_size, &config)
-            .expect("should succeed");
+        let config = SpinConfig {
+            beta: 1.0,
+            use_length_normalization: false,
+            ..SpinConfig::default()
+        };
+        let out =
+            SpinLoss::compute_batch_loss(&batch, &logits_real, &logits_gen, vocab_size, &config)
+                .expect("should succeed");
 
         assert!(
             (out.accuracy - 1.0).abs() < 1e-6,
@@ -679,8 +739,9 @@ mod tests {
         let logits_gen = vec![make_uniform_logits(2, vocab_size); 2];
         let config = SpinConfig::default();
 
-        let out = SpinLoss::compute_batch_loss(&batch, &logits_real, &logits_gen, vocab_size, &config)
-            .expect("should succeed");
+        let out =
+            SpinLoss::compute_batch_loss(&batch, &logits_real, &logits_gen, vocab_size, &config)
+                .expect("should succeed");
 
         assert!(
             (out.prob_margin - (out.real_log_probs_mean - out.gen_log_probs_mean)).abs() < 1e-6,
@@ -737,7 +798,10 @@ mod tests {
     #[test]
     fn test_spin_error_display() {
         let e1 = SpinError::EmptyBatch;
-        let e2 = SpinError::LogitsDimensionMismatch { expected: 4, got: 2 };
+        let e2 = SpinError::LogitsDimensionMismatch {
+            expected: 4,
+            got: 2,
+        };
         let e3 = SpinError::VocabSizeMismatch;
         let e4 = SpinError::InvalidConfig("bad beta".to_string());
 
@@ -752,7 +816,11 @@ mod tests {
 
     #[test]
     fn test_spin_trainer_compute_loss_delegation_ext() {
-        let config = SpinConfig { beta: 1.0, use_length_normalization: true, ..SpinConfig::default() };
+        let config = SpinConfig {
+            beta: 1.0,
+            use_length_normalization: true,
+            ..SpinConfig::default()
+        };
         let trainer = SpinTrainer::new(config);
         let vocab_size = 4_usize;
         let batch = make_batch_with_n(1, 2, 2);
@@ -778,17 +846,31 @@ mod tests {
     // Test: self-play loss approaches 0 when real log-prob >> gen log-prob
     #[test]
     fn test_self_play_loss_approaches_zero_when_real_dominates() {
-        let config = SpinConfig { beta: 1.0, use_length_normalization: false, ..SpinConfig::default() };
+        let config = SpinConfig {
+            beta: 1.0,
+            use_length_normalization: false,
+            ..SpinConfig::default()
+        };
         let loss = SpinLoss::compute_spin_loss(0.0_f32, -100.0_f32, &config);
-        assert!(loss < 1e-5, "loss should approach 0 when real >> gen, got {loss}");
+        assert!(
+            loss < 1e-5,
+            "loss should approach 0 when real >> gen, got {loss}"
+        );
     }
 
     // Test: SPIN loss is large when generated dominates over real
     #[test]
     fn test_self_play_loss_large_when_gen_dominates() {
-        let config = SpinConfig { beta: 1.0, use_length_normalization: false, ..SpinConfig::default() };
+        let config = SpinConfig {
+            beta: 1.0,
+            use_length_normalization: false,
+            ..SpinConfig::default()
+        };
         let loss = SpinLoss::compute_spin_loss(-100.0_f32, 0.0_f32, &config);
-        assert!(loss > 50.0, "loss should be very large when gen >> real, got {loss}");
+        assert!(
+            loss > 50.0,
+            "loss should be very large when gen >> real, got {loss}"
+        );
     }
 
     // Test: SPIN reward — real data is distinguishable from generated data
@@ -799,17 +881,33 @@ mod tests {
         let batch = make_batch_with_n(n, 1, 1);
         let real_logits = vec![vec![10.0_f32, -10.0]; n];
         let gen_logits = vec![vec![-10.0_f32, 10.0]; n];
-        let config = SpinConfig { beta: 1.0, use_length_normalization: false, ..SpinConfig::default() };
-        let out = SpinLoss::compute_batch_loss(&batch, &real_logits, &gen_logits, vocab_size, &config)
-            .expect("ok");
-        assert!(out.prob_margin > 0.0, "real should have higher log-prob than gen, margin={}", out.prob_margin);
-        assert!(out.accuracy > 0.5, "accuracy should be high when real dominates");
+        let config = SpinConfig {
+            beta: 1.0,
+            use_length_normalization: false,
+            ..SpinConfig::default()
+        };
+        let out =
+            SpinLoss::compute_batch_loss(&batch, &real_logits, &gen_logits, vocab_size, &config)
+                .expect("ok");
+        assert!(
+            out.prob_margin > 0.0,
+            "real should have higher log-prob than gen, margin={}",
+            out.prob_margin
+        );
+        assert!(
+            out.accuracy > 0.5,
+            "accuracy should be high when real dominates"
+        );
     }
 
     // Test: discriminator predicts real=high, generated=low
     #[test]
     fn test_discriminator_predicts_real_high_gen_low() {
-        let config = SpinConfig { beta: 1.0, use_length_normalization: false, ..SpinConfig::default() };
+        let config = SpinConfig {
+            beta: 1.0,
+            use_length_normalization: false,
+            ..SpinConfig::default()
+        };
         let correct_loss = SpinLoss::compute_spin_loss(0.0_f32, -5.0_f32, &config);
         let wrong_loss = SpinLoss::compute_spin_loss(-5.0_f32, 0.0_f32, &config);
         assert!(
@@ -821,7 +919,11 @@ mod tests {
     // Test: player 0 (LM) update direction — increasing real log-prob decreases loss
     #[test]
     fn test_player_zero_update_direction_prefers_real() {
-        let config = SpinConfig { beta: 1.0, use_length_normalization: false, ..SpinConfig::default() };
+        let config = SpinConfig {
+            beta: 1.0,
+            use_length_normalization: false,
+            ..SpinConfig::default()
+        };
         let loss_before = SpinLoss::compute_spin_loss(0.0_f32, 0.0_f32, &config);
         let loss_after = SpinLoss::compute_spin_loss(2.0_f32, 0.0_f32, &config);
         assert!(
@@ -833,7 +935,11 @@ mod tests {
     // Test: player 1 (discriminator) update — decreasing gen log-prob decreases loss
     #[test]
     fn test_player_one_update_direction_distinguishes_gen() {
-        let config = SpinConfig { beta: 1.0, use_length_normalization: false, ..SpinConfig::default() };
+        let config = SpinConfig {
+            beta: 1.0,
+            use_length_normalization: false,
+            ..SpinConfig::default()
+        };
         let loss_hard = SpinLoss::compute_spin_loss(0.0_f32, 0.0_f32, &config);
         let loss_easy = SpinLoss::compute_spin_loss(0.0_f32, -5.0_f32, &config);
         assert!(
@@ -845,7 +951,11 @@ mod tests {
     // Test: convergence — as generated improves, prob_margin decreases
     #[test]
     fn test_spin_convergence_prob_margin_decreases() {
-        let config = SpinConfig { beta: 1.0, use_length_normalization: false, ..SpinConfig::default() };
+        let config = SpinConfig {
+            beta: 1.0,
+            use_length_normalization: false,
+            ..SpinConfig::default()
+        };
         let vocab_size = 2_usize;
         let batch = make_batch_with_n(4, 1, 1);
         let real_logits = vec![vec![10.0_f32, -10.0]; 4];
@@ -853,11 +963,27 @@ mod tests {
         let gen_logits_iter0 = vec![vec![-10.0_f32, 10.0]; 4];
         // Iteration 1: gen closer to real
         let gen_logits_iter1 = vec![vec![5.0_f32, -5.0]; 4];
-        let out0 = SpinLoss::compute_batch_loss(&batch, &real_logits, &gen_logits_iter0, vocab_size, &config).expect("ok");
-        let out1 = SpinLoss::compute_batch_loss(&batch, &real_logits, &gen_logits_iter1, vocab_size, &config).expect("ok");
+        let out0 = SpinLoss::compute_batch_loss(
+            &batch,
+            &real_logits,
+            &gen_logits_iter0,
+            vocab_size,
+            &config,
+        )
+        .expect("ok");
+        let out1 = SpinLoss::compute_batch_loss(
+            &batch,
+            &real_logits,
+            &gen_logits_iter1,
+            vocab_size,
+            &config,
+        )
+        .expect("ok");
         assert!(
             out1.prob_margin < out0.prob_margin,
-            "margin should decrease as gen improves: iter0={}, iter1={}", out0.prob_margin, out1.prob_margin
+            "margin should decrease as gen improves: iter0={}, iter1={}",
+            out0.prob_margin,
+            out1.prob_margin
         );
     }
 
@@ -888,19 +1014,39 @@ mod tests {
     #[test]
     fn test_batch_aggregation_mean_loss_invariant() {
         let vocab_size = 4_usize;
-        let config = SpinConfig { beta: 1.0, use_length_normalization: false, ..SpinConfig::default() };
+        let config = SpinConfig {
+            beta: 1.0,
+            use_length_normalization: false,
+            ..SpinConfig::default()
+        };
         let batch1 = make_batch_with_n(1, 2, 2);
         let logits_real_1 = vec![make_uniform_logits(2, vocab_size)];
         let logits_gen_1 = vec![make_uniform_logits(2, vocab_size)];
-        let out1 = SpinLoss::compute_batch_loss(&batch1, &logits_real_1, &logits_gen_1, vocab_size, &config).expect("ok");
+        let out1 = SpinLoss::compute_batch_loss(
+            &batch1,
+            &logits_real_1,
+            &logits_gen_1,
+            vocab_size,
+            &config,
+        )
+        .expect("ok");
         let n = 5_usize;
         let batch5 = make_batch_with_n(n, 2, 2);
         let logits_real_5 = vec![make_uniform_logits(2, vocab_size); n];
         let logits_gen_5 = vec![make_uniform_logits(2, vocab_size); n];
-        let out5 = SpinLoss::compute_batch_loss(&batch5, &logits_real_5, &logits_gen_5, vocab_size, &config).expect("ok");
+        let out5 = SpinLoss::compute_batch_loss(
+            &batch5,
+            &logits_real_5,
+            &logits_gen_5,
+            vocab_size,
+            &config,
+        )
+        .expect("ok");
         assert!(
             (out1.total_loss - out5.total_loss).abs() < 1e-5,
-            "batch of 5 identical examples should give same mean loss: 1={}, 5={}", out1.total_loss, out5.total_loss
+            "batch of 5 identical examples should give same mean loss: 1={}, 5={}",
+            out1.total_loss,
+            out5.total_loss
         );
     }
 
@@ -929,27 +1075,41 @@ mod tests {
         let labels_short = vec![0_u32];
         let logits_long = vec![0.0_f32; vocab_size * 4];
         let labels_long = vec![0_u32; 4];
-        let lp_short_norm = SpinLoss::compute_log_probs(&logits_short, &labels_short, vocab_size, true);
-        let lp_long_norm = SpinLoss::compute_log_probs(&logits_long, &labels_long, vocab_size, true);
+        let lp_short_norm =
+            SpinLoss::compute_log_probs(&logits_short, &labels_short, vocab_size, true);
+        let lp_long_norm =
+            SpinLoss::compute_log_probs(&logits_long, &labels_long, vocab_size, true);
         // With normalization: same per-token log-prob → equal values
         assert!(
             (lp_short_norm - lp_long_norm).abs() < 1e-5,
             "length-normalized log-probs should be equal for uniform logits: short={lp_short_norm}, long={lp_long_norm}"
         );
         // Without normalization: longer sequence is more negative
-        let lp_short_raw = SpinLoss::compute_log_probs(&logits_short, &labels_short, vocab_size, false);
-        let lp_long_raw = SpinLoss::compute_log_probs(&logits_long, &labels_long, vocab_size, false);
-        assert!(lp_long_raw < lp_short_raw, "raw long seq more negative: short={lp_short_raw}, long={lp_long_raw}");
+        let lp_short_raw =
+            SpinLoss::compute_log_probs(&logits_short, &labels_short, vocab_size, false);
+        let lp_long_raw =
+            SpinLoss::compute_log_probs(&logits_long, &labels_long, vocab_size, false);
+        assert!(
+            lp_long_raw < lp_short_raw,
+            "raw long seq more negative: short={lp_short_raw}, long={lp_long_raw}"
+        );
     }
 
     // Test: numerical — known logprob difference produces expected loss value
     #[test]
     fn test_numerical_known_logprob_difference_produces_expected_loss() {
         // beta=1, real_lp=0, gen_lp=-2 → margin=2 → loss = ln(1 + e^{-2})
-        let config = SpinConfig { beta: 1.0, use_length_normalization: false, ..SpinConfig::default() };
+        let config = SpinConfig {
+            beta: 1.0,
+            use_length_normalization: false,
+            ..SpinConfig::default()
+        };
         let loss = SpinLoss::compute_spin_loss(0.0_f32, -2.0_f32, &config);
         let expected = (1.0_f32 + (-2.0_f32).exp()).ln();
-        assert!((loss - expected).abs() < 1e-5, "expected {expected}, got {loss}");
+        assert!(
+            (loss - expected).abs() < 1e-5,
+            "expected {expected}, got {loss}"
+        );
     }
 
     // Test: accuracy = 0.0 when all generated > real
@@ -962,29 +1122,49 @@ mod tests {
         let real_logits = vec![vec![-100.0_f32, 100.0]; n];
         // Gen labels are token 0, logits strongly prefer token 0 → high gen log-prob
         let gen_logits = vec![vec![100.0_f32, -100.0]; n];
-        let config = SpinConfig { beta: 1.0, use_length_normalization: false, ..SpinConfig::default() };
-        let out = SpinLoss::compute_batch_loss(&batch, &real_logits, &gen_logits, vocab_size, &config).expect("ok");
-        assert!(out.accuracy < 1e-6, "accuracy should be 0.0 when gen always has higher log-prob, got {}", out.accuracy);
+        let config = SpinConfig {
+            beta: 1.0,
+            use_length_normalization: false,
+            ..SpinConfig::default()
+        };
+        let out =
+            SpinLoss::compute_batch_loss(&batch, &real_logits, &gen_logits, vocab_size, &config)
+                .expect("ok");
+        assert!(
+            out.accuracy < 1e-6,
+            "accuracy should be 0.0 when gen always has higher log-prob, got {}",
+            out.accuracy
+        );
     }
 
     // Test: softplus large-positive numerically stable
     #[test]
     fn test_softplus_large_positive_is_stable() {
         let result = softplus(100.0_f32);
-        assert!(result.is_finite() && (result - 100.0_f32).abs() < 1.0, "softplus(100) ≈ 100, got {result}");
+        assert!(
+            result.is_finite() && (result - 100.0_f32).abs() < 1.0,
+            "softplus(100) ≈ 100, got {result}"
+        );
     }
 
     // Test: softplus at zero = log(2)
     #[test]
     fn test_softplus_at_zero_is_log2() {
         let result = softplus(0.0_f32);
-        assert!((result - (2.0_f32).ln()).abs() < 1e-6, "softplus(0)=log(2), got {result}");
+        assert!(
+            (result - (2.0_f32).ln()).abs() < 1e-6,
+            "softplus(0)=log(2), got {result}"
+        );
     }
 
     // Test: config iterations and num_generated_per_prompt are properly stored
     #[test]
     fn test_config_iterations_and_generated_per_prompt() {
-        let config = SpinConfig { iterations: 5, num_generated_per_prompt: 4, ..SpinConfig::default() };
+        let config = SpinConfig {
+            iterations: 5,
+            num_generated_per_prompt: 4,
+            ..SpinConfig::default()
+        };
         assert_eq!(config.iterations, 5);
         assert_eq!(config.num_generated_per_prompt, 4);
     }
@@ -998,7 +1178,12 @@ mod tests {
         let logits_real = vec![make_uniform_logits(2, vocab_size); n];
         let logits_gen = vec![make_uniform_logits(2, vocab_size); n];
         let config = SpinConfig::default();
-        let out = SpinLoss::compute_batch_loss(&batch, &logits_real, &logits_gen, vocab_size, &config).expect("ok");
-        assert_eq!(out.batch_size, n, "batch_size should match input batch size");
+        let out =
+            SpinLoss::compute_batch_loss(&batch, &logits_real, &logits_gen, vocab_size, &config)
+                .expect("ok");
+        assert_eq!(
+            out.batch_size, n,
+            "batch_size should match input batch size"
+        );
     }
 }

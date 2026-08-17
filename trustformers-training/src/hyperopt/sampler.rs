@@ -681,6 +681,7 @@ mod tests {
             .discrete("batch_size", 8, 128, 8)
             .categorical("optimizer", vec!["adam", "sgd", "adamw"])
             .build()
+            .expect("test search space definition must be valid")
     }
 
     fn create_test_trial_history() -> TrialHistory {

@@ -38,9 +38,10 @@ pub enum OrpoError {
 // ──────────────────────────────────────────────
 
 /// Variant of the ORPO odds-ratio loss term.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum OrpoLossVariant {
     /// Original log odds-ratio loss: `-log σ(log_odds(chosen, rejected))`.
+    #[default]
     Original,
     /// Explicit log odds-ratio — identical to `Original`; kept for API clarity.
     LogOddsRatio,
@@ -49,12 +50,6 @@ pub enum OrpoLossVariant {
     /// Margin ORPO: penalises pairs where the margin between rewards is below
     /// `margin`.  `L_OR = -log σ(log_odds - margin)`.
     MarginOrpo { margin: f64 },
-}
-
-impl Default for OrpoLossVariant {
-    fn default() -> Self {
-        OrpoLossVariant::Original
-    }
 }
 
 // ──────────────────────────────────────────────
@@ -142,7 +137,11 @@ impl SequenceLogProbs {
     /// Construct a new `SequenceLogProbs`.
     pub fn new(log_probs: Vec<f64>, labels: Vec<i64>) -> Self {
         let length = log_probs.len();
-        Self { log_probs, labels, length }
+        Self {
+            log_probs,
+            labels,
+            length,
+        }
     }
 
     /// Sum of log-probabilities at positions where `label != -100`.
@@ -298,15 +297,15 @@ pub fn compute_orpo_loss(
         OrpoLossVariant::Original | OrpoLossVariant::LogOddsRatio => {
             // L_OR = -log σ(log_odds)
             stable_log_sigmoid(scaled_log_or)
-        }
+        },
         OrpoLossVariant::SigmoidApprox => {
             // Numerically stable using softplus: log(1 + exp(-x))
             softplus(-scaled_log_or)
-        }
+        },
         OrpoLossVariant::MarginOrpo { margin } => {
             // L_OR = -log σ(log_odds - margin)
             stable_log_sigmoid(scaled_log_or - margin)
-        }
+        },
     };
 
     let total_loss = nll_loss + config.lambda * or_loss;
@@ -477,7 +476,8 @@ impl OrpoTrainer {
             mean_nll_loss: self.stats.iter().map(|s| s.mean_nll_loss).sum::<f64>() / n,
             mean_accuracy: self.stats.iter().map(|s| s.mean_accuracy).sum::<f64>() / n,
             mean_chosen_reward: self.stats.iter().map(|s| s.mean_chosen_reward).sum::<f64>() / n,
-            mean_rejected_reward: self.stats.iter().map(|s| s.mean_rejected_reward).sum::<f64>() / n,
+            mean_rejected_reward: self.stats.iter().map(|s| s.mean_rejected_reward).sum::<f64>()
+                / n,
             mean_odds_ratio: self.stats.iter().map(|s| s.mean_odds_ratio).sum::<f64>() / n,
         })
     }
@@ -662,7 +662,11 @@ mod tests {
     fn test_sum_log_probs_no_mask() {
         let s = seq(vec![-1.0, -2.0, -3.0]);
         let expected = -6.0;
-        assert!((s.sum_log_probs() - expected).abs() < 1e-10, "expected {expected}, got {}", s.sum_log_probs());
+        assert!(
+            (s.sum_log_probs() - expected).abs() < 1e-10,
+            "expected {expected}, got {}",
+            s.sum_log_probs()
+        );
     }
 
     // ── Test 2: sum_log_probs with masking ────────────────────────────────
@@ -671,7 +675,11 @@ mod tests {
         // labels: [0, -100, 2] → only positions 0 and 2 contribute
         let s = seq_masked(vec![-1.0, -99.0, -3.0], vec![0, -100, 2]);
         let expected = -4.0;
-        assert!((s.sum_log_probs() - expected).abs() < 1e-10, "expected {expected}, got {}", s.sum_log_probs());
+        assert!(
+            (s.sum_log_probs() - expected).abs() < 1e-10,
+            "expected {expected}, got {}",
+            s.sum_log_probs()
+        );
     }
 
     // ── Test 3: mean_log_prob with no masking ─────────────────────────────
@@ -679,49 +687,65 @@ mod tests {
     fn test_mean_log_prob_no_mask() {
         let s = seq(vec![-1.0, -2.0, -3.0]);
         let expected = -2.0;
-        assert!((s.mean_log_prob() - expected).abs() < 1e-10, "expected {expected}, got {}", s.mean_log_prob());
+        assert!(
+            (s.mean_log_prob() - expected).abs() < 1e-10,
+            "expected {expected}, got {}",
+            s.mean_log_prob()
+        );
     }
 
     // ── Test 4: num_valid_tokens with masking ─────────────────────────────
     #[test]
     fn test_num_valid_tokens_with_mask() {
-        let s = seq_masked(
-            vec![-1.0, -2.0, -3.0, -4.0],
-            vec![0, -100, 2, -100],
-        );
+        let s = seq_masked(vec![-1.0, -2.0, -3.0, -4.0], vec![0, -100, 2, -100]);
         assert_eq!(s.num_valid_tokens(), 2);
     }
 
     // ── Test 5: log_odds direction (chosen better → positive) ─────────────
     #[test]
     fn test_log_odds_direction_chosen_better() {
-        let chosen = seq(vec![-0.5, -0.5]);   // mean = -0.5
+        let chosen = seq(vec![-0.5, -0.5]); // mean = -0.5
         let rejected = seq(vec![-2.0, -2.0]); // mean = -2.0
         let lo = SequenceLogProbs::log_odds(&chosen, &rejected);
-        assert!(lo > 0.0, "log_odds should be positive when chosen is better, got {lo}");
+        assert!(
+            lo > 0.0,
+            "log_odds should be positive when chosen is better, got {lo}"
+        );
     }
 
     // ── Test 6: nll_loss basic ────────────────────────────────────────────
     #[test]
     fn test_nll_loss_basic() {
-        let config = OrpoConfig { label_smoothing: 0.0, ..Default::default() };
+        let config = OrpoConfig {
+            label_smoothing: 0.0,
+            ..Default::default()
+        };
         let loss_fn = OrpoLoss::new(config);
         let s = seq(vec![-1.0, -2.0, -3.0]); // mean = -2.0
         let nll = loss_fn.nll_loss(&s);
         let expected = 2.0; // -mean_log_prob
-        assert!((nll - expected).abs() < 1e-10, "expected {expected}, got {nll}");
+        assert!(
+            (nll - expected).abs() < 1e-10,
+            "expected {expected}, got {nll}"
+        );
     }
 
     // ── Test 7: nll_loss with masking ─────────────────────────────────────
     #[test]
     fn test_nll_loss_with_masking() {
-        let config = OrpoConfig { label_smoothing: 0.0, ..Default::default() };
+        let config = OrpoConfig {
+            label_smoothing: 0.0,
+            ..Default::default()
+        };
         let loss_fn = OrpoLoss::new(config);
         // only positions 0 and 2 contribute: mean = (-1 + -3)/2 = -2
         let s = seq_masked(vec![-1.0, -99.0, -3.0], vec![0, -100, 2]);
         let nll = loss_fn.nll_loss(&s);
         let expected = 2.0;
-        assert!((nll - expected).abs() < 1e-10, "expected {expected}, got {nll}");
+        assert!(
+            (nll - expected).abs() < 1e-10,
+            "expected {expected}, got {nll}"
+        );
     }
 
     // ── Test 8: or_loss is positive ───────────────────────────────────────
@@ -733,13 +757,20 @@ mod tests {
         let chosen = seq(vec![-0.5, -0.5]);
         let rejected = seq(vec![-2.0, -2.0]);
         let or_loss = loss_fn.or_loss(&chosen, &rejected);
-        assert!(or_loss > 0.0, "or_loss should always be positive, got {or_loss}");
+        assert!(
+            or_loss > 0.0,
+            "or_loss should always be positive, got {or_loss}"
+        );
     }
 
     // ── Test 9: compute_loss structure (total = sft + lambda * or) ────────
     #[test]
     fn test_compute_loss_decomposition() {
-        let config = OrpoConfig { lambda: 0.1, label_smoothing: 0.0, ..Default::default() };
+        let config = OrpoConfig {
+            lambda: 0.1,
+            label_smoothing: 0.0,
+            ..Default::default()
+        };
         let mut loss_fn = OrpoLoss::new(config);
         let chosen = seq(vec![-0.5, -0.5]);
         let rejected = seq(vec![-2.0, -2.0]);
@@ -749,7 +780,8 @@ mod tests {
         assert!(
             (result.total_loss - expected_total).abs() < 1e-10,
             "total_loss={} but sft+lambda*or={}",
-            result.total_loss, expected_total
+            result.total_loss,
+            expected_total
         );
     }
 
@@ -757,26 +789,38 @@ mod tests {
     #[test]
     fn test_accuracy_one_when_chosen_better() {
         let mut loss_fn = OrpoLoss::new(OrpoConfig::default());
-        let chosen = seq(vec![-0.5, -0.5]);   // mean = -0.5
+        let chosen = seq(vec![-0.5, -0.5]); // mean = -0.5
         let rejected = seq(vec![-2.0, -2.0]); // mean = -2.0
         let result = loss_fn.compute_loss(&chosen, &rejected).expect("should not fail");
-        assert!((result.accuracy - 1.0).abs() < 1e-10, "expected accuracy=1.0, got {}", result.accuracy);
+        assert!(
+            (result.accuracy - 1.0).abs() < 1e-10,
+            "expected accuracy=1.0, got {}",
+            result.accuracy
+        );
     }
 
     // ── Test 11: accuracy = 0.0 when rejected is better ───────────────────
     #[test]
     fn test_accuracy_zero_when_rejected_better() {
         let mut loss_fn = OrpoLoss::new(OrpoConfig::default());
-        let chosen = seq(vec![-3.0, -3.0]);   // mean = -3.0 (worse)
+        let chosen = seq(vec![-3.0, -3.0]); // mean = -3.0 (worse)
         let rejected = seq(vec![-0.5, -0.5]); // mean = -0.5 (better)
         let result = loss_fn.compute_loss(&chosen, &rejected).expect("should not fail");
-        assert!((result.accuracy - 0.0).abs() < 1e-10, "expected accuracy=0.0, got {}", result.accuracy);
+        assert!(
+            (result.accuracy - 0.0).abs() < 1e-10,
+            "expected accuracy=0.0, got {}",
+            result.accuracy
+        );
     }
 
     // ── Test 12: lambda=0 → only SFT loss ────────────────────────────────
     #[test]
     fn test_lambda_zero_only_sft() {
-        let config = OrpoConfig { lambda: 0.0, label_smoothing: 0.0, ..Default::default() };
+        let config = OrpoConfig {
+            lambda: 0.0,
+            label_smoothing: 0.0,
+            ..Default::default()
+        };
         let mut loss_fn = OrpoLoss::new(config);
         let chosen = seq(vec![-1.0, -2.0]);
         let rejected = seq(vec![-3.0, -4.0]);
@@ -812,9 +856,18 @@ mod tests {
             accuracy: 1.0,
         };
         let s = format!("{result}");
-        assert!(s.contains("total_loss"), "display should contain 'total_loss'");
-        assert!(s.contains("OrpoLossResult"), "display should contain struct name");
-        assert!(s.contains("1.2345"), "display should contain the total_loss value");
+        assert!(
+            s.contains("total_loss"),
+            "display should contain 'total_loss'"
+        );
+        assert!(
+            s.contains("OrpoLossResult"),
+            "display should contain struct name"
+        );
+        assert!(
+            s.contains("1.2345"),
+            "display should contain the total_loss value"
+        );
     }
 
     // ── Test 15a: empty sequence error ────────────────────────────────────
@@ -844,7 +897,10 @@ mod tests {
         let chosen = vec![-0.5, -0.5];
         let rejected = vec![-2.0, -2.0];
         let lor = compute_log_odds_ratio(&chosen, &rejected).expect("should not fail");
-        assert!(lor > 0.0, "log odds ratio should be positive when chosen is better, got {lor}");
+        assert!(
+            lor > 0.0,
+            "log odds ratio should be positive when chosen is better, got {lor}"
+        );
     }
 
     // ── Test 17: compute_log_odds_ratio negative when rejected better ──────
@@ -853,7 +909,10 @@ mod tests {
         let chosen = vec![-3.0, -3.0];
         let rejected = vec![-0.5, -0.5];
         let lor = compute_log_odds_ratio(&chosen, &rejected).expect("should not fail");
-        assert!(lor < 0.0, "log odds ratio should be negative when rejected is better, got {lor}");
+        assert!(
+            lor < 0.0,
+            "log odds ratio should be negative when rejected is better, got {lor}"
+        );
     }
 
     // ── Test 18: compute_log_odds_ratio empty error ────────────────────────
@@ -872,7 +931,10 @@ mod tests {
         let rejected = vec![-2.0, -2.0];
         let cfg = OrpoConfig::default();
         let out = compute_orpo_loss(&chosen, &rejected, 0.5, &cfg).expect("should succeed");
-        assert!(out.odds_ratio > 0.0, "odds_ratio should be > 0 when chosen is better");
+        assert!(
+            out.odds_ratio > 0.0,
+            "odds_ratio should be > 0 when chosen is better"
+        );
     }
 
     // ── Test 20: compute_orpo_loss total_loss = nll + lambda * or ─────────
@@ -881,11 +943,18 @@ mod tests {
         let chosen = vec![-0.5, -0.5];
         let rejected = vec![-2.0, -2.0];
         let nll = 1.234;
-        let cfg = OrpoConfig { lambda: 0.2, ..Default::default() };
+        let cfg = OrpoConfig {
+            lambda: 0.2,
+            ..Default::default()
+        };
         let out = compute_orpo_loss(&chosen, &rejected, nll, &cfg).expect("ok");
         let expected = out.nll_loss + 0.2 * out.or_loss;
-        assert!((out.total_loss - expected).abs() < 1e-10,
-            "total_loss={} expected={}", out.total_loss, expected);
+        assert!(
+            (out.total_loss - expected).abs() < 1e-10,
+            "total_loss={} expected={}",
+            out.total_loss,
+            expected
+        );
     }
 
     // ── Test 21: OrpoLossVariant::MarginOrpo increases loss ───────────────
@@ -904,8 +973,12 @@ mod tests {
         let out_no = compute_orpo_loss(&chosen, &rejected, 1.0, &cfg_no_margin).expect("ok");
         let out_m = compute_orpo_loss(&chosen, &rejected, 1.0, &cfg_with_margin).expect("ok");
         // Margin shifts the sigmoid input down → larger -log σ → larger or_loss
-        assert!(out_m.or_loss >= out_no.or_loss,
-            "margin orpo or_loss {} should be >= original {}", out_m.or_loss, out_no.or_loss);
+        assert!(
+            out_m.or_loss >= out_no.or_loss,
+            "margin orpo or_loss {} should be >= original {}",
+            out_m.or_loss,
+            out_no.or_loss
+        );
     }
 
     // ── Test 22: SigmoidApprox variant is numerically close to Original ───
@@ -913,13 +986,23 @@ mod tests {
     fn test_sigmoid_approx_close_to_original() {
         let chosen = vec![-0.5, -0.5];
         let rejected = vec![-2.0, -2.0];
-        let cfg_orig = OrpoConfig { loss_type: OrpoLossVariant::Original, ..Default::default() };
-        let cfg_approx = OrpoConfig { loss_type: OrpoLossVariant::SigmoidApprox, ..Default::default() };
+        let cfg_orig = OrpoConfig {
+            loss_type: OrpoLossVariant::Original,
+            ..Default::default()
+        };
+        let cfg_approx = OrpoConfig {
+            loss_type: OrpoLossVariant::SigmoidApprox,
+            ..Default::default()
+        };
         let out_orig = compute_orpo_loss(&chosen, &rejected, 1.0, &cfg_orig).expect("ok");
         let out_approx = compute_orpo_loss(&chosen, &rejected, 1.0, &cfg_approx).expect("ok");
         // Both forms should agree closely since they implement the same function
-        assert!((out_orig.or_loss - out_approx.or_loss).abs() < 1e-8,
-            "Original {} vs SigmoidApprox {}", out_orig.or_loss, out_approx.or_loss);
+        assert!(
+            (out_orig.or_loss - out_approx.or_loss).abs() < 1e-8,
+            "Original {} vs SigmoidApprox {}",
+            out_orig.or_loss,
+            out_approx.or_loss
+        );
     }
 
     // ── Test 23: OrpoTrainer accumulates stats correctly ──────────────────
@@ -977,7 +1060,10 @@ mod tests {
     // ── Test 26: config validate rejects bad lambda ────────────────────────
     #[test]
     fn test_config_validate_bad_lambda() {
-        let cfg = OrpoConfig { lambda: -0.1, ..Default::default() };
+        let cfg = OrpoConfig {
+            lambda: -0.1,
+            ..Default::default()
+        };
         let err = cfg.validate().unwrap_err();
         assert!(matches!(err, OrpoError::InvalidConfig(_)));
     }
@@ -985,7 +1071,10 @@ mod tests {
     // ── Test 27: config validate rejects bad beta ──────────────────────────
     #[test]
     fn test_config_validate_bad_beta() {
-        let cfg = OrpoConfig { beta: 0.0, ..Default::default() };
+        let cfg = OrpoConfig {
+            beta: 0.0,
+            ..Default::default()
+        };
         let err = cfg.validate().unwrap_err();
         assert!(matches!(err, OrpoError::InvalidConfig(_)));
     }
@@ -993,7 +1082,10 @@ mod tests {
     // ── Test 28: OrpoTrainer new rejects invalid config ───────────────────
     #[test]
     fn test_orpo_trainer_rejects_invalid_config() {
-        let cfg = OrpoConfig { lambda: -1.0, ..Default::default() };
+        let cfg = OrpoConfig {
+            lambda: -1.0,
+            ..Default::default()
+        };
         let result = OrpoTrainer::new(cfg);
         assert!(result.is_err(), "should reject invalid config");
     }
@@ -1003,10 +1095,16 @@ mod tests {
     fn test_softplus_large_values() {
         // For large x, softplus(x) ≈ x
         let val = softplus(100.0);
-        assert!((val - 100.0).abs() < 1.0, "softplus(100) should be ~100, got {val}");
+        assert!(
+            (val - 100.0).abs() < 1.0,
+            "softplus(100) should be ~100, got {val}"
+        );
         // For very negative x, softplus(x) ≈ 0
         let val_neg = softplus(-100.0);
-        assert!(val_neg < 1e-10, "softplus(-100) should be ~0, got {val_neg}");
+        assert!(
+            val_neg < 1e-10,
+            "softplus(-100) should be ~0, got {val_neg}"
+        );
     }
 
     // ── Test 30: log_odds_ratio symmetry ──────────────────────────────────
@@ -1017,7 +1115,9 @@ mod tests {
         let b = vec![-2.0, -2.0];
         let lor_ab = compute_log_odds_ratio(&a, &b).expect("ok");
         let lor_ba = compute_log_odds_ratio(&b, &a).expect("ok");
-        assert!((lor_ab + lor_ba).abs() < 1e-10,
-            "log_odds(a,b) + log_odds(b,a) should be 0, got {lor_ab} + {lor_ba}");
+        assert!(
+            (lor_ab + lor_ba).abs() < 1e-10,
+            "log_odds(a,b) + log_odds(b,a) should be 0, got {lor_ab} + {lor_ba}"
+        );
     }
 }

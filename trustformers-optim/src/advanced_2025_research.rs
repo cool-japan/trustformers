@@ -486,6 +486,7 @@ impl StatefulOptimizer for DiWo {
                 third_moment: HashMap::new(),
                 param_steps: HashMap::new(),
                 velocity: HashMap::new(),
+                ..Default::default()
             });
             // This is still unsafe because we're returning a reference to thread-local data
             // A proper fix would require restructuring the trait and implementation
@@ -509,6 +510,7 @@ impl StatefulOptimizer for DiWo {
                 third_moment: HashMap::new(),
                 param_steps: HashMap::new(),
                 velocity: HashMap::new(),
+                ..Default::default()
             });
             // This is still unsafe because we're returning a mutable reference to thread-local data
             // A proper fix would require restructuring the trait and implementation

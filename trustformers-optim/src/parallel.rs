@@ -211,6 +211,11 @@ pub struct ParallelAdam {
     weight_decay: f32,
     /// Parallel optimizer state
     state: ParallelOptimizerState,
+    /// Stable parameter identity registry (see [`crate::param_id`]).
+    ///
+    /// Replaces heap-address keys, which change in every process and so made
+    /// checkpoint resume silently restore nothing.
+    params: crate::param_id::ParamRegistry,
 }
 
 impl ParallelAdam {
@@ -233,6 +238,7 @@ impl ParallelAdam {
             eps,
             weight_decay,
             state: ParallelOptimizerState::new(config),
+            params: crate::param_id::ParamRegistry::new(),
         }
     }
 
@@ -453,7 +459,7 @@ impl Optimizer for ParallelAdam {
     fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
         match (parameter, grad) {
             (Tensor::F32(param), Tensor::F32(grad_arr)) => {
-                let param_id = format!("{:p}", param.as_ptr());
+                let param_id = self.params.key_for_addr(param.as_ptr() as usize, param.len())?;
                 self.update_single_parameter(
                     param_id,
                     param.as_slice_mut().ok_or_else(|| {
@@ -565,7 +571,7 @@ impl BatchUpdate for ParallelAdam {
         for (param, grad) in batch {
             match (param, grad) {
                 (Tensor::F32(p), Tensor::F32(g)) => {
-                    let param_id = format!("{:p}", p.as_ptr());
+                    let param_id = self.params.key_for_addr(p.as_ptr() as usize, p.len())?;
                     updates.push((
                         param_id,
                         p.as_slice_mut().ok_or_else(|| {

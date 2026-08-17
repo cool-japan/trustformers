@@ -65,6 +65,9 @@ pub mod layers;
 pub mod models;
 pub mod utils;
 
+#[cfg(test)]
+mod tests;
+
 pub use config::{HierarchicalConfig, HierarchicalType, ReductionMethod};
 pub use layers::{
     HierarchicalAttention, HierarchicalEncoder, HierarchicalLayer, NestedTransformerLayer,

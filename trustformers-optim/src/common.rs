@@ -11,6 +11,7 @@
 //! - **Gradient Processing**: Shared gradient manipulation utilities
 //! - **Memory Management**: Efficient buffer allocation and reuse
 
+use crate::param_id::{ParamId, ParamRegistry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::errors::{Result, TrustformersError};
@@ -39,6 +40,15 @@ pub struct OptimizerState {
 
     /// Velocity buffers for optimization methods like SGD with momentum
     pub velocity: HashMap<String, Vec<f32>>,
+
+    /// Stable parameter identity registry.
+    ///
+    /// Every buffer map above is keyed by the canonical keys handed out by this
+    /// registry. It is deliberately **not** serialised: identity is reconstructed on
+    /// load from the checkpointed keys themselves (see [`crate::param_id`]), which
+    /// keeps the on-disk state format unchanged.
+    #[serde(skip)]
+    pub params: ParamRegistry,
 }
 
 impl OptimizerState {
@@ -51,7 +61,48 @@ impl OptimizerState {
             third_moment: HashMap::new(),
             param_steps: HashMap::new(),
             velocity: HashMap::new(),
+            params: ParamRegistry::new(),
         }
+    }
+
+    /// Resolves the stable state key for an anonymous parameter tensor.
+    ///
+    /// This is the supported replacement for the old `format!("{:p}", …)` idiom: the
+    /// returned key survives checkpoint save/load, whereas a heap address does not.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tensor dtype has no addressable buffer, or when the
+    /// parameter ordering does not match a restored checkpoint.
+    pub fn param_key_for_tensor(&mut self, tensor: &Tensor) -> Result<String> {
+        self.params.key_for_tensor(tensor)
+    }
+
+    /// Resolves the stable state key for an anonymous parameter given its buffer
+    /// address and element count.
+    ///
+    /// # Errors
+    ///
+    /// See [`OptimizerState::param_key_for_tensor`].
+    pub fn param_key(&mut self, addr: usize, numel: usize) -> Result<String> {
+        self.params.key_for_addr(addr, numel)
+    }
+
+    /// Resolves the stable state key for a parameter that has a caller-supplied name.
+    ///
+    /// Named keys make checkpoint resume independent of parameter visit order and
+    /// should be preferred wherever the surrounding API carries names.
+    pub fn param_key_named(&mut self, name: &str, addr: usize, numel: usize) -> String {
+        self.params.key_for_named_addr(name, addr, numel)
+    }
+
+    /// Rebuilds one registry slot from a checkpointed state key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `key` carries no recognised identity prefix.
+    pub fn restore_param_key(&mut self, key: &str, numel: usize) -> Result<ParamId> {
+        self.params.restore_key(key, numel)
     }
 
     /// Gets or creates momentum buffer for a parameter.
@@ -325,19 +376,27 @@ impl GradientProcessor {
 pub struct ParameterIds;
 
 impl ParameterIds {
-    /// Creates a unique parameter ID from tensor pointer.
+    /// Creates a parameter ID from a tensor.
     ///
-    /// # Arguments
+    /// This helper is **stateless**, so it cannot assign a durable identity: it needs
+    /// a [`ParamRegistry`] to remember which parameter it has already seen. Use
+    /// [`OptimizerState::param_key_for_tensor`] (or [`ParamRegistry`] directly)
+    /// instead — an id derived from the tensor's address alone changes in every
+    /// process and silently breaks checkpoint resume.
     ///
-    /// * `tensor` - The tensor to create ID for
-    pub fn from_tensor(tensor: &Tensor) -> Result<String> {
-        match tensor {
-            Tensor::F32(data) => Ok(format!("{:p}", data.as_ptr())),
-            _ => Err(TrustformersError::tensor_op_error(
-                "Unsupported tensor type for parameter ID",
-                "from_tensor",
-            )),
-        }
+    /// # Errors
+    ///
+    /// Always returns an error; see above for the supported replacement.
+    #[deprecated(
+        since = "0.2.1",
+        note = "stateless ids cannot survive a checkpoint; use OptimizerState::param_key_for_tensor"
+    )]
+    pub fn from_tensor(_tensor: &Tensor) -> Result<String> {
+        Err(TrustformersError::not_implemented(
+            "ParameterIds::from_tensor cannot assign a durable parameter identity; \
+             use OptimizerState::param_key_for_tensor or ParamRegistry instead"
+                .to_string(),
+        ))
     }
 
     /// Creates a parameter ID from name.

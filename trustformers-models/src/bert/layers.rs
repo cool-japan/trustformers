@@ -1,10 +1,105 @@
 use crate::bert::config::BertConfig;
+use crate::weight_loading::checkpoint::WeightBinder;
 use scirs2_core::ndarray::s; // SciRS2 Integration Policy
 use trustformers_core::device::Device;
 use trustformers_core::errors::{tensor_op_error, Result};
 use trustformers_core::layers::{FeedForward, LayerNorm, MultiHeadAttention};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Layer;
+
+/// Checkpoint sub-paths for one encoder layer.
+///
+/// BERT and DistilBERT share this encoder implementation but spell their
+/// parameters differently (`attention.self.query` versus `attention.q_lin`, and
+/// so on). Keeping the spelling in one table means the binder, and the tests that
+/// build fixtures for it, are driven by the same source.
+#[derive(Debug, Clone)]
+pub struct BertLayerNames {
+    /// Prefix of the encoder stack, e.g. `encoder.layer.`.
+    pub layer_stack_prefix: &'static str,
+    /// Query projection, relative to the layer prefix.
+    pub query: &'static str,
+    /// Key projection.
+    pub key: &'static str,
+    /// Value projection.
+    pub value: &'static str,
+    /// Attention output projection.
+    pub attention_output: &'static str,
+    /// Layer norm applied after the attention residual.
+    pub attention_norm: &'static str,
+    /// First feed-forward projection (hidden -> intermediate).
+    pub intermediate: &'static str,
+    /// Second feed-forward projection (intermediate -> hidden).
+    pub feed_forward_output: &'static str,
+    /// Layer norm applied after the feed-forward residual.
+    pub output_norm: &'static str,
+}
+
+impl BertLayerNames {
+    /// HuggingFace `BertModel` parameter spelling.
+    pub const fn bert() -> Self {
+        Self {
+            layer_stack_prefix: "encoder.layer.",
+            query: "attention.self.query",
+            key: "attention.self.key",
+            value: "attention.self.value",
+            attention_output: "attention.output.dense",
+            attention_norm: "attention.output.LayerNorm",
+            intermediate: "intermediate.dense",
+            feed_forward_output: "output.dense",
+            output_norm: "output.LayerNorm",
+        }
+    }
+
+    /// HuggingFace `DistilBertModel` parameter spelling.
+    pub const fn distilbert() -> Self {
+        Self {
+            layer_stack_prefix: "transformer.layer.",
+            query: "attention.q_lin",
+            key: "attention.k_lin",
+            value: "attention.v_lin",
+            attention_output: "attention.out_lin",
+            attention_norm: "sa_layer_norm",
+            intermediate: "ffn.lin1",
+            feed_forward_output: "ffn.lin2",
+            output_norm: "output_layer_norm",
+        }
+    }
+}
+
+/// Take a `[out, in]` weight and its `[out]` bias from the checkpoint.
+///
+/// Both HuggingFace `nn.Linear` and this crate's [`trustformers_core::layers::Linear`]
+/// store the weight as `[out_features, in_features]`, so no transposition is
+/// involved; the shapes are checked instead of assumed.
+///
+/// Returns `None` for a tensor the checkpoint does not hold — the binder records
+/// it, so the caller leaves the parameter untouched rather than substituting one.
+fn take_linear(
+    binder: &mut WeightBinder<'_>,
+    name: &str,
+    weight_shape: [usize; 2],
+) -> Result<(Option<Tensor>, Option<Tensor>)> {
+    let weight = binder.take_shaped(&format!("{name}.weight"), &weight_shape)?;
+    let bias = binder.take_shaped(&format!("{name}.bias"), &[weight_shape[0]])?;
+    Ok((weight, bias))
+}
+
+/// Copy a layer-norm weight/bias pair from the checkpoint.
+fn bind_layer_norm(
+    binder: &mut WeightBinder<'_>,
+    name: &str,
+    hidden_size: usize,
+    norm: &mut LayerNorm,
+) -> Result<()> {
+    if let Some(weight) = binder.take_shaped(&format!("{name}.weight"), &[hidden_size])? {
+        norm.set_weight(weight)?;
+    }
+    if let Some(bias) = binder.take_shaped(&format!("{name}.bias"), &[hidden_size])? {
+        norm.set_bias(bias)?;
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct BertEmbeddings {
@@ -79,6 +174,48 @@ impl BertEmbeddings {
             + self.token_type_embeddings.parameter_count()
             + self.layer_norm.parameter_count()
     }
+
+    /// Copy the embedding tables and their layer norm out of a checkpoint.
+    ///
+    /// `has_token_type_embeddings` is false for DistilBERT, which has no segment
+    /// embedding table; the local table then keeps its zero-equivalent role and
+    /// is not requested from the checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a tensor exists but has the wrong shape. Absent tensors are
+    /// recorded on the binder and reported together by
+    /// [`WeightBinder::finish`](crate::weight_loading::checkpoint::WeightBinder::finish).
+    pub fn load_weights(
+        &mut self,
+        binder: &mut WeightBinder<'_>,
+        config: &BertConfig,
+        has_token_type_embeddings: bool,
+    ) -> Result<()> {
+        let hidden = config.hidden_size;
+
+        if let Some(weight) = binder.take_shaped(
+            "embeddings.word_embeddings.weight",
+            &[config.vocab_size, hidden],
+        )? {
+            self.word_embeddings.set_weight(weight)?;
+        }
+        if let Some(weight) = binder.take_shaped(
+            "embeddings.position_embeddings.weight",
+            &[config.max_position_embeddings, hidden],
+        )? {
+            self.position_embeddings.set_weight(weight)?;
+        }
+        if has_token_type_embeddings {
+            if let Some(weight) = binder.take_shaped(
+                "embeddings.token_type_embeddings.weight",
+                &[config.type_vocab_size, hidden],
+            )? {
+                self.token_type_embeddings.set_weight(weight)?;
+            }
+        }
+        bind_layer_norm(binder, "embeddings.LayerNorm", hidden, &mut self.layer_norm)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +257,55 @@ impl BertLayer {
         self.attention.parameter_count()
             + self.intermediate.parameter_count()
             + self.output_layer_norm.parameter_count()
+    }
+
+    /// Copy one encoder layer's parameters out of a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a shape mismatch; absent tensors are recorded on the binder.
+    pub fn load_weights(
+        &mut self,
+        binder: &mut WeightBinder<'_>,
+        layer_prefix: &str,
+        names: &BertLayerNames,
+        config: &BertConfig,
+    ) -> Result<()> {
+        let hidden = config.hidden_size;
+        let intermediate = config.intermediate_size;
+
+        self.attention.load_weights(binder, layer_prefix, names, config)?;
+
+        let (weight, bias) = take_linear(
+            binder,
+            &format!("{layer_prefix}{}", names.intermediate),
+            [intermediate, hidden],
+        )?;
+        if let Some(weight) = weight {
+            self.intermediate.set_dense_weight(weight)?;
+        }
+        if let Some(bias) = bias {
+            self.intermediate.set_dense_bias(bias)?;
+        }
+
+        let (weight, bias) = take_linear(
+            binder,
+            &format!("{layer_prefix}{}", names.feed_forward_output),
+            [hidden, intermediate],
+        )?;
+        if let Some(weight) = weight {
+            self.intermediate.set_output_weight(weight)?;
+        }
+        if let Some(bias) = bias {
+            self.intermediate.set_output_bias(bias)?;
+        }
+
+        bind_layer_norm(
+            binder,
+            &format!("{layer_prefix}{}", names.output_norm),
+            hidden,
+            &mut self.output_layer_norm,
+        )
     }
 }
 
@@ -187,6 +373,76 @@ impl BertAttention {
     pub fn parameter_count(&self) -> usize {
         self.self_attention.parameter_count() + self.output_layer_norm.parameter_count()
     }
+
+    /// Copy the four attention projections and the post-attention norm.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a shape mismatch; absent tensors are recorded on the binder.
+    pub fn load_weights(
+        &mut self,
+        binder: &mut WeightBinder<'_>,
+        layer_prefix: &str,
+        names: &BertLayerNames,
+        config: &BertConfig,
+    ) -> Result<()> {
+        let hidden = config.hidden_size;
+
+        let (weight, bias) = take_linear(
+            binder,
+            &format!("{layer_prefix}{}", names.query),
+            [hidden, hidden],
+        )?;
+        if let Some(weight) = weight {
+            self.self_attention.set_query_weight(weight)?;
+        }
+        if let Some(bias) = bias {
+            self.self_attention.set_query_bias(bias)?;
+        }
+
+        let (weight, bias) = take_linear(
+            binder,
+            &format!("{layer_prefix}{}", names.key),
+            [hidden, hidden],
+        )?;
+        if let Some(weight) = weight {
+            self.self_attention.set_key_weight(weight)?;
+        }
+        if let Some(bias) = bias {
+            self.self_attention.set_key_bias(bias)?;
+        }
+
+        let (weight, bias) = take_linear(
+            binder,
+            &format!("{layer_prefix}{}", names.value),
+            [hidden, hidden],
+        )?;
+        if let Some(weight) = weight {
+            self.self_attention.set_value_weight(weight)?;
+        }
+        if let Some(bias) = bias {
+            self.self_attention.set_value_bias(bias)?;
+        }
+
+        let (weight, bias) = take_linear(
+            binder,
+            &format!("{layer_prefix}{}", names.attention_output),
+            [hidden, hidden],
+        )?;
+        if let Some(weight) = weight {
+            self.self_attention.set_out_proj_weight(weight)?;
+        }
+        if let Some(bias) = bias {
+            self.self_attention.set_out_proj_bias(bias)?;
+        }
+
+        bind_layer_norm(
+            binder,
+            &format!("{layer_prefix}{}", names.attention_norm),
+            hidden,
+            &mut self.output_layer_norm,
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +481,29 @@ impl BertEncoder {
     pub fn parameter_count(&self) -> usize {
         self.layers.iter().map(|layer| layer.parameter_count()).sum()
     }
+
+    /// Number of encoder layers.
+    pub fn num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Copy every encoder layer's parameters out of a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a shape mismatch; absent tensors are recorded on the binder.
+    pub fn load_weights(
+        &mut self,
+        binder: &mut WeightBinder<'_>,
+        names: &BertLayerNames,
+        config: &BertConfig,
+    ) -> Result<()> {
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            let layer_prefix = format!("{}{index}.", names.layer_stack_prefix);
+            layer.load_weights(binder, &layer_prefix, names, config)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -256,6 +535,32 @@ impl BertPooler {
 
     pub fn parameter_count(&self) -> usize {
         self.dense.parameter_count()
+    }
+
+    /// The pooler's dense projection.
+    pub fn dense(&self) -> &trustformers_core::layers::Linear {
+        &self.dense
+    }
+
+    /// Copy the pooler projection out of a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a shape mismatch; absent tensors are recorded on the binder.
+    pub fn load_weights(
+        &mut self,
+        binder: &mut WeightBinder<'_>,
+        config: &BertConfig,
+    ) -> Result<()> {
+        let hidden = config.hidden_size;
+        let (weight, bias) = take_linear(binder, "pooler.dense", [hidden, hidden])?;
+        if let Some(weight) = weight {
+            self.dense.set_weight(weight)?;
+        }
+        if let Some(bias) = bias {
+            self.dense.set_bias(bias)?;
+        }
+        Ok(())
     }
 }
 

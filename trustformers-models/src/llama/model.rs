@@ -1,4 +1,5 @@
 use crate::llama::config::LlamaConfig;
+use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
     device::Device,
@@ -90,89 +91,103 @@ impl RotaryEmbedding {
     /// Each pair `(x[i], x[i + half_dim])` is rotated by angle `pos / base^(2i/dim)`.
     ///
     /// `q` and `k` are expected to have shape `[seq_len, num_heads * head_dim]`
-    /// or `[batch, seq_len, num_heads * head_dim]`.  The rotation is applied
-    /// to the first `self.dim` values in each head.
+    /// or `[batch, seq_len, num_heads * head_dim]`, where `head_dim == self.dim`.
+    /// **Every** head block is rotated, not just the first: rotating only the
+    /// leading `self.dim` columns would leave every head above index 0 without
+    /// any positional information at all. Under GQA `q` and `k` carry different
+    /// head counts, so each tensor is rotated independently.
     pub fn apply_rotary_emb(
         &self,
         q: &Tensor,
         k: &Tensor,
         position_ids: &[usize],
     ) -> Result<(Tensor, Tensor)> {
-        match (q, k) {
-            (Tensor::F32(q_arr), Tensor::F32(k_arr)) => {
-                let mut rotated_q = q_arr.clone();
-                let mut rotated_k = k_arr.clone();
+        let half = self.dim / 2;
+        // freqs[i] = 1 / base^(2i / dim)  for i in 0..half
+        let freqs: Vec<f32> = (0..half)
+            .map(|i| 1.0_f32 / self.base.powf(2.0 * i as f32 / self.dim as f32))
+            .collect();
+        // One (sin, cos) table shared by both tensors and every head.
+        let mut table = Vec::with_capacity(position_ids.len() * half);
+        for &pos in position_ids {
+            for &freq in &freqs {
+                let angle = pos as f32 * freq;
+                table.push((angle.sin(), angle.cos()));
+            }
+        }
 
-                // q_arr / k_arr shape: [seq_len, total_dim]  (2-D, no batch)
-                // or [batch, seq_len, total_dim] (3-D).
-                // position_ids has length seq_len.
-                let ndim = self.dim;
-                let half = ndim / 2;
+        let rotated_q = self.rotate(q, position_ids.len(), &table, "query")?;
+        let rotated_k = self.rotate(k, position_ids.len(), &table, "key")?;
+        Ok((rotated_q, rotated_k))
+    }
 
-                // Validate that we can rotate: total_dim must be >= ndim
-                let total_dim = {
-                    let s = q_arr.shape();
-                    s[s.len() - 1]
+    /// Rotate every `self.dim`-wide head block of one tensor.
+    fn rotate(
+        &self,
+        tensor: &Tensor,
+        positions: usize,
+        table: &[(f32, f32)],
+        role: &str,
+    ) -> Result<Tensor> {
+        let half = self.dim / 2;
+        match tensor {
+            Tensor::F32(arr) => {
+                let shape = arr.shape().to_vec();
+                let (batch, seq_len, width) = match shape.len() {
+                    2 => (1usize, shape[0], shape[1]),
+                    3 => (shape[0], shape[1], shape[2]),
+                    _ => {
+                        return Err(tensor_op_error(
+                            "RotaryEmbedding::apply_rotary_emb",
+                            format!(
+                                "expected [seq, features] or [batch, seq, features] for the {role} tensor, got {shape:?}"
+                            ),
+                        ))
+                    },
                 };
-                if total_dim < ndim {
+                if self.dim == 0 || width < self.dim || !width.is_multiple_of(self.dim) {
                     return Err(tensor_op_error(
                         "RotaryEmbedding::apply_rotary_emb",
                         format!(
-                            "tensor last dim {} is smaller than rope dim {}",
-                            total_dim, ndim
+                            "{role} width {width} is not a positive multiple of the rope dim {}",
+                            self.dim
+                        ),
+                    ));
+                }
+                if seq_len != positions {
+                    return Err(tensor_op_error(
+                        "RotaryEmbedding::apply_rotary_emb",
+                        format!(
+                            "{role} has {seq_len} positions but {positions} position ids were given"
                         ),
                     ));
                 }
 
-                // Pre-compute (cos, sin) for each position × each frequency pair
-                // freqs[i] = 1 / base^(2i / ndim)  for i in 0..half
-                let freqs: Vec<f32> = (0..half)
-                    .map(|i| 1.0_f32 / self.base.powf(2.0 * i as f32 / ndim as f32))
-                    .collect();
-
-                // Rotate in-place.  We iterate over positions provided by
-                // position_ids. For 2-D tensors the first axis is seq_len;
-                // for 3-D tensors position_ids still indexes along seq_len.
-                let shape = q_arr.shape().to_vec();
-                let rank = shape.len();
-
-                for (seq_idx, &pos) in position_ids.iter().enumerate() {
-                    for i in 0..half {
-                        let j = i + half; // companion dimension
-
-                        let cos_val = (pos as f32 * freqs[i]).cos();
-                        let sin_val = (pos as f32 * freqs[i]).sin();
-
-                        if rank == 2 {
-                            // shape: [seq_len, total_dim]
-                            let qi = rotated_q[[seq_idx, i]];
-                            let qj = rotated_q[[seq_idx, j]];
-                            rotated_q[[seq_idx, i]] = qi * cos_val - qj * sin_val;
-                            rotated_q[[seq_idx, j]] = qi * sin_val + qj * cos_val;
-
-                            let ki = rotated_k[[seq_idx, i]];
-                            let kj = rotated_k[[seq_idx, j]];
-                            rotated_k[[seq_idx, i]] = ki * cos_val - kj * sin_val;
-                            rotated_k[[seq_idx, j]] = ki * sin_val + kj * cos_val;
-                        } else if rank == 3 {
-                            // shape: [batch, seq_len, total_dim]
-                            for b in 0..shape[0] {
-                                let qi = rotated_q[[b, seq_idx, i]];
-                                let qj = rotated_q[[b, seq_idx, j]];
-                                rotated_q[[b, seq_idx, i]] = qi * cos_val - qj * sin_val;
-                                rotated_q[[b, seq_idx, j]] = qi * sin_val + qj * cos_val;
-
-                                let ki = rotated_k[[b, seq_idx, i]];
-                                let kj = rotated_k[[b, seq_idx, j]];
-                                rotated_k[[b, seq_idx, i]] = ki * cos_val - kj * sin_val;
-                                rotated_k[[b, seq_idx, j]] = ki * sin_val + kj * cos_val;
+                let heads = width / self.dim;
+                let mut data: Vec<f32> = arr.iter().copied().collect();
+                for b in 0..batch {
+                    for t in 0..seq_len {
+                        let row = (b * seq_len + t) * width;
+                        for head in 0..heads {
+                            let base = row + head * self.dim;
+                            for i in 0..half {
+                                let (sin_val, cos_val) = table[t * half + i];
+                                let x = data[base + i];
+                                let y = data[base + i + half];
+                                data[base + i] = x * cos_val - y * sin_val;
+                                data[base + i + half] = x * sin_val + y * cos_val;
                             }
                         }
-                        // ranks other than 2/3 leave the values unchanged
                     }
                 }
 
-                Ok((Tensor::F32(rotated_q), Tensor::F32(rotated_k)))
+                let rotated = ArrayD::from_shape_vec(IxDyn(&shape), data).map_err(|e| {
+                    tensor_op_error(
+                        "RotaryEmbedding::apply_rotary_emb",
+                        format!("shape error while rebuilding the {role} tensor: {e}"),
+                    )
+                })?;
+                Ok(Tensor::F32(rotated))
             },
             _ => Err(tensor_op_error(
                 "RotaryEmbedding::apply_rotary_emb",
@@ -740,13 +755,27 @@ impl Model for LlamaModel {
 impl LlamaModel {
     /// Load model weights from a directory containing HuggingFace format weights
     pub fn load_from_path(&mut self, model_path: impl AsRef<std::path::Path>) -> Result<()> {
-        use crate::weight_loading::{auto_create_loader, WeightLoadingConfig};
+        use crate::weight_loading::WeightLoadingConfig;
 
         let config = WeightLoadingConfig {
             lazy_loading: true,
             memory_mapped: false,
             ..Default::default()
         };
+        self.load_from_path_with_config(model_path, config)
+    }
+
+    /// Load weights tensor-by-tensor with an explicit loader configuration.
+    ///
+    /// Every tensor is fetched individually and installed into its layer, so the
+    /// resident set never holds more than one source tensor at a time on top of
+    /// the model itself.
+    pub fn load_from_path_with_config(
+        &mut self,
+        model_path: impl AsRef<std::path::Path>,
+        config: crate::weight_loading::WeightLoadingConfig,
+    ) -> Result<()> {
+        use crate::weight_loading::auto_create_loader;
 
         let mut loader = auto_create_loader(model_path, Some(config))?;
 
@@ -871,10 +900,12 @@ impl LlamaModel {
                 .args([
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
-                    "-o",
-                    file_path.to_str().expect("operation failed"),
-                    &file_url,
                 ])
+                // Pass the path as an OsStr: model caches may legitimately live
+                // under a non-UTF-8 directory name, which `to_str()` cannot express.
+                .arg("-o")
+                .arg(&file_path)
+                .arg(&file_url)
                 .output();
 
             match curl_result {
@@ -895,13 +926,8 @@ impl LlamaModel {
             }
 
             // Try using wget as fallback
-            let wget_result = Command::new("wget")
-                .args([
-                    "-O",
-                    file_path.to_str().expect("operation failed"),
-                    &file_url,
-                ])
-                .output();
+            let wget_result =
+                Command::new("wget").arg("-O").arg(&file_path).arg(&file_url).output();
 
             match wget_result {
                 Ok(output) if output.status.success() => {
@@ -936,12 +962,16 @@ impl LlamaModel {
         Ok(())
     }
 
-    /// Load weights with lazy loading for large models
-    pub fn load_with_lazy_loading(
-        &mut self,
-        model_path: impl AsRef<std::path::Path>,
-    ) -> Result<()> {
-        use crate::weight_loading::{auto_create_loader, WeightLoadingConfig};
+    /// Load weights through a **memory-mapped** loader.
+    ///
+    /// The checkpoint is mapped rather than read into an intermediate buffer and
+    /// tensors are materialised one at a time, which bounds peak memory to the
+    /// model plus the largest single tensor. It is *not* deferred loading: when
+    /// this call returns, every weight the model knows about is resident. Model
+    /// parameters are owned `Tensor`s, so there is nothing to resolve later; if
+    /// you need bounded resident memory, quantise or shard the model instead.
+    pub fn load_with_mmap(&mut self, model_path: impl AsRef<std::path::Path>) -> Result<()> {
+        use crate::weight_loading::WeightLoadingConfig;
 
         let config = WeightLoadingConfig {
             lazy_loading: true,
@@ -949,20 +979,22 @@ impl LlamaModel {
             streaming: false,
             ..Default::default()
         };
+        self.load_from_path_with_config(model_path, config)
+    }
 
-        let loader = auto_create_loader(&model_path, Some(config))?;
-
-        // For lazy loading, we'd store references to the loader and load tensors on-demand
-        // This is a simplified example - a full implementation would need more complex state management
-
-        println!("Lazy loading enabled - tensors will be loaded on-demand");
-
-        // List available tensors
-        let tensor_names = loader.list_tensors()?;
-        println!("Found {} tensors in model", tensor_names.len());
-
-        // For now, still load everything (in a real implementation, this would be truly lazy)
-        self.load_from_path(model_path)
+    /// Deprecated alias for [`load_with_mmap`](Self::load_with_mmap).
+    ///
+    /// The old name promised on-demand tensor resolution that this loader has
+    /// never performed; it maps the checkpoint and loads every tensor eagerly.
+    #[deprecated(
+        since = "0.2.1",
+        note = "renamed to `load_with_mmap`: loading is memory-mapped, not deferred"
+    )]
+    pub fn load_with_lazy_loading(
+        &mut self,
+        model_path: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        self.load_with_mmap(model_path)
     }
 }
 

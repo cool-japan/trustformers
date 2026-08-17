@@ -106,7 +106,6 @@ impl HierarchicalAttention {
 
 /// Hierarchical encoder layer
 pub struct HierarchicalEncoder {
-    #[allow(dead_code)]
     config: HierarchicalConfig,
     layers: Vec<HierarchicalLayer>,
 }
@@ -147,6 +146,11 @@ impl Layer for HierarchicalEncoder {
 }
 
 impl HierarchicalEncoder {
+    /// Configuration this encoder was built from.
+    pub fn config(&self) -> &HierarchicalConfig {
+        &self.config
+    }
+
     pub fn parameter_count(&self) -> usize {
         self.layers.iter().map(|layer| layer.parameter_count()).sum()
     }
@@ -154,7 +158,6 @@ impl HierarchicalEncoder {
 
 /// Single hierarchical layer
 pub struct HierarchicalLayer {
-    #[allow(dead_code)]
     config: HierarchicalConfig,
     hierarchical_attention: HierarchicalAttention,
     feed_forward: HierarchicalFeedForward,
@@ -208,6 +211,11 @@ impl Layer for HierarchicalLayer {
 }
 
 impl HierarchicalLayer {
+    /// Configuration this layer was built from.
+    pub fn config(&self) -> &HierarchicalConfig {
+        &self.config
+    }
+
     pub fn parameter_count(&self) -> usize {
         self.hierarchical_attention.parameter_count()
             + self.feed_forward.parameter_count()
@@ -386,7 +394,6 @@ impl PyramidLayer {
 
 /// Tree attention layer
 pub struct TreeAttention {
-    #[allow(dead_code)]
     config: HierarchicalConfig,
     attention: MultiHeadAttention,
     tree_mask: Tensor,
@@ -440,18 +447,36 @@ impl Layer for TreeAttention {
 }
 
 impl TreeAttention {
+    /// Configuration this layer was built from.
+    pub fn config(&self) -> &HierarchicalConfig {
+        &self.config
+    }
+
+    /// The tree-structured attention mask applied by this layer.
+    pub fn tree_mask(&self) -> &Tensor {
+        &self.tree_mask
+    }
+
     pub fn parameter_count(&self) -> usize {
         self.attention.parameter_count()
     }
 }
 
 /// Nested transformer layer
+///
+/// Applies inner attention, outer attention and a position-wise feed-forward
+/// network, each pre-normed with its own [`LayerNorm`] and wrapped in a residual
+/// connection.
 pub struct NestedTransformerLayer {
-    #[allow(dead_code)]
     config: HierarchicalConfig,
     outer_attention: MultiHeadAttention,
     inner_attention: MultiHeadAttention,
+    /// Up-projection `hidden_size -> intermediate_size` of the feed-forward block.
     feed_forward: Linear,
+    /// Down-projection `intermediate_size -> hidden_size`, so the block's output
+    /// can be added back onto the residual stream.
+    feed_forward_out: Linear,
+    /// One pre-norm per sub-block: inner attention, outer attention, feed-forward.
     norm_layers: Vec<LayerNorm>,
 }
 
@@ -472,8 +497,10 @@ impl NestedTransformerLayer {
         )?;
 
         let feed_forward = Linear::new(config.hidden_size, config.intermediate_size, true);
+        let feed_forward_out = Linear::new(config.intermediate_size, config.hidden_size, true);
 
         let norm_layers = vec![
+            LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
             LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
             LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
         ];
@@ -483,6 +510,7 @@ impl NestedTransformerLayer {
             outer_attention,
             inner_attention,
             feed_forward,
+            feed_forward_out,
             norm_layers,
         })
     }
@@ -507,6 +535,15 @@ impl Layer for NestedTransformerLayer {
         let outer_output = self.outer_attention.forward(normed_input)?;
         let hidden_states = residual.add(&outer_output)?;
 
+        let residual = hidden_states.clone();
+
+        // Position-wise feed-forward network: down(gelu(up(x))) + residual.
+        let normed_input = self.norm_layers[2].forward(hidden_states)?;
+        let intermediate = self.feed_forward.forward(normed_input)?;
+        let activated = intermediate.gelu()?;
+        let ff_output = self.feed_forward_out.forward(activated)?;
+        let hidden_states = residual.add(&ff_output)?;
+
         Ok(HierarchicalOutput {
             output: hidden_states,
             level_outputs: vec![inner_output, outer_output],
@@ -517,15 +554,119 @@ impl Layer for NestedTransformerLayer {
 }
 
 impl NestedTransformerLayer {
+    /// Configuration this layer was built from.
+    pub fn config(&self) -> &HierarchicalConfig {
+        &self.config
+    }
+
     pub fn parameter_count(&self) -> usize {
         let mut total = self.outer_attention.parameter_count()
             + self.inner_attention.parameter_count()
-            + self.feed_forward.parameter_count();
+            + self.feed_forward.parameter_count()
+            + self.feed_forward_out.parameter_count();
 
         for norm in &self.norm_layers {
             total += norm.parameter_count();
         }
 
         total
+    }
+}
+
+#[cfg(test)]
+mod layer_tests {
+    use super::*;
+    use crate::hierarchical::config::HierarchicalConfig;
+
+    /// A model small enough to build repeatedly inside a test run.
+    fn tiny_config() -> HierarchicalConfig {
+        HierarchicalConfig {
+            hidden_size: 32,
+            num_levels: 2,
+            num_heads: 4,
+            reduction_factor: 2,
+            num_layers_per_level: 1,
+            intermediate_size: 64,
+            dropout: 0.0,
+            attention_dropout: 0.0,
+            max_seq_lengths: vec![16, 8],
+            ..HierarchicalConfig::default()
+        }
+    }
+
+    fn ramp_input(seq: usize, hidden: usize) -> Result<Tensor> {
+        Tensor::from_vec(
+            (0..seq * hidden).map(|i| (i as f32 * 0.05).sin()).collect(),
+            &[1, seq, hidden],
+        )
+    }
+
+    /// The nested layer's feed-forward network must actually be applied.
+    ///
+    /// A previous revision constructed a single `Linear(hidden -> intermediate)`,
+    /// counted it in `parameter_count` and never called it, so the layer was two
+    /// stacked attentions with no position-wise network at all. Zeroing the
+    /// down-projection is a no-op against that code and changes the output here.
+    #[test]
+    fn test_nested_layer_applies_its_feed_forward() -> Result<()> {
+        let config = tiny_config();
+        let mut layer = NestedTransformerLayer::new(config.clone())?;
+        let input = ramp_input(4, config.hidden_size)?;
+
+        let with_ffn = layer.forward(input.clone())?.output.data()?;
+
+        // Zeroing the down-projection removes the whole feed-forward contribution.
+        layer.feed_forward_out.set_weight(Tensor::zeros(&[
+            config.hidden_size,
+            config.intermediate_size,
+        ])?)?;
+        layer.feed_forward_out.set_bias(Tensor::zeros(&[config.hidden_size])?)?;
+        let without_ffn = layer.forward(input)?.output.data()?;
+
+        assert_eq!(with_ffn.len(), without_ffn.len());
+        assert!(
+            with_ffn.iter().zip(without_ffn.iter()).any(|(a, b)| (a - b).abs() > 1e-6),
+            "zeroing the feed-forward down-projection changed nothing — the FFN is unused"
+        );
+        assert!(with_ffn.iter().all(|v| v.is_finite()));
+
+        Ok(())
+    }
+
+    /// `parameter_count` must equal the weights the layer really applies.
+    #[test]
+    fn test_nested_layer_parameter_count_matches_the_applied_weights() -> Result<()> {
+        let config = tiny_config();
+        let layer = NestedTransformerLayer::new(config.clone())?;
+
+        let hidden = config.hidden_size;
+        let intermediate = config.intermediate_size;
+        // up: [intermediate, hidden] + bias, down: [hidden, intermediate] + bias.
+        let feed_forward =
+            (hidden * intermediate + intermediate) + (intermediate * hidden + hidden);
+        // Three pre-norms, each a weight and a bias of width `hidden`.
+        let norms = 3 * (2 * hidden);
+        let attention =
+            layer.inner_attention.parameter_count() + layer.outer_attention.parameter_count();
+
+        assert_eq!(layer.norm_layers.len(), 3);
+        assert_eq!(layer.parameter_count(), attention + feed_forward + norms);
+
+        Ok(())
+    }
+
+    /// The nested layer keeps the model width and produces a real signal.
+    #[test]
+    fn test_nested_layer_output_shape_and_signal() -> Result<()> {
+        let config = tiny_config();
+        let layer = NestedTransformerLayer::new(config.clone())?;
+        let out = layer.forward(ramp_input(6, config.hidden_size)?)?;
+
+        assert_eq!(out.output.shape(), vec![1, 6, config.hidden_size]);
+        let data = out.output.data()?;
+        assert!(data.iter().all(|v| v.is_finite()));
+        assert!(data.iter().any(|v| v.abs() > 1e-6));
+
+        Ok(())
     }
 }

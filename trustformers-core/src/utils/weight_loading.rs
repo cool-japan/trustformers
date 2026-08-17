@@ -1,3 +1,26 @@
+//! Reading pretrained weights from checkpoint files.
+//!
+//! Two formats are supported end to end:
+//!
+//! * **safetensors** via [`SafeTensorsReader`];
+//! * **PyTorch** (`.bin`, `.pt`, `.pth`) via [`PyTorchReader`], which reads the real
+//!   ZIP + pickle checkpoint with the pure-Rust implementation in
+//!   [`zip_archive`], [`pickle`] and [`torch`].
+//!
+//! An earlier revision of `PyTorchReader` never parsed anything: it ran
+//! `String::from_utf8_lossy` over the file, looked for fifteen hard-coded substrings
+//! such as `"attention.self.query.weight"`, and handed back all-zero tensors with
+//! guessed BERT-base dimensions — or, when even that failed, a fabricated ten-tensor
+//! BERT state dict. Loading a checkpoint silently produced a zeroed model. All of
+//! that is gone.
+
+#[path = "weight_loading/pickle.rs"]
+pub mod pickle;
+#[path = "weight_loading/torch.rs"]
+pub mod torch;
+#[path = "weight_loading/zip_archive.rs"]
+pub mod zip_archive;
+
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use crate::traits::WeightReader;
@@ -5,7 +28,7 @@ use safetensors::{SafeTensors, View};
 use scirs2_core::ndarray::{ArrayD, IxDyn};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::path::Path;
 
 /// Convert IEEE 754 half-precision (F16) to single-precision (F32)
@@ -138,304 +161,153 @@ impl WeightReader for SafeTensorsReader {
     }
 }
 
-/// Reader for PyTorch weight files (.pt, .bin, .pth)
-pub struct PyTorchReader {
-    tensors: HashMap<String, TensorData>,
-}
-
+/// Reader for PyTorch checkpoints (`.pt`, `.bin`, `.pth`).
+///
+/// The file is parsed for real: the ZIP central directory is walked, `data.pkl` is
+/// interpreted by a pickle virtual machine that records rather than executes the
+/// `torch._utils._rebuild_tensor_v2` calls it finds, and each tensor is
+/// reconstructed from its storage record with the checkpoint's own dtype, shape and
+/// bytes.
+///
+/// # Errors
+///
+/// Construction fails, with an explanatory message, when the file is not a PyTorch
+/// checkpoint, uses the legacy pre-1.6 non-ZIP layout, has deflate-compressed
+/// members, contains no tensors, or holds a non-contiguous tensor view.
 #[derive(Debug)]
-struct TensorData {
-    data: Vec<f32>,
-    shape: Vec<usize>,
-    dtype: String,
+pub struct PyTorchReader {
+    state_dict: torch::TorchStateDict,
 }
 
 impl PyTorchReader {
-    /// Create a new PyTorchReader from a file path
+    /// Parse a PyTorch checkpoint from disk.
     pub fn from_file(path: &Path) -> Result<Self> {
-        let file = File::open(path).map_err(|e| {
-            TrustformersError::io_error(format!("Failed to open PyTorch file: {}", e))
+        let state_dict = torch::read_torch_file(path).map_err(|e| {
+            TrustformersError::weight_load_error(format!("failed to read PyTorch file: {e}"))
         })?;
-
-        // For now, we'll implement a simplified PyTorch reader
-        // In a full implementation, you would use a proper PyTorch pickle deserializer
-        let mut reader = BufReader::new(file);
-        let mut tensors = HashMap::new();
-
-        // This is a simplified implementation. A real PyTorch reader would:
-        // 1. Parse the Python pickle format
-        // 2. Handle different tensor types and layouts
-        // 3. Support both CPU and GPU tensors
-        // 4. Handle nested dictionaries and model state_dicts
-
-        // For demonstration, we'll create some mock tensors based on common PyTorch model patterns
-        if let Ok(metadata) = Self::read_pytorch_metadata(&mut reader) {
-            for (name, info) in metadata {
-                tensors.insert(name, info);
-            }
-        } else {
-            // Fallback: create some common tensor names for demonstration
-            Self::create_fallback_tensors(&mut tensors);
-        }
-
-        Ok(Self { tensors })
+        Ok(Self { state_dict })
     }
 
-    /// Attempt to read PyTorch metadata from the file
-    fn read_pytorch_metadata(reader: &mut BufReader<File>) -> Result<HashMap<String, TensorData>> {
-        // This is a placeholder implementation
-        // A real implementation would parse the PyTorch pickle format
-        let mut metadata = HashMap::new();
-
-        // Try to detect if this is a PyTorch checkpoint format
-        let mut buffer = Vec::new();
-        if reader.read_to_end(&mut buffer).is_ok() {
-            // Check for PyTorch magic bytes or pickle protocol
-            if buffer.len() > 4 && Self::is_pytorch_format(&buffer) {
-                // Parse the actual tensors (simplified)
-                metadata = Self::parse_pytorch_tensors(&buffer)?;
-            }
-        }
-
-        Ok(metadata)
+    /// Parse a PyTorch checkpoint held in memory.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let state_dict = torch::read_torch_bytes(bytes).map_err(|e| {
+            TrustformersError::weight_load_error(format!("failed to read PyTorch data: {e}"))
+        })?;
+        Ok(Self { state_dict })
     }
 
-    /// Check if the file appears to be in PyTorch format
-    fn is_pytorch_format(data: &[u8]) -> bool {
-        // Check for Python pickle protocol markers
-        if data.len() > 2 {
-            // Pickle protocol markers
-            let first_bytes = &data[0..2];
-            match first_bytes {
-                [0x80, 0x02] | [0x80, 0x03] | [0x80, 0x04] | [0x80, 0x05] => return true,
-                _ => {},
-            }
-        }
-
-        // Check for common PyTorch tensor keys in the data
-        let data_str = String::from_utf8_lossy(data);
-        data_str.contains("state_dict")
-            || data_str.contains("torch")
-            || data_str.contains("weight")
-            || data_str.contains("bias")
+    /// The parsed state dict.
+    pub fn state_dict(&self) -> &torch::TorchStateDict {
+        &self.state_dict
     }
 
-    /// Parse PyTorch tensors from binary data
-    fn parse_pytorch_tensors(data: &[u8]) -> Result<HashMap<String, TensorData>> {
-        let mut tensors = HashMap::new();
-
-        // This is a highly simplified parser
-        // A real implementation would use proper pickle deserialization
-
-        // Look for common PyTorch model keys
-        let data_str = String::from_utf8_lossy(data);
-
-        // Extract tensor names using pattern matching (simplified)
-        let common_patterns = [
-            "embeddings.weight",
-            "encoder.layers.",
-            "decoder.layers.",
-            "attention.self.query.weight",
-            "attention.self.key.weight",
-            "attention.self.value.weight",
-            "attention.output.dense.weight",
-            "attention.output.dense.bias",
-            "intermediate.dense.weight",
-            "intermediate.dense.bias",
-            "output.dense.weight",
-            "output.dense.bias",
-            "LayerNorm.weight",
-            "LayerNorm.bias",
-            "lm_head.weight",
-            "classifier.weight",
-            "classifier.bias",
-        ];
-
-        // Create tensors based on detected patterns
-        for pattern in &common_patterns {
-            if data_str.contains(pattern) {
-                // Create a tensor with realistic dimensions
-                let (shape, size) = Self::get_realistic_tensor_shape(pattern);
-                let tensor_data = TensorData {
-                    data: vec![0.0; size], // Initialize with zeros
-                    shape,
-                    dtype: "f32".to_string(),
-                };
-                tensors.insert(pattern.to_string(), tensor_data);
-            }
-        }
-
-        Ok(tensors)
-    }
-
-    /// Get realistic tensor shapes based on tensor name patterns
-    fn get_realistic_tensor_shape(name: &str) -> (Vec<usize>, usize) {
-        match name {
-            n if n.contains("embeddings.weight") => {
-                let shape = vec![30522, 768]; // Common vocab size x hidden size
-                let size = shape.iter().product();
-                (shape, size)
-            },
-            n if n.contains("query.weight")
-                || n.contains("key.weight")
-                || n.contains("value.weight") =>
-            {
-                let shape = vec![768, 768]; // hidden_size x hidden_size
-                let size = shape.iter().product();
-                (shape, size)
-            },
-            n if n.contains("dense.weight") => {
-                let shape = vec![768, 3072]; // hidden_size x intermediate_size
-                let size = shape.iter().product();
-                (shape, size)
-            },
-            n if n.contains("dense.bias") => {
-                let shape = vec![3072]; // intermediate_size
-                let size = shape.iter().product();
-                (shape, size)
-            },
-            n if n.contains("LayerNorm.weight") || n.contains("LayerNorm.bias") => {
-                let shape = vec![768]; // hidden_size
-                let size = shape.iter().product();
-                (shape, size)
-            },
-            n if n.contains("lm_head.weight") => {
-                let shape = vec![30522, 768]; // vocab_size x hidden_size
-                let size = shape.iter().product();
-                (shape, size)
-            },
-            _ => {
-                let shape = vec![768]; // Default to hidden_size
-                let size = shape.iter().product();
-                (shape, size)
-            },
-        }
-    }
-
-    /// Create fallback tensors when metadata parsing fails
-    fn create_fallback_tensors(tensors: &mut HashMap<String, TensorData>) {
-        // Create some common transformer model tensors
-        let common_tensors = vec![
-            ("embeddings.word_embeddings.weight", vec![30522, 768]),
-            ("embeddings.position_embeddings.weight", vec![512, 768]),
-            ("embeddings.LayerNorm.weight", vec![768]),
-            ("embeddings.LayerNorm.bias", vec![768]),
-            (
-                "encoder.layer.0.attention.self.query.weight",
-                vec![768, 768],
-            ),
-            ("encoder.layer.0.attention.self.key.weight", vec![768, 768]),
-            (
-                "encoder.layer.0.attention.self.value.weight",
-                vec![768, 768],
-            ),
-            (
-                "encoder.layer.0.attention.output.dense.weight",
-                vec![768, 768],
-            ),
-            ("encoder.layer.0.attention.output.dense.bias", vec![768]),
-            ("lm_head.weight", vec![30522, 768]),
-        ];
-
-        for (name, shape) in common_tensors {
-            let size = shape.iter().product();
-            let tensor_data = TensorData {
-                data: vec![0.0; size],
-                shape,
-                dtype: "f32".to_string(),
-            };
-            tensors.insert(name.to_string(), tensor_data);
-        }
+    /// The element type a tensor had in the checkpoint.
+    pub fn dtype_of(&self, name: &str) -> Option<torch::TorchDType> {
+        self.state_dict.get(name).map(|tensor| tensor.dtype)
     }
 }
 
 impl WeightReader for PyTorchReader {
     fn read_tensor(&mut self, name: &str) -> Result<Tensor> {
-        let tensor_data = self.tensors.get(name).ok_or_else(|| {
-            TrustformersError::weight_load_error(format!("Tensor {} not found", name))
-        })?;
-
-        // Convert the tensor data to a Tensor
-        match tensor_data.dtype.as_str() {
-            "f32" => {
-                let arr =
-                    ArrayD::from_shape_vec(IxDyn(&tensor_data.shape), tensor_data.data.clone())
-                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-
-                Ok(Tensor::F32(arr))
-            },
-            _ => Err(TrustformersError::weight_load_error(format!(
-                "Unsupported dtype: {}",
-                tensor_data.dtype
-            ))),
-        }
+        self.state_dict.get(name).map(|record| record.tensor.clone()).ok_or_else(|| {
+            TrustformersError::weight_load_error(format!(
+                "Tensor {name} not found in the checkpoint"
+            ))
+        })
     }
 
     fn list_tensors(&self) -> Vec<String> {
-        self.tensors.keys().cloned().collect()
+        self.state_dict.names()
     }
 }
 
+/// Report from [`WeightLoader::load_weights_into_model`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WeightLoadReport {
+    /// Parameters whose checkpoint tensor was found and copied in.
+    pub loaded: Vec<String>,
+    /// Parameters the checkpoint had no tensor for.
+    pub missing: Vec<String>,
+    /// Checkpoint tensors that matched no model parameter.
+    pub unused: Vec<String>,
+}
+
+impl WeightLoadReport {
+    /// Whether every model parameter was filled from the checkpoint.
+    pub fn is_complete(&self) -> bool {
+        self.missing.is_empty()
+    }
+}
+
+/// Helpers for loading checkpoints into models.
 pub struct WeightLoader;
 
 impl WeightLoader {
-    pub fn load_weights_into_model<M>(model: &mut M, reader: &mut dyn WeightReader) -> Result<()>
+    /// Copy a checkpoint's tensors into a model's live parameters.
+    ///
+    /// Parameters are matched by the names the model reports through
+    /// [`Model::named_tensors_mut`](crate::traits::Model::named_tensors_mut).
+    /// Every copy is shape-checked, so a mismatched checkpoint fails instead of
+    /// leaving the model half-initialised.
+    ///
+    /// A previous revision serialised the tensors into an invented JSON envelope
+    /// and handed that to `Model::load_pretrained`, which no model implementation
+    /// could parse; the weights never reached the model.
+    ///
+    /// # Errors
+    ///
+    /// * The model exposes no named parameters (`named_tensors_mut` not implemented).
+    /// * A checkpoint tensor's shape differs from the parameter it matches.
+    /// * A tensor cannot be read from the checkpoint.
+    pub fn load_weights_into_model<M>(
+        model: &mut M,
+        reader: &mut dyn WeightReader,
+    ) -> Result<WeightLoadReport>
     where
         M: crate::traits::Model,
     {
-        // Get list of available tensors from the reader
-        let available_tensors = reader.list_tensors();
+        let available: Vec<String> = reader.list_tensors();
+        let mut loaded_tensors: HashMap<String, Tensor> = HashMap::with_capacity(available.len());
+        for name in &available {
+            loaded_tensors.insert(name.clone(), reader.read_tensor(name)?);
+        }
 
-        // Load each tensor and attempt to match it with model parameters
-        let mut loaded_tensors = HashMap::new();
+        let parameter_names: Vec<String> =
+            model.named_tensors().into_iter().map(|(name, _)| name).collect();
+        if parameter_names.is_empty() {
+            return Err(TrustformersError::weight_load_error(
+                "the model exposes no named parameters: `Model::named_tensors_mut` is not \
+                 implemented for this type, so there is nowhere to put the checkpoint's tensors"
+                    .to_string(),
+            ));
+        }
 
-        for tensor_name in available_tensors {
-            match reader.read_tensor(&tensor_name) {
-                Ok(tensor) => {
-                    loaded_tensors.insert(tensor_name.clone(), tensor);
+        let mut report = WeightLoadReport::default();
+        for (name, parameter) in model.named_tensors_mut() {
+            match loaded_tensors.get(&name) {
+                Some(source) => {
+                    if source.shape() != parameter.shape() {
+                        return Err(TrustformersError::weight_load_error(format!(
+                            "checkpoint tensor '{name}' has shape {:?} but the model parameter \
+                             has shape {:?}",
+                            source.shape(),
+                            parameter.shape()
+                        )));
+                    }
+                    *parameter = source.clone();
+                    report.loaded.push(name);
                 },
-                Err(e) => {
-                    // Log warning but continue loading other tensors
-                    eprintln!("Warning: Failed to load tensor '{}': {}", tensor_name, e);
-                },
+                None => report.missing.push(name),
             }
         }
 
-        // Create a simple in-memory buffer to pass to the model's load_pretrained method
-        let mut buffer = std::io::Cursor::new(Vec::new());
+        let matched: std::collections::HashSet<&String> = report.loaded.iter().collect();
+        report.unused = available.into_iter().filter(|name| !matched.contains(name)).collect();
 
-        // Create a simple custom serialization format for the tensors
-        // This is a bridge between WeightReader and the Model's load_pretrained interface
-        let tensor_data: std::collections::HashMap<String, serde_json::Value> = loaded_tensors
-            .iter()
-            .map(|(name, tensor)| {
-                (
-                    name.clone(),
-                    serde_json::json!({
-                        "shape": tensor.shape(),
-                        "dtype": format!("{:?}", tensor.dtype()),
-                        "data": tensor.data().unwrap_or_default()
-                    }),
-                )
-            })
-            .collect();
-
-        let json_data = serde_json::json!({
-            "tensor_count": loaded_tensors.len(),
-            "tensors": tensor_data
-        });
-
-        let serialized_data = serde_json::to_string(&json_data).map_err(|e| {
-            TrustformersError::weight_load_error(format!("Failed to serialize weights: {}", e))
-        })?;
-
-        buffer.get_mut().extend_from_slice(serialized_data.as_bytes());
-        buffer.set_position(0);
-
-        // Use the model's load_pretrained method
-        model.load_pretrained(&mut buffer)?;
-
-        Ok(())
+        report.loaded.sort();
+        report.missing.sort();
+        report.unused.sort();
+        Ok(report)
     }
 
     /// Load weights from a SafeTensors file
@@ -500,5 +372,334 @@ impl WeightLoader {
                 "Unable to determine file format from extension".into(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::torch::fixture::{build_checkpoint, FixtureTensor};
+    use super::*;
+    use crate::traits::{Config, Model};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct TinyConfig;
+
+    impl Config for TinyConfig {
+        fn architecture(&self) -> &'static str {
+            "tiny"
+        }
+    }
+
+    /// A model with two real parameters, so weight loading has somewhere to write.
+    struct TinyModel {
+        config: TinyConfig,
+        weight: Tensor,
+        bias: Tensor,
+    }
+
+    impl TinyModel {
+        fn zeros() -> Self {
+            Self {
+                config: TinyConfig,
+                weight: Tensor::zeros(&[2, 3]).expect("weight"),
+                bias: Tensor::zeros(&[2]).expect("bias"),
+            }
+        }
+    }
+
+    impl Model for TinyModel {
+        type Config = TinyConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+
+        fn forward(&self, input: Self::Input) -> Result<Self::Output> {
+            Ok(input)
+        }
+
+        fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_config(&self) -> &Self::Config {
+            &self.config
+        }
+
+        fn num_parameters(&self) -> usize {
+            self.weight.len() + self.bias.len()
+        }
+
+        fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+            vec![
+                ("weight".to_string(), &self.weight),
+                ("bias".to_string(), &self.bias),
+            ]
+        }
+
+        fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+            vec![
+                ("weight".to_string(), &mut self.weight),
+                ("bias".to_string(), &mut self.bias),
+            ]
+        }
+    }
+
+    /// A model that does not implement the enumeration API.
+    struct OpaqueModel {
+        config: TinyConfig,
+    }
+
+    impl Model for OpaqueModel {
+        type Config = TinyConfig;
+        type Input = Tensor;
+        type Output = Tensor;
+
+        fn forward(&self, input: Self::Input) -> Result<Self::Output> {
+            Ok(input)
+        }
+
+        fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_config(&self) -> &Self::Config {
+            &self.config
+        }
+
+        fn num_parameters(&self) -> usize {
+            0
+        }
+    }
+
+    fn checkpoint_bytes(weight: &[f32], bias: &[f32]) -> Vec<u8> {
+        build_checkpoint(
+            "archive",
+            &[
+                FixtureTensor {
+                    name: "weight".to_string(),
+                    storage_class: "FloatStorage",
+                    storage_key: "0".to_string(),
+                    bytes: weight.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                    element_count: weight.len(),
+                    storage_offset: 0,
+                    shape: vec![2, 3],
+                    stride: vec![3, 1],
+                },
+                FixtureTensor {
+                    name: "bias".to_string(),
+                    storage_class: "FloatStorage",
+                    storage_key: "1".to_string(),
+                    bytes: bias.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                    element_count: bias.len(),
+                    storage_offset: 0,
+                    shape: vec![2],
+                    stride: vec![1],
+                },
+            ],
+        )
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("trustformers_weight_loading_tests");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir.join(name)
+    }
+
+    /// Regression test: the old reader returned zeros with guessed BERT shapes.
+    #[test]
+    fn pytorch_reader_returns_the_checkpoints_real_values() {
+        let weight: Vec<f32> = (0..6).map(|i| i as f32 * 0.5 - 1.0).collect();
+        let bias = vec![2.0f32, -3.0];
+        let path = temp_path("real_values.bin");
+        std::fs::write(&path, checkpoint_bytes(&weight, &bias)).expect("write");
+
+        let mut reader = PyTorchReader::from_file(&path).expect("read");
+        let mut names = reader.list_tensors();
+        names.sort();
+        assert_eq!(names, vec!["bias".to_string(), "weight".to_string()]);
+
+        let loaded = reader.read_tensor("weight").expect("weight");
+        assert_eq!(loaded.shape(), vec![2, 3]);
+        assert_eq!(loaded.to_vec_f32().expect("f32"), weight);
+        assert!(
+            loaded.to_vec_f32().expect("f32").iter().any(|v| *v != 0.0),
+            "the old reader returned all zeros"
+        );
+
+        assert!(reader.read_tensor("nonexistent").is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pytorch_reader_output_depends_on_the_file() {
+        let path_a = temp_path("varies_a.bin");
+        let path_b = temp_path("varies_b.bin");
+        std::fs::write(&path_a, checkpoint_bytes(&[1.0; 6], &[1.0; 2])).expect("write");
+        std::fs::write(&path_b, checkpoint_bytes(&[9.0; 6], &[9.0; 2])).expect("write");
+
+        let mut a = PyTorchReader::from_file(&path_a).expect("read");
+        let mut b = PyTorchReader::from_file(&path_b).expect("read");
+        assert_ne!(
+            a.read_tensor("weight").expect("a").to_vec_f32().expect("f32"),
+            b.read_tensor("weight").expect("b").to_vec_f32().expect("f32")
+        );
+
+        let _ = std::fs::remove_file(&path_a);
+        let _ = std::fs::remove_file(&path_b);
+    }
+
+    /// Regression test: the old reader invented a BERT state dict for any file.
+    #[test]
+    fn pytorch_reader_refuses_files_that_are_not_checkpoints() {
+        let path = temp_path("not_a_checkpoint.bin");
+        std::fs::write(&path, b"this file mentions state_dict and weight and bias").expect("write");
+
+        let err = PyTorchReader::from_file(&path).expect_err("must not invent a state dict");
+        let message = err.to_string();
+        assert!(
+            !message.is_empty() && message.contains("PyTorch"),
+            "expected an explanatory error, got: {message}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pytorch_reader_records_the_source_dtype() {
+        let path = temp_path("dtype.bin");
+        std::fs::write(&path, checkpoint_bytes(&[0.0; 6], &[0.0; 2])).expect("write");
+
+        let reader = PyTorchReader::from_file(&path).expect("read");
+        assert_eq!(reader.dtype_of("weight"), Some(torch::TorchDType::F32));
+        assert_eq!(reader.dtype_of("absent"), None);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_weights_into_model_actually_writes_the_parameters() {
+        let weight: Vec<f32> = (0..6).map(|i| i as f32 + 1.0).collect();
+        let bias = vec![7.0f32, 8.0];
+        let path = temp_path("into_model.bin");
+        std::fs::write(&path, checkpoint_bytes(&weight, &bias)).expect("write");
+
+        let mut model = TinyModel::zeros();
+        assert!(model.weight.to_vec_f32().expect("f32").iter().all(|v| *v == 0.0));
+
+        let mut reader = PyTorchReader::from_file(&path).expect("read");
+        let report = WeightLoader::load_weights_into_model(&mut model, &mut reader).expect("load");
+
+        assert!(report.is_complete(), "missing: {:?}", report.missing);
+        assert_eq!(
+            report.loaded,
+            vec!["bias".to_string(), "weight".to_string()]
+        );
+        assert!(report.unused.is_empty());
+        assert_eq!(model.weight.to_vec_f32().expect("f32"), weight);
+        assert_eq!(model.bias.to_vec_f32().expect("f32"), bias);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_weights_into_model_rejects_a_model_without_named_parameters() {
+        let path = temp_path("opaque.bin");
+        std::fs::write(&path, checkpoint_bytes(&[0.0; 6], &[0.0; 2])).expect("write");
+
+        let mut model = OpaqueModel { config: TinyConfig };
+        let mut reader = PyTorchReader::from_file(&path).expect("read");
+        let err = WeightLoader::load_weights_into_model(&mut model, &mut reader)
+            .expect_err("nowhere to load into");
+        assert!(err.to_string().contains("named_tensors_mut"), "{err}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_weights_into_model_rejects_shape_mismatches() {
+        // A checkpoint whose "weight" is [3, 2] rather than the model's [2, 3].
+        let values: Vec<f32> = (0..6).map(|i| i as f32).collect();
+        let bytes = build_checkpoint(
+            "archive",
+            &[FixtureTensor {
+                name: "weight".to_string(),
+                storage_class: "FloatStorage",
+                storage_key: "0".to_string(),
+                bytes: values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                element_count: 6,
+                storage_offset: 0,
+                shape: vec![3, 2],
+                stride: vec![2, 1],
+            }],
+        );
+        let path = temp_path("shape_mismatch.bin");
+        std::fs::write(&path, bytes).expect("write");
+
+        let mut model = TinyModel::zeros();
+        let mut reader = PyTorchReader::from_file(&path).expect("read");
+        let err = WeightLoader::load_weights_into_model(&mut model, &mut reader)
+            .expect_err("shape mismatch");
+        assert!(err.to_string().contains("shape"), "{err}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_weights_into_model_reports_missing_and_unused_tensors() {
+        let values: Vec<f32> = (0..6).map(|i| i as f32).collect();
+        let bytes = build_checkpoint(
+            "archive",
+            &[
+                FixtureTensor {
+                    name: "weight".to_string(),
+                    storage_class: "FloatStorage",
+                    storage_key: "0".to_string(),
+                    bytes: values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                    element_count: 6,
+                    storage_offset: 0,
+                    shape: vec![2, 3],
+                    stride: vec![3, 1],
+                },
+                FixtureTensor {
+                    name: "extra".to_string(),
+                    storage_class: "FloatStorage",
+                    storage_key: "1".to_string(),
+                    bytes: vec![0u8; 4],
+                    element_count: 1,
+                    storage_offset: 0,
+                    shape: vec![1],
+                    stride: vec![1],
+                },
+            ],
+        );
+        let path = temp_path("partial.bin");
+        std::fs::write(&path, bytes).expect("write");
+
+        let mut model = TinyModel::zeros();
+        let mut reader = PyTorchReader::from_file(&path).expect("read");
+        let report = WeightLoader::load_weights_into_model(&mut model, &mut reader).expect("load");
+
+        assert_eq!(report.loaded, vec!["weight".to_string()]);
+        assert_eq!(report.missing, vec!["bias".to_string()]);
+        assert_eq!(report.unused, vec!["extra".to_string()]);
+        assert!(!report.is_complete());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_weights_auto_dispatches_on_the_extension() {
+        let path = temp_path("auto.bin");
+        std::fs::write(&path, checkpoint_bytes(&[1.0; 6], &[1.0; 2])).expect("write");
+
+        let reader = WeightLoader::load_weights_auto(&path).expect("auto");
+        assert_eq!(reader.list_tensors().len(), 2);
+
+        let unknown = temp_path("auto.unknown");
+        std::fs::write(&unknown, b"x").expect("write");
+        assert!(WeightLoader::load_weights_auto(&unknown).is_err());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&unknown);
     }
 }

@@ -148,7 +148,10 @@ pub enum ReinforceError {
     /// `log_probs` length does not match `response` length for the given example index.
     LengthMismatch(usize),
     /// A reward or log-probability was not finite (NaN or Inf).
-    NonFiniteValue { example_idx: usize, field: &'static str },
+    NonFiniteValue {
+        example_idx: usize,
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for ReinforceError {
@@ -183,16 +186,15 @@ pub fn normalize_rewards(rewards: &[f32], method: &RewardNormalization) -> Vec<f
                 return vec![];
             }
             let mean = rewards.iter().sum::<f32>() / n;
-            let variance =
-                rewards.iter().map(|r| (r - mean).powi(2)).sum::<f32>() / n;
+            let variance = rewards.iter().map(|r| (r - mean).powi(2)).sum::<f32>() / n;
             let std = variance.sqrt();
             let denom = std + 1e-8;
             rewards.iter().map(|r| (r - mean) / denom).collect()
-        }
-        RewardNormalization::Clip { min_reward, max_reward } => rewards
-            .iter()
-            .map(|r| r.max(*min_reward).min(*max_reward))
-            .collect(),
+        },
+        RewardNormalization::Clip {
+            min_reward,
+            max_reward,
+        } => rewards.iter().map(|r| r.max(*min_reward).min(*max_reward)).collect(),
         RewardNormalization::Tanh => rewards.iter().map(|r| r.tanh()).collect(),
     }
 }
@@ -285,18 +287,11 @@ pub fn compute_reinforce_loss(
         .collect();
 
     // Raw advantages
-    let raw_advantages: Vec<f32> = rewards
-        .iter()
-        .zip(baselines.iter())
-        .map(|(r, b)| r - b)
-        .collect();
+    let raw_advantages: Vec<f32> =
+        rewards.iter().zip(baselines.iter()).map(|(r, b)| r - b).collect();
 
     // Optionally whiten
-    let advantages = if config.whiten_rewards {
-        whiten(&raw_advantages)
-    } else {
-        raw_advantages
-    };
+    let advantages = if config.whiten_rewards { whiten(&raw_advantages) } else { raw_advantages };
 
     // Compute per-token losses and entropy
     let mut total_policy_loss = 0.0_f32;
@@ -315,16 +310,9 @@ pub fn compute_reinforce_loss(
         total_tokens += n;
     }
 
-    let mean_policy_loss = if total_tokens > 0 {
-        total_policy_loss / total_tokens as f32
-    } else {
-        0.0
-    };
-    let mean_entropy = if total_tokens > 0 {
-        total_entropy / total_tokens as f32
-    } else {
-        0.0
-    };
+    let mean_policy_loss =
+        if total_tokens > 0 { total_policy_loss / total_tokens as f32 } else { 0.0 };
+    let mean_entropy = if total_tokens > 0 { total_entropy / total_tokens as f32 } else { 0.0 };
     let entropy_bonus = config.entropy_coeff * mean_entropy;
     let total_loss = mean_policy_loss - entropy_bonus;
 
@@ -379,14 +367,12 @@ impl ReinforceBaseline {
         match &self.method {
             BaselineMethod::None => vec![0.0; examples.len()],
             BaselineMethod::RunningMean => vec![self.running_mean; examples.len()],
-            BaselineMethod::SelfCritical => examples
-                .iter()
-                .map(|e| e.baseline_reward.unwrap_or(0.0))
-                .collect(),
-            BaselineMethod::ValueFunction => examples
-                .iter()
-                .map(|e| e.baseline_reward.unwrap_or(0.0))
-                .collect(),
+            BaselineMethod::SelfCritical => {
+                examples.iter().map(|e| e.baseline_reward.unwrap_or(0.0)).collect()
+            },
+            BaselineMethod::ValueFunction => {
+                examples.iter().map(|e| e.baseline_reward.unwrap_or(0.0)).collect()
+            },
         }
     }
 
@@ -399,7 +385,8 @@ impl ReinforceBaseline {
         if self.count == 0 {
             self.running_mean = batch_mean;
         } else {
-            self.running_mean = self.ema_decay * self.running_mean + (1.0 - self.ema_decay) * batch_mean;
+            self.running_mean =
+                self.ema_decay * self.running_mean + (1.0 - self.ema_decay) * batch_mean;
         }
         self.count += 1;
     }
@@ -514,7 +501,11 @@ mod tests {
         let out = compute_reinforce_loss(&examples, &config).expect("should succeed");
         // advantage = reward - 0 = 1.0
         // token losses: -(-1.0)*1.0 = 1.0, -(-2.0)*1.0 = 2.0 → mean = 1.5
-        assert!((out.policy_loss - 1.5).abs() < 1e-5, "policy_loss={}", out.policy_loss);
+        assert!(
+            (out.policy_loss - 1.5).abs() < 1e-5,
+            "policy_loss={}",
+            out.policy_loss
+        );
         assert_eq!(out.num_examples, 1);
         assert_eq!(out.num_tokens, 2);
     }
@@ -533,7 +524,11 @@ mod tests {
         let examples = vec![make_example(2.0, vec![-1.0], Some(1.0))];
         let out = compute_reinforce_loss(&examples, &config).expect("should succeed");
         // token loss = -(-1.0)*1.0 = 1.0
-        assert!((out.policy_loss - 1.0).abs() < 1e-5, "got {}", out.policy_loss);
+        assert!(
+            (out.policy_loss - 1.0).abs() < 1e-5,
+            "got {}",
+            out.policy_loss
+        );
     }
 
     // ── Test 3: value function baseline ───────────────────────────────────
@@ -550,7 +545,11 @@ mod tests {
         let examples = vec![make_example(5.0, vec![-2.0], Some(3.0))];
         let out = compute_reinforce_loss(&examples, &config).expect("should succeed");
         // token loss = -(-2.0)*2.0 = 4.0
-        assert!((out.policy_loss - 4.0).abs() < 1e-5, "got {}", out.policy_loss);
+        assert!(
+            (out.policy_loss - 4.0).abs() < 1e-5,
+            "got {}",
+            out.policy_loss
+        );
     }
 
     // ── Test 4: reward normalization Zscore ───────────────────────────────
@@ -568,7 +567,10 @@ mod tests {
         let rewards = vec![-5.0_f32, 0.5, 10.0];
         let normalized = normalize_rewards(
             &rewards,
-            &RewardNormalization::Clip { min_reward: -1.0, max_reward: 1.0 },
+            &RewardNormalization::Clip {
+                min_reward: -1.0,
+                max_reward: 1.0,
+            },
         );
         assert!((normalized[0] - (-1.0)).abs() < 1e-6);
         assert!((normalized[1] - 0.5).abs() < 1e-6);
@@ -605,7 +607,8 @@ mod tests {
         assert!(
             out_entropy.total_loss < out_base.total_loss,
             "entropy bonus should reduce loss: {} vs {}",
-            out_entropy.total_loss, out_base.total_loss
+            out_entropy.total_loss,
+            out_base.total_loss
         );
     }
 
@@ -725,7 +728,10 @@ mod tests {
 
         let e3 = format!(
             "{}",
-            ReinforceError::NonFiniteValue { example_idx: 0, field: "reward" }
+            ReinforceError::NonFiniteValue {
+                example_idx: 0,
+                field: "reward"
+            }
         );
         assert!(e3.contains("reward"), "got: {e3}");
     }
@@ -747,8 +753,16 @@ mod tests {
         // reward=3.0, log_probs=[-1.0] → loss = -(-1.0)*3.0 = 3.0
         let examples = vec![make_example(3.0, vec![-1.0], None)];
         let out = compute_reinforce_loss(&examples, &config).expect("ok");
-        assert!((out.policy_loss - 3.0).abs() < 1e-5, "policy_loss={}", out.policy_loss);
-        assert!((out.mean_reward - 3.0).abs() < 1e-5, "mean_reward={}", out.mean_reward);
+        assert!(
+            (out.policy_loss - 3.0).abs() < 1e-5,
+            "policy_loss={}",
+            out.policy_loss
+        );
+        assert!(
+            (out.mean_reward - 3.0).abs() < 1e-5,
+            "mean_reward={}",
+            out.mean_reward
+        );
     }
 
     #[test]
@@ -768,7 +782,11 @@ mod tests {
         let r1 = compute_reinforce_loss(&[ex1], &config).expect("ok1");
         let r2 = compute_reinforce_loss(&[ex2], &config).expect("ok2");
         // r2 policy_loss should be 2x r1 (reward doubled)
-        assert!((r2.policy_loss / r1.policy_loss - 2.0).abs() < 1e-5, "ratio={}", r2.policy_loss / r1.policy_loss);
+        assert!(
+            (r2.policy_loss / r1.policy_loss - 2.0).abs() < 1e-5,
+            "ratio={}",
+            r2.policy_loss / r1.policy_loss
+        );
     }
 
     #[test]
@@ -784,7 +802,11 @@ mod tests {
         // reward=5.0, baseline=5.0 → advantage=0 → loss=0
         let examples = vec![make_example(5.0, vec![-1.0], Some(5.0))];
         let out = compute_reinforce_loss(&examples, &config).expect("ok");
-        assert!((out.policy_loss).abs() < 1e-5, "zero advantage → zero policy loss, got {}", out.policy_loss);
+        assert!(
+            (out.policy_loss).abs() < 1e-5,
+            "zero advantage → zero policy loss, got {}",
+            out.policy_loss
+        );
     }
 
     #[test]
@@ -800,7 +822,11 @@ mod tests {
         // reward=3.0, V=1.0 → advantage=2.0 → loss = -(-1.0)*2.0 = 2.0
         let examples = vec![make_example(3.0, vec![-1.0], Some(1.0))];
         let out = compute_reinforce_loss(&examples, &config).expect("ok");
-        assert!((out.policy_loss - 2.0).abs() < 1e-5, "policy_loss={}", out.policy_loss);
+        assert!(
+            (out.policy_loss - 2.0).abs() < 1e-5,
+            "policy_loss={}",
+            out.policy_loss
+        );
     }
 
     #[test]
@@ -818,7 +844,11 @@ mod tests {
             make_example(2.0, vec![-0.5, -1.5], Some(2.0)),
         ];
         let out = compute_reinforce_loss(&examples, &config).expect("ok");
-        assert!((out.policy_loss).abs() < 1e-5, "gradient should be 0 when all advantages=0, got {}", out.policy_loss);
+        assert!(
+            (out.policy_loss).abs() < 1e-5,
+            "gradient should be 0 when all advantages=0, got {}",
+            out.policy_loss
+        );
     }
 
     #[test]
@@ -827,10 +857,19 @@ mod tests {
         let rewards = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
         let normalized = normalize_rewards(&rewards, &RewardNormalization::Zscore);
         let mean = normalized.iter().sum::<f32>() / normalized.len() as f32;
-        assert!(mean.abs() < 1e-5, "mean after zscore should be ~0, got {}", mean);
+        assert!(
+            mean.abs() < 1e-5,
+            "mean after zscore should be ~0, got {}",
+            mean
+        );
         // variance ≈ 1
-        let var = normalized.iter().map(|r| (r - mean).powi(2)).sum::<f32>() / normalized.len() as f32;
-        assert!((var - 1.0).abs() < 1e-4, "variance after zscore should be ~1, got {}", var);
+        let var =
+            normalized.iter().map(|r| (r - mean).powi(2)).sum::<f32>() / normalized.len() as f32;
+        assert!(
+            (var - 1.0).abs() < 1e-4,
+            "variance after zscore should be ~1, got {}",
+            var
+        );
     }
 
     #[test]
@@ -848,8 +887,16 @@ mod tests {
         let out = compute_reinforce_loss(&examples, &config).expect("ok");
         // policy_loss = -(-2.0)*0.0 = 0.0; entropy_bonus = 0.5*2.0 = 1.0
         // total_loss = 0.0 - 1.0 = -1.0
-        assert!((out.entropy_loss - 1.0).abs() < 1e-5, "entropy_loss={}", out.entropy_loss);
-        assert!((out.total_loss - (-1.0)).abs() < 1e-5, "total_loss={}", out.total_loss);
+        assert!(
+            (out.entropy_loss - 1.0).abs() < 1e-5,
+            "entropy_loss={}",
+            out.entropy_loss
+        );
+        assert!(
+            (out.total_loss - (-1.0)).abs() < 1e-5,
+            "total_loss={}",
+            out.total_loss
+        );
     }
 
     #[test]
@@ -870,7 +917,11 @@ mod tests {
             make_example(2.0, vec![-1.0, -1.0, -1.0], None),
         ];
         let out = compute_reinforce_loss(&examples, &config).expect("ok");
-        assert!((out.policy_loss - 1.6).abs() < 1e-5, "policy_loss={}", out.policy_loss);
+        assert!(
+            (out.policy_loss - 1.6).abs() < 1e-5,
+            "policy_loss={}",
+            out.policy_loss
+        );
         assert_eq!(out.num_tokens, 5);
         assert_eq!(out.num_examples, 2);
     }
@@ -890,7 +941,11 @@ mod tests {
         let ex2 = make_example(scale, vec![-1.0], None);
         let r1 = compute_reinforce_loss(&[ex1], &config).expect("ok1");
         let r2 = compute_reinforce_loss(&[ex2], &config).expect("ok2");
-        assert!((r2.policy_loss / r1.policy_loss - scale).abs() < 1e-5, "ratio={}", r2.policy_loss / r1.policy_loss);
+        assert!(
+            (r2.policy_loss / r1.policy_loss - scale).abs() < 1e-5,
+            "ratio={}",
+            r2.policy_loss / r1.policy_loss
+        );
     }
 
     #[test]
@@ -914,10 +969,17 @@ mod tests {
         // EMA update: first call sets to batch_mean; subsequent calls decay
         let mut bl = ReinforceBaseline::new(BaselineMethod::RunningMean);
         bl.update(&[10.0_f32]);
-        assert!((bl.running_mean - 10.0).abs() < 1e-5, "first update should set mean to batch mean");
+        assert!(
+            (bl.running_mean - 10.0).abs() < 1e-5,
+            "first update should set mean to batch mean"
+        );
         // Second update: ema = 0.99*10 + 0.01*0 = 9.9
         bl.update(&[0.0_f32]);
-        assert!((bl.running_mean - 9.9).abs() < 1e-5, "second update={}", bl.running_mean);
+        assert!(
+            (bl.running_mean - 9.9).abs() < 1e-5,
+            "second update={}",
+            bl.running_mean
+        );
     }
 
     #[test]
@@ -934,7 +996,10 @@ mod tests {
         let examples = vec![make_example(1.0, vec![-1.0], None)];
         trainer.compute_loss(examples.clone()).expect("step 1");
         trainer.compute_loss(examples.clone()).expect("step 2");
-        assert_eq!(trainer.step, 2, "step counter should be 2 after 2 compute_loss calls");
+        assert_eq!(
+            trainer.step, 2,
+            "step counter should be 2 after 2 compute_loss calls"
+        );
     }
 
     #[test]
@@ -964,10 +1029,15 @@ mod tests {
         // More uniform (smaller |log_prob|) → lower entropy contribution per token
         // but sum over more tokens → total higher for uniform
         // entropy(lp) = -lp; more negative lp → more entropy
-        let high_entropy_lp = -3.0_f32;  // p = exp(-3) ≈ 0.05, spread out
-        let low_entropy_lp = -0.01_f32;  // p = exp(-0.01) ≈ 0.99, concentrated
+        let high_entropy_lp = -3.0_f32; // p = exp(-3) ≈ 0.05, spread out
+        let low_entropy_lp = -0.01_f32; // p = exp(-0.01) ≈ 0.99, concentrated
         let e_high = compute_entropy(high_entropy_lp);
         let e_low = compute_entropy(low_entropy_lp);
-        assert!(e_high > e_low, "higher |log_prob| → more entropy: {} vs {}", e_high, e_low);
+        assert!(
+            e_high > e_low,
+            "higher |log_prob| → more entropy: {} vs {}",
+            e_high,
+            e_low
+        );
     }
 }

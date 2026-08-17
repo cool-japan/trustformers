@@ -245,8 +245,8 @@ impl ChineseTokenizer {
     }
 
     /// Preprocess text by normalizing and handling special cases
-    fn preprocess_text(&self, text: &str) -> String {
-        let mut processed = if self.use_normalizer {
+    fn preprocess_text(&self, text: &str) -> Result<String> {
+        let mut processed: String = if self.use_normalizer {
             // Basic normalization: lowercase and whitespace normalization
             text.to_lowercase()
                 .chars()
@@ -258,48 +258,30 @@ impl ChineseTokenizer {
 
         // Convert to simplified Chinese if requested
         if self.config.convert_to_simplified {
-            processed = self.traditional_to_simplified(&processed);
+            processed = self.traditional_to_simplified(&processed)?;
         }
 
-        processed
+        Ok(processed)
     }
 
-    /// Simple traditional to simplified Chinese conversion
-    fn traditional_to_simplified(&self, text: &str) -> String {
-        // This is a simplified mapping - in practice, you'd use a comprehensive dictionary
-        let mapping = vec![
-            ('東', '东'),
-            ('習', '习'),
-            ('國', '国'),
-            ('學', '学'),
-            ('長', '长'),
-            ('開', '开'),
-            ('關', '关'),
-            ('時', '时'),
-            ('間', '间'),
-            ('問', '问'),
-            ('題', '题'),
-            ('會', '会'),
-            ('來', '来'),
-            ('說', '说'),
-            ('話', '话'),
-            ('見', '见'),
-            ('覺', '觉'),
-            ('經', '经'),
-            ('過', '过'),
-            ('對', '对'),
-            ('現', '现'),
-            ('發', '发'),
-            ('車', '车'),
-            ('門', '门'),
-            ('們', '们'),
-        ];
-
-        let mut result = text.to_string();
-        for (traditional, simplified) in mapping {
-            result = result.replace(traditional, &simplified.to_string());
-        }
-        result
+    /// Convert Traditional Chinese characters to Simplified Chinese.
+    ///
+    /// This crate does not bundle a comprehensive Traditional-to-Simplified
+    /// dictionary (a real one, such as OpenCC's, has tens of thousands of
+    /// character and phrase-level rules). Silently applying a small
+    /// hardcoded character list and calling that "conversion" would
+    /// mis-tokenize any text containing a character outside that list with
+    /// no indication anything was skipped. Until a real conversion table is
+    /// wired in, `convert_to_simplified: true` is therefore rejected
+    /// up front rather than partially honored.
+    fn traditional_to_simplified(&self, _text: &str) -> Result<String> {
+        Err(TrustformersError::not_implemented(
+            "Traditional-to-Simplified Chinese conversion (ChineseTokenizerConfig \
+             { convert_to_simplified: true, .. }) requires a comprehensive conversion table \
+             that is not bundled with this crate; disable convert_to_simplified, or \
+             pre-convert text with an external tool (e.g. OpenCC) before tokenizing"
+                .to_string(),
+        ))
     }
 
     /// Segment Chinese text into words using dynamic programming
@@ -444,7 +426,7 @@ impl ChineseTokenizer {
 
 impl Tokenizer for ChineseTokenizer {
     fn encode(&self, text: &str) -> Result<TokenizedInput> {
-        let processed_text = self.preprocess_text(text);
+        let processed_text = self.preprocess_text(text)?;
         let segments = self.segment_text(&processed_text);
         let tokens = self.tokenize_segments(segments);
 
@@ -497,8 +479,8 @@ impl Tokenizer for ChineseTokenizer {
     }
 
     fn encode_pair(&self, text_a: &str, text_b: &str) -> Result<TokenizedInput> {
-        let processed_a = self.preprocess_text(text_a);
-        let processed_b = self.preprocess_text(text_b);
+        let processed_a = self.preprocess_text(text_a)?;
+        let processed_b = self.preprocess_text(text_b)?;
 
         let segments_a = self.segment_text(&processed_a);
         let segments_b = self.segment_text(&processed_b);
@@ -662,8 +644,14 @@ mod tests {
         assert!(!tokenizer.contains_word("测试"));
     }
 
+    /// Regression test: `traditional_to_simplified` used to silently
+    /// "convert" text using a small hardcoded ~25-character mapping,
+    /// leaving every other Traditional character untouched with no
+    /// indication anything was skipped. Without a real conversion table
+    /// bundled, this must now be a structured error instead of a
+    /// plausible-looking partial result.
     #[test]
-    fn test_traditional_to_simplified() {
+    fn test_traditional_to_simplified_is_not_a_fake_partial_conversion() {
         let config = ChineseTokenizerConfig {
             convert_to_simplified: true,
             ..Default::default()
@@ -671,7 +659,37 @@ mod tests {
         let vocab = create_test_vocab();
         let tokenizer = ChineseTokenizer::new(config, vocab);
 
-        let simplified = tokenizer.traditional_to_simplified("東西");
-        assert_eq!(simplified, "东西");
+        let result = tokenizer.traditional_to_simplified("東西");
+        assert!(
+            result.is_err(),
+            "must not silently succeed with fabricated partial conversion"
+        );
+    }
+
+    /// `encode`/`encode_pair` must propagate that same structured error
+    /// rather than silently tokenizing partially-converted text.
+    #[test]
+    fn test_encode_errors_when_convert_to_simplified_is_requested() {
+        let config = ChineseTokenizerConfig {
+            convert_to_simplified: true,
+            ..Default::default()
+        };
+        let vocab = create_test_vocab();
+        let tokenizer = ChineseTokenizer::new(config, vocab);
+
+        assert!(tokenizer.encode("東西").is_err());
+    }
+
+    /// The default configuration (`convert_to_simplified: false`) must be
+    /// completely unaffected: this is an opt-in feature and encoding must
+    /// keep working normally when it isn't requested.
+    #[test]
+    fn test_encode_succeeds_when_convert_to_simplified_is_not_requested() {
+        let config = ChineseTokenizerConfig::default();
+        assert!(!config.convert_to_simplified);
+        let vocab = create_test_vocab();
+        let tokenizer = ChineseTokenizer::new(config, vocab);
+
+        assert!(tokenizer.encode("東西").is_ok());
     }
 }

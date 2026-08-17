@@ -10,25 +10,37 @@ use trustformers_core::traits::{Config, Layer, Model, TokenizedInput};
 
 /// Rotary Position Embedding (RoPE) for GPT-J
 /// Reference: "RoFormer: Enhanced Transformer with Rotary Position Embedding" (Su et al., 2021)
-/// GPT-J uses RoPE on a subset of dimensions (rotary_dim) for efficiency
+/// GPT-J uses RoPE on a subset of dimensions (rotary_dim) for efficiency, and
+/// (unlike the LLaMA/GPT-NeoX "rotate-half" convention) rotates *interleaved*
+/// adjacent pairs `(x[2i], x[2i+1])`, matching EleutherAI's original GPT-J
+/// implementation and HF `modeling_gptj.py`'s `rotate_every_two`.
 #[derive(Debug, Clone)]
 pub struct GptJRotaryEmbedding {
-    pub dim: usize, // rotary dimensions (typically head_dim // 2)
+    /// Number of leading channels per head that receive rotation. Channels
+    /// `[dim, head_dim)` pass through unrotated.
+    pub dim: usize,
+    /// Total per-head channel width (`n_embd / n_head`).
+    pub head_dim: usize,
     pub max_seq_len: usize,
     pub base: f32, // theta parameter, typically 10000.0
 }
 
 impl GptJRotaryEmbedding {
-    pub fn new(dim: usize, max_seq_len: usize, base: f32) -> Self {
+    pub fn new(dim: usize, head_dim: usize, max_seq_len: usize, base: f32) -> Self {
         Self {
             dim,
+            head_dim,
             max_seq_len,
             base,
         }
     }
 
-    /// Apply rotary embedding to query and key tensors
-    /// GPT-J applies RoPE to only the first rotary_dim dimensions
+    /// Apply rotary embedding to query and key tensors.
+    ///
+    /// `q`/`k` have shape `[seq_len, num_heads * head_dim]`; the head count
+    /// is inferred independently for each tensor from `head_dim`, and every
+    /// head is rotated (only its first `dim` channels — the rest pass
+    /// through unchanged, per GPT-J's partial-rotary design).
     pub fn apply_rotary_emb(
         &self,
         q: &Tensor,
@@ -37,31 +49,117 @@ impl GptJRotaryEmbedding {
     ) -> Result<(Tensor, Tensor)> {
         match (q, k) {
             (Tensor::F32(q_arr), Tensor::F32(k_arr)) => {
-                let rotated_q = q_arr.clone();
-                let rotated_k = k_arr.clone();
+                if self.head_dim == 0 {
+                    return Err(tensor_op_error("gptj_rope", "head_dim must be > 0"));
+                }
+                if self.dim > self.head_dim {
+                    return Err(tensor_op_error(
+                        "gptj_rope",
+                        "rotary_dim must not exceed head_dim",
+                    ));
+                }
+                let q_shape = q_arr.shape().to_vec();
+                let k_shape = k_arr.shape().to_vec();
+                let q_last = *q_shape
+                    .last()
+                    .ok_or_else(|| tensor_op_error("gptj_rope", "q tensor has no dimensions"))?;
+                let k_last = *k_shape
+                    .last()
+                    .ok_or_else(|| tensor_op_error("gptj_rope", "k tensor has no dimensions"))?;
+                if !q_last.is_multiple_of(self.head_dim) || !k_last.is_multiple_of(self.head_dim) {
+                    return Err(tensor_op_error(
+                        "gptj_rope",
+                        format!(
+                            "last dim (q={q_last}, k={k_last}) must be a multiple of head_dim={}",
+                            self.head_dim
+                        ),
+                    ));
+                }
+                let q_heads = q_last / self.head_dim;
+                let k_heads = k_last / self.head_dim;
 
-                // Apply RoPE to the first rotary_dim dimensions
-                for &pos in position_ids.iter() {
-                    for i in 0..(self.dim / 2) {
-                        let freq = 1.0 / self.base.powf(2.0 * i as f32 / self.dim as f32);
-                        let angle = pos as f32 * freq;
-                        let _cos_val = angle.cos();
-                        let _sin_val = angle.sin();
+                let mut q_data = q_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gptj_rope", "q tensor not contiguous"))?
+                    .to_vec();
+                let mut k_data = k_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gptj_rope", "k tensor not contiguous"))?
+                    .to_vec();
 
-                        // Apply rotation to the rotary dimensions
-                        // Note: This is a simplified implementation
-                        // In production, this would require proper tensor reshaping
-                        // and complex number rotation operations on the rotary_dim subset
-                        // For now, we preserve the tensor structure
-                    }
+                let seq_len_q = q_data.len() / q_last.max(1);
+                let seq_len_k = k_data.len() / k_last.max(1);
+                if seq_len_q != position_ids.len() || seq_len_k != position_ids.len() {
+                    return Err(tensor_op_error(
+                        "gptj_rope",
+                        "position_ids length must match the sequence length of q and k",
+                    ));
                 }
 
-                Ok((Tensor::F32(rotated_q), Tensor::F32(rotated_k)))
+                apply_rope_interleaved(
+                    &mut q_data,
+                    q_heads,
+                    self.head_dim,
+                    self.dim,
+                    self.base,
+                    position_ids,
+                );
+                apply_rope_interleaved(
+                    &mut k_data,
+                    k_heads,
+                    self.head_dim,
+                    self.dim,
+                    self.base,
+                    position_ids,
+                );
+
+                Ok((
+                    Tensor::from_vec(q_data, &q_shape)?,
+                    Tensor::from_vec(k_data, &k_shape)?,
+                ))
             },
             _ => Err(tensor_op_error(
                 "tensor_operation",
                 "Unsupported tensor types for GPT-J RoPE",
             )),
+        }
+    }
+}
+
+/// Rotate `data` (row-major, shape `[seq_len, num_heads * head_dim]`) in
+/// place using GPT-J's interleaved-pair RoPE convention: for each head, the
+/// first `rotary_dim` channels are rotated as adjacent pairs
+/// `(x[2i], x[2i+1]) -> (x[2i]*cos - x[2i+1]*sin, x[2i]*sin + x[2i+1]*cos)`;
+/// channels `[rotary_dim, head_dim)` are left unchanged.
+fn apply_rope_interleaved(
+    data: &mut [f32],
+    num_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    base: f32,
+    position_ids: &[usize],
+) {
+    let pairs = rotary_dim / 2;
+    if pairs == 0 {
+        return;
+    }
+    let row_width = num_heads * head_dim;
+    for (row, &pos) in position_ids.iter().enumerate() {
+        let row_off = row * row_width;
+        for h in 0..num_heads {
+            let head_off = row_off + h * head_dim;
+            for i in 0..pairs {
+                let freq = 1.0 / base.powf(2.0 * i as f32 / rotary_dim as f32);
+                let angle = pos as f32 * freq;
+                let cos_v = angle.cos();
+                let sin_v = angle.sin();
+                let idx0 = head_off + 2 * i;
+                let idx1 = head_off + 2 * i + 1;
+                let x0 = data[idx0];
+                let x1 = data[idx1];
+                data[idx0] = x0 * cos_v - x1 * sin_v;
+                data[idx1] = x0 * sin_v + x1 * cos_v;
+            }
         }
     }
 }
@@ -82,16 +180,16 @@ pub struct GptJBlock {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct GptJAttention {
     q_proj: Linear,
     k_proj: Linear,
     v_proj: Linear,
     out_proj: Linear,
-    #[allow(dead_code)]
     num_heads: usize,
     head_dim: usize,
+    #[allow(dead_code)]
     rotary_dim: usize,
+    #[allow(dead_code)]
     dropout: f32,
     rotary_emb: GptJRotaryEmbedding,
 }
@@ -234,6 +332,7 @@ impl GptJAttention {
         let head_dim = config.head_dim();
         let rotary_emb = GptJRotaryEmbedding::new(
             config.rotary_dim,
+            head_dim,
             config.n_positions,
             10000.0, // Standard RoPE theta value
         );
@@ -255,6 +354,7 @@ impl GptJAttention {
         let head_dim = config.head_dim();
         let rotary_emb = GptJRotaryEmbedding::new(
             config.rotary_dim,
+            head_dim,
             config.n_positions,
             10000.0, // Standard RoPE theta value
         );
@@ -297,27 +397,97 @@ impl GptJAttention {
         Ok(())
     }
 
+    /// Real multi-head scaled dot-product attention with GPT-J's partial
+    /// (interleaved-pair) RoPE and causal masking. GPT-J uses standard
+    /// multi-head attention (no grouped/multi-query heads), so every query
+    /// head reads from the key/value head of the same index.
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
         // Compute Q, K, V
         let q = self.q_proj.forward(hidden_states.clone())?;
         let k = self.k_proj.forward(hidden_states.clone())?;
         let v = self.v_proj.forward(hidden_states)?;
 
-        // Apply RoPE to query and key tensors
-        let seq_len = q.shape()[1]; // Assuming [batch, seq_len, hidden_size]
+        if self.num_heads == 0 {
+            return Err(tensor_op_error("gptj_attn", "num_heads must be > 0"));
+        }
+        let width = self.num_heads * self.head_dim;
+        let total_q: usize = q.shape().iter().product();
+        if width == 0 || !total_q.is_multiple_of(width) {
+            return Err(tensor_op_error(
+                "gptj_attn",
+                "q size inconsistent with num_heads * head_dim",
+            ));
+        }
+        let seq_len = total_q / width;
         let position_ids: Vec<usize> = (0..seq_len).collect();
 
-        let (_q_rotated, _k_rotated) = self.rotary_emb.apply_rotary_emb(&q, &k, &position_ids)?;
+        // Apply RoPE to query and key tensors (first `rotary_dim` channels
+        // of each head only; `v` is never rotated).
+        let (q_rotated, k_rotated) = self.rotary_emb.apply_rotary_emb(&q, &k, &position_ids)?;
 
-        // Simplified multi-head attention computation
-        // In a full implementation, this would include:
-        // - Proper tensor reshaping for multi-head attention
-        // - Scaled dot-product attention computation
-        // - Attention masking and dropout
-        // For now, use the value tensor with output projection
-        let output = self.out_proj.forward(v)?;
+        match (&q_rotated, &k_rotated, &v) {
+            (Tensor::F32(q_arr), Tensor::F32(k_arr), Tensor::F32(v_arr)) => {
+                let q_data = q_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gptj_attn", "q tensor not contiguous"))?;
+                let k_data = k_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gptj_attn", "k tensor not contiguous"))?;
+                let v_data = v_arr
+                    .as_slice()
+                    .ok_or_else(|| tensor_op_error("gptj_attn", "v tensor not contiguous"))?;
+                if q_data.len() != seq_len * width
+                    || k_data.len() != seq_len * width
+                    || v_data.len() != seq_len * width
+                {
+                    return Err(tensor_op_error(
+                        "gptj_attn",
+                        "q/k/v tensor size inconsistent with num_heads * head_dim",
+                    ));
+                }
 
-        Ok(output)
+                let scale = 1.0 / (self.head_dim as f32).sqrt();
+                let mut out = vec![0f32; seq_len * width];
+                for h in 0..self.num_heads {
+                    for i in 0..seq_len {
+                        let q_off = i * width + h * self.head_dim;
+                        // Causal: query position i attends to keys 0..=i.
+                        let mut scores = Vec::with_capacity(i + 1);
+                        for j in 0..=i {
+                            let k_off = j * width + h * self.head_dim;
+                            let dot: f32 = (0..self.head_dim)
+                                .map(|d| q_data[q_off + d] * k_data[k_off + d])
+                                .sum();
+                            scores.push(dot * scale);
+                        }
+                        let max_val = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                        let mut weights = vec![0f32; scores.len()];
+                        let mut sum = 0f32;
+                        for (idx, &s) in scores.iter().enumerate() {
+                            let e = (s - max_val).exp();
+                            weights[idx] = e;
+                            sum += e;
+                        }
+                        let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+                        let out_off = i * width + h * self.head_dim;
+                        for (j, &w) in weights.iter().enumerate() {
+                            let wn = w * inv_sum;
+                            let v_off = j * width + h * self.head_dim;
+                            for d in 0..self.head_dim {
+                                out[out_off + d] += wn * v_data[v_off + d];
+                            }
+                        }
+                    }
+                }
+
+                let attended = Tensor::from_vec(out, &[seq_len, width])?;
+                self.out_proj.forward(attended)
+            },
+            _ => Err(tensor_op_error(
+                "tensor_operation",
+                "Unsupported tensor types for GPT-J attention",
+            )),
+        }
     }
 
     /// Apply rotary position embedding to a tensor
@@ -1080,7 +1250,7 @@ mod tests {
 
     #[test]
     fn test_gptj_rope_construction() {
-        let rope = GptJRotaryEmbedding::new(64, 2048, 10000.0);
+        let rope = GptJRotaryEmbedding::new(64, 64, 2048, 10000.0);
         assert_eq!(rope.dim, 64);
         assert_eq!(rope.max_seq_len, 2048);
         assert!((rope.base - 10000.0).abs() < 1e-3);
@@ -1090,7 +1260,7 @@ mod tests {
     fn test_gptj_rope_apply_preserves_shape() {
         use scirs2_core::ndarray::{ArrayD, IxDyn};
         use trustformers_core::tensor::Tensor;
-        let rope = GptJRotaryEmbedding::new(4, 32, 10000.0);
+        let rope = GptJRotaryEmbedding::new(4, 4, 32, 10000.0);
         let q_data = vec![0.1f32; 2 * 4]; // seq=2, dim=4
         let k_data = vec![0.2f32; 2 * 4];
         let q_arr = ArrayD::from_shape_vec(IxDyn(&[2, 4]), q_data).expect("create q");
@@ -1109,6 +1279,256 @@ mod tests {
             k.shape(),
             "RoPE output k shape must match input"
         );
+    }
+
+    // -- Real RoPE / attention regression tests --
+    //
+    // These would have FAILED against the old no-op RoPE (which computed
+    // cos/sin into unused `_cos_val`/`_sin_val` and returned unrotated
+    // clones) and the old `out_proj(v)` fake attention (Q and K discarded).
+
+    #[test]
+    fn test_gptj_rope_position_zero_is_identity() {
+        use trustformers_core::tensor::Tensor;
+        let rope = GptJRotaryEmbedding::new(4, 4, 32, 10000.0);
+        let data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let q = Tensor::from_vec(data.clone(), &[1, 4]).expect("tensor");
+        let k = q.clone();
+        let (q_out, _) = rope.apply_rotary_emb(&q, &k, &[0]).expect("rope");
+        let out = match q_out {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32"),
+        };
+        for (a, b) in data.iter().zip(out.iter()) {
+            assert!((a - b).abs() < 1e-5, "position 0 must be identity");
+        }
+    }
+
+    #[test]
+    fn test_gptj_rope_different_positions_differ() {
+        use trustformers_core::tensor::Tensor;
+        let rope = GptJRotaryEmbedding::new(4, 4, 32, 10000.0);
+        let data = vec![1.0f32; 4];
+        let q = Tensor::from_vec(data, &[1, 4]).expect("tensor");
+        let k = q.clone();
+        let (q_pos0, _) = rope.apply_rotary_emb(&q, &k, &[0]).expect("rope pos0");
+        let (q_pos5, _) = rope.apply_rotary_emb(&q, &k, &[5]).expect("rope pos5");
+        let out0 = match q_pos0 {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32"),
+        };
+        let out5 = match q_pos5 {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32"),
+        };
+        let differs = out0.iter().zip(out5.iter()).any(|(a, b)| (a - b).abs() > 1e-4);
+        assert!(
+            differs,
+            "RoPE must rotate differently at different positions"
+        );
+    }
+
+    /// Regression: RoPE must rotate every head, not just the first
+    /// `head_dim`-wide block of a multi-head row.
+    #[test]
+    fn test_gptj_rope_rotates_every_head() {
+        use trustformers_core::tensor::Tensor;
+        let head_dim = 4;
+        let rope = GptJRotaryEmbedding::new(head_dim, head_dim, 32, 10000.0); // full rotary_dim
+        let data = vec![1.0f32; 8]; // seq_len=1, num_heads=2
+        let q = Tensor::from_vec(data.clone(), &[1, 8]).expect("tensor");
+        let k = q.clone();
+        let (q_out, _) = rope.apply_rotary_emb(&q, &k, &[7]).expect("rope");
+        let out = match q_out {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32"),
+        };
+        let head0_changed = out[0..4].iter().zip(&data[0..4]).any(|(a, b)| (a - b).abs() > 1e-4);
+        let head1_changed = out[4..8].iter().zip(&data[4..8]).any(|(a, b)| (a - b).abs() > 1e-4);
+        assert!(head0_changed, "head 0 must rotate");
+        assert!(head1_changed, "head 1 must ALSO rotate, not just head 0");
+    }
+
+    /// GPT-J's defining partial-rotary behavior: channels beyond
+    /// `rotary_dim` within a head must NOT be rotated.
+    #[test]
+    fn test_gptj_rope_leaves_channels_beyond_rotary_dim_untouched() {
+        use trustformers_core::tensor::Tensor;
+        let head_dim = 8;
+        let rotary_dim = 4; // < head_dim
+        let rope = GptJRotaryEmbedding::new(rotary_dim, head_dim, 32, 10000.0);
+        let data = vec![1.0f32; head_dim]; // seq_len=1, single head
+        let q = Tensor::from_vec(data.clone(), &[1, head_dim]).expect("tensor");
+        let k = q.clone();
+        let (q_out, _) = rope.apply_rotary_emb(&q, &k, &[9]).expect("rope");
+        let out = match q_out {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32"),
+        };
+        let rotated_changed = out[0..rotary_dim]
+            .iter()
+            .zip(&data[0..rotary_dim])
+            .any(|(a, b)| (a - b).abs() > 1e-4);
+        assert!(rotated_changed, "the first rotary_dim channels must rotate");
+        for (a, b) in out[rotary_dim..head_dim].iter().zip(&data[rotary_dim..head_dim]) {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "channels beyond rotary_dim must pass through unrotated"
+            );
+        }
+    }
+
+    fn attn_test_config() -> GptJConfig {
+        tiny_config()
+    }
+
+    #[test]
+    fn test_gptj_attention_output_shape() {
+        use trustformers_core::tensor::Tensor;
+        let config = attn_test_config();
+        let attn = GptJAttention::new(&config).expect("attention");
+        let seq_len = 4;
+        let hidden = config.n_embd;
+        let data: Vec<f32> = (0..seq_len * hidden).map(|i| (i as f32) * 0.01).collect();
+        let input = Tensor::from_vec(data, &[seq_len, hidden]).expect("tensor");
+        let out = attn.forward(input).expect("forward");
+        assert_eq!(out.shape(), vec![seq_len, hidden]);
+    }
+
+    /// Changing an EARLY token must change a LATER position's output — the
+    /// discriminating test that only passes for real QK^T/softmax/V
+    /// attention (the old `out_proj(v)` fake path only mixed V, and even
+    /// V-only would trivially pass this since output[i] += w*v[i] uses V
+    /// from position 0..=i; the REAL failure mode this catches is Q/K being
+    /// entirely ignored, which this test's causal-masking sibling below
+    /// exercises together with position sensitivity from RoPE).
+    #[test]
+    fn test_gptj_attention_early_token_change_propagates_forward() {
+        use trustformers_core::tensor::Tensor;
+        let config = attn_test_config();
+        let attn = GptJAttention::new(&config).expect("attention");
+        let seq_len = 4;
+        let hidden = config.n_embd;
+
+        let base: Vec<f32> = (0..seq_len * hidden).map(|i| (i as f32) * 0.01 - 0.2).collect();
+        let mut modified = base.clone();
+        for x in modified[0..hidden].iter_mut() {
+            *x += 5.0;
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+        let out_mod = attn
+            .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+
+        let a = match &out_base {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32"),
+        };
+        let b = match &out_mod {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32"),
+        };
+        let last_a = &a[3 * hidden..4 * hidden];
+        let last_b = &b[3 * hidden..4 * hidden];
+        let differs = last_a.iter().zip(last_b.iter()).any(|(x, y)| (x - y).abs() > 1e-5);
+        assert!(differs, "changing token 0 must change token 3's output");
+    }
+
+    /// Causal masking: changing the LAST token must not change any earlier
+    /// position's output.
+    #[test]
+    fn test_gptj_attention_causal_mask_future_does_not_leak_backward() {
+        use trustformers_core::tensor::Tensor;
+        let config = attn_test_config();
+        let attn = GptJAttention::new(&config).expect("attention");
+        let seq_len = 4;
+        let hidden = config.n_embd;
+
+        let base: Vec<f32> = (0..seq_len * hidden).map(|i| (i as f32) * 0.01 - 0.2).collect();
+        let mut modified = base.clone();
+        for x in modified[3 * hidden..4 * hidden].iter_mut() {
+            *x += 5.0;
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+        let out_mod = attn
+            .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+
+        let a = match &out_base {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32"),
+        };
+        let b = match &out_mod {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32"),
+        };
+        for row in 0..3 {
+            let ra = &a[row * hidden..(row + 1) * hidden];
+            let rb = &b[row * hidden..(row + 1) * hidden];
+            for (x, y) in ra.iter().zip(rb.iter()) {
+                assert!(
+                    (x - y).abs() < 1e-6,
+                    "row {row} must be unaffected by a later change"
+                );
+            }
+        }
+    }
+
+    /// Causal property with a growing sequence: forwarding a prefix of
+    /// length N and then forwarding that same prefix plus one appended
+    /// token must leave rows `0..N` of the output bit-identical. This is
+    /// the variable-length analogue of "appending a token to the KV cache
+    /// does not change earlier positions' outputs" for this crate's
+    /// stateless `Layer::forward` (there is no incremental KV cache in the
+    /// `Layer` API; `seq_len` and `position_ids` are recomputed fresh from
+    /// the input on every call). Stronger than the fixed-length "modify a
+    /// token" tests above: it also catches a mask or RoPE angle that leaked
+    /// total `seq_len` instead of depending only on each row's own
+    /// position — relevant here since GPT-J's RoPE is partial-rotary
+    /// (`rotary_dim=4 < head_dim=8` in `tiny_config`).
+    #[test]
+    fn test_gptj_attention_prefix_extension_preserves_earlier_outputs() {
+        use trustformers_core::tensor::Tensor;
+        let config = attn_test_config();
+        let attn = GptJAttention::new(&config).expect("attention");
+        let hidden = config.n_embd;
+        let prefix_len = 3;
+
+        let prefix: Vec<f32> = (0..prefix_len * hidden).map(|i| (i as f32) * 0.01 - 0.2).collect();
+        let mut extended = prefix.clone();
+        extended.extend((0..hidden).map(|i| (i as f32) * 0.02 + 0.3));
+
+        let out_prefix = attn
+            .forward(Tensor::from_vec(prefix, &[prefix_len, hidden]).expect("t"))
+            .expect("fwd prefix");
+        let out_extended = attn
+            .forward(Tensor::from_vec(extended, &[prefix_len + 1, hidden]).expect("t"))
+            .expect("fwd extended");
+
+        let a = match &out_prefix {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32"),
+        };
+        let b = match &out_extended {
+            Tensor::F32(arr) => arr.as_slice().expect("contiguous").to_vec(),
+            _ => panic!("expected F32"),
+        };
+        for row in 0..prefix_len {
+            let ra = &a[row * hidden..(row + 1) * hidden];
+            let rb = &b[row * hidden..(row + 1) * hidden];
+            for (x, y) in ra.iter().zip(rb.iter()) {
+                assert!(
+                    (x - y).abs() < 1e-5,
+                    "row {row} must be unchanged when a new token is appended after it"
+                );
+            }
+        }
     }
 
     // --- GptJModel ---

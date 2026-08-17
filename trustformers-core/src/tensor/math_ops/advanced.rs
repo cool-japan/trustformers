@@ -220,43 +220,29 @@ impl Tensor {
                     ));
                 }
 
-                // Calculate mean along the axis
-                let _mean = a.mean_axis(Axis(axis)).ok_or_else(|| {
-                    crate::errors::compute_error(
-                        "layer_norm",
-                        "axis must be valid for mean operation",
-                    )
-                })?;
+                // One streaming pass per normalized lane: mean, variance and the
+                // normalisation itself, with no intermediate full-size arrays.
+                //
+                // The previous implementation paired `mean_axis(Axis(axis))` /
+                // `map_axis(Axis(axis))` -- whose results are indexed by the
+                // *remaining* axes -- with `axis_iter_mut(Axis(axis))`, which
+                // iterates *along* the axis. For any tensor with more than one
+                // dimension those indices refer to different things, so every
+                // lane was normalised with another lane's statistics (and the
+                // loop panicked outright whenever the normalized axis was longer
+                // than the leading one).
+                let mut result = a.as_standard_layout().into_owned();
 
-                // Simple layer normalization for last dimension
-                let last_dim = a.ndim() - 1;
-                if axis != last_dim {
-                    return Err(TrustformersError::tensor_op_error(
-                        "Layer norm currently only supports last dimension normalization",
-                        "layer_norm",
-                    ));
-                }
-
-                // Calculate statistics along the last axis
-                let mean = a.mean_axis(Axis(axis)).ok_or_else(|| {
-                    crate::errors::compute_error(
-                        "layer_norm",
-                        "axis must be valid for mean operation",
-                    )
-                })?;
-                let var = a.map_axis(Axis(axis), |lane| {
-                    // mean() is None only for an empty lane; layer-norm lanes are non-empty,
-                    // so fall back to 0.0 to keep this map_axis closure infallible.
-                    let lane_mean = lane.mean().unwrap_or(0.0);
-                    lane.mapv(|x| (x - lane_mean).powi(2)).mean().unwrap_or(0.0)
-                });
-
-                // Normalize
-                let mut result = a.clone();
-                for (i, mut lane) in result.axis_iter_mut(Axis(axis)).enumerate() {
-                    let m = mean[i];
-                    let v = var[i];
-                    lane.mapv_inplace(|x| (x - m) / (v + epsilon).sqrt());
+                for mut lane in result.lanes_mut(Axis(axis)) {
+                    let count = lane.len();
+                    if count == 0 {
+                        continue;
+                    }
+                    let n = count as f32;
+                    let mean = lane.iter().sum::<f32>() / n;
+                    let variance = lane.iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>() / n;
+                    let inverse_std = 1.0 / (variance + epsilon).sqrt();
+                    lane.mapv_inplace(|x| (x - mean) * inverse_std);
                 }
 
                 Ok(Tensor::F32(result))

@@ -14,17 +14,23 @@
 //! - Unified calibration toolkit for comprehensive quantization workflow management
 
 mod activation;
+pub mod awq;
 mod base;
 mod bitsandbytes;
+mod calibration_stats;
 mod calibration_toolkit;
 mod fp8;
 mod ggml_advanced;
 mod gguf_k_quants;
+pub mod gptq;
+pub mod int2;
 mod learned;
 mod mixed_bit;
 pub mod mx;
+pub mod packed;
 mod qat;
 mod smoothquant;
+pub mod utils;
 
 // Re-export all items from base module
 pub use base::{
@@ -87,8 +93,8 @@ pub use calibration_toolkit::{
 
 // Re-export FP8 quantization items
 pub use fp8::{
-    estimate_quantization_error, select_fp8_format, DelayedScalingConfig, FP8Config, FP8Format,
-    FP8Quantizer, FP8Tensor, ScaleFactors, ScalingStrategy,
+    estimate_quantization_error, quantization_sqnr_db, select_fp8_format, DelayedScalingConfig,
+    FP8Config, FP8Format, FP8Quantizer, FP8Tensor, ScaleFactors, ScalingStrategy,
 };
 
 // Re-export GGUF K-quant items

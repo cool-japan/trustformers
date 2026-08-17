@@ -1,9 +1,16 @@
-//! Async export functionality for large models
+//! Async export driver for large models.
 //!
-//! This module provides async export capabilities that allow for non-blocking
-//! export operations, progress tracking, and cancellation support.
-
-#![allow(unused_variables)] // Async export
+//! Exports run on a blocking task so the caller's runtime stays responsive, with
+//! step-level progress, cancellation before the write begins, and a result that
+//! reports the real size of the file produced.
+//!
+//! # Progress is step-level, not byte-level
+//!
+//! [`ModelExporter`] has no progress callback: an export is one blocking call.
+//! This module therefore reports the step it is on and two measured byte figures —
+//! the model's real parameter footprint before the write, and the real file size
+//! after it. It does not interpolate a per-layer byte counter, because nothing here
+//! can observe one.
 
 use crate::export::*;
 use crate::traits::Model;
@@ -11,7 +18,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 
@@ -191,7 +198,17 @@ impl AsyncExportManager {
         })
     }
 
-    /// Run the export with progress tracking
+    /// Run the export, reporting progress that reflects work actually done.
+    ///
+    /// The steps below correspond to real operations. There is deliberately no
+    /// per-layer byte counter: [`ModelExporter`] is a single blocking call with no
+    /// progress callback, so the only byte figures reported are the model's real
+    /// parameter footprint (known before the write) and the real size of the file
+    /// on disk afterwards.
+    ///
+    /// A previous revision slept for four seconds while emitting
+    /// `"Converting layer i/100"` and `bytes_processed = (i + 1) * 100_000` for
+    /// every model, whatever its size.
     async fn run_export_with_progress<M: Model + Send + Sync + 'static>(
         model: Arc<M>,
         config: ExportConfig,
@@ -200,11 +217,12 @@ impl AsyncExportManager {
     ) -> Result<ExportResult> {
         let start_time = Instant::now();
 
-        // Step 1: Validation
+        // Step 1: validation — the exporter's own check, plus the model's real
+        // parameter footprint, which is what the export has to write.
         controller
             .update_progress(
                 ExportStep::ValidatingModel,
-                5.0,
+                10.0,
                 "Validating model compatibility",
                 None,
             )
@@ -214,125 +232,57 @@ impl AsyncExportManager {
             return Err(anyhow!("Export cancelled during validation"));
         }
 
-        // Simulate validation work
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        exporter.validate_model(model.as_ref(), config.format)?;
 
-        // Step 2: Model optimization
+        let parameter_bytes: u64 =
+            model.named_tensors().iter().map(|(_, tensor)| tensor.size_bytes() as u64).sum();
+        let total_bytes = (parameter_bytes > 0).then_some(parameter_bytes);
+
+        // Step 2: the export itself. It is a single blocking call, so it cannot be
+        // interrupted once started; the last chance to cancel is here.
         controller
             .update_progress(
-                ExportStep::OptimizingModel,
-                15.0,
-                "Optimizing model for export",
-                None,
+                ExportStep::WritingOutput,
+                20.0,
+                "Writing output file",
+                total_bytes,
             )
             .await?;
 
         if controller.check_cancelled().await {
-            return Err(anyhow!("Export cancelled during optimization"));
+            return Err(anyhow!("Export cancelled before writing"));
         }
 
-        // Simulate optimization work
-        tokio::time::sleep(Duration::from_millis(1000)).await;
-
-        // Step 3: Weight conversion
-        controller
-            .update_progress(
-                ExportStep::ConvertingWeights,
-                40.0,
-                "Converting model weights",
-                Some(10_000_000), // Estimate total bytes
-            )
-            .await?;
-
-        if controller.check_cancelled().await {
-            return Err(anyhow!("Export cancelled during weight conversion"));
-        }
-
-        // Simulate weight conversion with progress updates
-        for i in 0..100 {
-            if controller.check_cancelled().await {
-                return Err(anyhow!("Export cancelled during weight conversion"));
-            }
-
-            controller.bytes_processed.store((i + 1) * 100_000, Ordering::Relaxed);
-
-            let progress = 40.0 + (i as f64 / 100.0) * 30.0; // 40% to 70%
-            controller
-                .update_progress(
-                    ExportStep::ConvertingWeights,
-                    progress,
-                    &format!("Converting layer {}/100", i + 1),
-                    Some(10_000_000),
-                )
-                .await?;
-
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        // Step 4: Quantization (if enabled)
-        if config.quantization.is_some() {
-            controller
-                .update_progress(
-                    ExportStep::ApplyingQuantization,
-                    75.0,
-                    "Applying quantization",
-                    None,
-                )
-                .await?;
-
-            if controller.check_cancelled().await {
-                return Err(anyhow!("Export cancelled during quantization"));
-            }
-
-            tokio::time::sleep(Duration::from_millis(2000)).await;
-        }
-
-        // Step 5: Metadata generation
-        controller
-            .update_progress(
-                ExportStep::GeneratingMetadata,
-                85.0,
-                "Generating metadata",
-                None,
-            )
-            .await?;
-
-        if controller.check_cancelled().await {
-            return Err(anyhow!("Export cancelled during metadata generation"));
-        }
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        // Step 6: Writing output
-        controller
-            .update_progress(ExportStep::WritingOutput, 95.0, "Writing output file", None)
-            .await?;
-
-        if controller.check_cancelled().await {
-            return Err(anyhow!("Export cancelled during file writing"));
-        }
-
-        // Clone config fields needed after the closure
         let format = config.format;
         let output_path = config.output_path.clone();
+        let export_config = config.clone();
 
-        // Perform the actual export (this would be the real export logic)
-        tokio::task::spawn_blocking(move || exporter.export(model.as_ref(), &config)).await??;
+        let export_outcome =
+            tokio::task::spawn_blocking(move || exporter.export(model.as_ref(), &export_config))
+                .await?;
 
-        // Step 7: Finalization
-        controller
-            .update_progress(ExportStep::Finalizing, 98.0, "Finalizing export", None)
-            .await?;
+        if let Err(error) = export_outcome {
+            let _ = controller
+                .update_progress(
+                    ExportStep::Failed,
+                    100.0,
+                    &format!("Export failed: {error}"),
+                    total_bytes,
+                )
+                .await;
+            return Err(error);
+        }
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Step 3: measure what was actually written.
+        let output_size_bytes = measure_output_bytes(&config)?;
+        controller.bytes_processed.store(output_size_bytes, Ordering::Relaxed);
 
-        // Step 8: Completion
         controller
             .update_progress(
                 ExportStep::Completed,
                 100.0,
-                "Export completed successfully",
-                None,
+                "Export completed",
+                total_bytes,
             )
             .await?;
 
@@ -341,9 +291,11 @@ impl AsyncExportManager {
         Ok(ExportResult {
             format,
             output_path,
-            optimizations_applied: vec!["graph_optimization".to_string()],
+            // This wrapper applies no optimization passes of its own; whatever the
+            // exporter did is the exporter's business to report.
+            optimizations_applied: Vec::new(),
             export_time_ms: elapsed.as_millis() as u64,
-            output_size_bytes: controller.bytes_processed.load(Ordering::Relaxed),
+            output_size_bytes,
         })
     }
 
@@ -449,6 +401,46 @@ impl ExportController {
     }
 }
 
+/// Locate the file an exporter wrote and return its real size.
+///
+/// Exporters append their format's extension to `output_path`, so both the bare
+/// path and the extended one are checked. When neither exists the export claimed a
+/// success it did not deliver, and that is reported rather than papered over with
+/// a made-up byte count.
+fn measure_output_bytes(config: &ExportConfig) -> Result<u64> {
+    let extension = match config.format {
+        ExportFormat::ONNX => "onnx",
+        ExportFormat::GGML => "ggml",
+        ExportFormat::GGUF => "gguf",
+        ExportFormat::NNEF => "nnef",
+        ExportFormat::OpenVINO => "xml",
+        ExportFormat::TensorRT => "plan",
+        ExportFormat::TVM => "so",
+        ExportFormat::CoreML => "mlmodel",
+    };
+
+    let candidates = [
+        std::path::PathBuf::from(&config.output_path),
+        std::path::PathBuf::from(format!("{}.{}", config.output_path, extension)),
+    ];
+
+    for candidate in &candidates {
+        if let Ok(metadata) = std::fs::metadata(candidate) {
+            if metadata.is_file() {
+                return Ok(metadata.len());
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "the {:?} exporter reported success but no output file exists at {} or {}.{}",
+        config.format,
+        config.output_path,
+        config.output_path,
+        extension
+    ))
+}
+
 impl ExportStep {
     /// Get a human-readable description of the export step
     pub fn description(&self) -> &'static str {
@@ -497,50 +489,7 @@ pub async fn export_model_async<M: Model + Send + Sync + 'static>(
 mod tests {
     use super::*;
 
-    // Mock model for testing
-    #[derive(Clone)]
-    #[allow(dead_code)]
-    struct MockModel {
-        config: MockConfig,
-    }
-
-    #[derive(Clone, serde::Serialize, serde::Deserialize)]
-    #[allow(dead_code)]
-    struct MockConfig {
-        hidden_size: usize,
-    }
-
-    impl crate::traits::Config for MockConfig {
-        fn architecture(&self) -> &'static str {
-            "mock"
-        }
-    }
-
-    impl crate::traits::Model for MockModel {
-        type Config = MockConfig;
-        type Input = crate::tensor::Tensor;
-        type Output = crate::tensor::Tensor;
-
-        fn forward(&self, input: Self::Input) -> crate::errors::Result<Self::Output> {
-            Ok(input)
-        }
-
-        fn load_pretrained(
-            &mut self,
-            _reader: &mut dyn std::io::Read,
-        ) -> crate::errors::Result<()> {
-            Ok(())
-        }
-
-        fn get_config(&self) -> &Self::Config {
-            &self.config
-        }
-
-        fn num_parameters(&self) -> usize {
-            // Mock model with a reasonable parameter count for testing
-            500_000
-        }
-    }
+    use crate::export::test_support::TestModel;
 
     #[tokio::test]
     async fn test_async_export_manager_creation() {
@@ -583,5 +532,131 @@ mod tests {
 
         assert_eq!(deserialized.progress_percentage, 50.0);
         assert_eq!(deserialized.bytes_processed, 1000000);
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// Regression test: progress used to report `(i + 1) * 100_000` bytes towards a
+    /// hard-coded 10 MB total for every model, and slept four seconds doing it.
+    #[tokio::test]
+    async fn progress_reports_measured_bytes_not_invented_ones() {
+        let dir = temp_dir("trustformers_async_export_real");
+        let output = dir.join("model");
+
+        let model = Arc::new(TestModel::with_seed(1.0));
+        let expected_parameter_bytes: u64 =
+            model.named_tensors().iter().map(|(_, tensor)| tensor.size_bytes() as u64).sum();
+
+        let config = ExportConfig {
+            format: ExportFormat::GGUF,
+            output_path: output.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let started = Instant::now();
+        let mut handle = export_model_async(
+            model,
+            config,
+            ConcreteExporter::GGUF(crate::export::gguf::GGUFExporter::new()),
+        )
+        .await
+        .expect("start export");
+
+        let mut updates = Vec::new();
+        while let Some(progress) = handle.get_progress().await {
+            updates.push(progress);
+        }
+
+        let result = handle.wait().await.expect("export");
+        let wall_clock = started.elapsed();
+
+        // The old implementation slept for at least 2.2 seconds unconditionally.
+        assert!(
+            wall_clock < std::time::Duration::from_secs(2),
+            "a tiny model must not take {wall_clock:?} to export"
+        );
+
+        let real_size =
+            std::fs::metadata(output.with_extension("gguf")).expect("output file").len();
+        assert_eq!(result.output_size_bytes, real_size);
+        assert!(result.optimizations_applied.is_empty());
+
+        for progress in &updates {
+            assert_ne!(
+                progress.bytes_processed, 100_000,
+                "byte counts must not come from a fixed schedule"
+            );
+            if let Some(total) = progress.total_bytes {
+                assert_eq!(
+                    total, expected_parameter_bytes,
+                    "the declared total must be the model's real parameter footprint"
+                );
+            }
+            assert!(
+                !progress.current_operation.contains("/100"),
+                "no invented per-layer counter: {}",
+                progress.current_operation
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failing exporter must surface its error rather than report a completed export.
+    #[tokio::test]
+    async fn a_failing_export_is_reported_as_a_failure() {
+        let dir = temp_dir("trustformers_async_export_fail");
+        let output = dir.join("model");
+
+        let config = ExportConfig {
+            format: ExportFormat::TensorRT,
+            output_path: output.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let handle = export_model_async(
+            Arc::new(TestModel::with_seed(1.0)),
+            config,
+            ConcreteExporter::TensorRT(crate::export::tensorrt::TensorRTExporter::new()),
+        )
+        .await
+        .expect("start export");
+
+        let err = handle.wait().await.expect_err("TensorRT export cannot succeed");
+        assert!(err.to_string().contains("Unsupported operation"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A model with no weights must fail validation before anything is written.
+    #[tokio::test]
+    async fn a_model_without_weights_fails_validation() {
+        let dir = temp_dir("trustformers_async_export_empty");
+        let output = dir.join("model");
+
+        let config = ExportConfig {
+            format: ExportFormat::GGUF,
+            output_path: output.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let handle = export_model_async(
+            Arc::new(TestModel::empty()),
+            config,
+            ConcreteExporter::GGUF(crate::export::gguf::GGUFExporter::new()),
+        )
+        .await
+        .expect("start export");
+
+        let err = handle.wait().await.expect_err("no weights, no export");
+        assert!(err.to_string().contains("named_tensors"), "{err}");
+        assert!(!output.with_extension("gguf").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

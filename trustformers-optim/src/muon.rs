@@ -345,11 +345,11 @@ impl Default for Muon {
 
 impl Optimizer for Muon {
     fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
+        // Stable parameter identity (see `crate::param_id`), resolved before the
+        // mutable data borrow.
+        let param_id = self.state.param_key_for_tensor(parameter)?;
         let param_data = parameter.data_mut()?;
         let grad_data = grad.data()?;
-
-        // Generate unique parameter ID based on memory address
-        let param_id = format!("param_{:p}", param_data.as_ptr());
         let param_size = param_data.len();
 
         // Determine parameter shape

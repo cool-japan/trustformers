@@ -2,12 +2,83 @@
 
 use crate::bert::config::BertConfig;
 use crate::bert::model::BertModel;
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport};
 use std::io::Read;
 use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
 use trustformers_core::layers::Linear;
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Layer, Model, TokenizedInput};
+
+/// Bind a `[out, in]` head projection and its bias from a checkpoint.
+///
+/// A head that the checkpoint does not carry is legitimate — a pretrained
+/// backbone ships without a fine-tuned head — but it is recorded in
+/// [`LoadReport::missing`] so the caller can see that the layer kept its random
+/// initialisation. A head that *is* present must reach the model: silently
+/// leaving it behind is exactly the failure this crate is being cleaned of.
+///
+/// # Errors
+///
+/// Fails when a tensor is present with the wrong shape.
+fn bind_head_linear(
+    checkpoint: &Checkpoint,
+    report: &mut LoadReport,
+    name: &str,
+    weight_shape: [usize; 2],
+    layer: &mut Linear,
+) -> Result<()> {
+    let weight_name = format!("{name}.weight");
+    match checkpoint.take_shaped(&weight_name, &weight_shape)? {
+        Some(weight) => {
+            layer.set_weight(weight)?;
+            report.mark_loaded(&weight_name);
+        },
+        None => report.note_absent(&weight_name),
+    }
+
+    let bias_name = format!("{name}.bias");
+    match checkpoint.take_shaped(&bias_name, &[weight_shape[0]])? {
+        Some(bias) => {
+            layer.set_bias(bias)?;
+            report.mark_loaded(&bias_name);
+        },
+        None => report.note_absent(&bias_name),
+    }
+    Ok(())
+}
+
+/// Bind a head layer norm from a checkpoint, recording what was found.
+///
+/// # Errors
+///
+/// Fails when a tensor is present with the wrong shape.
+fn bind_head_layer_norm(
+    checkpoint: &Checkpoint,
+    report: &mut LoadReport,
+    name: &str,
+    hidden_size: usize,
+    norm: &mut trustformers_core::layers::LayerNorm,
+) -> Result<()> {
+    let weight_name = format!("{name}.weight");
+    match checkpoint.take_shaped(&weight_name, &[hidden_size])? {
+        Some(weight) => {
+            norm.set_weight(weight)?;
+            report.mark_loaded(&weight_name);
+        },
+        None => report.note_absent(&weight_name),
+    }
+
+    let bias_name = format!("{name}.bias");
+    match checkpoint.take_shaped(&bias_name, &[hidden_size])? {
+        Some(bias) => {
+            norm.set_bias(bias)?;
+            report.mark_loaded(&bias_name);
+        },
+        None => report.note_absent(&bias_name),
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct BertForSequenceClassification {
@@ -37,6 +108,11 @@ impl BertForSequenceClassification {
 
     pub fn device(&self) -> Device {
         self.device
+    }
+
+    /// The classification head's weight matrix.
+    pub fn classifier_weight(&self) -> &Tensor {
+        self.classifier.weight()
     }
 }
 
@@ -69,7 +145,7 @@ impl Model for BertForSequenceClassification {
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.bert.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -78,6 +154,33 @@ impl Model for BertForSequenceClassification {
 
     fn num_parameters(&self) -> usize {
         self.bert.num_parameters() + self.classifier.parameter_count()
+    }
+}
+
+impl BertForSequenceClassification {
+    /// Load the encoder and, when the checkpoint carries one, the classifier head.
+    ///
+    /// A previous revision delegated straight to `BertModel::load_pretrained`,
+    /// which loads only the encoder. A fine-tuned checkpoint's `classifier.*`
+    /// tensors were therefore dropped and inference ran through a
+    /// `Tensor::randn` classifier while `load_pretrained` reported success.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when the head is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.bert.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.bert.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "classifier",
+            [self.num_labels, hidden],
+            &mut self.classifier,
+        )?;
+        Ok(report)
     }
 }
 
@@ -147,6 +250,72 @@ impl BertLMHead {
             + self.layer_norm.parameter_count()
             + self.decoder.parameter_count()
     }
+
+    /// Bind the masked-LM head from a checkpoint, if it carries one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a head tensor is present with the wrong shape.
+    fn load_weights(
+        &mut self,
+        checkpoint: &Checkpoint,
+        report: &mut LoadReport,
+        config: &BertConfig,
+    ) -> Result<()> {
+        let hidden = config.hidden_size;
+        bind_head_linear(
+            checkpoint,
+            report,
+            "cls.predictions.transform.dense",
+            [hidden, hidden],
+            &mut self.dense,
+        )?;
+        bind_head_layer_norm(
+            checkpoint,
+            report,
+            "cls.predictions.transform.LayerNorm",
+            hidden,
+            &mut self.layer_norm,
+        )?;
+
+        // The decoder is usually tied to the input embedding table, in which case
+        // the checkpoint stores only its bias under `cls.predictions.bias`.
+        let decoder_weight = "cls.predictions.decoder.weight";
+        match checkpoint.take_shaped(decoder_weight, &[config.vocab_size, hidden])? {
+            Some(weight) => {
+                self.decoder.set_weight(weight)?;
+                report.mark_loaded(decoder_weight);
+            },
+            None => {
+                let tied = [
+                    "bert.embeddings.word_embeddings.weight",
+                    "embeddings.word_embeddings.weight",
+                ]
+                .into_iter()
+                .find(|name| checkpoint.contains(name));
+                match tied {
+                    Some(name) => {
+                        if let Some(weight) =
+                            checkpoint.take_shaped(name, &[config.vocab_size, hidden])?
+                        {
+                            self.decoder.set_weight(weight)?;
+                        }
+                    },
+                    None => report.note_absent(decoder_weight),
+                }
+            },
+        }
+
+        for bias_name in ["cls.predictions.decoder.bias", "cls.predictions.bias"] {
+            if let Some(bias) = checkpoint.take_shaped(bias_name, &[config.vocab_size])? {
+                self.decoder.set_bias(bias)?;
+                report.mark_loaded(bias_name);
+                return Ok(());
+            }
+        }
+        report.note_absent("cls.predictions.bias");
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -171,7 +340,7 @@ impl Model for BertForMaskedLM {
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.bert.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -180,6 +349,27 @@ impl Model for BertForMaskedLM {
 
     fn num_parameters(&self) -> usize {
         self.bert.num_parameters() + self.cls.parameter_count()
+    }
+}
+
+impl BertForMaskedLM {
+    /// Load the encoder and, when the checkpoint carries one, the MLM head.
+    ///
+    /// HuggingFace stores the head as `cls.predictions.transform.dense.*`,
+    /// `cls.predictions.transform.LayerNorm.*` and `cls.predictions.decoder.*`
+    /// (with `cls.predictions.bias` as the decoder bias when the decoder itself
+    /// is tied to the embedding table).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when a head tensor is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.bert.load_from_checkpoint(&checkpoint)?;
+        let config = self.bert.get_config().clone();
+        self.cls.load_weights(&checkpoint, &mut report, &config)?;
+        Ok(report)
     }
 }
 
@@ -238,7 +428,7 @@ impl Model for BertForTokenClassification {
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.bert.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -247,6 +437,28 @@ impl Model for BertForTokenClassification {
 
     fn num_parameters(&self) -> usize {
         self.bert.num_parameters() + self.classifier.parameter_count()
+    }
+}
+
+impl BertForTokenClassification {
+    /// Load the encoder and, when present, the token-classification head.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when the head is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.bert.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.bert.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "classifier",
+            [self.num_labels, hidden],
+            &mut self.classifier,
+        )?;
+        Ok(report)
     }
 }
 
@@ -316,7 +528,7 @@ impl Model for BertForQuestionAnswering {
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.bert.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -325,6 +537,28 @@ impl Model for BertForQuestionAnswering {
 
     fn num_parameters(&self) -> usize {
         self.bert.num_parameters() + self.qa_outputs.parameter_count()
+    }
+}
+
+impl BertForQuestionAnswering {
+    /// Load the encoder and, when present, the span-prediction head.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when the head is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.bert.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.bert.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "qa_outputs",
+            [2, hidden],
+            &mut self.qa_outputs,
+        )?;
+        Ok(report)
     }
 }
 

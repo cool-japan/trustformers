@@ -427,28 +427,20 @@ impl PerformanceProfiler {
         }
     }
 
-    /// Get current memory usage (simplified)
+    /// Get current process memory usage (resident set size, in MB).
+    ///
+    /// Uses `sysinfo`'s cross-platform process query instead of parsing
+    /// `/proc/self/status`, which only exists on Linux -- every other
+    /// platform (including macOS, this project's primary development
+    /// target) silently got a constant `0.0` "measurement" regardless of
+    /// actual memory use.
     fn get_memory_usage(&self) -> f64 {
-        // This is a simplified implementation
-        // In a real implementation, you'd use platform-specific APIs
-        // or libraries like `memory-stats` for accurate memory measurement
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
-                for line in contents.lines() {
-                    if line.starts_with("VmRSS:") {
-                        if let Some(kb_str) = line.split_whitespace().nth(1) {
-                            if let Ok(kb) = kb_str.parse::<f64>() {
-                                return kb / 1024.0; // Convert to MB
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Fallback: return 0 if we can't measure memory
-        0.0
+        let pid = sysinfo::Pid::from(std::process::id() as usize);
+        let system = sysinfo::System::new_all();
+        system
+            .process(pid)
+            .map(|process| process.memory() as f64 / (1024.0 * 1024.0)) // bytes -> MB
+            .unwrap_or(0.0)
     }
 
     /// Generate profiling report
@@ -844,6 +836,31 @@ mod tests {
         let config = ProfilerConfig::default();
         let profiler = PerformanceProfiler::new(config);
         assert_eq!(profiler.results.len(), 0);
+    }
+
+    /// Regression test for the memory-report bug: the old implementation
+    /// only measured anything on Linux (`/proc/self/status`) and returned a
+    /// constant `0.0` on every other platform, including macOS -- this
+    /// project's primary development platform per its own TODO.md. A
+    /// running test process always has nonzero resident memory, so a real
+    /// cross-platform measurement must reflect that.
+    #[test]
+    fn test_get_memory_usage_reports_nonzero_on_this_platform() {
+        let profiler = PerformanceProfiler::new(ProfilerConfig::default());
+        let usage_mb = profiler.get_memory_usage();
+        assert!(
+            usage_mb > 0.0,
+            "expected nonzero resident memory for the running test process, got {}",
+            usage_mb
+        );
+        // Sanity bound: a unit test process is not using terabytes of RAM.
+        // This mostly guards against a units bug (e.g. forgetting the
+        // bytes -> MB conversion).
+        assert!(
+            usage_mb < 1_000_000.0,
+            "implausibly large memory reading: {} MB",
+            usage_mb
+        );
     }
 
     #[test]

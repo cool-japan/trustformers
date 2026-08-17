@@ -203,6 +203,56 @@ pub trait Model: Send + Sync {
     /// }
     /// ```
     fn num_parameters(&self) -> usize;
+
+    /// Enumerates the model's parameters as `(name, tensor)` pairs.
+    ///
+    /// This is the canonical way to read a model's weights without knowing its
+    /// concrete type. Names should follow the checkpoint convention used by the
+    /// model family (for example `encoder.layer.0.attention.self.query.weight`),
+    /// because downstream tooling keys off them.
+    ///
+    /// # Contract
+    ///
+    /// * Every returned name must be unique.
+    /// * The returned tensors must be the *live* parameters of the model, not
+    ///   copies that were synthesised on the fly.
+    /// * The order should be stable across calls on an unmodified model so that
+    ///   serialised artifacts are reproducible.
+    ///
+    /// # Default Implementation
+    ///
+    /// The default returns an empty vector, so that existing implementations keep
+    /// compiling. **Model implementations that want to be exportable must override
+    /// it**: every exporter in [`crate::export`] refuses to write a file for a model
+    /// that exposes no named tensors, rather than inventing weights. The same is
+    /// true for the checkpoint writers and weight converters.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use trustformers_core::traits::Model;
+    ///
+    /// fn total_bytes<M: Model>(model: &M) -> usize {
+    ///     model
+    ///         .named_tensors()
+    ///         .iter()
+    ///         .map(|(_, tensor)| tensor.size_bytes())
+    ///         .sum()
+    /// }
+    /// ```
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        Vec::new()
+    }
+
+    /// Mutable counterpart of [`Model::named_tensors`].
+    ///
+    /// Used by weight loaders to copy checkpoint tensors into a live model. The
+    /// same contract applies: unique names, live parameters, stable order. The
+    /// default returns an empty vector, which makes weight loading fail loudly
+    /// instead of silently doing nothing.
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        Vec::new()
+    }
 }
 
 /// A building block for neural network architectures.

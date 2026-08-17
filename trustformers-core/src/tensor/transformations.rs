@@ -70,9 +70,11 @@ impl Tensor {
                         a.ndim(), dim0, dim1
                     )));
                 }
-                let mut result = a.clone();
-                result.swap_axes(dim0, dim1);
-                Ok(Tensor::F32(result.as_standard_layout().to_owned()))
+                // Swap axes on a *view* -- the former `a.clone()` deep-copied the
+                // whole tensor only for `as_standard_layout()` to copy it again.
+                let mut view = a.view();
+                view.swap_axes(dim0, dim1);
+                Ok(Tensor::F32(view.as_standard_layout().into_owned()))
             },
             Tensor::F64(a) => {
                 if dim0 >= a.ndim() || dim1 >= a.ndim() {
@@ -81,9 +83,11 @@ impl Tensor {
                         a.ndim(), dim0, dim1
                     )));
                 }
-                let mut result = a.clone();
-                result.swap_axes(dim0, dim1);
-                Ok(Tensor::F64(result.as_standard_layout().to_owned()))
+                // Swap axes on a *view* -- the former `a.clone()` deep-copied the
+                // whole tensor only for `as_standard_layout()` to copy it again.
+                let mut view = a.view();
+                view.swap_axes(dim0, dim1);
+                Ok(Tensor::F64(view.as_standard_layout().into_owned()))
             },
             Tensor::I64(a) => {
                 if dim0 >= a.ndim() || dim1 >= a.ndim() {
@@ -92,9 +96,11 @@ impl Tensor {
                         a.ndim(), dim0, dim1
                     )));
                 }
-                let mut result = a.clone();
-                result.swap_axes(dim0, dim1);
-                Ok(Tensor::I64(result.as_standard_layout().to_owned()))
+                // Swap axes on a *view* -- the former `a.clone()` deep-copied the
+                // whole tensor only for `as_standard_layout()` to copy it again.
+                let mut view = a.view();
+                view.swap_axes(dim0, dim1);
+                Ok(Tensor::I64(view.as_standard_layout().into_owned()))
             },
             Tensor::C32(a) => {
                 if dim0 >= a.ndim() || dim1 >= a.ndim() {
@@ -103,9 +109,11 @@ impl Tensor {
                         a.ndim(), dim0, dim1
                     )));
                 }
-                let mut result = a.clone();
-                result.swap_axes(dim0, dim1);
-                Ok(Tensor::C32(result.as_standard_layout().to_owned()))
+                // Swap axes on a *view* -- the former `a.clone()` deep-copied the
+                // whole tensor only for `as_standard_layout()` to copy it again.
+                let mut view = a.view();
+                view.swap_axes(dim0, dim1);
+                Ok(Tensor::C32(view.as_standard_layout().into_owned()))
             },
             Tensor::C64(a) => {
                 if dim0 >= a.ndim() || dim1 >= a.ndim() {
@@ -114,9 +122,11 @@ impl Tensor {
                         a.ndim(), dim0, dim1
                     )));
                 }
-                let mut result = a.clone();
-                result.swap_axes(dim0, dim1);
-                Ok(Tensor::C64(result.as_standard_layout().to_owned()))
+                // Swap axes on a *view* -- the former `a.clone()` deep-copied the
+                // whole tensor only for `as_standard_layout()` to copy it again.
+                let mut view = a.view();
+                view.swap_axes(dim0, dim1);
+                Ok(Tensor::C64(view.as_standard_layout().into_owned()))
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Transpose not supported for this tensor type",
@@ -188,47 +198,36 @@ impl Tensor {
                 shape.len()
             )));
         }
+        // Validate every range up front so no work is done for a request that
+        // cannot succeed (and so a bad trailing axis is reported before the
+        // leading axes have already been narrowed).
+        Self::validate_slice_ranges(&shape, ranges)?;
 
+        // Narrow a *view* one axis at a time and materialise exactly once. The
+        // previous implementation cloned the whole source tensor and then
+        // produced another owned copy per axis, so an N-dimensional slice cost
+        // N+1 full-tensor copies to extract what is usually a small block.
         match self {
             Tensor::F32(a) => {
-                // For now, use a simple approach with chain slicing
-                let mut result = a.clone();
-                for (i, &(start, end)) in ranges.iter().enumerate() {
-                    if end > shape[i] {
-                        return Err(TrustformersError::shape_error(format!(
-                            "Slice end {} exceeds dimension size {} for axis {}",
-                            end, shape[i], i
-                        )));
-                    }
-                    result = result.slice_axis(Axis(i), (start..end).into()).to_owned();
+                let mut view = a.view();
+                for (axis, &(start, end)) in ranges.iter().enumerate() {
+                    view = view.slice_axis_move(Axis(axis), (start..end).into());
                 }
-                Ok(Tensor::F32(result))
+                Ok(Tensor::F32(view.to_owned()))
             },
             Tensor::F64(a) => {
-                let mut result = a.clone();
-                for (i, &(start, end)) in ranges.iter().enumerate() {
-                    if end > shape[i] {
-                        return Err(TrustformersError::shape_error(format!(
-                            "Slice end {} exceeds dimension size {} for axis {}",
-                            end, shape[i], i
-                        )));
-                    }
-                    result = result.slice_axis(Axis(i), (start..end).into()).to_owned();
+                let mut view = a.view();
+                for (axis, &(start, end)) in ranges.iter().enumerate() {
+                    view = view.slice_axis_move(Axis(axis), (start..end).into());
                 }
-                Ok(Tensor::F64(result))
+                Ok(Tensor::F64(view.to_owned()))
             },
             Tensor::I64(a) => {
-                let mut result = a.clone();
-                for (i, &(start, end)) in ranges.iter().enumerate() {
-                    if end > shape[i] {
-                        return Err(TrustformersError::shape_error(format!(
-                            "Slice end {} exceeds dimension size {} for axis {}",
-                            end, shape[i], i
-                        )));
-                    }
-                    result = result.slice_axis(Axis(i), (start..end).into()).to_owned();
+                let mut view = a.view();
+                for (axis, &(start, end)) in ranges.iter().enumerate() {
+                    view = view.slice_axis_move(Axis(axis), (start..end).into());
                 }
-                Ok(Tensor::I64(result))
+                Ok(Tensor::I64(view.to_owned()))
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Multi-dimensional slice not supported for this tensor type",
@@ -376,6 +375,37 @@ impl Tensor {
         self.reshape(&new_shape)
     }
 
+    /// Validate `(start, end)` slice ranges against a tensor shape.
+    ///
+    /// Returns a [`TrustformersError::shape_error`] instead of letting `ndarray`
+    /// panic when there are more ranges than axes, `start > end`, or `end`
+    /// exceeds the axis length.
+    fn validate_slice_ranges(shape: &[usize], ranges: &[(usize, usize)]) -> Result<()> {
+        if ranges.len() > shape.len() {
+            return Err(TrustformersError::shape_error(format!(
+                "slice_ranges got {} ranges for a {}-dimensional tensor with shape {:?}",
+                ranges.len(),
+                shape.len(),
+                shape
+            )));
+        }
+        for (axis, &(start, end)) in ranges.iter().enumerate() {
+            if start > end {
+                return Err(TrustformersError::shape_error(format!(
+                    "slice_ranges: start {} exceeds end {} on axis {}",
+                    start, end, axis
+                )));
+            }
+            if end > shape[axis] {
+                return Err(TrustformersError::shape_error(format!(
+                    "slice_ranges: range {}..{} is out of bounds for axis {} of length {}",
+                    start, end, axis, shape[axis]
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Slice with multiple ranges.
     ///
     /// # Arguments
@@ -386,27 +416,34 @@ impl Tensor {
     ///
     /// A tensor slice.
     pub fn slice_ranges(&self, ranges: &[(usize, usize)]) -> Result<Tensor> {
+        Self::validate_slice_ranges(&self.shape(), ranges)?;
+
+        // Narrow a *view* one axis at a time and materialise exactly once, at the
+        // end. The previous implementation cloned the entire source tensor before
+        // slicing and then produced another owned copy per axis -- inside the
+        // nested Q-/K-block loops of attention that is gigabytes of memcpy per
+        // layer for blocks that are a few hundred KiB.
         match self {
             Tensor::F32(a) => {
-                let mut result = a.clone();
+                let mut view = a.view();
                 for (axis, &(start, end)) in ranges.iter().enumerate() {
-                    result = result.slice_axis(Axis(axis), (start..end).into()).to_owned();
+                    view = view.slice_axis_move(Axis(axis), (start..end).into());
                 }
-                Ok(Tensor::F32(result))
+                Ok(Tensor::F32(view.to_owned()))
             },
             Tensor::F64(a) => {
-                let mut result = a.clone();
+                let mut view = a.view();
                 for (axis, &(start, end)) in ranges.iter().enumerate() {
-                    result = result.slice_axis(Axis(axis), (start..end).into()).to_owned();
+                    view = view.slice_axis_move(Axis(axis), (start..end).into());
                 }
-                Ok(Tensor::F64(result))
+                Ok(Tensor::F64(view.to_owned()))
             },
             Tensor::I64(a) => {
-                let mut result = a.clone();
+                let mut view = a.view();
                 for (axis, &(start, end)) in ranges.iter().enumerate() {
-                    result = result.slice_axis(Axis(axis), (start..end).into()).to_owned();
+                    view = view.slice_axis_move(Axis(axis), (start..end).into());
                 }
-                Ok(Tensor::I64(result))
+                Ok(Tensor::I64(view.to_owned()))
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Multi-range slice not supported for this tensor type",
@@ -939,6 +976,35 @@ impl Tensor {
     /// let indices = Tensor::from_vec(vec![0, 2, 1], &[3, 1, 1])?;
     /// let gathered = tensor.gather(-2, &indices)?;
     /// ```
+    /// Validate the shape preconditions of [`Tensor::gather`].
+    ///
+    /// PyTorch requires `index.size(d) <= input.size(d)` for every axis `d`
+    /// other than the gather axis. Without this check an oversized index tensor
+    /// produced an `ndarray` out-of-bounds *panic* from inside a fallible API.
+    fn validate_gather_shapes(
+        data_shape: &[usize],
+        idx_shape: &[usize],
+        gather_dim: usize,
+    ) -> Result<()> {
+        if data_shape.len() != idx_shape.len() {
+            return Err(TrustformersError::shape_error(format!(
+                "gather: index tensor must have the same rank as the input tensor \
+                 (input {:?}, index {:?})",
+                data_shape, idx_shape
+            )));
+        }
+        for (axis, (&data_dim, &idx_dim)) in data_shape.iter().zip(idx_shape.iter()).enumerate() {
+            if axis != gather_dim && idx_dim > data_dim {
+                return Err(TrustformersError::shape_error(format!(
+                    "gather: index size {} on axis {} exceeds input size {} \
+                     (input {:?}, index {:?}, dim {})",
+                    idx_dim, axis, data_dim, data_shape, idx_shape, gather_dim
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn gather(&self, dim: i64, index: &Tensor) -> Result<Tensor> {
         let normalized_dim = self.normalize_axis(dim, false)?;
 
@@ -948,18 +1014,14 @@ impl Tensor {
                 let idx_shape = idx.shape();
 
                 // Verify shapes are compatible
-                if data_shape.len() != idx_shape.len() {
-                    return Err(TrustformersError::tensor_op_error(
-                        "Index tensor must have same number of dimensions as input tensor",
-                        "gather",
-                    ));
-                }
+                Self::validate_gather_shapes(data_shape, idx_shape, normalized_dim)?;
 
                 // Create output with same shape as index
                 let mut result = ArrayD::zeros(IxDyn(idx_shape));
 
-                // Simplified gather implementation
-                // For each element in the index tensor, gather the corresponding value
+                // For each element of the index tensor, copy the source element
+                // whose coordinate along `dim` is the index value (PyTorch
+                // `torch.gather` semantics; shapes validated above).
                 for idx_flat in 0..idx.len() {
                     let mut idx_coords = Vec::new();
                     let mut remaining = idx_flat;
@@ -997,12 +1059,7 @@ impl Tensor {
                 let data_shape = data.shape();
                 let idx_shape = idx.shape();
 
-                if data_shape.len() != idx_shape.len() {
-                    return Err(TrustformersError::tensor_op_error(
-                        "Index tensor must have same number of dimensions as input tensor",
-                        "gather",
-                    ));
-                }
+                Self::validate_gather_shapes(data_shape, idx_shape, normalized_dim)?;
 
                 let mut result = ArrayD::zeros(IxDyn(idx_shape));
 

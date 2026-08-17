@@ -39,7 +39,7 @@ impl Optimizer for LAMB {
         // LAMB optimizer with layer-wise adaptation
         match (parameter, grad) {
             (Tensor::F32(param), Tensor::F32(grad_arr)) => {
-                let param_id = format!("{:p}", param.as_ptr());
+                let param_id = self.state.param_key(param.as_ptr() as usize, param.len())?;
                 let size = grad_arr.len();
 
                 let exp_avg =

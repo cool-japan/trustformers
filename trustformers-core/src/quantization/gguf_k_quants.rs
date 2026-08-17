@@ -60,10 +60,13 @@ pub enum KQuantType {
     Q4_K,
 }
 
+/// Number of weights in a K-quant super-block (fixed by the GGUF K-quant format).
+pub const K_QUANT_SUPERBLOCK_SIZE: usize = 256;
+
 impl KQuantType {
     /// Get super-block size (always 256 for K-quants)
     pub fn superblock_size(&self) -> usize {
-        256
+        K_QUANT_SUPERBLOCK_SIZE
     }
 
     /// Get number of sub-blocks per super-block
@@ -281,7 +284,16 @@ impl KQuantizer {
 
     /// Quantize a super-block to Q2_K format
     fn quantize_q2k(&self, data: &[f32]) -> Result<Vec<u8>> {
-        assert_eq!(data.len(), 256);
+        // Returned as an error, not asserted: `assert_eq!` is *not* compiled out
+        // in release, so a future K-quant type with a different super-block size
+        // would abort the process mid-quantization instead of reporting a fault.
+        if data.len() != K_QUANT_SUPERBLOCK_SIZE {
+            return Err(TrustformersError::invalid_input(format!(
+                "Q2_K super-block must be {} elements, got {}",
+                K_QUANT_SUPERBLOCK_SIZE,
+                data.len()
+            )));
+        }
 
         let num_subblocks = 16;
         let subblock_size = 16;
@@ -345,7 +357,16 @@ impl KQuantizer {
 
     /// Quantize a super-block to Q3_K format
     fn quantize_q3k(&self, data: &[f32]) -> Result<Vec<u8>> {
-        assert_eq!(data.len(), 256);
+        // Returned as an error, not asserted: `assert_eq!` is *not* compiled out
+        // in release, so a future K-quant type with a different super-block size
+        // would abort the process mid-quantization instead of reporting a fault.
+        if data.len() != K_QUANT_SUPERBLOCK_SIZE {
+            return Err(TrustformersError::invalid_input(format!(
+                "Q3_K super-block must be {} elements, got {}",
+                K_QUANT_SUPERBLOCK_SIZE,
+                data.len()
+            )));
+        }
 
         let num_subblocks = 16;
         let subblock_size = 16;
@@ -377,16 +398,8 @@ impl KQuantizer {
                 hmask[sb / 8] |= 1 << (sb % 8);
             }
 
-            // Pack 6-bit scales
-            // This is simplified - actual packing is more complex
-            let byte_idx = (sb * 6) / 8;
-            let bit_offset = (sb * 6) % 8;
-            if byte_idx < scales.len() {
-                scales[byte_idx] |= scale_6bit << bit_offset;
-                if bit_offset > 2 && byte_idx + 1 < scales.len() {
-                    scales[byte_idx + 1] |= scale_6bit >> (8 - bit_offset);
-                }
-            }
+            // Pack the 6-bit scale into the dense bit stream.
+            pack_6bit(&mut scales, sb, scale_6bit);
 
             // Quantize weights to 3 bits
             let sb_scale = f16_to_f32(d) * (scale_6bit as f32 / 63.0);
@@ -421,7 +434,16 @@ impl KQuantizer {
 
     /// Quantize a super-block to Q4_K format
     fn quantize_q4k(&self, data: &[f32]) -> Result<Vec<u8>> {
-        assert_eq!(data.len(), 256);
+        // Returned as an error, not asserted: `assert_eq!` is *not* compiled out
+        // in release, so a future K-quant type with a different super-block size
+        // would abort the process mid-quantization instead of reporting a fault.
+        if data.len() != K_QUANT_SUPERBLOCK_SIZE {
+            return Err(TrustformersError::invalid_input(format!(
+                "Q4_K super-block must be {} elements, got {}",
+                K_QUANT_SUPERBLOCK_SIZE,
+                data.len()
+            )));
+        }
 
         let num_subblocks = 8;
         let subblock_size = 32;
@@ -449,21 +471,9 @@ impl KQuantizer {
             let scale_q = ((sb_max / f16_to_f32(d)) * 63.0).round().clamp(0.0, 63.0) as u8;
             let min_q = ((sb_min.abs() / f16_to_f32(dmin)) * 63.0).round().clamp(0.0, 63.0) as u8;
 
-            // Pack 6-bit values
-            let byte_idx = (sb * 6) / 8;
-            let bit_offset = (sb * 6) % 8;
-            if byte_idx < scales.len() {
-                scales[byte_idx] |= scale_q << bit_offset;
-                if bit_offset > 2 && byte_idx + 1 < scales.len() {
-                    scales[byte_idx + 1] |= scale_q >> (8 - bit_offset);
-                }
-            }
-            if byte_idx < mins.len() {
-                mins[byte_idx] |= min_q << bit_offset;
-                if bit_offset > 2 && byte_idx + 1 < mins.len() {
-                    mins[byte_idx + 1] |= min_q >> (8 - bit_offset);
-                }
-            }
+            // Pack the 6-bit scale and minimum into their dense bit streams.
+            pack_6bit(&mut scales, sb, scale_q);
+            pack_6bit(&mut mins, sb, min_q);
 
             // Quantize weights to 4 bits
             let sb_scale = f16_to_f32(d) * (scale_q as f32 / 63.0);
@@ -580,14 +590,8 @@ impl KQuantizer {
         let mut weights = Vec::with_capacity(256);
 
         for sb in 0..16 {
-            // Extract 6-bit scale (simplified)
-            let byte_idx = (sb * 6) / 8;
-            let bit_offset = (sb * 6) % 8;
-            let mut scale_q = if byte_idx < scales.len() {
-                (scales[byte_idx] >> bit_offset) & 0x3F
-            } else {
-                32
-            };
+            // Extract the 6-bit scale, recombining the byte-straddling spill.
+            let mut scale_q = unpack_6bit(scales, sb).unwrap_or(32);
 
             // Add high bit from hmask
             if hmask[sb / 8] & (1 << (sb % 8)) != 0 {
@@ -635,14 +639,8 @@ impl KQuantizer {
         let mut weights = Vec::with_capacity(256);
 
         for sb in 0..8 {
-            // Extract 6-bit scale (simplified)
-            let byte_idx = (sb * 6) / 8;
-            let bit_offset = (sb * 6) % 8;
-            let scale_q = if byte_idx < scales.len() {
-                (scales[byte_idx] >> bit_offset) & 0x3F
-            } else {
-                32
-            };
+            // Extract the 6-bit scale, recombining the byte-straddling spill.
+            let scale_q = unpack_6bit(scales, sb).unwrap_or(32);
 
             let sb_scale = d * (scale_q as f32 / 63.0);
 
@@ -664,49 +662,57 @@ impl KQuantizer {
     }
 }
 
-/// Convert f32 to FP16
-fn f32_to_f16(val: f32) -> F16 {
-    // Simplified conversion - in production, use half crate
-    let bits = val.to_bits();
-    let sign = (bits >> 31) & 1;
-    let exp = ((bits >> 23) & 0xFF) as i32;
-    let mant = bits & 0x7F_FFFF;
-
-    if exp == 0 {
-        return (sign as u16) << 15;
+/// Write a 6-bit value into a densely packed little-endian bit stream.
+///
+/// Field `index` occupies bits `index*6 .. index*6+6`; when that range straddles
+/// a byte boundary the high part spills into the next byte.
+fn pack_6bit(buffer: &mut [u8], index: usize, value: u8) {
+    let value = value & 0x3F;
+    let bit_index = index * 6;
+    let byte_index = bit_index / 8;
+    let bit_offset = bit_index % 8;
+    if byte_index >= buffer.len() {
+        return;
     }
-
-    let exp_f16 = exp - 127 + 15;
-    if exp_f16 <= 0 {
-        return (sign as u16) << 15;
+    buffer[byte_index] |= value << bit_offset;
+    // A 6-bit field starting at offset 4 or 6 spills 2 or 4 bits into the next byte.
+    if bit_offset > 2 && byte_index + 1 < buffer.len() {
+        buffer[byte_index + 1] |= value >> (8 - bit_offset);
     }
-    if exp_f16 >= 31 {
-        return ((sign as u16) << 15) | 0x7C00; // Infinity
-    }
-
-    let mant_f16 = (mant >> 13) as u16;
-    ((sign as u16) << 15) | ((exp_f16 as u16) << 10) | (mant_f16 & 0x3FF)
 }
 
-/// Convert FP16 to f32
+/// Read back a value written by [`pack_6bit`].
+///
+/// The spill half **must** be recombined: reading only
+/// `(buffer[byte] >> offset) & 0x3F` -- which both K-quant decoders used to do --
+/// silently truncates every field that straddles a byte boundary (10 of every 16
+/// sub-block scales), so a round trip returned scales like `53 -> 1`.
+fn unpack_6bit(buffer: &[u8], index: usize) -> Option<u8> {
+    let bit_index = index * 6;
+    let byte_index = bit_index / 8;
+    let bit_offset = bit_index % 8;
+    let low = *buffer.get(byte_index)?;
+    let mut value = (low >> bit_offset) & 0x3F;
+    if bit_offset > 2 {
+        let high = *buffer.get(byte_index + 1)?;
+        value |= (high << (8 - bit_offset)) & 0x3F;
+    }
+    Some(value)
+}
+
+/// Convert f32 to IEEE-754 binary16 (round-to-nearest-even, denormals preserved).
+///
+/// Delegates to `half::f16`; the previous hand-rolled version truncated the
+/// mantissa and flushed denormals to zero, biasing every stored K-quant scale.
+#[inline]
+fn f32_to_f16(val: f32) -> F16 {
+    half::f16::from_f32(val).to_bits()
+}
+
+/// Convert IEEE-754 binary16 to f32 (exact; every binary16 value fits in f32).
+#[inline]
 fn f16_to_f32(val: F16) -> f32 {
-    let sign = (val >> 15) & 1;
-    let exp = ((val >> 10) & 0x1F) as i32;
-    let mant = (val & 0x3FF) as u32;
-
-    if exp == 0 {
-        return if sign == 1 { -0.0 } else { 0.0 };
-    }
-
-    if exp == 31 {
-        return if sign == 1 { f32::NEG_INFINITY } else { f32::INFINITY };
-    }
-
-    let exp_f32 = exp - 15 + 127;
-    let mant_f32 = mant << 13;
-
-    let bits = ((sign as u32) << 31) | ((exp_f32 as u32) << 23) | mant_f32;
-    f32::from_bits(bits)
+    half::f16::from_bits(val).to_f32()
 }
 
 #[cfg(test)]
@@ -783,6 +789,79 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    /// Regression test for the 6-bit sub-block scale codec.
+    ///
+    /// The decoder used to read only `(buffer[byte] >> offset) & 0x3F`, dropping
+    /// the spill half of every field that straddles a byte boundary. With 16
+    /// fields packed into 12 bytes, 10 of them straddle -- so a scale of 53 came
+    /// back as 1, and the dequantized weights of those sub-blocks were scaled by
+    /// a nearly arbitrary factor.
+    #[test]
+    fn six_bit_scale_codec_round_trips_every_field() {
+        // 16 fields (Q3_K) into 12 bytes.
+        let values: Vec<u8> = (0..16).map(|i| ((i * 7 + 5) % 64) as u8).collect();
+        let mut buffer = vec![0u8; 12];
+        for (index, &value) in values.iter().enumerate() {
+            pack_6bit(&mut buffer, index, value);
+        }
+        for (index, &value) in values.iter().enumerate() {
+            assert_eq!(
+                unpack_6bit(&buffer, index),
+                Some(value),
+                "field {index} did not survive the round trip"
+            );
+        }
+    }
+
+    /// The same codec must round-trip the 8-field / 6-byte layout used by Q4_K.
+    #[test]
+    fn six_bit_scale_codec_round_trips_the_q4k_layout() {
+        for offset in 0..64u8 {
+            let values: Vec<u8> = (0..8).map(|i| (offset.wrapping_add(i * 11)) & 0x3F).collect();
+            let mut buffer = vec![0u8; 6];
+            for (index, &value) in values.iter().enumerate() {
+                pack_6bit(&mut buffer, index, value);
+            }
+            let decoded: Vec<u8> =
+                (0..8).map(|index| unpack_6bit(&buffer, index).unwrap_or(255)).collect();
+            assert_eq!(decoded, values, "offset {offset} round trip failed");
+        }
+    }
+
+    /// Every full 6-bit value must survive in every slot position, including the
+    /// all-ones pattern that makes a truncating decoder most obviously wrong.
+    #[test]
+    fn six_bit_scale_codec_handles_saturated_values_in_every_slot() {
+        for index in 0..16usize {
+            let mut buffer = vec![0u8; 12];
+            pack_6bit(&mut buffer, index, 0x3F);
+            assert_eq!(
+                unpack_6bit(&buffer, index),
+                Some(0x3F),
+                "0x3F was truncated in slot {index}"
+            );
+            // No neighbouring field may have been corrupted.
+            for other in 0..16usize {
+                if other == index {
+                    continue;
+                }
+                let neighbour = unpack_6bit(&buffer, other).unwrap_or(255);
+                assert!(
+                    neighbour == 0 || fields_share_a_byte(index, other),
+                    "slot {other} was polluted by a write to slot {index}: {neighbour}"
+                );
+            }
+        }
+    }
+
+    /// Two 6-bit fields share a byte when their bit ranges land in the same byte.
+    fn fields_share_a_byte(a: usize, b: usize) -> bool {
+        let range = |i: usize| ((i * 6) / 8, (i * 6 + 5) / 8);
+        let (a_lo, a_hi) = range(a);
+        let (b_lo, b_hi) = range(b);
+        a_lo <= b_hi && b_lo <= a_hi
     }
 
     #[test]

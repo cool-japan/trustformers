@@ -425,10 +425,67 @@ impl QuantizationParams {
     }
 }
 
-/// QAT Linear layer
+/// A layer whose weight tensor quantization-aware training can read and substitute.
+///
+/// QAT needs two capabilities that the bare [`Layer`] trait does not expose: reading the
+/// layer's *actual* weights (so the observer statistics describe the real distribution) and
+/// running the layer's forward pass with a substituted weight (so the fake-quantized values
+/// are the ones that reach the output). Implementations are provided for
+/// [`trustformers_core::layers::Linear`] and [`trustformers_core::layers::Conv2d`]; any other
+/// layer can opt in by implementing this trait.
+pub trait QuantizableLayer: Layer<Input = Tensor, Output = Tensor> {
+    /// The layer's current weight tensor.
+    fn quantizable_weight(&self) -> Result<Tensor>;
+
+    /// Run the layer's forward pass using `weight` in place of the stored weight.
+    ///
+    /// The stored weight is left untouched — QAT is a *simulation* of quantization during
+    /// training, not an in-place quantization of the master weights.
+    fn forward_with_weight(&self, input: Tensor, weight: &Tensor) -> Result<Tensor>;
+}
+
+impl QuantizableLayer for trustformers_core::layers::Linear {
+    fn quantizable_weight(&self) -> Result<Tensor> {
+        Ok(self.weight().clone())
+    }
+
+    fn forward_with_weight(&self, input: Tensor, weight: &Tensor) -> Result<Tensor> {
+        let mut substituted = self.clone();
+        substituted.set_weight(weight.clone())?;
+        substituted.forward(input)
+    }
+}
+
+impl QuantizableLayer for trustformers_core::layers::Conv2d {
+    fn quantizable_weight(&self) -> Result<Tensor> {
+        self.weight.clone().ok_or_else(|| {
+            trustformers_core::errors::TrustformersError::tensor_op_error(
+                "Conv2d weights not initialized. Call init_weights() before wrapping in QAT.",
+                "QuantizableLayer::quantizable_weight",
+            )
+        })
+    }
+
+    fn forward_with_weight(&self, input: Tensor, weight: &Tensor) -> Result<Tensor> {
+        let mut substituted = self.clone();
+        substituted.weight = Some(weight.clone());
+        substituted.forward(input)
+    }
+}
+
+/// QAT Linear layer.
+///
+/// Wraps a [`QuantizableLayer`] and, once `config.start_step` is reached, runs the forward
+/// pass with a fake-quantized copy of the wrapped layer's **real** weights. The observer
+/// statistics therefore describe the actual weight distribution and the quantization noise
+/// actually reaches the output.
+///
+/// The backward pass is a straight-through estimator: [`Layer::forward`] carries no autodiff
+/// tape in this crate, so the STE mask lives in [`QATTrainer::straight_through_weight_grad`],
+/// which the training loop applies to the incoming weight gradient.
 pub struct QATLinear {
     /// Original linear layer
-    linear: Arc<dyn Layer<Input = Tensor, Output = Tensor>>,
+    linear: Arc<dyn QuantizableLayer>,
     /// QAT configuration
     config: QATConfig,
     /// Quantization parameters
@@ -440,18 +497,23 @@ pub struct QATLinear {
 }
 
 impl QATLinear {
-    pub fn new(linear: Arc<dyn Layer<Input = Tensor, Output = Tensor>>, config: QATConfig) -> Self {
-        // Initialize quantization parameters based on weight shape
-        let weight_shape = vec![1]; // Simplified - would get from linear layer
-        let quant_params = QuantizationParams::new(&weight_shape, config.symmetric);
+    /// Wrap `linear` for quantization-aware training.
+    ///
+    /// The quantization parameters are sized from the layer's real weight tensor, so this
+    /// constructor fails when the weight cannot be read (e.g. an uninitialised `Conv2d`).
+    pub fn new(linear: Arc<dyn QuantizableLayer>, config: QATConfig) -> Result<Self> {
+        // Per-tensor quantization: one scale (and one zero point) for the whole weight.
+        let quant_params = QuantizationParams::new(&[1], config.symmetric);
+        // Validate up-front that the weight is readable rather than failing on first forward.
+        let _ = linear.quantizable_weight()?;
 
-        Self {
+        Ok(Self {
             linear,
             config,
             quant_params: Arc::new(Mutex::new(quant_params)),
             step: Arc::new(Mutex::new(0)),
             enabled: true,
-        }
+        })
     }
 
     /// Enable or disable QAT
@@ -464,30 +526,9 @@ impl QATLinear {
         Arc::clone(&self.quant_params)
     }
 
-    /// Extract weight tensor from the wrapped linear layer
-    fn get_layer_weights(&self) -> Result<Tensor> {
-        // Since we're working with a trait object, we simulate weight extraction
-        // In a production implementation, this would use a WeightAccessor trait
-        // or downcast to concrete layer types to extract actual weights
-
-        // Use typical transformer layer dimensions for weight simulation
-        let weight_shape = vec![768, 768]; // Standard hidden_size for many models
-
-        // Initialize with Xavier/Glorot uniform initialization for realistic weights
-        let fan_in = weight_shape[0] as f32;
-        let fan_out = weight_shape[1] as f32;
-        let limit = (6.0 / (fan_in + fan_out)).sqrt();
-
-        // Generate weight data with proper initialization distribution
-        let total_elements = weight_shape.iter().product::<usize>();
-        let weight_data: Vec<f32> = (0..total_elements)
-            .map(|_| {
-                let uniform_val = fastrand::f32(); // [0.0, 1.0)
-                (uniform_val - 0.5) * 2.0 * limit // Scale to [-limit, limit]
-            })
-            .collect();
-
-        Tensor::from_vec(weight_data, &weight_shape)
+    /// The wrapped layer's real weight tensor.
+    pub fn layer_weights(&self) -> Result<Tensor> {
+        self.linear.quantizable_weight()
     }
 }
 
@@ -506,8 +547,8 @@ impl Layer for QATLinear {
             return self.linear.forward(input);
         }
 
-        // Get weight tensor from the linear layer
-        let weight = self.get_layer_weights()?;
+        // Read the wrapped layer's actual weights.
+        let weight = self.linear.quantizable_weight()?;
 
         // Update statistics if not frozen
         if self.config.freeze_step.is_none_or(|freeze_step| current_step < freeze_step) {
@@ -517,27 +558,29 @@ impl Layer for QATLinear {
             params.compute_params(self.config.default_bits, self.config.symmetric)?;
         }
 
-        // Simulate quantization on weights
-        let params = self.quant_params.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _quantized_weight = fake_quantize(
-            &weight,
-            &params.scale,
-            params.zero_point.as_ref(),
-            self.config.default_bits,
-            self.config.symmetric,
-        )?;
-        drop(params);
+        let quantized_weight = {
+            let params = self.quant_params.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            fake_quantize(
+                &weight,
+                &params.scale,
+                params.zero_point.as_ref(),
+                self.config.default_bits,
+                self.config.symmetric,
+            )?
+        };
 
-        // Forward with quantized weights
-        // In practice, this would use the quantized weights in the linear operation
-        self.linear.forward(input)
+        // Forward with the fake-quantized weights — this is what makes QAT observable.
+        self.linear.forward_with_weight(input, &quantized_weight)
     }
 }
 
-/// QAT Convolution layer
+/// QAT Convolution layer.
+///
+/// Quantizes both the input activations (when requested) and the wrapped layer's **real**
+/// kernel weights, then runs the convolution with the fake-quantized kernel.
 pub struct QATConv2d {
     /// Original convolution layer
-    conv: Arc<dyn Layer<Input = Tensor, Output = Tensor>>,
+    conv: Arc<dyn QuantizableLayer>,
     /// QAT configuration
     config: QATConfig,
     /// Weight quantization parameters
@@ -549,13 +592,17 @@ pub struct QATConv2d {
 }
 
 impl QATConv2d {
+    /// Wrap `conv` for quantization-aware training.
+    ///
+    /// Fails when the wrapped layer's weights cannot be read (an uninitialised `Conv2d`),
+    /// rather than silently quantizing an invented kernel.
     pub fn new(
-        conv: Arc<dyn Layer<Input = Tensor, Output = Tensor>>,
+        conv: Arc<dyn QuantizableLayer>,
         config: QATConfig,
         quantize_activations: bool,
-    ) -> Self {
-        let weight_shape = vec![1]; // Simplified
-        let weight_params = QuantizationParams::new(&weight_shape, config.symmetric);
+    ) -> Result<Self> {
+        let _ = conv.quantizable_weight()?;
+        let weight_params = QuantizationParams::new(&[1], config.symmetric);
 
         let activation_params = if quantize_activations {
             Some(Arc::new(Mutex::new(QuantizationParams::new(
@@ -566,13 +613,18 @@ impl QATConv2d {
             None
         };
 
-        Self {
+        Ok(Self {
             conv,
             config,
             weight_params: Arc::new(Mutex::new(weight_params)),
             activation_params,
             step: Arc::new(Mutex::new(0)),
-        }
+        })
+    }
+
+    /// Quantization parameters observed on the kernel weights.
+    pub fn get_weight_params(&self) -> Arc<Mutex<QuantizationParams>> {
+        Arc::clone(&self.weight_params)
     }
 }
 
@@ -589,12 +641,15 @@ impl Layer for QATConv2d {
             return self.conv.forward(input);
         }
 
+        let observing =
+            self.config.freeze_step.is_none_or(|freeze_step| current_step < freeze_step);
+
         // Quantize input activations if configured
         let quantized_input = if let Some(act_params) = &self.activation_params {
-            if self.config.freeze_step.is_none_or(|freeze_step| current_step < freeze_step) {
+            if observing {
                 let mut params = act_params.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 params.update_stats(&input, self.config.observer_momentum)?;
-                params.compute_params(self.config.default_bits, self.config.symmetric)?;
+                params.compute_params(self.config.activation_bits, self.config.symmetric)?;
             }
 
             let params = act_params.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -602,15 +657,33 @@ impl Layer for QATConv2d {
                 &input,
                 &params.scale,
                 params.zero_point.as_ref(),
-                self.config.default_bits,
+                self.config.activation_bits,
                 self.config.symmetric,
             )?
         } else {
             input.clone()
         };
 
-        // Apply convolution with quantized weights (simplified)
-        self.conv.forward(quantized_input)
+        // Quantize the real kernel weights.
+        let weight = self.conv.quantizable_weight()?;
+        if observing {
+            let mut params =
+                self.weight_params.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            params.update_stats(&weight, self.config.observer_momentum)?;
+            params.compute_params(self.config.default_bits, self.config.symmetric)?;
+        }
+        let quantized_weight = {
+            let params = self.weight_params.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            fake_quantize(
+                &weight,
+                &params.scale,
+                params.zero_point.as_ref(),
+                self.config.default_bits,
+                self.config.symmetric,
+            )?
+        };
+
+        self.conv.forward_with_weight(quantized_input, &quantized_weight)
     }
 }
 
@@ -722,8 +795,9 @@ pub fn fake_quantize(
         })
         .collect();
 
-    // Straight-through estimator: forward uses dequantized values,
-    // backward passes gradients through unchanged
+    // Forward-only: this returns the dequantized values. The straight-through estimator is
+    // the *backward* half of QAT and lives in `QATTrainer::straight_through_weight_grad`,
+    // because `Layer::forward` carries no autodiff tape in this crate.
     Tensor::from_vec(result_data, &tensor.shape())
 }
 
@@ -1151,6 +1225,61 @@ impl QATTrainer {
         }
     }
 
+    /// Straight-through estimator mask for a weight gradient.
+    ///
+    /// The forward pass replaces `w` with `fake_quantize(w)`, whose derivative is zero almost
+    /// everywhere. The STE substitutes the identity for that derivative *inside* the
+    /// representable range and zero outside it (the "clipped" STE of Bengio et al. 2013,
+    /// as used by PyTorch's `fake_quantize_per_tensor_affine` backward):
+    ///
+    /// ```text
+    ///                 ⎧ g_i   if q_min ≤ round(w_i/scale) + zero_point ≤ q_max
+    /// g'_i =          ⎨
+    ///                 ⎩ 0     otherwise
+    /// ```
+    ///
+    /// Apply this to the gradient that flows into the wrapped layer's weight before the
+    /// optimizer step, so clamped weights are not pushed further out of range.
+    pub fn straight_through_weight_grad(
+        &self,
+        weight_grad: &Tensor,
+        weight: &Tensor,
+        scale: &Tensor,
+        zero_point: Option<&Tensor>,
+        bits: u8,
+        symmetric: bool,
+    ) -> Result<Tensor> {
+        if weight_grad.shape() != weight.shape() {
+            return Err(trustformers_core::errors::TrustformersError::shape_error(format!(
+                "straight_through_weight_grad: gradient shape {:?} does not match weight shape {:?}",
+                weight_grad.shape(),
+                weight.shape()
+            )));
+        }
+
+        let q_min = if symmetric { -(1 << (bits - 1)) } else { 0 } as f32;
+        let q_max = if symmetric { (1 << (bits - 1)) - 1 } else { (1 << bits) - 1 } as f32;
+        let scale_val = scale.get_float(0)?;
+        let zero_point_val = if let Some(zp) = zero_point { zp.get_float(0)? } else { 0.0 };
+
+        let weights = weight.data()?;
+        let grads = weight_grad.data()?;
+        let masked: Vec<f32> = weights
+            .iter()
+            .zip(grads.iter())
+            .map(|(&w, &g)| {
+                let q = (w / scale_val).round() + zero_point_val;
+                if q < q_min || q > q_max {
+                    0.0
+                } else {
+                    g
+                }
+            })
+            .collect();
+
+        Tensor::from_vec(masked, &weight.shape())
+    }
+
     /// Update quantization parameters with gradients
     pub fn update_quant_params(
         &self,
@@ -1199,30 +1328,250 @@ impl CalibrationDataset {
     }
 }
 
-/// QAT-specific loss function that includes quantization error
+/// QAT loss: **mean squared error** on the task plus a quantization-error penalty.
+///
+/// ```text
+/// L = MSE(predictions, targets) + alpha * quant_error
+/// ```
+///
+/// The task term is squared error, not cross-entropy — for classification QAT use
+/// [`qat_loss_with`] and pass [`crate::losses::CrossEntropyLoss`], which is what the task
+/// actually calls for.
 pub fn qat_loss(
     predictions: &Tensor,
     targets: &Tensor,
     quant_error: f32,
     alpha: f32,
 ) -> Result<Tensor> {
-    // Regular loss (e.g., cross-entropy)
     let task_loss = compute_task_loss(predictions, targets)?;
-
-    // Add quantization error penalty
     let total_loss = task_loss.add_scalar(alpha * quant_error)?;
-
     Ok(total_loss)
 }
 
+/// QAT loss with a caller-supplied task loss.
+///
+/// ```text
+/// L = loss_fn(predictions, targets) + alpha * quant_error
+/// ```
+///
+/// This is the form to use whenever the task is not regression: pass
+/// [`crate::losses::CrossEntropyLoss`] for classification / language modelling and the
+/// reported number is a real cross-entropy rather than squared error on logits.
+pub fn qat_loss_with(
+    loss_fn: &dyn crate::losses::Loss,
+    predictions: &Tensor,
+    targets: &Tensor,
+    quant_error: f32,
+    alpha: f32,
+) -> Result<f32> {
+    let task_loss = loss_fn.compute(predictions, targets)?;
+    Ok(task_loss + alpha * quant_error)
+}
+
+/// Mean squared error between `predictions` and `targets`.
+///
+/// Used as the default task loss by [`qat_loss`] when no explicit loss function is supplied.
 fn compute_task_loss(predictions: &Tensor, targets: &Tensor) -> Result<Tensor> {
-    // Placeholder for actual loss computation
     predictions.sub(targets)?.pow(2.0)?.mean()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trustformers_core::layers::Linear;
+
+    /// A `Linear` with a known, tiny weight so quantization effects are checkable by hand.
+    fn linear_with_weight(values: Vec<f32>, out_features: usize, in_features: usize) -> Linear {
+        let mut linear = Linear::new(in_features, out_features, false);
+        let weight = Tensor::from_vec(values, &[out_features, in_features])
+            .expect("weight tensor creation failed");
+        linear.set_weight(weight).expect("set_weight failed");
+        linear
+    }
+
+    // ── QAT reads and uses the real weights ──────────────────────────────────
+
+    #[test]
+    fn test_qat_linear_reads_the_wrapped_layer_weights() {
+        // Regression: `get_layer_weights` used to fabricate a fresh random [768, 768] tensor
+        // on every call, so the observer statistics described noise and two consecutive calls
+        // returned different values.
+        let linear = linear_with_weight(vec![0.25, -0.5, 0.75, -1.0], 2, 2);
+        let qat = QATLinear::new(
+            Arc::new(linear),
+            QATConfig {
+                start_step: 0,
+                ..QATConfig::default()
+            },
+        )
+        .expect("QATLinear::new failed");
+
+        let first = qat.layer_weights().expect("weights");
+        let second = qat.layer_weights().expect("weights");
+        assert_eq!(
+            first.shape(),
+            &[2, 2],
+            "shape must come from the real layer"
+        );
+        assert_eq!(
+            first.data().expect("data"),
+            vec![0.25, -0.5, 0.75, -1.0],
+            "weights must be the layer's own"
+        );
+        assert_eq!(
+            first.data().expect("data"),
+            second.data().expect("data"),
+            "reading the weights twice must give the same tensor"
+        );
+    }
+
+    #[test]
+    fn test_qat_changes_the_forward_output() {
+        // Regression: the old forward discarded the quantized weight and called the
+        // unquantized layer, so enabling QAT was a no-op. Two bits make the quantization
+        // error unmistakable.
+        let weights = vec![0.13, -0.42, 0.87, -0.61];
+        let linear = linear_with_weight(weights.clone(), 2, 2);
+        let reference = linear_with_weight(weights, 2, 2);
+
+        let config = QATConfig {
+            start_step: 0,
+            default_bits: 2,
+            symmetric: true,
+            ..QATConfig::default()
+        };
+        let qat = QATLinear::new(Arc::new(linear), config).expect("QATLinear::new failed");
+
+        let input = Tensor::from_vec(vec![1.0f32, -1.0], &[1, 2]).expect("input");
+        let plain = reference.forward(input.clone()).expect("plain forward");
+        let quantized = qat.forward(input).expect("qat forward");
+
+        let plain_data = plain.data().expect("plain data");
+        let quant_data = quantized.data().expect("quant data");
+        let max_diff = plain_data
+            .iter()
+            .zip(quant_data.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff > 1e-4,
+            "2-bit QAT must perturb the output, max diff was {max_diff}"
+        );
+    }
+
+    #[test]
+    fn test_qat_disabled_matches_the_plain_layer() {
+        let weights = vec![0.13, -0.42, 0.87, -0.61];
+        let linear = linear_with_weight(weights.clone(), 2, 2);
+        let reference = linear_with_weight(weights, 2, 2);
+
+        let mut qat = QATLinear::new(
+            Arc::new(linear),
+            QATConfig {
+                start_step: 0,
+                default_bits: 2,
+                ..QATConfig::default()
+            },
+        )
+        .expect("QATLinear::new failed");
+        qat.set_enabled(false);
+
+        let input = Tensor::from_vec(vec![1.0f32, -1.0], &[1, 2]).expect("input");
+        let plain = reference.forward(input.clone()).expect("plain");
+        let out = qat.forward(input).expect("qat");
+        assert_eq!(plain.data().expect("a"), out.data().expect("b"));
+    }
+
+    #[test]
+    fn test_qat_observer_statistics_track_the_real_weight_range() {
+        // The running min/max must bracket the actual weights, not random noise.
+        let linear = linear_with_weight(vec![0.2, -0.8, 0.5, -0.1], 2, 2);
+        let qat = QATLinear::new(
+            Arc::new(linear),
+            QATConfig {
+                start_step: 0,
+                ..QATConfig::default()
+            },
+        )
+        .expect("QATLinear::new failed");
+
+        let input = Tensor::from_vec(vec![1.0f32, 1.0], &[1, 2]).expect("input");
+        qat.forward(input).expect("forward");
+
+        let params = qat.get_quant_params();
+        let guard = params.lock().expect("lock");
+        let min = guard.running_min.get_float(0).expect("min");
+        let max = guard.running_max.get_float(0).expect("max");
+        assert!(
+            (min - (-0.8)).abs() < 1e-5,
+            "running min should be -0.8, got {min}"
+        );
+        assert!(
+            (max - 0.5).abs() < 1e-5,
+            "running max should be 0.5, got {max}"
+        );
+    }
+
+    #[test]
+    fn test_qat_linear_before_start_step_is_a_plain_forward() {
+        let weights = vec![0.13, -0.42, 0.87, -0.61];
+        let linear = linear_with_weight(weights.clone(), 2, 2);
+        let reference = linear_with_weight(weights, 2, 2);
+        let qat = QATLinear::new(
+            Arc::new(linear),
+            QATConfig {
+                start_step: 100,
+                default_bits: 2,
+                ..QATConfig::default()
+            },
+        )
+        .expect("QATLinear::new failed");
+
+        let input = Tensor::from_vec(vec![1.0f32, -1.0], &[1, 2]).expect("input");
+        let plain = reference.forward(input.clone()).expect("plain");
+        let out = qat.forward(input).expect("qat");
+        assert_eq!(plain.data().expect("a"), out.data().expect("b"));
+    }
+
+    #[test]
+    fn test_straight_through_estimator_masks_out_of_range_weights() {
+        let trainer = QATTrainer::new(0.01, 0.0);
+        // scale 0.1, symmetric 8-bit => representable |q| <= 127 => |w| <= 12.7
+        let weight = Tensor::from_vec(vec![1.0f32, 20.0, -30.0, -2.0], &[4]).expect("weight");
+        let grad = Tensor::from_vec(vec![0.5f32, 0.5, 0.5, 0.5], &[4]).expect("grad");
+        let scale = Tensor::from_vec(vec![0.1f32], &[1]).expect("scale");
+
+        let masked = trainer
+            .straight_through_weight_grad(&grad, &weight, &scale, None, 8, true)
+            .expect("ste failed");
+        let data = masked.data().expect("data");
+        assert_eq!(data[0], 0.5, "in-range weight keeps its gradient");
+        assert_eq!(data[1], 0.0, "clipped weight gets a zero gradient");
+        assert_eq!(data[2], 0.0, "clipped weight gets a zero gradient");
+        assert_eq!(data[3], 0.5, "in-range weight keeps its gradient");
+    }
+
+    #[test]
+    fn test_straight_through_estimator_rejects_shape_mismatch() {
+        let trainer = QATTrainer::new(0.01, 0.0);
+        let weight = Tensor::from_vec(vec![1.0f32, 2.0], &[2]).expect("weight");
+        let grad = Tensor::from_vec(vec![1.0f32], &[1]).expect("grad");
+        let scale = Tensor::from_vec(vec![0.1f32], &[1]).expect("scale");
+        assert!(trainer
+            .straight_through_weight_grad(&grad, &weight, &scale, None, 8, true)
+            .is_err());
+    }
+
+    #[test]
+    fn test_qat_loss_with_uses_the_supplied_loss_function() {
+        use crate::losses::MSELoss;
+        let predictions = Tensor::from_vec(vec![1.0f32, 2.0], &[2]).expect("pred");
+        let targets = Tensor::from_vec(vec![0.0f32, 0.0], &[2]).expect("target");
+        // MSE = (1 + 4) / 2 = 2.5, plus alpha * quant_error = 0.5 * 2 = 1.0
+        let value = qat_loss_with(&MSELoss::new(), &predictions, &targets, 2.0, 0.5)
+            .expect("qat_loss_with failed");
+        assert!((value - 3.5).abs() < 1e-5, "expected 3.5, got {value}");
+    }
 
     #[test]
     fn test_fake_quantize() {

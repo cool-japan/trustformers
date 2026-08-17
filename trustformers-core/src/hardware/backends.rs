@@ -351,13 +351,13 @@ impl GPUBackend {
                 }
             }
 
-            // Fallback: Check for CUDA runtime availability
-            if self.is_cuda_available() {
-                // Default assumption: at least one CUDA device available
-                Ok(vec!["cuda_0_Unknown_GPU".to_string()])
-            } else {
-                Ok(vec![])
-            }
+            // `nvidia-smi --query-gpu` above is the authoritative source: if
+            // it didn't report a device (missing tool, non-zero exit, or an
+            // empty device list), there is nothing real to report. A coarse
+            // "is a CUDA runtime library present" signal (`is_cuda_available`)
+            // is not proof a GPU is attached, so it must not be used to
+            // synthesize a phantom device here.
+            Ok(vec![])
         }
 
         #[cfg(not(feature = "cuda"))]
@@ -426,12 +426,11 @@ impl GPUBackend {
                 }
             }
 
-            // Fallback: Check for ROCm runtime availability
-            if self.is_rocm_available() {
-                Ok(vec!["rocm_0_AMD_GPU".to_string()])
-            } else {
-                Ok(vec![])
-            }
+            // As with CUDA above: `rocm-smi` output and the `/sys/class/drm`
+            // vendor-ID scan are the authoritative sources. If neither found
+            // a device, report none rather than synthesizing one from the
+            // coarser `is_rocm_available` library-presence check.
+            Ok(vec![])
         }
 
         #[cfg(not(feature = "rocm"))]
@@ -440,7 +439,7 @@ impl GPUBackend {
 
     fn discover_opencl_devices(&self) -> HardwareResult<Vec<String>> {
         // OpenCL device discovery using system calls
-        if self.is_opencl_available() {
+        if Self::is_opencl_available() {
             #[cfg(feature = "opencl")]
             {
                 // Try to use clinfo command if available
@@ -457,8 +456,11 @@ impl GPUBackend {
                         return Ok(devices);
                     }
                 }
-                // Fallback to basic detection
-                Ok(vec!["gpu_opencl_0".to_string()])
+                // `clinfo` is missing, failed, or reported zero devices: the
+                // OpenCL *loader* being present (`is_opencl_available`) does
+                // not mean a usable OpenCL device exists, so report none
+                // rather than fabricating "gpu_opencl_0".
+                Ok(vec![])
             }
             #[cfg(not(feature = "opencl"))]
             Ok(vec![])
@@ -531,7 +533,7 @@ impl GPUBackend {
 
     fn discover_vulkan_devices(&self) -> HardwareResult<Vec<String>> {
         // Vulkan device discovery using vulkaninfo if available
-        if self.is_vulkan_available() {
+        if Self::is_vulkan_available() {
             #[cfg(feature = "vulkan")]
             {
                 use std::process::Command;
@@ -549,8 +551,11 @@ impl GPUBackend {
                         }
                     }
                 }
-                // Fallback to basic detection
-                Ok(vec!["gpu_vulkan_0".to_string()])
+                // `vulkaninfo` is missing, failed, or reported zero devices:
+                // the Vulkan loader being present (`is_vulkan_available`)
+                // does not mean a usable Vulkan device exists, so report
+                // none rather than fabricating "gpu_vulkan_0".
+                Ok(vec![])
             }
             #[cfg(not(feature = "vulkan"))]
             Ok(vec![])
@@ -559,13 +564,22 @@ impl GPUBackend {
         }
     }
 
+    /// Real availability probe: checks the driver CLI's exit status (not
+    /// merely that the process could be spawned) before checking for the
+    /// runtime library on disk.
     #[allow(dead_code)]
-    fn is_cuda_available(&self) -> bool {
+    pub(crate) fn is_cuda_available() -> bool {
         // Check CUDA availability with runtime detection
         #[cfg(feature = "cuda")]
         {
-            // Check for nvidia-smi command
-            if std::process::Command::new("nvidia-smi").arg("--version").output().is_ok() {
+            // Check for nvidia-smi command succeeding (not just spawning:
+            // e.g. a `nvidia-smi` shim that always exits non-zero when no
+            // driver is loaded must not be read as "available").
+            if std::process::Command::new("nvidia-smi")
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+            {
                 return true;
             }
             // Check for CUDA runtime library
@@ -587,12 +601,16 @@ impl GPUBackend {
     }
 
     #[allow(dead_code)]
-    fn is_rocm_available(&self) -> bool {
+    pub(crate) fn is_rocm_available() -> bool {
         // Check ROCm availability with runtime detection
         #[cfg(feature = "rocm")]
         {
-            // Check for rocm-smi command
-            if std::process::Command::new("rocm-smi").arg("--version").output().is_ok() {
+            // Check for rocm-smi command succeeding
+            if std::process::Command::new("rocm-smi")
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+            {
                 return true;
             }
             // Check for ROCm runtime library
@@ -608,12 +626,12 @@ impl GPUBackend {
         false
     }
 
-    fn is_opencl_available(&self) -> bool {
+    pub(crate) fn is_opencl_available() -> bool {
         // Check OpenCL availability with runtime detection
         #[cfg(feature = "opencl")]
         {
-            // Check for clinfo command
-            if std::process::Command::new("clinfo").output().is_ok() {
+            // Check for clinfo command succeeding
+            if std::process::Command::new("clinfo").output().is_ok_and(|o| o.status.success()) {
                 return true;
             }
             // Check for OpenCL runtime library
@@ -627,8 +645,9 @@ impl GPUBackend {
             }
             #[cfg(target_os = "windows")]
             {
-                // Check for OpenCL.dll
-                true // Assume available on Windows for now
+                // No command-line probe used here; check for the loader DLL
+                // instead of assuming availability.
+                std::path::Path::new("C:\\Windows\\System32\\OpenCL.dll").exists()
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             false
@@ -638,7 +657,7 @@ impl GPUBackend {
     }
 
     #[allow(dead_code)]
-    fn is_metal_available(&self) -> bool {
+    pub(crate) fn is_metal_available(&self) -> bool {
         // Check Metal availability with runtime detection
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
@@ -649,12 +668,15 @@ impl GPUBackend {
         false
     }
 
-    fn is_vulkan_available(&self) -> bool {
+    pub(crate) fn is_vulkan_available() -> bool {
         // Check Vulkan availability with runtime detection
         #[cfg(feature = "vulkan")]
         {
-            // Check for vulkaninfo command
-            if std::process::Command::new("vulkaninfo").output().is_ok() {
+            // Check for vulkaninfo command succeeding
+            if std::process::Command::new("vulkaninfo")
+                .output()
+                .is_ok_and(|o| o.status.success())
+            {
                 return true;
             }
             // Check for Vulkan loader library
@@ -670,8 +692,9 @@ impl GPUBackend {
             }
             #[cfg(target_os = "windows")]
             {
-                // Check for vulkan-1.dll
-                true // Assume available on Windows for now
+                // No command-line probe used here; check for the loader DLL
+                // instead of assuming availability.
+                std::path::Path::new("C:\\Windows\\System32\\vulkan-1.dll").exists()
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             false

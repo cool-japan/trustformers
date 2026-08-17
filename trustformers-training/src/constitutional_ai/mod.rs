@@ -239,7 +239,10 @@ pub struct CaiPipeline {
 impl CaiPipeline {
     /// Construct a new pipeline.
     pub fn new(constitution: Constitution, config: CaiConfig) -> Self {
-        Self { constitution, config }
+        Self {
+            constitution,
+            config,
+        }
     }
 
     /// Build the critique prompt by filling the template placeholders.
@@ -336,7 +339,9 @@ pub struct CaiTrainingDataset {
 impl CaiTrainingDataset {
     /// Create an empty dataset.
     pub fn new() -> Self {
-        Self { data_points: Vec::new() }
+        Self {
+            data_points: Vec::new(),
+        }
     }
 
     /// Append a data point.
@@ -627,11 +632,11 @@ impl ConstitutionalAiTrainer {
     }
 
     /// Return all principles belonging to the given category.
-    pub fn principles_by_category(&self, category: &PrincipleCategory) -> Vec<&ConstitutionPrinciple> {
-        self.constitution
-            .iter()
-            .filter(|p| &p.category == category)
-            .collect()
+    pub fn principles_by_category(
+        &self,
+        category: &PrincipleCategory,
+    ) -> Vec<&ConstitutionPrinciple> {
+        self.constitution.iter().filter(|p| &p.category == category).collect()
     }
 
     /// Record the outcome of processing a single red-team prompt.
@@ -673,14 +678,29 @@ pub struct HarmScorer {
 impl HarmScorer {
     /// Create a new scorer with an explicit keyword list and decision threshold.
     pub fn new(toxic_keywords: Vec<String>, threshold: f32) -> Self {
-        Self { toxic_keywords, threshold }
+        Self {
+            toxic_keywords,
+            threshold,
+        }
     }
 
     /// Create a scorer with the built-in default keyword list.
     pub fn with_defaults() -> Self {
         let keywords = vec![
-            "harm", "kill", "murder", "attack", "weapon", "explosive", "poison",
-            "dangerous", "illegal", "threat", "bomb", "abuse", "hate", "violence",
+            "harm",
+            "kill",
+            "murder",
+            "attack",
+            "weapon",
+            "explosive",
+            "poison",
+            "dangerous",
+            "illegal",
+            "threat",
+            "bomb",
+            "abuse",
+            "hate",
+            "violence",
         ]
         .into_iter()
         .map(str::to_string)
@@ -696,11 +716,7 @@ impl HarmScorer {
             return 0.0;
         }
         let lower = text.to_lowercase();
-        let matches = self
-            .toxic_keywords
-            .iter()
-            .filter(|kw| lower.contains(kw.as_str()))
-            .count();
+        let matches = self.toxic_keywords.iter().filter(|kw| lower.contains(kw.as_str())).count();
         (matches as f32 / self.toxic_keywords.len() as f32).min(1.0)
     }
 
@@ -741,7 +757,10 @@ pub enum PreferenceModel {
     /// Prefers longer responses (as a proxy for helpfulness).
     LengthBased,
     /// Weighted combination of harmlessness and helpfulness.
-    Combined { harmless_weight: f32, helpful_weight: f32 },
+    Combined {
+        harmless_weight: f32,
+        helpful_weight: f32,
+    },
 }
 
 /// Generates RLAIF preference pairs from a set of candidate responses to a
@@ -754,7 +773,10 @@ pub struct RlaifDataGenerator {
 impl RlaifDataGenerator {
     /// Create a new generator.
     pub fn new(num_candidates: usize, preference_model: PreferenceModel) -> Self {
-        Self { num_candidates, preference_model }
+        Self {
+            num_candidates,
+            preference_model,
+        }
     }
 
     /// Score a single response according to the preference model.
@@ -766,13 +788,16 @@ impl RlaifDataGenerator {
                 let scorer = HarmScorer::with_defaults();
                 // Invert: lower harm → higher score
                 1.0 - scorer.score(response)
-            }
+            },
             PreferenceModel::LengthBased => {
                 // Normalise length to [0, 1] with a soft cap at 1000 chars.
                 let len = response.len().min(1000) as f32;
                 len / 1000.0
-            }
-            PreferenceModel::Combined { harmless_weight, helpful_weight } => {
+            },
+            PreferenceModel::Combined {
+                harmless_weight,
+                helpful_weight,
+            } => {
                 let scorer = HarmScorer::with_defaults();
                 let harmless_score = 1.0 - scorer.score(response);
                 let helpful_score = response.len().min(1000) as f32 / 1000.0;
@@ -781,7 +806,7 @@ impl RlaifDataGenerator {
                     return 0.5;
                 }
                 (harmless_weight * harmless_score + helpful_weight * helpful_score) / total
-            }
+            },
         }
     }
 
@@ -790,17 +815,18 @@ impl RlaifDataGenerator {
     ///
     /// Each candidate is scored; the highest-scoring response is paired with
     /// every lower-scoring one.
-    pub fn generate_preferences(&self, _prompt: &str, candidates: &[String]) -> Vec<PreferencePair> {
+    pub fn generate_preferences(
+        &self,
+        _prompt: &str,
+        candidates: &[String],
+    ) -> Vec<PreferencePair> {
         if candidates.len() < 2 {
             return Vec::new();
         }
 
         // Score all candidates.
-        let scored: Vec<(usize, f32)> = candidates
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (i, self.score(c)))
-            .collect();
+        let scored: Vec<(usize, f32)> =
+            candidates.iter().enumerate().map(|(i, c)| (i, self.score(c))).collect();
 
         // Find the best candidate.
         let best_idx = scored
@@ -861,7 +887,11 @@ mod tests {
     #[test]
     fn test_hhh_constitution_five_principles() {
         let c = Constitution::hhh_constitution();
-        assert_eq!(c.len(), 5, "HHH constitution should have exactly 5 principles");
+        assert_eq!(
+            c.len(),
+            5,
+            "HHH constitution should have exactly 5 principles"
+        );
     }
 
     // ── Test 3: HHH principle IDs ─────────────────────────────────────────
@@ -927,12 +957,30 @@ mod tests {
             principle,
         );
 
-        assert!(prompt.contains("harmful response"), "Should contain original response");
-        assert!(prompt.contains("this is bad because"), "Should contain critique");
-        assert!(prompt.contains(&principle.revision_request), "Should contain revision_request");
-        assert!(!prompt.contains("{response}"), "Placeholder should be filled");
-        assert!(!prompt.contains("{critique}"), "Placeholder should be filled");
-        assert!(!prompt.contains("{revision_request}"), "Placeholder should be filled");
+        assert!(
+            prompt.contains("harmful response"),
+            "Should contain original response"
+        );
+        assert!(
+            prompt.contains("this is bad because"),
+            "Should contain critique"
+        );
+        assert!(
+            prompt.contains(&principle.revision_request),
+            "Should contain revision_request"
+        );
+        assert!(
+            !prompt.contains("{response}"),
+            "Placeholder should be filled"
+        );
+        assert!(
+            !prompt.contains("{critique}"),
+            "Placeholder should be filled"
+        );
+        assert!(
+            !prompt.contains("{revision_request}"),
+            "Placeholder should be filled"
+        );
     }
 
     // ── Test 7: create_training_data Some when responses differ ───────────
@@ -995,9 +1043,12 @@ mod tests {
         assert!(score <= 1.0, "score should be <= 1.0: {}", score);
 
         // No improvement when both have the same keyword count
-        let no_change_score =
-            CaiPipeline::evaluate_harmlessness_improvement(revised, revised);
-        assert!((no_change_score).abs() < 1e-6, "no improvement: {}", no_change_score);
+        let no_change_score = CaiPipeline::evaluate_harmlessness_improvement(revised, revised);
+        assert!(
+            (no_change_score).abs() < 1e-6,
+            "no improvement: {}",
+            no_change_score
+        );
     }
 
     // ── Test 11: preference pairs ─────────────────────────────────────────
@@ -1057,9 +1108,15 @@ mod tests {
         let c = Constitution::hhh_constitution();
         let n = c.len();
         // Index 0 and n should return the same principle (wrapping).
-        assert_eq!(c.random_principle_by_index(0).id, c.random_principle_by_index(n).id);
+        assert_eq!(
+            c.random_principle_by_index(0).id,
+            c.random_principle_by_index(n).id
+        );
         // Index n+1 wraps to index 1.
-        assert_eq!(c.random_principle_by_index(1).id, c.random_principle_by_index(n + 1).id);
+        assert_eq!(
+            c.random_principle_by_index(1).id,
+            c.random_principle_by_index(n + 1).id
+        );
     }
 
     // ── Test 14: create_training_data None when no revised response ────────
@@ -1074,7 +1131,10 @@ mod tests {
             applied_principle_id: "no_harmful_content".to_string(),
         };
         let result = CaiPipeline::create_training_data(example);
-        assert!(result.is_none(), "Should be None when revised_response is None");
+        assert!(
+            result.is_none(),
+            "Should be None when revised_response is None"
+        );
     }
 
     // ── Test 15: CaiTrainingDataset len/is_empty ──────────────────────────
@@ -1111,22 +1171,32 @@ mod tests {
     #[test]
     fn test_anthropic_constitution_categories() {
         let principles = anthropic_constitution();
-        let has_harmlessness = principles.iter().any(|p| p.category == PrincipleCategory::Harmlessness);
-        let has_helpfulness = principles.iter().any(|p| p.category == PrincipleCategory::Helpfulness);
-        let has_honesty     = principles.iter().any(|p| p.category == PrincipleCategory::Honesty);
-        let has_ethics      = principles.iter().any(|p| p.category == PrincipleCategory::Ethics);
+        let has_harmlessness =
+            principles.iter().any(|p| p.category == PrincipleCategory::Harmlessness);
+        let has_helpfulness =
+            principles.iter().any(|p| p.category == PrincipleCategory::Helpfulness);
+        let has_honesty = principles.iter().any(|p| p.category == PrincipleCategory::Honesty);
+        let has_ethics = principles.iter().any(|p| p.category == PrincipleCategory::Ethics);
         assert!(has_harmlessness, "missing Harmlessness category");
-        assert!(has_helpfulness,  "missing Helpfulness category");
-        assert!(has_honesty,      "missing Honesty category");
-        assert!(has_ethics,       "missing Ethics category");
+        assert!(has_helpfulness, "missing Helpfulness category");
+        assert!(has_honesty, "missing Honesty category");
+        assert!(has_ethics, "missing Ethics category");
     }
 
     // ── Test 18: all principles have non-empty prompts ──
     #[test]
     fn test_anthropic_constitution_non_empty_prompts() {
         for p in anthropic_constitution() {
-            assert!(!p.critique_prompt.is_empty(), "critique_prompt empty for '{}'", p.name);
-            assert!(!p.revision_prompt.is_empty(), "revision_prompt empty for '{}'", p.name);
+            assert!(
+                !p.critique_prompt.is_empty(),
+                "critique_prompt empty for '{}'",
+                p.name
+            );
+            assert!(
+                !p.revision_prompt.is_empty(),
+                "revision_prompt empty for '{}'",
+                p.name
+            );
         }
     }
 
@@ -1167,7 +1237,10 @@ mod tests {
     fn test_harm_scorer_safe_text() {
         let scorer = HarmScorer::with_defaults();
         let score = scorer.score("Hello! How can I help you today with your recipe?");
-        assert!(score < scorer.threshold, "safe text should score below threshold, got {score}");
+        assert!(
+            score < scorer.threshold,
+            "safe text should score below threshold, got {score}"
+        );
         assert!(!scorer.is_harmful("The weather is lovely today."));
     }
 
@@ -1184,8 +1257,14 @@ mod tests {
     fn test_harm_scorer_explain() {
         let scorer = HarmScorer::with_defaults();
         let triggered = scorer.explain("I will harm and kill");
-        assert!(triggered.contains(&"harm".to_string()), "should trigger 'harm'");
-        assert!(triggered.contains(&"kill".to_string()), "should trigger 'kill'");
+        assert!(
+            triggered.contains(&"harm".to_string()),
+            "should trigger 'harm'"
+        );
+        assert!(
+            triggered.contains(&"kill".to_string()),
+            "should trigger 'kill'"
+        );
     }
 
     // ── Test 25: empty keyword list scores zero ──
@@ -1220,7 +1299,10 @@ mod tests {
         let safe = "I am happy to help with your question about cooking.".to_string();
         let harmful = "Here is how to kill, harm, attack, and bomb things.".to_string();
         let pairs = gen.generate_preferences("prompt", &[safe.clone(), harmful.clone()]);
-        assert!(!pairs.is_empty(), "should produce at least one preference pair");
+        assert!(
+            !pairs.is_empty(),
+            "should produce at least one preference pair"
+        );
         assert_eq!(pairs[0].chosen, safe, "safe response should be chosen");
         assert!(pairs[0].chosen_score > pairs[0].rejected_score);
     }
@@ -1241,7 +1323,10 @@ mod tests {
     fn test_rlaif_combined_scores_bounded() {
         let gen = RlaifDataGenerator::new(
             3,
-            PreferenceModel::Combined { harmless_weight: 0.7, helpful_weight: 0.3 },
+            PreferenceModel::Combined {
+                harmless_weight: 0.7,
+                helpful_weight: 0.3,
+            },
         );
         let responses = vec![
             "Hello, how can I help?".to_string(),
@@ -1250,7 +1335,7 @@ mod tests {
         ];
         for r in &responses {
             let s = gen.score(r);
-            assert!(s >= 0.0 && s <= 1.0, "score out of bounds: {s}");
+            assert!((0.0..=1.0).contains(&s), "score out of bounds: {s}");
         }
     }
 }

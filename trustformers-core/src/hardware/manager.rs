@@ -12,12 +12,14 @@
 use super::allocation::{LoadBalancer, MemoryManager, ResourceAllocator};
 use super::backends::{CPUBackend, GPUBackend};
 use super::config::{DeviceInfo, HardwareManagerConfig};
-use super::devices::GPUBackendType;
+use super::devices::{CPUDevice, GPUBackendType, GPUDevice};
 use super::monitoring::{HealthChecker, PerformanceMonitor};
 use super::registry::HardwareRegistry;
 use super::scheduling::{AdvancedScheduler, DefaultScheduler, SchedulingAlgorithm};
 use super::traits::{HardwareBackend, HardwareOperation, HardwareScheduler};
-use super::{HardwareMetrics, HardwareResult, HardwareType, OperationParameter};
+use super::{
+    HardwareMetrics, HardwareResult, HardwareType, OperationMode, OperationParameter, PrecisionMode,
+};
 use crate::errors::TrustformersError;
 use crate::tensor::Tensor;
 use std::collections::HashMap;
@@ -140,34 +142,36 @@ impl HardwareManager {
         None
     }
 
+    // Delegate to `GPUBackend`'s real runtime probes (driver CLI exit
+    // status / runtime library presence) instead of unconditionally
+    // claiming every backend is available whenever its Cargo feature is
+    // compiled in.
     #[cfg(feature = "cuda")]
     fn is_cuda_available(&self) -> bool {
-        // Check CUDA availability
-        true // Placeholder
+        GPUBackend::is_cuda_available()
     }
 
     #[cfg(feature = "rocm")]
     fn is_rocm_available(&self) -> bool {
-        // Check ROCm availability
-        true // Placeholder
+        GPUBackend::is_rocm_available()
     }
 
     #[cfg(all(target_os = "macos", feature = "metal"))]
     fn is_metal_available(&self) -> bool {
-        // Check Metal availability
-        true // Placeholder
+        // `is_metal_available` is an instance probe on `GPUBackend` (not yet
+        // migrated to a static probe); constructing one here is cheap and
+        // side-effect-free (see `GPUBackend::new`).
+        GPUBackend::new(GPUBackendType::Metal).is_metal_available()
     }
 
     #[cfg(feature = "opencl")]
     fn is_opencl_available(&self) -> bool {
-        // Check OpenCL availability
-        true // Placeholder
+        GPUBackend::is_opencl_available()
     }
 
     #[cfg(feature = "vulkan")]
     fn is_vulkan_available(&self) -> bool {
-        // Check Vulkan availability
-        true // Placeholder
+        GPUBackend::is_vulkan_available()
     }
 
     /// Initialize GPU backend
@@ -297,6 +301,12 @@ impl HardwareManager {
     }
 
     /// Execute an operation on a specific device
+    ///
+    /// Dispatches by operation name to `CPUDevice::execute_operation` /
+    /// `GPUDevice::execute_operation`, which perform real Tensor
+    /// computation (see `hardware::devices`) for the operations they
+    /// support, and return a structured error for anything they don't -
+    /// never a copy of the input passed off as a computed result.
     pub fn execute_on_device(
         &self,
         device_id: &str,
@@ -304,6 +314,13 @@ impl HardwareManager {
         inputs: &[Tensor],
         _params: &HashMap<String, OperationParameter>,
     ) -> HardwareResult<Vec<Tensor>> {
+        if inputs.is_empty() {
+            return Err(TrustformersError::hardware_error(
+                "execute_on_device requires at least one input tensor",
+                "execute_on_device",
+            ));
+        }
+
         // Determine which backend owns this device
         let device_info = self.get_device_info(device_id).ok_or_else(|| {
             TrustformersError::hardware_error("Device not found", "execute_on_device")
@@ -311,16 +328,30 @@ impl HardwareManager {
 
         match device_info.hardware_type {
             HardwareType::CPU => {
-                // For now, return a mock result since the actual backend implementation
-                // is not fully compatible. In practice, this would integrate with the
-                // actual hardware backend operations.
-                Ok(vec![inputs[0].clone()])
+                let device = CPUDevice::new(device_id.to_string());
+                device.execute_operation(
+                    operation.name(),
+                    inputs,
+                    OperationMode::Balanced,
+                    PrecisionMode::Single,
+                )
             },
             HardwareType::GPU => {
-                // For now, return a mock result since the actual backend implementation
-                // is not fully compatible. In practice, this would integrate with the
-                // actual hardware backend operations.
-                Ok(vec![inputs[0].clone()])
+                // `DeviceInfo` does not currently record which
+                // `GPUBackendType` a device id belongs to; fall back to
+                // re-detecting one. This does not affect correctness of the
+                // computed result: `GPUDevice::execute_operation` performs
+                // the same real host computation for every backend type,
+                // since none of them open a live accelerator context (see
+                // `GPUDevice::new`).
+                let backend_type = self.detect_gpu_backend().unwrap_or(GPUBackendType::Unknown);
+                let device = GPUDevice::new(device_id.to_string(), backend_type);
+                device.execute_operation(
+                    operation.name(),
+                    inputs,
+                    OperationMode::Balanced,
+                    PrecisionMode::Single,
+                )
             },
             _ => Err(TrustformersError::hardware_error(
                 "Unsupported hardware type",
@@ -442,5 +473,121 @@ mod tests {
             retrieved_metrics.expect("operation failed in test").utilization,
             50.0
         );
+    }
+
+    /// Minimal `HardwareOperation` used only to exercise
+    /// `HardwareManager::execute_on_device` by name; `execute`/
+    /// `validate_params`/`estimate_cost` are not called by
+    /// `execute_on_device` (it dispatches by `name()` directly to
+    /// `CPUDevice`/`GPUDevice::execute_operation`), so they are stubbed.
+    struct NamedOp(&'static str);
+
+    #[async_trait::async_trait]
+    impl HardwareOperation for NamedOp {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        async fn execute(
+            &self,
+            _device: &mut dyn super::super::traits::HardwareDevice,
+            _inputs: &[Tensor],
+            _outputs: &mut [Tensor],
+            _params: &HashMap<String, OperationParameter>,
+        ) -> HardwareResult<()> {
+            Ok(())
+        }
+
+        fn validate_params(
+            &self,
+            _params: &HashMap<String, OperationParameter>,
+        ) -> HardwareResult<()> {
+            Ok(())
+        }
+
+        fn requirements(&self) -> super::super::traits::OperationRequirements {
+            super::super::traits::OperationRequirements {
+                min_memory: 0,
+                compute_units: None,
+                data_types: vec![],
+                capabilities: vec![],
+                performance: Default::default(),
+            }
+        }
+
+        fn estimate_cost(
+            &self,
+            _inputs: &[Tensor],
+            _params: &HashMap<String, OperationParameter>,
+        ) -> f64 {
+            0.0
+        }
+    }
+
+    /// Regression test: `execute_on_device` used to return
+    /// `Ok(vec![inputs[0].clone()])` ("a mock result") for every CPU/GPU
+    /// operation, regardless of what the operation actually was. This
+    /// asserts the dispatched device really computes `add`, and that an
+    /// unsupported operation name honestly errors instead of echoing back
+    /// the input.
+    #[tokio::test]
+    async fn test_execute_on_device_computes_real_result_for_cpu() {
+        let mut manager = HardwareManager::default();
+        manager.initialize().await.expect("initialize failed");
+
+        let cpu_devices = manager.list_devices_by_type(HardwareType::CPU);
+        assert!(
+            !cpu_devices.is_empty(),
+            "expected at least one CPU device to be registered"
+        );
+        let device_id = cpu_devices[0].id.clone();
+
+        let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], &[3]).expect("create failed");
+        let b = Tensor::from_vec(vec![10.0f32, 20.0, 30.0], &[3]).expect("create failed");
+        let op = NamedOp("add");
+
+        let result = manager
+            .execute_on_device(&device_id, &op, &[a, b], &HashMap::new())
+            .expect("execute_on_device should succeed for add");
+
+        let data = result[0].data().expect("read result");
+        assert_eq!(
+            data,
+            vec![11.0, 22.0, 33.0],
+            "must be a real sum, not an echo of input[0]"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_on_device_unsupported_operation_errors() {
+        let mut manager = HardwareManager::default();
+        manager.initialize().await.expect("initialize failed");
+
+        let cpu_devices = manager.list_devices_by_type(HardwareType::CPU);
+        assert!(!cpu_devices.is_empty());
+        let device_id = cpu_devices[0].id.clone();
+
+        let a = Tensor::from_vec(vec![1.0f32], &[1]).expect("create failed");
+        let op = NamedOp("definitely_not_a_real_op");
+
+        let result = manager.execute_on_device(&device_id, &op, &[a], &HashMap::new());
+        assert!(
+            result.is_err(),
+            "unsupported operations must error, not silently succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_on_device_empty_inputs_errors_not_panics() {
+        let mut manager = HardwareManager::default();
+        manager.initialize().await.expect("initialize failed");
+
+        let cpu_devices = manager.list_devices_by_type(HardwareType::CPU);
+        assert!(!cpu_devices.is_empty());
+        let device_id = cpu_devices[0].id.clone();
+
+        let op = NamedOp("add");
+        let result = manager.execute_on_device(&device_id, &op, &[], &HashMap::new());
+        assert!(result.is_err());
     }
 }

@@ -16,15 +16,15 @@ pub use adaptive::{
     CurriculumProgress, CurriculumState, SelfPacedLearning,
 };
 pub use scheduler::{
-    CurriculumError, CurriculumErrorKind, CurriculumScheduler, CurriculumStrategy,
-    CurriculumWindow, anti_curriculum_indices, sort_by_length, sort_by_perplexity,
+    anti_curriculum_indices, sort_by_length, sort_by_perplexity, CurriculumError,
+    CurriculumErrorKind, CurriculumScheduler, CurriculumStrategy, CurriculumWindow,
 };
 
 #[cfg(test)]
 mod tests {
     use super::adaptive::{
-        AdaptiveCurriculumScheduler, CurriculumAction, CurriculumAdvanceStrategy,
-        CurriculumState, SelfPacedLearning,
+        AdaptiveCurriculumScheduler, CurriculumAction, CurriculumAdvanceStrategy, CurriculumState,
+        SelfPacedLearning,
     };
     use super::scheduler::{CurriculumScheduler, CurriculumStrategy};
 
@@ -34,7 +34,9 @@ mod tests {
 
     #[test]
     fn test_curriculum_advance_strategy_linear_is_accessible() {
-        let strategy = CurriculumAdvanceStrategy::Linear { steps_per_advance: 100 };
+        let strategy = CurriculumAdvanceStrategy::Linear {
+            steps_per_advance: 100,
+        };
         let _sched = AdaptiveCurriculumScheduler::new(strategy, 4);
     }
 
@@ -54,8 +56,12 @@ mod tests {
                 ramp_steps: 1000,
             },
             100,
-        ).expect("scheduler creation must succeed");
-        assert!(sched.total_samples() > 0, "scheduler must report positive total samples");
+        )
+        .expect("scheduler creation must succeed");
+        assert!(
+            sched.total_samples() > 0,
+            "scheduler must report positive total samples"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -65,7 +71,9 @@ mod tests {
     #[test]
     fn test_linear_scheduler_advances_through_all_phases() {
         let mut sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::Linear { steps_per_advance: 5 },
+            CurriculumAdvanceStrategy::Linear {
+                steps_per_advance: 5,
+            },
             4,
         );
 
@@ -77,13 +85,18 @@ mod tests {
                 break;
             }
         }
-        assert!(completed, "linear scheduler should complete all phases within 100 steps");
+        assert!(
+            completed,
+            "linear scheduler should complete all phases within 100 steps"
+        );
     }
 
     #[test]
     fn test_difficulty_increases_as_phases_advance() {
         let mut sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::Linear { steps_per_advance: 3 },
+            CurriculumAdvanceStrategy::Linear {
+                steps_per_advance: 3,
+            },
             3,
         );
         let initial_difficulty = sched.current_max_difficulty();
@@ -103,7 +116,9 @@ mod tests {
     fn test_sampling_weights_len_matches_phases() {
         let num_phases = 5_usize;
         let sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::Linear { steps_per_advance: 10 },
+            CurriculumAdvanceStrategy::Linear {
+                steps_per_advance: 10,
+            },
             num_phases,
         );
         assert_eq!(
@@ -116,7 +131,9 @@ mod tests {
     #[test]
     fn test_first_bin_weight_starts_at_one() {
         let sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::Linear { steps_per_advance: 100 },
+            CurriculumAdvanceStrategy::Linear {
+                steps_per_advance: 100,
+            },
             5,
         );
         let weights = sched.sampling_weights();
@@ -130,7 +147,9 @@ mod tests {
     #[test]
     fn test_higher_bins_start_at_zero_weight() {
         let sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::Linear { steps_per_advance: 100 },
+            CurriculumAdvanceStrategy::Linear {
+                steps_per_advance: 100,
+            },
             5,
         );
         let weights = sched.sampling_weights();
@@ -147,7 +166,9 @@ mod tests {
     #[test]
     fn test_progress_report_initial_state() {
         let sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::Linear { steps_per_advance: 100 },
+            CurriculumAdvanceStrategy::Linear {
+                steps_per_advance: 100,
+            },
             4,
         );
         let progress = sched.progress_report();
@@ -162,25 +183,37 @@ mod tests {
     #[test]
     fn test_loss_triggered_advances_when_loss_low() {
         let mut sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::LossTriggered { threshold: 0.5, patience: 3 },
+            CurriculumAdvanceStrategy::LossTriggered {
+                threshold: 0.5,
+                patience: 3,
+            },
             4,
         );
 
         let mut advanced = false;
         for _ in 0..50 {
             let action = sched.step(0.1, None); // loss well below threshold
-            if matches!(action, CurriculumAction::Advance { .. } | CurriculumAction::Complete) {
+            if matches!(
+                action,
+                CurriculumAction::Advance { .. } | CurriculumAction::Complete
+            ) {
                 advanced = true;
                 break;
             }
         }
-        assert!(advanced, "loss-triggered scheduler should advance when loss stays below threshold");
+        assert!(
+            advanced,
+            "loss-triggered scheduler should advance when loss stays below threshold"
+        );
     }
 
     #[test]
     fn test_loss_triggered_does_not_advance_with_high_loss() {
         let mut sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::LossTriggered { threshold: 0.3, patience: 5 },
+            CurriculumAdvanceStrategy::LossTriggered {
+                threshold: 0.3,
+                patience: 5,
+            },
             4,
         );
 
@@ -191,13 +224,18 @@ mod tests {
                 advanced = true;
             }
         }
-        assert!(!advanced, "scheduler should not advance when loss stays above threshold");
+        assert!(
+            !advanced,
+            "scheduler should not advance when loss stays above threshold"
+        );
     }
 
     #[test]
     fn test_fixed_schedule_advances_at_specified_steps() {
         let mut sched = AdaptiveCurriculumScheduler::new(
-            CurriculumAdvanceStrategy::FixedSchedule { advance_at_steps: vec![5, 10, 15] },
+            CurriculumAdvanceStrategy::FixedSchedule {
+                advance_at_steps: vec![5, 10, 15],
+            },
             4,
         );
 
@@ -208,7 +246,10 @@ mod tests {
                 advance_steps.push(step);
             }
         }
-        assert!(!advance_steps.is_empty(), "should have at least one advance with fixed schedule");
+        assert!(
+            !advance_steps.is_empty(),
+            "should have at least one advance with fixed schedule"
+        );
     }
 
     // -----------------------------------------------------------------------

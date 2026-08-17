@@ -126,14 +126,43 @@ impl ZeroCopyVocabEntry {
     }
 }
 
+/// Bounds-checked byte slice of `data[start..start + len]`.
+///
+/// Used everywhere a section is carved out of the memory-mapped file from
+/// header-supplied offsets/lengths, which may be corrupted or hostile:
+/// `start + len` is computed with `checked_add` (a wraparound must not
+/// silently produce a small, in-bounds-looking `end`), and the range is
+/// bounds-checked against `data.len()` before slicing, so a malformed file
+/// produces an `Err` instead of an indexing panic.
+fn checked_slice<'a>(data: &'a [u8], start: usize, len: usize, label: &str) -> Result<&'a [u8]> {
+    let end = start.checked_add(len).ok_or_else(|| {
+        TrustformersError::serialization_error(format!(
+            "{} section offset+length overflows: start={}, len={}",
+            label, start, len
+        ))
+    })?;
+    data.get(start..end).ok_or_else(|| {
+        TrustformersError::serialization_error(format!(
+            "{} section [{}..{}) extends beyond the file (len {})",
+            label,
+            start,
+            end,
+            data.len()
+        ))
+    })
+}
+
 /// Zero-copy tokenizer implementation
 pub struct ZeroCopyTokenizer {
     /// Memory-mapped file
     mmap: Mmap,
     /// Header information
     header: ZeroCopyHeader,
-    /// Vocabulary entries
-    vocab_entries: &'static [ZeroCopyVocabEntry],
+    /// Byte offset of the vocabulary-entries array within `mmap` (validated
+    /// in [`Self::from_file`]).
+    vocab_entries_offset: usize,
+    /// Number of [`ZeroCopyVocabEntry`] records at `vocab_entries_offset`.
+    vocab_entries_count: usize,
     /// Token-to-ID mapping for fast lookup
     token_to_id: HashMap<String, u32>,
     /// ID-to-token mapping for fast lookup

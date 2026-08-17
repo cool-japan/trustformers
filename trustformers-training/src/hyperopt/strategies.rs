@@ -3,6 +3,7 @@
 use super::{
     Direction, ParameterValue, RandomSampler, Sampler, SearchSpace, TPESampler, Trial, TrialHistory,
 };
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -301,9 +302,19 @@ pub struct StandardHalving {
 }
 
 impl StandardHalving {
-    pub fn new(reduction_factor: usize) -> Self {
-        assert!(reduction_factor >= 2, "Reduction factor must be at least 2");
-        Self { reduction_factor }
+    /// Create a successive-halving schedule.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `reduction_factor < 2`: a factor of 1 would keep every trial
+    /// forever and a factor of 0 would divide by zero, so neither can be silently accepted.
+    pub fn new(reduction_factor: usize) -> Result<Self> {
+        if reduction_factor < 2 {
+            return Err(anyhow::anyhow!(
+                "Reduction factor must be at least 2, got {reduction_factor}"
+            ));
+        }
+        Ok(Self { reduction_factor })
     }
 }
 
@@ -345,7 +356,10 @@ impl SuccessiveHalving {
         Self {
             max_resource,
             initial_configs,
-            halving_strategy: Box::new(StandardHalving::new(3)),
+            // reason: 3 is a literal >= 2, so this construction cannot fail.
+            halving_strategy: Box::new(
+                StandardHalving::new(3).expect("literal reduction factor 3 is >= 2"),
+            ),
             current_stage: 0,
             trials_suggested: 0,
             sampler: Box::new(RandomSampler::new()),
@@ -877,6 +891,7 @@ mod tests {
             .discrete("batch_size", 8, 32, 8)
             .categorical("optimizer", vec!["adam", "sgd"])
             .build()
+            .expect("test search space definition must be valid")
     }
 
     fn create_mixed_search_space() -> SearchSpace {
@@ -885,6 +900,7 @@ mod tests {
             .discrete("batch_size", 8, 32, 8)
             .categorical("optimizer", vec!["adam", "sgd"])
             .build()
+            .expect("test search space definition must be valid")
     }
 
     #[test]
@@ -1016,7 +1032,7 @@ mod tests {
 
     #[test]
     fn test_standard_halving() {
-        let halving = StandardHalving::new(3);
+        let halving = StandardHalving::new(3).expect("reduction factor 3 is valid");
 
         assert_eq!(halving.get_resource_allocation(0, 100.0), 100.0);
         assert_eq!(halving.get_resource_allocation(1, 100.0), 100.0 / 3.0);

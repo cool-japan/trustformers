@@ -509,4 +509,240 @@ mod tests {
         let out = swiglu(&gate, &up);
         assert_eq!(out.len(), 4, "swiglu output length must match inputs");
     }
+
+    // -----------------------------------------------------------------------
+    // Real attention regression tests
+    // -----------------------------------------------------------------------
+    //
+    // These exercise real GQA scaled dot-product attention with a real
+    // per-layer sliding window, replacing a mock that discarded V entirely
+    // and fed a zero-padded, RoPE'd Q straight into `o_proj`. Every test
+    // below would have FAILED against that old code.
+
+    fn qwen25_lcg_vec(n: usize, seed: u64) -> Vec<f32> {
+        let mut state = seed;
+        (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ((state >> 33) as f32) / (u32::MAX as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    fn qwen25_f32_data(t: &trustformers_core::tensor::Tensor) -> Vec<f32> {
+        match t {
+            trustformers_core::tensor::Tensor::F32(arr) => {
+                arr.as_slice().expect("contiguous").to_vec()
+            },
+            _ => panic!("expected F32 tensor"),
+        }
+    }
+
+    #[test]
+    fn test_qwen25_attention_output_shape() {
+        use trustformers_core::device::Device;
+        use trustformers_core::tensor::Tensor;
+        use trustformers_core::traits::Layer;
+
+        let cfg = tiny_config();
+        let attn = Qwen25Attention::new(&cfg, 0, Device::CPU).expect("attention"); // no sliding window
+        let seq_len = 4;
+        let hidden = cfg.hidden_size;
+        let input =
+            Tensor::from_vec(qwen25_lcg_vec(seq_len * hidden, 1), &[seq_len, hidden]).expect("t");
+        let out = attn.forward(input).expect("forward");
+        assert_eq!(out.shape(), vec![seq_len, hidden]);
+    }
+
+    /// Changing an EARLY token must change a LATER position's output — the
+    /// discriminating test that only real QK^T/softmax/V attention passes.
+    /// The old mock fed a zero-padded RoPE'd Q straight to `o_proj`, so
+    /// changing token 0 would only ever affect token 0's own output row.
+    #[test]
+    fn test_qwen25_attention_early_token_change_propagates_forward() {
+        use trustformers_core::device::Device;
+        use trustformers_core::tensor::Tensor;
+        use trustformers_core::traits::Layer;
+
+        let cfg = tiny_config();
+        let attn = Qwen25Attention::new(&cfg, 0, Device::CPU).expect("attention");
+        let seq_len = 4;
+        let hidden = cfg.hidden_size;
+
+        let base = qwen25_lcg_vec(seq_len * hidden, 51);
+        let mut modified = base.clone();
+        for x in modified[0..hidden].iter_mut() {
+            *x += 5.0;
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+        let out_mod = attn
+            .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+
+        let a = qwen25_f32_data(&out_base);
+        let b = qwen25_f32_data(&out_mod);
+        let last_a = &a[3 * hidden..4 * hidden];
+        let last_b = &b[3 * hidden..4 * hidden];
+        let differs = last_a.iter().zip(last_b.iter()).any(|(x, y)| (x - y).abs() > 1e-5);
+        assert!(differs, "changing token 0 must change token 3's output");
+    }
+
+    #[test]
+    fn test_qwen25_attention_causal_mask_future_does_not_leak_backward() {
+        use trustformers_core::device::Device;
+        use trustformers_core::tensor::Tensor;
+        use trustformers_core::traits::Layer;
+
+        let cfg = tiny_config();
+        let attn = Qwen25Attention::new(&cfg, 0, Device::CPU).expect("attention");
+        let seq_len = 4;
+        let hidden = cfg.hidden_size;
+
+        let base = qwen25_lcg_vec(seq_len * hidden, 52);
+        let mut modified = base.clone();
+        for x in modified[3 * hidden..4 * hidden].iter_mut() {
+            *x += 5.0;
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+        let out_mod = attn
+            .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+
+        let a = qwen25_f32_data(&out_base);
+        let b = qwen25_f32_data(&out_mod);
+        for row in 0..3 {
+            let ra = &a[row * hidden..(row + 1) * hidden];
+            let rb = &b[row * hidden..(row + 1) * hidden];
+            for (x, y) in ra.iter().zip(rb.iter()) {
+                assert!(
+                    (x - y).abs() < 1e-6,
+                    "row {row} must be unaffected by a later change"
+                );
+            }
+        }
+    }
+
+    /// A sliding-window layer must actually exclude distant keys.
+    #[test]
+    fn test_qwen25_attention_sliding_window_excludes_distant_tokens() {
+        use trustformers_core::device::Device;
+        use trustformers_core::tensor::Tensor;
+        use trustformers_core::traits::Layer;
+
+        let mut cfg = tiny_config();
+        cfg.use_sliding_window = true;
+        cfg.sliding_window = Some(1);
+        cfg.max_window_layers = 0; // layer 0 gets the sliding window
+        let attn = Qwen25Attention::new(&cfg, 0, Device::CPU).expect("attention");
+        assert!(
+            attn.uses_sliding_window(),
+            "layer 0 must use the sliding window"
+        );
+        let seq_len = 4;
+        let hidden = cfg.hidden_size;
+
+        let base = qwen25_lcg_vec(seq_len * hidden, 53);
+        let mut modified = base.clone();
+        for x in modified[0..hidden].iter_mut() {
+            *x += 5.0;
+        }
+
+        let out_base = attn
+            .forward(Tensor::from_vec(base, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+        let out_mod = attn
+            .forward(Tensor::from_vec(modified, &[seq_len, hidden]).expect("t"))
+            .expect("fwd");
+
+        let a = qwen25_f32_data(&out_base);
+        let b = qwen25_f32_data(&out_mod);
+        let last_a = &a[3 * hidden..4 * hidden];
+        let last_b = &b[3 * hidden..4 * hidden];
+        for (x, y) in last_a.iter().zip(last_b.iter()) {
+            assert!(
+                (x - y).abs() < 1e-6,
+                "token 3 with sliding_window=1 must not see token 0 at all"
+            );
+        }
+    }
+
+    /// RoPE multi-head regression: the SECOND head of a GQA query tensor
+    /// must also be rotated, not just the first `head_dim`-wide block.
+    #[test]
+    fn test_qwen25_rotate_heads_rope_rotates_every_head() {
+        let head_dim = 4;
+        let num_heads = 2;
+        let mut data = vec![1.0f32; num_heads * head_dim]; // seq_len=1
+        let original = data.clone();
+        crate::qwen2_5::model::rotate_heads_rope(&mut data, num_heads, head_dim, 10000.0, &[7]);
+        let head0_changed = data[0..head_dim]
+            .iter()
+            .zip(&original[0..head_dim])
+            .any(|(a, b)| (a - b).abs() > 1e-4);
+        let head1_changed = data[head_dim..2 * head_dim]
+            .iter()
+            .zip(&original[head_dim..2 * head_dim])
+            .any(|(a, b)| (a - b).abs() > 1e-4);
+        assert!(head0_changed, "head 0 must rotate at a non-zero position");
+        assert!(head1_changed, "head 1 must ALSO rotate, not just head 0");
+    }
+
+    /// Causal property with a growing sequence: forwarding a prefix of
+    /// length N and then forwarding that same prefix plus one appended
+    /// token must leave rows `0..N` of the output bit-identical. This is
+    /// the variable-length analogue of "appending a token to the KV cache
+    /// does not change earlier positions' outputs" for this crate's
+    /// stateless `Layer::forward` (there is no incremental KV cache in the
+    /// `Layer` API; `seq_len` and `position_ids` are recomputed fresh from
+    /// the input on every call). Uses a non-sliding-window layer (`tiny_config`
+    /// leaves `use_sliding_window: false` per its `Qwen25Config::default()`
+    /// base) so the property isolates RoPE/mask-vs-seq_len leakage from
+    /// window-boundary effects, which are covered separately above.
+    #[test]
+    fn test_qwen25_attention_prefix_extension_preserves_earlier_outputs() {
+        use trustformers_core::device::Device;
+        use trustformers_core::tensor::Tensor;
+        use trustformers_core::traits::Layer;
+
+        let cfg = tiny_config();
+        let attn = Qwen25Attention::new(&cfg, 0, Device::CPU).expect("attention");
+        assert!(
+            !attn.uses_sliding_window(),
+            "tiny_config's layer 0 must not use a sliding window"
+        );
+        let hidden = cfg.hidden_size;
+        let prefix_len = 3;
+
+        let prefix = qwen25_lcg_vec(prefix_len * hidden, 91);
+        let mut extended = prefix.clone();
+        extended.extend(qwen25_lcg_vec(hidden, 92));
+
+        let out_prefix = attn
+            .forward(Tensor::from_vec(prefix, &[prefix_len, hidden]).expect("t"))
+            .expect("fwd prefix");
+        let out_extended = attn
+            .forward(Tensor::from_vec(extended, &[prefix_len + 1, hidden]).expect("t"))
+            .expect("fwd extended");
+
+        let a = qwen25_f32_data(&out_prefix);
+        let b = qwen25_f32_data(&out_extended);
+        for row in 0..prefix_len {
+            let ra = &a[row * hidden..(row + 1) * hidden];
+            let rb = &b[row * hidden..(row + 1) * hidden];
+            for (x, y) in ra.iter().zip(rb.iter()) {
+                assert!(
+                    (x - y).abs() < 1e-5,
+                    "row {row} must be unchanged when a new token is appended after it"
+                );
+            }
+        }
+    }
 }

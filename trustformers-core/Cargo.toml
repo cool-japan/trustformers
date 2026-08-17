@@ -36,6 +36,7 @@ byteorder.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 regex.workspace = true
+regex-automata.workspace = true
 lazy_static.workspace = true
 dashmap.workspace = true
 oxiarc-zstd.workspace = true
@@ -45,6 +46,7 @@ async-trait.workspace = true
 tokio.workspace = true
 sha2.workspace = true
 hex.workspace = true
+sysinfo.workspace = true
 # COOLJAPAN Pure-Rust Policy (Campaign B): reqwest pulls rustls -> aws-lc-rs ->
 # aws-lc-sys (C/C++ via cmake/cc). Keep it OUT of the default tree by making it
 # optional; only the remote leaderboard storage backend needs it.
@@ -105,7 +107,10 @@ linalg = ["scirs2-core/linalg"]  # Linear algebra operations
 # rustls -> aws-lc-sys (C/C++). The file/in-memory backends work without it.
 remote-leaderboard = ["dep:reqwest"]
 candle = ["dep:candle-core"]
-parallel = []
+# Multi-threaded kernels (attention, SDPA, ...) via scirs2-core's rayon-backed
+# `parallel_ops`. scirs2-core is already built with this feature above, so the
+# flag documents the dependency rather than toggling it.
+parallel = ["scirs2-core/parallel"]
 mpi = ["dep:mpi"]
 cuda = ["dep:oxicuda-blas", "dep:oxicuda-dnn", "dep:oxicuda-memory", "dep:oxicuda-driver"]
 rocm = ["dep:libloading"]

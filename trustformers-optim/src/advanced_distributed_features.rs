@@ -57,6 +57,8 @@
 // retained intentionally for in-progress features; not yet on active call paths.
 #![allow(dead_code)]
 
+pub mod checkpoint_format;
+
 use crate::enhanced_distributed_training::{DistributedConfig, PerformanceMetrics};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -344,9 +346,10 @@ impl AutoScaler {
     }
 
     fn execute_scale_up(&mut self, nodes: usize) -> Result<()> {
-        println!(
-            "🔼 Scaling up: Adding {} nodes (current: {})",
-            nodes, self.current_nodes
+        log::info!(
+            "scaling up: adding {} nodes (current: {})",
+            nodes,
+            self.current_nodes
         );
 
         self.current_nodes += nodes;
@@ -369,9 +372,10 @@ impl AutoScaler {
     }
 
     fn execute_scale_down(&mut self, nodes: usize) -> Result<()> {
-        println!(
-            "🔽 Scaling down: Removing {} nodes (current: {})",
-            nodes, self.current_nodes
+        log::info!(
+            "scaling down: removing {} nodes (current: {})",
+            nodes,
+            self.current_nodes
         );
 
         self.current_nodes -= nodes;
@@ -676,6 +680,11 @@ pub struct SmartCheckpointManager {
     validation_enabled: bool,
     differential_enabled: bool,
     checkpoint_dir: PathBuf,
+    /// Model state as of the most recent checkpoint; the baseline that
+    /// differential checkpoints are diffed against.
+    baseline_state: HashMap<String, Tensor>,
+    /// Absolute change below which an element is considered unchanged.
+    differential_threshold: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -736,7 +745,22 @@ impl SmartCheckpointManager {
             validation_enabled,
             differential_enabled,
             checkpoint_dir,
+            baseline_state: HashMap::new(),
+            differential_threshold: 0.0,
         })
+    }
+
+    /// Set the absolute change below which an element is treated as unchanged
+    /// by differential checkpointing. The default, `0.0`, records every element
+    /// that differs at all (lossless).
+    pub fn with_differential_threshold(mut self, threshold: f32) -> Self {
+        self.differential_threshold = threshold.max(0.0);
+        self
+    }
+
+    /// Model state the next differential checkpoint will be diffed against.
+    pub fn baseline_state(&self) -> &HashMap<String, Tensor> {
+        &self.baseline_state
     }
 
     pub fn should_checkpoint(&self, step: usize, performance_metrics: &PerformanceMetrics) -> bool {
@@ -841,108 +865,156 @@ impl SmartCheckpointManager {
 
         self.checkpoint_history.push(checkpoint_info.clone());
 
+        // The state just written becomes the baseline for the next differential
+        // checkpoint.
+        self.baseline_state = model_state.clone();
+
         // Cleanup old checkpoints
         self.cleanup_old_checkpoints()?;
 
-        println!(
-            "📁 Checkpoint created: Step {}, Size: {:.2}MB, Type: {}",
+        log::info!(
+            "checkpoint created: step {}, {:.2} MiB, {}",
             step,
             file_size as f32 / (1024.0 * 1024.0),
-            if is_differential { "Differential" } else { "Full" }
+            if is_differential { "differential" } else { "full" }
         );
 
         Ok(checkpoint_info)
     }
 
+    /// Serialize the complete model state.
+    ///
+    /// Tensor payloads are IEEE-754 `f32` little-endian bytes, so a
+    /// save→load round trip is bit-identical. See
+    /// [`checkpoint_format`](self::checkpoint_format) for the layout.
     fn create_full_checkpoint(&self, model_state: &HashMap<String, Tensor>) -> Result<Vec<u8>> {
-        // Simplified checkpoint serialization
-        // In a real implementation, would use proper serialization format
-        let mut data = Vec::new();
-
-        // Add magic header
-        data.extend_from_slice(b"TFRS_CKPT_FULL");
-
-        // Add parameter count
-        data.extend_from_slice(&(model_state.len() as u32).to_le_bytes());
-
-        // Add parameters (simplified)
-        for (name, tensor) in model_state {
-            // Parameter name length and name
-            data.extend_from_slice(&(name.len() as u32).to_le_bytes());
-            data.extend_from_slice(name.as_bytes());
-
-            // Tensor shape
-            let shape = tensor.shape();
-            data.extend_from_slice(&(shape.len() as u32).to_le_bytes());
-            for dim in shape {
-                data.extend_from_slice(&(dim as u32).to_le_bytes());
-            }
-
-            // Tensor data (simplified - would need proper serialization)
-            let tensor_data = tensor.to_vec_u8()?;
-            data.extend_from_slice(&(tensor_data.len() as u32).to_le_bytes());
-            for &value in &tensor_data {
-                data.extend_from_slice(&value.to_le_bytes());
-            }
-        }
-
-        Ok(data)
+        checkpoint_format::encode_full(model_state)
     }
 
+    /// Serialize only the elements that changed since the previous checkpoint.
+    ///
+    /// The baseline is the state captured at the last successful
+    /// [`SmartCheckpointManager::create_checkpoint`]. Elements whose absolute
+    /// change does not exceed [`SmartCheckpointManager::differential_threshold`]
+    /// are omitted entirely.
     fn create_differential_checkpoint(
         &self,
         model_state: &HashMap<String, Tensor>,
     ) -> Result<Vec<u8>> {
-        // Simplified differential checkpoint
-        // In practice, would compute actual differences from base checkpoint
-        let mut data = Vec::new();
+        let base_step = self.checkpoint_history.last().map(|c| c.step).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "differential checkpointing requires a previous checkpoint".to_string(),
+            )
+        })?;
 
-        // Add magic header
-        data.extend_from_slice(b"TFRS_CKPT_DIFF");
+        checkpoint_format::encode_differential(
+            model_state,
+            &self.baseline_state,
+            base_step,
+            self.differential_threshold,
+        )
+    }
 
-        // Add base checkpoint reference
-        if let Some(base_step) = self.checkpoint_history.last().map(|c| c.step) {
-            data.extend_from_slice(&(base_step as u32).to_le_bytes());
+    /// Losslessly compress a serialized checkpoint (zero-run-length encoding).
+    fn compress_checkpoint(&self, data: &[u8]) -> Result<Vec<u8>> {
+        Ok(checkpoint_format::compress(data))
+    }
+
+    /// Validate a checkpoint by fully parsing it back, not by looking at its
+    /// size.
+    ///
+    /// Differential checkpoints are validated against the manager's baseline
+    /// state, which is exactly what a restore would use.
+    fn validate_checkpoint(&self, file_path: &PathBuf) -> Result<bool> {
+        let raw = std::fs::read(file_path)?;
+        let payload = match checkpoint_format::decompress(&raw) {
+            Ok(payload) => payload,
+            Err(_) => return Ok(false),
+        };
+
+        if checkpoint_format::is_differential(&payload) {
+            Ok(checkpoint_format::decode_differential(&payload, &self.baseline_state).is_ok())
+        } else {
+            Ok(checkpoint_format::decode_full(&payload).is_ok())
+        }
+    }
+
+    /// Restore the model state recorded at `step`.
+    ///
+    /// Differential checkpoints are replayed on top of the nearest preceding
+    /// full checkpoint, so any step in the retained history can be restored.
+    pub fn load_checkpoint(&self, step: usize) -> Result<HashMap<String, Tensor>> {
+        let target =
+            self.checkpoint_history
+                .iter()
+                .position(|info| info.step == step)
+                .ok_or_else(|| {
+                    TrustformersError::invalid_input(format!(
+                        "no checkpoint recorded for step {step}"
+                    ))
+                })?;
+
+        // Walk back to the most recent full checkpoint.
+        let mut anchor = target;
+        while self.checkpoint_history[anchor].is_differential {
+            if anchor == 0 {
+                return Err(TrustformersError::invalid_state(
+                    "checkpoint history starts with a differential checkpoint; the base is gone"
+                        .to_string(),
+                ));
+            }
+            anchor -= 1;
         }
 
-        // For simplicity, store full data but mark as differential
-        // Real implementation would compute and store only differences
-        let full_data = self.create_full_checkpoint(model_state)?;
-        data.extend_from_slice(&full_data);
+        let mut state = checkpoint_format::decode_full(&self.read_payload(anchor)?)?;
+        for index in (anchor + 1)..=target {
+            let payload = self.read_payload(index)?;
+            let (_, next) = checkpoint_format::decode_differential(&payload, &state)?;
+            state = next;
+        }
 
-        Ok(data)
+        Ok(state)
     }
 
-    fn compress_checkpoint(&self, data: &[u8]) -> Result<Vec<u8>> {
-        // Simplified compression (in practice, would use proper compression library)
-        // For demonstration, just add compression header
-        let mut compressed = Vec::new();
-        compressed.extend_from_slice(b"COMPRESSED");
-        compressed.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        compressed.extend_from_slice(data);
-        Ok(compressed)
+    fn read_payload(&self, index: usize) -> Result<Vec<u8>> {
+        let info = self.checkpoint_history.get(index).ok_or_else(|| {
+            TrustformersError::invalid_input(format!("checkpoint index {index} is out of range"))
+        })?;
+        let raw = std::fs::read(&info.file_path)?;
+        checkpoint_format::decompress(&raw)
     }
 
-    fn validate_checkpoint(&self, file_path: &PathBuf) -> Result<bool> {
-        // Simplified validation - check file exists and has minimum size
-        let metadata = std::fs::metadata(file_path)?;
-        Ok(metadata.len() > 100) // Minimum 100 bytes
-    }
-
+    /// Drop the oldest checkpoints beyond the retention count.
+    ///
+    /// A full checkpoint is never dropped while a differential checkpoint still
+    /// depends on it, because doing so would make every dependent checkpoint
+    /// unrestorable.
     fn cleanup_old_checkpoints(&mut self) -> Result<()> {
         if self.checkpoint_history.len() <= self.config.retention_count {
             return Ok(());
         }
 
-        // Remove oldest checkpoints
-        let to_remove = self.checkpoint_history.len() - self.config.retention_count;
-        for _ in 0..to_remove {
-            if let Some(old_checkpoint) = self.checkpoint_history.first() {
-                if let Err(e) = std::fs::remove_file(&old_checkpoint.file_path) {
-                    eprintln!("Warning: Failed to remove old checkpoint: {}", e);
-                }
+        let mut to_remove = self.checkpoint_history.len() - self.config.retention_count;
+        while to_remove > 0 {
+            let next_is_dependent =
+                self.checkpoint_history.get(1).is_some_and(|info| info.is_differential);
+            if next_is_dependent {
+                log::debug!(
+                    "retaining checkpoint at step {} because later differential checkpoints \
+                     depend on it",
+                    self.checkpoint_history[0].step
+                );
+                break;
             }
-            self.checkpoint_history.remove(0);
+
+            let removed = self.checkpoint_history.remove(0);
+            if let Err(err) = std::fs::remove_file(&removed.file_path) {
+                log::warn!(
+                    "failed to remove old checkpoint {}: {err}",
+                    removed.file_path.display()
+                );
+            }
+            to_remove -= 1;
         }
 
         Ok(())
@@ -1273,6 +1345,179 @@ impl MLPerformanceModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trustformers-ckpt-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn model_state(scale: f32) -> HashMap<String, Tensor> {
+        let mut state = HashMap::new();
+        state.insert(
+            "encoder.weight".to_string(),
+            Tensor::from_slice(
+                &[0.11 * scale, -0.25 * scale, 0.5 * scale, -0.75 * scale],
+                &[2, 2],
+            )
+            .expect("tensor must build in test"),
+        );
+        state.insert(
+            "encoder.bias".to_string(),
+            Tensor::from_slice(&[-0.03 * scale, 0.07 * scale], &[2])
+                .expect("tensor must build in test"),
+        );
+        state
+    }
+
+    fn assert_states_equal(actual: &HashMap<String, Tensor>, expected: &HashMap<String, Tensor>) {
+        assert_eq!(actual.len(), expected.len(), "parameter count");
+        for (name, tensor) in expected {
+            let restored =
+                actual.get(name).unwrap_or_else(|| panic!("parameter `{name}` was lost"));
+            assert_eq!(restored.shape(), tensor.shape(), "`{name}` shape");
+            assert_eq!(
+                restored.to_vec_f32().expect("read"),
+                tensor.to_vec_f32().expect("read"),
+                "`{name}` values must be bit-identical"
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_save_load_round_trip_is_bit_identical() {
+        let dir = scratch_dir("full");
+        let config = CheckpointConfig {
+            differential: false,
+            compression: false,
+            ..CheckpointConfig::default()
+        };
+        let mut manager =
+            SmartCheckpointManager::new(config, dir.clone()).expect("manager must build in test");
+
+        let state = model_state(1.0);
+        let info = manager.create_checkpoint(10, &state).expect("checkpoint in test");
+        assert!(info.validation_passed, "a real checkpoint must validate");
+        assert!(!info.is_differential);
+
+        let restored = manager.load_checkpoint(10).expect("load in test");
+        assert_states_equal(&restored, &state);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checkpoint_does_not_zero_sub_unit_weights() {
+        // Regression: the previous serializer wrote `tensor.to_vec_u8()`,
+        // which casts f32 values to u8 and mapped every weight in (-1, 1) to 0.
+        let dir = scratch_dir("subunit");
+        let config = CheckpointConfig {
+            differential: false,
+            compression: true,
+            ..CheckpointConfig::default()
+        };
+        let mut manager =
+            SmartCheckpointManager::new(config, dir.clone()).expect("manager must build in test");
+
+        let mut state = HashMap::new();
+        state.insert(
+            "w".to_string(),
+            Tensor::from_slice(&[0.004, -0.9, 0.5, 0.125], &[4])
+                .expect("tensor must build in test"),
+        );
+
+        manager.create_checkpoint(1, &state).expect("checkpoint in test");
+        let restored = manager.load_checkpoint(1).expect("load in test");
+        let values = restored.get("w").expect("parameter must survive").to_vec_f32().expect("read");
+
+        assert_eq!(values, vec![0.004f32, -0.9, 0.5, 0.125]);
+        assert!(values.iter().all(|value| *value != 0.0));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn differential_checkpoints_replay_onto_the_base() {
+        let dir = scratch_dir("diff");
+        let config = CheckpointConfig {
+            differential: true,
+            compression: true,
+            retention_count: 10,
+            ..CheckpointConfig::default()
+        };
+        let mut manager =
+            SmartCheckpointManager::new(config, dir.clone()).expect("manager must build in test");
+
+        let first = model_state(1.0);
+        let second = model_state(2.0);
+        let third = model_state(3.0);
+
+        let full = manager.create_checkpoint(1, &first).expect("checkpoint in test");
+        assert!(!full.is_differential);
+        let diff_one = manager.create_checkpoint(2, &second).expect("checkpoint in test");
+        assert!(diff_one.is_differential);
+        let diff_two = manager.create_checkpoint(3, &third).expect("checkpoint in test");
+        assert!(diff_two.is_differential);
+        assert!(diff_two.validation_passed);
+
+        assert_states_equal(&manager.load_checkpoint(1).expect("load in test"), &first);
+        assert_states_equal(&manager.load_checkpoint(2).expect("load in test"), &second);
+        assert_states_equal(&manager.load_checkpoint(3).expect("load in test"), &third);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn differential_checkpoint_is_smaller_than_a_full_one() {
+        let dir = scratch_dir("size");
+        let config = CheckpointConfig {
+            differential: true,
+            compression: false,
+            retention_count: 10,
+            ..CheckpointConfig::default()
+        };
+        let mut manager =
+            SmartCheckpointManager::new(config, dir.clone()).expect("manager must build in test");
+
+        let mut state = HashMap::new();
+        state.insert(
+            "w".to_string(),
+            Tensor::from_slice(&vec![0.5f32; 256], &[256]).expect("tensor must build in test"),
+        );
+        let full = manager.create_checkpoint(1, &state).expect("checkpoint in test");
+
+        // Change a single element.
+        let mut changed: Vec<f32> = vec![0.5f32; 256];
+        changed[7] = -1.25;
+        state.insert(
+            "w".to_string(),
+            Tensor::from_slice(&changed, &[256]).expect("tensor must build in test"),
+        );
+        let diff = manager.create_checkpoint(2, &state).expect("checkpoint in test");
+
+        assert!(
+            diff.file_size < full.file_size,
+            "a one-element delta must be smaller than the full state ({} vs {})",
+            diff.file_size,
+            full.file_size
+        );
+        assert_states_equal(&manager.load_checkpoint(2).expect("load in test"), &state);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loading_an_unknown_step_errors() {
+        let dir = scratch_dir("missing");
+        let manager = SmartCheckpointManager::new(CheckpointConfig::default(), dir.clone())
+            .expect("manager must build in test");
+        assert!(manager.load_checkpoint(42).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_auto_scaler_config() {

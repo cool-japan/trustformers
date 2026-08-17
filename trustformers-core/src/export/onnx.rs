@@ -1,15 +1,39 @@
-// ONNX export functionality
-#![allow(unused_variables)] // ONNX export implementation
+//! ONNX export.
+//!
+//! This module owns the in-memory `onnx.*` message types and the exporter. The
+//! binary protobuf codec lives in [`super::onnx_proto`] and the CPU interpreter in
+//! [`super::onnx_cpu`].
+//!
+//! # What can and cannot be exported
+//!
+//! [`ONNXExporter::export_graph`] writes a **real binary `onnx.ModelProto`** — the
+//! same bytes `onnxruntime` and Netron read — from an [`ONNXModel`] the caller has
+//! built, initializers and all.
+//!
+//! [`ONNXExporter::export`] (the [`ModelExporter`] entry point) cannot do that,
+//! because an ONNX graph is a *topology* and the [`Model`] trait exposes only
+//! parameters through [`Model::named_tensors`]. It therefore returns a structured
+//! [`ErrorKind::UnsupportedOperation`](crate::errors::ErrorKind::UnsupportedOperation)
+//! rather than guessing. A previous revision guessed: it emitted twelve
+//! transformer blocks for every model and wrote the result as a human-readable text
+//! dump under the `.onnx` extension, which no ONNX tool can open.
 
-use super::{ExportConfig, ExportFormat, ExportPrecision, ModelExporter};
+use super::{collect_model_tensors, ExportConfig, ExportFormat, ExportPrecision, ModelExporter};
+use crate::errors::unsupported_operation;
 use crate::traits::Model;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Write;
+use std::path::Path;
+
+/// Explanation attached to every refusal to derive an ONNX graph from a `Model`.
+pub const ONNX_TOPOLOGY_UNSUPPORTED_REASON: &str =
+    "an ONNX graph describes the model's operations and how they are wired \
+     together; the `Model` trait exposes parameters only (`named_tensors`), so the \
+     graph cannot be derived. Build an `ONNXModel` explicitly and call \
+     `ONNXExporter::export_graph`, or export the weights to GGUF.";
 
 /// ONNX model representation
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ONNXModel {
     pub graph: ONNXGraph,
     pub ir_version: i64,
@@ -19,7 +43,7 @@ pub struct ONNXModel {
     pub model_version: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ONNXGraph {
     pub nodes: Vec<ONNXNode>,
     pub inputs: Vec<ONNXValueInfo>,
@@ -28,7 +52,7 @@ pub struct ONNXGraph {
     pub name: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ONNXNode {
     pub op_type: String,
     pub inputs: Vec<String>,
@@ -37,35 +61,35 @@ pub struct ONNXNode {
     pub name: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ONNXValueInfo {
     pub name: String,
     pub type_info: ONNXTypeInfo,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ONNXTypeInfo {
     pub tensor_type: ONNXTensorType,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ONNXTensorType {
     pub elem_type: ONNXDataType,
     pub shape: ONNXTensorShape,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ONNXTensorShape {
     pub dims: Vec<ONNXDimension>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ONNXDimension {
     Value(i64),
     Parameter(String),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ONNXDataType {
     Float = 1,
     UInt8 = 2,
@@ -85,7 +109,60 @@ pub enum ONNXDataType {
     BFloat16 = 16,
 }
 
-#[derive(Debug)]
+impl ONNXDataType {
+    /// Decode a `TensorProto.DataType` wire value.
+    pub fn from_i32(value: i32) -> Result<Self> {
+        Ok(match value {
+            1 => ONNXDataType::Float,
+            2 => ONNXDataType::UInt8,
+            3 => ONNXDataType::Int8,
+            4 => ONNXDataType::UInt16,
+            5 => ONNXDataType::Int16,
+            6 => ONNXDataType::Int32,
+            7 => ONNXDataType::Int64,
+            8 => ONNXDataType::String,
+            9 => ONNXDataType::Bool,
+            10 => ONNXDataType::Float16,
+            11 => ONNXDataType::Double,
+            12 => ONNXDataType::UInt32,
+            13 => ONNXDataType::UInt64,
+            14 => ONNXDataType::Complex64,
+            15 => ONNXDataType::Complex128,
+            16 => ONNXDataType::BFloat16,
+            other => return Err(anyhow!("unknown ONNX TensorProto data type {other}")),
+        })
+    }
+
+    /// Size in bytes of one element, for the fixed-width types.
+    ///
+    /// Returns `None` for `String`, whose elements are variable length.
+    pub fn element_size(&self) -> Option<usize> {
+        Some(match self {
+            ONNXDataType::Float | ONNXDataType::Int32 | ONNXDataType::UInt32 => 4,
+            ONNXDataType::UInt8 | ONNXDataType::Int8 | ONNXDataType::Bool => 1,
+            ONNXDataType::UInt16
+            | ONNXDataType::Int16
+            | ONNXDataType::Float16
+            | ONNXDataType::BFloat16 => 2,
+            ONNXDataType::Int64 | ONNXDataType::UInt64 | ONNXDataType::Double => 8,
+            ONNXDataType::Complex64 => 8,
+            ONNXDataType::Complex128 => 16,
+            ONNXDataType::String => return None,
+        })
+    }
+
+    /// The ONNX element type matching an export precision.
+    pub fn from_precision(precision: ExportPrecision) -> Self {
+        match precision {
+            ExportPrecision::FP32 => ONNXDataType::Float,
+            ExportPrecision::FP16 => ONNXDataType::Float16,
+            // ONNX has no 4-bit tensor element type in the opsets this crate targets.
+            ExportPrecision::INT8 | ExportPrecision::INT4 => ONNXDataType::Int8,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ONNXTensor {
     pub name: String,
     pub data_type: ONNXDataType,
@@ -93,13 +170,13 @@ pub struct ONNXTensor {
     pub raw_data: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ONNXOpsetImport {
     pub domain: String,
     pub version: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ONNXAttribute {
     Int(i64),
     Float(f32),
@@ -170,302 +247,115 @@ impl ONNXExporter {
         Self { opset_version: 14 }
     }
 
+    /// Override the opset version declared in exported models.
     pub fn with_opset_version(mut self, version: i64) -> Self {
         self.opset_version = version;
         self
     }
 
-    fn create_onnx_model<M: Model>(&self, model: &M, config: &ExportConfig) -> Result<ONNXModel> {
-        let mut graph = ONNXGraph {
-            nodes: Vec::new(),
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-            initializers: Vec::new(),
-            name: "trustformers_model".to_string(),
-        };
+    /// The opset version this exporter declares by default.
+    pub fn opset_version(&self) -> i64 {
+        self.opset_version
+    }
 
-        // Create input specification
-        let batch_size = config.batch_size.unwrap_or(1);
-        let seq_len = config.sequence_length.unwrap_or(512);
+    /// Serialise an explicitly built [`ONNXModel`] as a binary `onnx.ModelProto`.
+    ///
+    /// This is the real thing: the bytes written here are what `onnxruntime`,
+    /// Netron and this crate's own [`super::onnx_cpu`] interpreter read. The
+    /// caller supplies the graph, because the [`Model`] trait cannot express one.
+    ///
+    /// `output_path` is used verbatim — add the `.onnx` extension yourself.
+    pub fn export_graph<P: AsRef<Path>>(&self, model: &ONNXModel, output_path: P) -> Result<()> {
+        validate_graph(&model.graph)?;
+        let bytes = super::onnx_proto::encode_model(model);
+        std::fs::write(output_path.as_ref(), bytes)?;
+        Ok(())
+    }
 
-        let input_ids = ONNXValueInfo {
-            name: "input_ids".to_string(),
-            type_info: ONNXTypeInfo {
-                tensor_type: ONNXTensorType {
-                    elem_type: ONNXDataType::Int64,
-                    shape: ONNXTensorShape {
-                        dims: vec![
-                            ONNXDimension::Parameter("batch_size".to_string()),
-                            ONNXDimension::Parameter("sequence_length".to_string()),
-                        ],
-                    },
-                },
-            },
-        };
-        graph.inputs.push(input_ids);
+    /// Serialise an explicitly built [`ONNXModel`] to bytes.
+    pub fn encode_graph(&self, model: &ONNXModel) -> Result<Vec<u8>> {
+        validate_graph(&model.graph)?;
+        Ok(super::onnx_proto::encode_model(model))
+    }
 
-        // Create attention mask input
-        let attention_mask = ONNXValueInfo {
-            name: "attention_mask".to_string(),
-            type_info: ONNXTypeInfo {
-                tensor_type: ONNXTensorType {
-                    elem_type: ONNXDataType::Int64,
-                    shape: ONNXTensorShape {
-                        dims: vec![
-                            ONNXDimension::Parameter("batch_size".to_string()),
-                            ONNXDimension::Parameter("sequence_length".to_string()),
-                        ],
-                    },
-                },
-            },
-        };
-        graph.inputs.push(attention_mask);
-
-        // Create output specification
-        let output = ONNXValueInfo {
-            name: "logits".to_string(),
-            type_info: ONNXTypeInfo {
-                tensor_type: ONNXTensorType {
-                    elem_type: match config.precision {
-                        ExportPrecision::FP32 => ONNXDataType::Float,
-                        ExportPrecision::FP16 => ONNXDataType::Float16,
-                        ExportPrecision::INT8 => ONNXDataType::Int8,
-                        ExportPrecision::INT4 => ONNXDataType::Int8, // ONNX doesn't have INT4
-                    },
-                    shape: ONNXTensorShape {
-                        dims: vec![
-                            ONNXDimension::Parameter("batch_size".to_string()),
-                            ONNXDimension::Parameter("sequence_length".to_string()),
-                            ONNXDimension::Value(50257), // Vocab size (example)
-                        ],
-                    },
-                },
-            },
-        };
-        graph.outputs.push(output);
-
-        // Convert model layers to ONNX nodes
-        self.convert_model_to_nodes(model, &mut graph, config)?;
-
-        let onnx_model = ONNXModel {
+    /// Build an [`ONNXModel`] shell — opset, producer and IR version — with the
+    /// caller's graph. No nodes or initializers are invented.
+    pub fn wrap_graph(&self, graph: ONNXGraph, config: &ExportConfig) -> ONNXModel {
+        ONNXModel {
             graph,
             ir_version: 8,
             opset_imports: vec![ONNXOpsetImport {
-                domain: "".to_string(),
+                domain: String::new(),
                 version: config.opset_version.unwrap_or(self.opset_version),
             }],
             producer_name: "TrustformeRS".to_string(),
-            producer_version: "0.1.0".to_string(),
+            producer_version: env!("CARGO_PKG_VERSION").to_string(),
             model_version: 1,
-        };
-
-        Ok(onnx_model)
-    }
-
-    fn convert_model_to_nodes<M: Model>(
-        &self,
-        model: &M,
-        graph: &mut ONNXGraph,
-        config: &ExportConfig,
-    ) -> Result<()> {
-        // This is a simplified conversion - in practice, you'd need to:
-        // 1. Traverse the model's computational graph
-        // 2. Convert each layer to corresponding ONNX operations
-        // 3. Handle weight initialization and parameter mapping
-
-        // Example: Add embedding layer
-        let embedding_node = ONNXNode {
-            op_type: "Gather".to_string(),
-            inputs: vec!["embedding_weight".to_string(), "input_ids".to_string()],
-            outputs: vec!["embeddings".to_string()],
-            attributes: HashMap::new(),
-            name: "embedding".to_string(),
-        };
-        graph.nodes.push(embedding_node);
-
-        // Example: Add transformer layers
-        for layer_idx in 0..12 {
-            // Assuming 12 layers
-            self.add_transformer_layer(graph, layer_idx, config)?;
         }
-
-        // Example: Add final layer norm and linear projection
-        let final_norm_node = ONNXNode {
-            op_type: "LayerNormalization".to_string(),
-            inputs: vec![
-                format!("layer_{}_output", 11),
-                "final_layer_norm_weight".to_string(),
-                "final_layer_norm_bias".to_string(),
-            ],
-            outputs: vec!["final_hidden_states".to_string()],
-            attributes: HashMap::new(),
-            name: "final_layer_norm".to_string(),
-        };
-        graph.nodes.push(final_norm_node);
-
-        let lm_head_node = ONNXNode {
-            op_type: "MatMul".to_string(),
-            inputs: vec![
-                "final_hidden_states".to_string(),
-                "lm_head_weight".to_string(),
-            ],
-            outputs: vec!["logits".to_string()],
-            attributes: HashMap::new(),
-            name: "lm_head".to_string(),
-        };
-        graph.nodes.push(lm_head_node);
-
-        Ok(())
     }
+}
 
-    fn add_transformer_layer(
-        &self,
-        graph: &mut ONNXGraph,
-        layer_idx: usize,
-        _config: &ExportConfig,
-    ) -> Result<()> {
-        let layer_prefix = format!("layer_{}", layer_idx);
-        let input_name = if layer_idx == 0 {
-            "embeddings".to_string()
-        } else {
-            format!("layer_{}_output", layer_idx - 1)
-        };
-
-        // Self-attention layer
-        let attention_node = ONNXNode {
-            op_type: "MultiHeadAttention".to_string(),
-            inputs: vec![
-                input_name.clone(),
-                input_name.clone(),
-                input_name.clone(),
-                format!("{}_attention_mask", layer_prefix),
-            ],
-            outputs: vec![format!("{}_attention_output", layer_prefix)],
-            attributes: {
-                let mut attrs = HashMap::new();
-                attrs.insert("num_heads".to_string(), ONNXAttribute::Int(12));
-                attrs
-            },
-            name: format!("{}_attention", layer_prefix),
-        };
-        graph.nodes.push(attention_node);
-
-        // Add residual connection
-        let add_node = ONNXNode {
-            op_type: "Add".to_string(),
-            inputs: vec![
-                input_name.clone(),
-                format!("{}_attention_output", layer_prefix),
-            ],
-            outputs: vec![format!("{}_attention_residual", layer_prefix)],
-            attributes: HashMap::new(),
-            name: format!("{}_attention_add", layer_prefix),
-        };
-        graph.nodes.push(add_node);
-
-        // Layer normalization
-        let norm_node = ONNXNode {
-            op_type: "LayerNormalization".to_string(),
-            inputs: vec![
-                format!("{}_attention_residual", layer_prefix),
-                format!("{}_norm_weight", layer_prefix),
-                format!("{}_norm_bias", layer_prefix),
-            ],
-            outputs: vec![format!("{}_norm_output", layer_prefix)],
-            attributes: HashMap::new(),
-            name: format!("{}_norm", layer_prefix),
-        };
-        graph.nodes.push(norm_node);
-
-        // Feed-forward network
-        let ff_node = ONNXNode {
-            op_type: "MatMul".to_string(),
-            inputs: vec![
-                format!("{}_norm_output", layer_prefix),
-                format!("{}_ff_weight", layer_prefix),
-            ],
-            outputs: vec![format!("{}_ff_output", layer_prefix)],
-            attributes: HashMap::new(),
-            name: format!("{}_feedforward", layer_prefix),
-        };
-        graph.nodes.push(ff_node);
-
-        // Final residual connection
-        let final_add_node = ONNXNode {
-            op_type: "Add".to_string(),
-            inputs: vec![
-                format!("{}_norm_output", layer_prefix),
-                format!("{}_ff_output", layer_prefix),
-            ],
-            outputs: vec![format!("{}_output", layer_prefix)],
-            attributes: HashMap::new(),
-            name: format!("{}_final_add", layer_prefix),
-        };
-        graph.nodes.push(final_add_node);
-
-        Ok(())
-    }
-
-    fn serialize_onnx_model(&self, model: &ONNXModel, output_path: &str) -> Result<()> {
-        // In a real implementation, you would use protobuf to serialize
-        // For now, we'll create a simple text representation
-        let serialized = self.serialize_to_text(model)?;
-
-        let mut file = File::create(format!("{}.onnx", output_path))?;
-        file.write_all(serialized.as_bytes())?;
-
-        Ok(())
-    }
-
-    fn serialize_to_text(&self, model: &ONNXModel) -> Result<String> {
-        let mut output = String::new();
-
-        output.push_str(&format!("IR Version: {}\n", model.ir_version));
-        output.push_str(&format!(
-            "Producer: {} {}\n",
-            model.producer_name, model.producer_version
+/// Reject graphs that would serialise into a file no runtime can execute.
+fn validate_graph(graph: &ONNXGraph) -> Result<()> {
+    if graph.nodes.is_empty() {
+        return Err(anyhow!(
+            "ONNX graph '{}' has no nodes; an initializer-only file is not an executable model",
+            graph.name
         ));
-        output.push_str(&format!("Model Version: {}\n", model.model_version));
-        output.push('\n');
-
-        output.push_str("Opset Imports:\n");
-        for opset in &model.opset_imports {
-            output.push_str(&format!(
-                "  Domain: '{}', Version: {}\n",
-                opset.domain, opset.version
-            ));
-        }
-        output.push('\n');
-
-        output.push_str("Graph:\n");
-        output.push_str(&format!("  Name: {}\n", model.graph.name));
-
-        output.push_str("  Inputs:\n");
-        for input in &model.graph.inputs {
-            output.push_str(&format!("    {}: {:?}\n", input.name, input.type_info));
-        }
-
-        output.push_str("  Outputs:\n");
-        for output_info in &model.graph.outputs {
-            output.push_str(&format!(
-                "    {}: {:?}\n",
-                output_info.name, output_info.type_info
-            ));
-        }
-
-        output.push_str("  Nodes:\n");
-        for node in &model.graph.nodes {
-            output.push_str(&format!(
-                "    {} ({}): {} -> {}\n",
-                node.name,
-                node.op_type,
-                node.inputs.join(", "),
-                node.outputs.join(", ")
-            ));
-        }
-
-        Ok(output)
     }
+    if graph.outputs.is_empty() {
+        return Err(anyhow!("ONNX graph '{}' declares no outputs", graph.name));
+    }
+
+    let mut produced: std::collections::HashSet<&str> =
+        graph.inputs.iter().map(|value| value.name.as_str()).collect();
+    for initializer in &graph.initializers {
+        produced.insert(initializer.name.as_str());
+
+        let element_count: i64 = initializer.dims.iter().product();
+        if let Some(element_size) = initializer.data_type.element_size() {
+            let expected = element_count.max(0) as usize * element_size;
+            if initializer.raw_data.len() != expected {
+                return Err(anyhow!(
+                    "ONNX initializer '{}' declares dims {:?} of {:?} ({expected} bytes) but \
+                     carries {} bytes",
+                    initializer.name,
+                    initializer.dims,
+                    initializer.data_type,
+                    initializer.raw_data.len()
+                ));
+            }
+        }
+    }
+
+    for node in &graph.nodes {
+        for input in &node.inputs {
+            // The empty name is ONNX's way of skipping an optional input.
+            if !input.is_empty() && !produced.contains(input.as_str()) {
+                return Err(anyhow!(
+                    "ONNX node '{}' ({}) consumes '{}', which no input, initializer or earlier \
+                     node produces",
+                    node.name,
+                    node.op_type,
+                    input
+                ));
+            }
+        }
+        for output in &node.outputs {
+            produced.insert(output.as_str());
+        }
+    }
+
+    for output in &graph.outputs {
+        if !produced.contains(output.name.as_str()) {
+            return Err(anyhow!(
+                "ONNX graph output '{}' is never produced by any node",
+                output.name
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 impl Default for ONNXOperatorRegistry {
@@ -1164,26 +1054,30 @@ impl ONNXOperatorRegistry {
 }
 
 impl ModelExporter for ONNXExporter {
+    /// Always fails with a structured `UnsupportedOperation` error.
+    ///
+    /// See the [module documentation](self); use [`ONNXExporter::export_graph`]
+    /// with an explicitly built [`ONNXModel`] to write a real `.onnx` file.
     fn export<M: Model>(&self, model: &M, config: &ExportConfig) -> Result<()> {
         if config.format != ExportFormat::ONNX {
             return Err(anyhow!("ONNXExporter only supports ONNX format"));
         }
 
-        let onnx_model = self.create_onnx_model(model, config)?;
-        self.serialize_onnx_model(&onnx_model, &config.output_path)?;
-
-        println!("Model exported to {}.onnx", config.output_path);
-        Ok(())
+        // Surface the "no weights at all" problem first: it is the caller's bug,
+        // whereas the missing topology is a limitation of the `Model` trait.
+        let _tensors = collect_model_tensors(model)?;
+        Err(unsupported_operation("ONNX graph export", ONNX_TOPOLOGY_UNSUPPORTED_REASON).into())
     }
 
     fn supported_formats(&self) -> Vec<ExportFormat> {
         vec![ExportFormat::ONNX]
     }
 
-    fn validate_model<M: Model>(&self, _model: &M, format: ExportFormat) -> Result<()> {
+    fn validate_model<M: Model>(&self, model: &M, format: ExportFormat) -> Result<()> {
         if format != ExportFormat::ONNX {
             return Err(anyhow!("ONNXExporter only supports ONNX format"));
         }
+        collect_model_tensors(model)?;
         Ok(())
     }
 }
@@ -1191,6 +1085,156 @@ impl ModelExporter for ONNXExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::export::test_support::TestModel;
+
+    fn float_tensor(name: &str, dims: Vec<i64>, values: &[f32]) -> ONNXTensor {
+        ONNXTensor {
+            name: name.to_string(),
+            data_type: ONNXDataType::Float,
+            dims,
+            raw_data: values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        }
+    }
+
+    fn float_value_info(name: &str, dims: Vec<i64>) -> ONNXValueInfo {
+        ONNXValueInfo {
+            name: name.to_string(),
+            type_info: ONNXTypeInfo {
+                tensor_type: ONNXTensorType {
+                    elem_type: ONNXDataType::Float,
+                    shape: ONNXTensorShape {
+                        dims: dims.into_iter().map(ONNXDimension::Value).collect(),
+                    },
+                },
+            },
+        }
+    }
+
+    fn tiny_graph() -> ONNXGraph {
+        ONNXGraph {
+            nodes: vec![ONNXNode {
+                op_type: "Add".to_string(),
+                inputs: vec!["x".to_string(), "b".to_string()],
+                outputs: vec!["y".to_string()],
+                attributes: HashMap::new(),
+                name: "add0".to_string(),
+            }],
+            inputs: vec![float_value_info("x", vec![2])],
+            outputs: vec![float_value_info("y", vec![2])],
+            initializers: vec![float_tensor("b", vec![2], &[1.0, 2.0])],
+            name: "tiny".to_string(),
+        }
+    }
+
+    /// Regression test for the exporter that wrote `"IR Version: 8\nProducer: ..."`
+    /// into a file named `*.onnx`.
+    #[test]
+    fn export_graph_writes_binary_protobuf_not_text() {
+        let dir = std::env::temp_dir().join("trustformers_onnx_export_graph");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("tiny.onnx");
+
+        // `ExportConfig::opset_version` takes precedence over the exporter default.
+        let exporter = ONNXExporter::new().with_opset_version(14);
+        let config = ExportConfig {
+            opset_version: Some(17),
+            ..Default::default()
+        };
+        let model = exporter.wrap_graph(tiny_graph(), &config);
+        exporter.export_graph(&model, &path).expect("write");
+
+        let bytes = std::fs::read(&path).expect("read back");
+        assert!(!bytes.starts_with(b"IR Version"), "must not be a text dump");
+        // ModelProto field 1 (ir_version) is a varint: key byte 0x08.
+        assert_eq!(bytes[0], 0x08);
+
+        let decoded = crate::export::onnx_proto::decode_model(&bytes).expect("parse");
+        assert_eq!(decoded.graph.name, "tiny");
+        assert_eq!(decoded.graph.nodes[0].op_type, "Add");
+        assert_eq!(decoded.graph.initializers[0].raw_data.len(), 8);
+        assert_eq!(decoded.opset_imports[0].version, 17);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_graph_rejects_dangling_inputs() {
+        let mut graph = tiny_graph();
+        graph.initializers.clear();
+        let exporter = ONNXExporter::new();
+        let model = exporter.wrap_graph(graph, &ExportConfig::default());
+        let err = exporter.encode_graph(&model).expect_err("dangling input");
+        assert!(err.to_string().contains("consumes 'b'"), "{err}");
+    }
+
+    #[test]
+    fn export_graph_rejects_initializers_whose_bytes_do_not_match_their_dims() {
+        let mut graph = tiny_graph();
+        graph.initializers[0].dims = vec![7];
+        let exporter = ONNXExporter::new();
+        let model = exporter.wrap_graph(graph, &ExportConfig::default());
+        let err = exporter.encode_graph(&model).expect_err("bad initializer");
+        assert!(err.to_string().contains("carries 8 bytes"), "{err}");
+    }
+
+    #[test]
+    fn export_graph_rejects_node_free_graphs() {
+        let mut graph = tiny_graph();
+        graph.nodes.clear();
+        let exporter = ONNXExporter::new();
+        let model = exporter.wrap_graph(graph, &ExportConfig::default());
+        let err = exporter.encode_graph(&model).expect_err("weights-only is not a model");
+        assert!(err.to_string().contains("no nodes"), "{err}");
+    }
+
+    /// The `ModelExporter` entry point must refuse rather than invent a topology.
+    #[test]
+    fn model_exporter_entry_point_refuses_to_invent_a_graph() {
+        let dir = std::env::temp_dir().join("trustformers_onnx_export_refuse");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let output = dir.join("model");
+
+        let config = ExportConfig {
+            format: ExportFormat::ONNX,
+            output_path: output.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let err = ONNXExporter::new()
+            .export(&TestModel::with_seed(1.0), &config)
+            .expect_err("no topology, no export");
+        assert!(err.to_string().contains("Unsupported operation"), "{err}");
+        assert!(!output.with_extension("onnx").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn model_exporter_reports_missing_weights_first() {
+        let config = ExportConfig {
+            format: ExportFormat::ONNX,
+            ..Default::default()
+        };
+        let err = ONNXExporter::new()
+            .export(&TestModel::empty(), &config)
+            .expect_err("no weights, no export");
+        assert!(err.to_string().contains("named_tensors"), "{err}");
+    }
+
+    #[test]
+    fn onnx_data_type_round_trips_through_its_wire_value() {
+        for data_type in [
+            ONNXDataType::Float,
+            ONNXDataType::Int64,
+            ONNXDataType::Float16,
+            ONNXDataType::Bool,
+        ] {
+            assert_eq!(
+                ONNXDataType::from_i32(data_type as i32).expect("known type"),
+                data_type
+            );
+        }
+        assert!(ONNXDataType::from_i32(999).is_err());
+    }
 
     #[test]
     fn test_onnx_exporter_creation() {

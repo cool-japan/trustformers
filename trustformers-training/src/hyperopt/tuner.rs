@@ -712,7 +712,8 @@ mod tests {
         let search_space = SearchSpaceBuilder::new()
             .continuous("learning_rate", 1e-5, 1e-1)
             .discrete("batch_size", 8, 64, 8)
-            .build();
+            .build()
+            .expect("search space definition must be valid");
 
         let tuner = HyperparameterTuner::with_random_search(config, search_space);
 
@@ -853,7 +854,10 @@ mod tests {
     #[test]
     fn test_tuner_creation_with_random_search() {
         let config = TunerConfig::new("random_test").max_trials(10);
-        let search_space = SearchSpaceBuilder::new().continuous("lr", 1e-5, 1e-1).build();
+        let search_space = SearchSpaceBuilder::new()
+            .continuous("lr", 1e-5, 1e-1)
+            .build()
+            .expect("search space definition must be valid");
         let tuner = HyperparameterTuner::with_random_search(config, search_space);
         assert_eq!(tuner.current_trial_number, 0);
         assert!(tuner.history.trials.is_empty());

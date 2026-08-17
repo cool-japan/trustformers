@@ -3,9 +3,19 @@
 
 //! RISC-V Vector Extensions backend implementation for TrustformeRS
 //!
-//! This module provides support for RISC-V Vector (RVV) extensions,
-//! enabling efficient vectorized tensor operations on RISC-V processors
-//! with Vector 1.0 and future extensions.
+//! This module models the RISC-V Vector (RVV) programming interface
+//! (register allocation accounting, `vsetvli`/`vle`/`vse`/... assembly
+//! generation for reference/inspection) and provides a **portable scalar
+//! CPU fallback** for `add`/`mul`/`gemm`. It does *not* execute real RVV
+//! instructions: the `riscv` feature has no dependencies
+//! (`riscv = []` in Cargo.toml) and nothing here emits `core::arch::asm!`.
+//! The generated assembly text (`generate_vector_loop`) is produced for
+//! documentation/tooling purposes only and is never executed - actual
+//! results always come from the scalar fallback in
+//! `RiscVBackend::simulate_vector_execution`, which computes real,
+//! correct results on the host CPU using ordinary Rust arithmetic (not
+//! RVV-accelerated, despite the surrounding register-allocation
+//! bookkeeping this module performs).
 
 #![allow(dead_code)] // RISC-V backend implementation with architecture-specific features
 #![allow(unused_variables)] // Backend implementation with reserved parameters
@@ -423,16 +433,19 @@ impl RiscVBackend {
             operation.input_specs[0].element_width,
         )?;
 
-        // Execute the vectorized operation (simulation)
+        // Execute the vectorized operation (scalar fallback; see module doc)
         let outputs = self.simulate_vector_execution(operation, inputs)?;
 
         // Deallocate registers
         self.register_manager.deallocate_registers(&register_allocation.id)?;
 
-        // Update metrics
+        // Update metrics using the real output element count (not an
+        // estimated cycle count - see `update_execution_metrics`).
         let execution_time = start_time.elapsed();
         let metadata = operation.metadata.clone();
-        self.update_execution_metrics(execution_time, &metadata);
+        let elements_processed: usize =
+            outputs.iter().map(|t| t.shape().iter().product::<usize>()).sum();
+        self.update_execution_metrics(execution_time, &metadata, elements_processed);
 
         Ok(outputs)
     }
@@ -823,12 +836,18 @@ impl RiscVBackend {
         optimizations
     }
 
+    /// Portable scalar CPU fallback for `add`/`mul`/`gemm`: real, correct
+    /// computation on the host CPU, not RVV-accelerated (no
+    /// `core::arch::asm!`/vector intrinsics are used - see the module-level
+    /// doc). Any other operation name honestly errors rather than silently
+    /// returning `inputs[0]` unchanged (the previous behavior, which for
+    /// e.g. `execute_vector_conv2d`'s "conv2d" op returned data whose
+    /// length didn't even match the claimed output shape).
     fn simulate_vector_execution(
         &self,
         operation: &VectorizedOperation,
         inputs: &[Tensor],
     ) -> HardwareResult<Vec<Tensor>> {
-        // Simplified simulation - in practice would execute actual vector instructions
         let output_shape = inputs[0].shape().to_vec();
         let output_data = match operation.name.as_str() {
             "add" => {
@@ -846,7 +865,7 @@ impl RiscVBackend {
                 a_data.iter().zip(b_data.iter()).map(|(x, y)| x * y).collect()
             },
             "gemm" => {
-                // Simplified GEMM simulation
+                // Scalar GEMM (see module doc: not RVV-accelerated).
                 let a = &inputs[0];
                 let b = &inputs[1];
                 let a_shape = a.shape();
@@ -866,23 +885,39 @@ impl RiscVBackend {
                 }
                 result
             },
-            _ => inputs[0].data()?.clone(), // Pass-through for other operations
+            other => {
+                return Err(compute_error(
+                    "riscv_operation".to_string(),
+                    format!(
+                        "RISC-V scalar fallback does not implement operation '{other}' \
+                         (only add/mul/gemm are supported)"
+                    ),
+                ));
+            },
         };
 
         let output_tensor = Tensor::from_vec(output_data, &output_shape)?;
         Ok(vec![output_tensor])
     }
 
+    /// Update metrics from a real wall-clock measurement (`execution_time`)
+    /// and the real number of output elements the scalar fallback actually
+    /// produced (`elements_processed`). Previously `ops_per_second` divided
+    /// `metadata.estimated_cycles` - a static heuristic, not a measured
+    /// cycle count (there is no portable way to read a RISC-V hardware
+    /// cycle counter from safe Rust here) - by the real elapsed time,
+    /// which produced a throughput number that looked measured but wasn't.
     fn update_execution_metrics(
         &mut self,
         execution_time: Duration,
         metadata: &VectorOperationMetadata,
+        elements_processed: usize,
     ) {
         let mut metrics = self.metrics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let execution_ms = execution_time.as_millis() as f64;
+        let execution_secs = execution_time.as_secs_f64().max(1e-9);
 
-        metrics.ops_per_second = metadata.estimated_cycles as f64 / (execution_ms / 1000.0);
-        metrics.latency = execution_ms;
+        metrics.ops_per_second = elements_processed as f64 / execution_secs;
+        metrics.latency = execution_time.as_millis() as f64;
         metrics.throughput = metrics.ops_per_second;
         metrics.utilization = metadata.register_pressure.min(1.0) as f64;
         metrics.memory_bandwidth = Self::get_memory_bandwidth(&self.config.target_vlen)
@@ -1174,5 +1209,74 @@ mod tests {
 
         manager.deallocate_registers("test").expect("operation failed in test");
         assert_eq!(manager.allocated_registers.len(), 0);
+    }
+
+    /// Regression test: the scalar GEMM fallback must produce real,
+    /// correct results (checked against a hand-computed reference), not a
+    /// pass-through of the input.
+    #[test]
+    fn test_execute_vector_matmul_computes_real_result() {
+        let mut backend =
+            RiscVBackend::new(RiscVConfig::default()).expect("backend construction failed");
+
+        let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor a");
+        let b = Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], &[2, 2]).expect("tensor b");
+
+        let result = backend.execute_vector_matmul(&a, &b).expect("matmul should succeed");
+        let data = result.data().expect("read result");
+        // [[1,2],[3,4]] * [[5,6],[7,8]] = [[19,22],[43,50]]
+        assert_eq!(data, vec![19.0, 22.0, 43.0, 50.0]);
+    }
+
+    /// Regression test: before the fix, `simulate_vector_execution`'s `_`
+    /// arm silently returned `inputs[0]`'s data unchanged for any operation
+    /// other than add/mul/gemm - `execute_vector_conv2d` hit exactly this
+    /// arm (its compiled operation is named "conv2d"), producing a "result"
+    /// that was really just the untouched input reinterpreted under the
+    /// conv2d output shape. It must now error instead of fabricating a
+    /// result.
+    #[test]
+    fn test_execute_vector_conv2d_errors_instead_of_passthrough() {
+        let mut backend =
+            RiscVBackend::new(RiscVConfig::default()).expect("backend construction failed");
+
+        let input = Tensor::from_vec(vec![1.0f32; 16], &[1, 1, 4, 4]).expect("input tensor");
+        let kernel = Tensor::from_vec(vec![1.0f32; 9], &[1, 1, 3, 3]).expect("kernel tensor");
+
+        let result = backend.execute_vector_conv2d(&input, &kernel, &[1, 1], &[0, 0]);
+        assert!(
+            result.is_err(),
+            "unimplemented ops must error, not silently pass the input through as \"output\""
+        );
+    }
+
+    /// Regression test: unsupported operation names passed directly to
+    /// `execute_vector_operation` must error, not echo the first input.
+    #[test]
+    fn test_execute_vector_operation_unsupported_op_errors() {
+        let mut backend =
+            RiscVBackend::new(RiscVConfig::default()).expect("backend construction failed");
+
+        let spec = VectorSpec {
+            element_type: DataType::F32,
+            lmul: 1.0,
+            element_width: 32,
+            vector_length: 8,
+            layout: VectorLayout::UnitStride,
+        };
+        let op_id = backend
+            .compile_vector_operation(
+                "softmax",
+                RiscVVectorOp::Arithmetic(ArithmeticOp::Add),
+                &[spec.clone(), spec],
+            )
+            .expect("compile should succeed");
+
+        let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], &[4]).expect("tensor");
+        let result = backend.execute_vector_operation(&op_id, &[x]);
+        assert!(
+            result.is_err(),
+            "unsupported op 'softmax' must error, not pass through"
+        );
     }
 }

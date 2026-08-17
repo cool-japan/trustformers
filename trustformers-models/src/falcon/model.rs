@@ -56,42 +56,84 @@ impl ALiBi {
         self.device
     }
 
-    /// Apply ALiBi bias to attention scores
-    pub fn apply_bias(&self, attention_scores: &Tensor, seq_len: usize) -> Result<Tensor> {
-        // Create position bias matrix for causal attention
-        let mut bias_data = Vec::new();
+    /// Per-head ALiBi slopes (one entry per attention head).
+    pub fn slopes(&self) -> &Tensor {
+        &self.slopes
+    }
 
-        // Create bias for each head
-        for head_idx in 0..self.num_heads {
+    /// Number of attention heads this bias was built for.
+    pub fn num_heads(&self) -> usize {
+        self.num_heads
+    }
+
+    /// Build the ALiBi bias tensor of shape `[1, num_heads, seq_len, seq_len]`.
+    ///
+    /// Following Press et al. (2022), the bias for head `h` at query position
+    /// `i` and key position `j` is `-slope_h * (i - j)` — a linear penalty that
+    /// grows with the query/key distance. Positions in the future (`j > i`) are
+    /// left at `0.0`: causal masking is a separate, additive concern handled by
+    /// [`FalconAttention::create_causal_mask`], so this function contributes the
+    /// positional bias and nothing else.
+    ///
+    /// The leading singleton axis lets the result broadcast over the batch when
+    /// added to scores shaped `[batch, num_heads, seq_len, seq_len]`.
+    pub fn build_bias(&self, seq_len: usize) -> Result<Tensor> {
+        // Hoist the slope lookup out of the element loop: one read, not one per
+        // element.
+        let slopes = self.slopes.data()?;
+        if slopes.len() != self.num_heads {
+            return Err(tensor_op_error(
+                "ALiBi::build_bias",
+                format!(
+                    "slope count {} does not match num_heads {}",
+                    slopes.len(),
+                    self.num_heads
+                ),
+            ));
+        }
+
+        let mut bias_data = Vec::with_capacity(self.num_heads * seq_len * seq_len);
+        for &slope in slopes.iter() {
             for i in 0..seq_len {
                 for j in 0..seq_len {
                     if j > i {
-                        // Future positions get large negative bias (causal mask)
-                        bias_data.push(-10000.0);
+                        // Masked by the causal mask; contribute no positional bias.
+                        bias_data.push(0.0);
                     } else {
-                        // Past positions get linear bias scaled by head-specific slope
                         let distance = (i - j) as f32;
-                        let slope = if let Ok(slopes_data) = self.slopes.data() {
-                            if head_idx < slopes_data.len() {
-                                slopes_data[head_idx]
-                            } else {
-                                1.0
-                            }
-                        } else {
-                            1.0
-                        };
                         bias_data.push(-distance * slope);
                     }
                 }
             }
         }
 
-        // Create bias tensor with proper shape for broadcasting
-        let bias_tensor = Tensor::from_vec(bias_data, &[seq_len, seq_len])?;
+        Tensor::from_vec(bias_data, &[1, self.num_heads, seq_len, seq_len])
+    }
 
-        // Add bias to attention scores with proper broadcasting
-        let biased_scores = attention_scores.add(&bias_tensor)?;
-        Ok(biased_scores)
+    /// Add the ALiBi bias to *pre-softmax* attention scores.
+    ///
+    /// `attention_scores` must have shape `[batch, num_heads, seq_len, seq_len]`
+    /// — i.e. raw `Q Kᵀ / sqrt(d)` scores, before masking and before softmax.
+    /// Applying ALiBi anywhere else (in particular to the post-softmax attention
+    /// output) is not the ALiBi mechanism and is rejected here.
+    pub fn apply_bias(&self, attention_scores: &Tensor, seq_len: usize) -> Result<Tensor> {
+        let shape = attention_scores.shape();
+        if shape.len() != 4
+            || shape[1] != self.num_heads
+            || shape[2] != seq_len
+            || shape[3] != seq_len
+        {
+            return Err(tensor_op_error(
+                "ALiBi::apply_bias",
+                format!(
+                    "expected pre-softmax scores of shape [batch, {}, {seq_len}, {seq_len}], got {:?}",
+                    self.num_heads, shape
+                ),
+            ));
+        }
+
+        let bias_tensor = self.build_bias(seq_len)?;
+        attention_scores.add(&bias_tensor)
     }
 }
 
@@ -250,6 +292,15 @@ impl Layer for FalconAttention {
         let scale = (self.head_dim as f32).sqrt();
         let scaled_scores = scores.div_scalar(scale)?;
 
+        // Apply ALiBi positional bias to the PRE-softmax scores. ALiBi is a bias
+        // on the attention logits (Press et al., 2022); adding it after softmax
+        // would not be ALiBi at all.
+        let scaled_scores = if let Some(alibi) = &self.alibi {
+            alibi.apply_bias(&scaled_scores, seq_len)?
+        } else {
+            scaled_scores
+        };
+
         // Apply causal mask
         let causal_mask = self.create_causal_mask(seq_len)?;
         let masked_scores = scaled_scores.add(&causal_mask)?;
@@ -265,15 +316,12 @@ impl Layer for FalconAttention {
         let attention_output =
             attention_output.reshape(&[batch_size, seq_len, self.num_heads * self.head_dim])?;
 
-        // Apply ALiBi bias if enabled
-        let biased_output = if let Some(alibi) = &self.alibi {
-            alibi.apply_bias(&attention_output, seq_len)?
-        } else {
-            attention_output
-        };
+        // NOTE: ALiBi is *not* applied here. The bias belongs on the pre-softmax
+        // logits (see above); adding it to the post-softmax context vectors would
+        // corrupt the output instead of biasing the attention distribution.
 
         // Final output projection
-        let output = self.dense.forward(biased_output)?;
+        let output = self.dense.forward(attention_output)?;
         Ok(output)
     }
 }
@@ -1141,6 +1189,213 @@ mod tests {
         for (i, &s) in data.iter().enumerate() {
             assert!(s > 0.0, "Slope[{}] = {} must be positive", i, s);
         }
+    }
+
+    // ---- ALiBi bias: reference math and placement ----
+
+    /// Hand-computed reference for `num_heads = 2`:
+    /// `ratio = 2^(-8/2) = 0.0625`, so slopes are `[0.0625, 0.0625^2]`.
+    #[test]
+    fn test_alibi_slopes_two_heads_reference_values() {
+        let alibi = ALiBi::new(2).expect("ALiBi with 2 heads");
+        let slopes = alibi.slopes().data().expect("slope data");
+        assert_eq!(slopes.len(), 2, "one slope per head");
+        assert!(
+            (slopes[0] - 0.0625).abs() < 1e-7,
+            "slope[0] = {}",
+            slopes[0]
+        );
+        assert!(
+            (slopes[1] - 0.003_906_25).abs() < 1e-9,
+            "slope[1] = {}",
+            slopes[1]
+        );
+    }
+
+    /// The bias must be `[1, num_heads, seq_len, seq_len]` — the old code produced
+    /// `num_heads * seq_len * seq_len` values but declared a `[seq_len, seq_len]`
+    /// shape, which is an element-count mismatch.
+    #[test]
+    fn test_alibi_build_bias_shape_and_reference_values() {
+        let alibi = ALiBi::new(2).expect("ALiBi with 2 heads");
+        let bias = alibi.build_bias(3).expect("bias");
+        assert_eq!(
+            bias.shape(),
+            &[1, 2, 3, 3],
+            "bias must be [1, num_heads, seq_len, seq_len]"
+        );
+
+        match &bias {
+            Tensor::F32(arr) => {
+                // Head 0, slope 0.0625: bias[i][j] = -(i - j) * slope for j <= i.
+                assert_eq!(arr[[0, 0, 0, 0]], 0.0);
+                assert!((arr[[0, 0, 1, 0]] + 0.0625).abs() < 1e-7);
+                assert_eq!(arr[[0, 0, 1, 1]], 0.0);
+                assert!((arr[[0, 0, 2, 0]] + 0.125).abs() < 1e-7);
+                assert!((arr[[0, 0, 2, 1]] + 0.0625).abs() < 1e-7);
+                assert_eq!(arr[[0, 0, 2, 2]], 0.0);
+                // Future positions carry no positional bias (causal mask handles them).
+                assert_eq!(arr[[0, 0, 0, 1]], 0.0);
+                // Head 1 uses the steeper-decaying slope 0.0625^2.
+                assert!((arr[[0, 1, 2, 0]] + 2.0 * 0.003_906_25).abs() < 1e-8);
+            },
+            _ => panic!("expected F32 bias"),
+        }
+    }
+
+    /// ALiBi must land on the pre-softmax logits. Adding it to the post-softmax
+    /// attention output (shape `[batch, seq_len, num_heads * head_dim]`) is the
+    /// bug this rejects.
+    #[test]
+    fn test_alibi_apply_bias_rejects_post_softmax_output_shape() {
+        let alibi = ALiBi::new(4).expect("ALiBi with 4 heads");
+        let post_softmax_output = Tensor::zeros(&[1, 3, 4 * 8]).expect("output tensor");
+        let result = alibi.apply_bias(&post_softmax_output, 3);
+        assert!(
+            result.is_err(),
+            "ALiBi must refuse anything that is not [batch, num_heads, seq, seq]"
+        );
+    }
+
+    /// Applying the bias to zero logits and taking a softmax must yield the
+    /// hand-computed ALiBi distribution: closer keys get more probability mass.
+    #[test]
+    fn test_alibi_biased_softmax_matches_hand_computation() {
+        let alibi = ALiBi::new(2).expect("ALiBi with 2 heads");
+        let scores = Tensor::zeros(&[1, 2, 3, 3]).expect("zero scores");
+        let biased = alibi.apply_bias(&scores, 3).expect("biased scores");
+        // Mask the future so the softmax is over the causal prefix only.
+        let mut mask_data = vec![0.0f32; 9];
+        for i in 0..3 {
+            for j in (i + 1)..3 {
+                mask_data[i * 3 + j] = f32::NEG_INFINITY;
+            }
+        }
+        let mask = Tensor::from_vec(mask_data, &[3, 3]).expect("mask");
+        let weights = biased.add(&mask).expect("masked").softmax(-1).expect("softmax");
+
+        // Head 0, query position 2: logits are [-0.125, -0.0625, 0.0].
+        let slope = 0.0625f32;
+        let raw = [(-2.0 * slope).exp(), (-slope).exp(), 1.0f32];
+        let denom: f32 = raw.iter().sum();
+        match &weights {
+            Tensor::F32(arr) => {
+                for (j, &r) in raw.iter().enumerate() {
+                    let expected = r / denom;
+                    let got = arr[[0, 0, 2, j]];
+                    assert!(
+                        (got - expected).abs() < 1e-6,
+                        "weight[2][{j}] = {got}, expected {expected}"
+                    );
+                }
+                // Monotone decay with distance is the defining ALiBi property.
+                assert!(arr[[0, 0, 2, 2]] > arr[[0, 0, 2, 1]]);
+                assert!(arr[[0, 0, 2, 1]] > arr[[0, 0, 2, 0]]);
+            },
+            _ => panic!("expected F32 weights"),
+        }
+    }
+
+    /// End-to-end: an attention layer with ALiBi enabled must (a) run at all and
+    /// (b) produce a different result from the identical layer without ALiBi.
+    /// The pre-fix code failed (a) — the bias was applied to the post-softmax
+    /// output, whose shape does not match.
+    #[test]
+    fn test_falcon_attention_alibi_changes_output() {
+        let mut config_alibi = tiny_falcon_config();
+        config_alibi.alibi = true;
+        let config_plain = tiny_falcon_config();
+
+        let with_alibi = FalconAttention::new(&config_alibi).expect("attention with ALiBi");
+        let mut without_alibi =
+            FalconAttention::new(&config_plain).expect("attention without ALiBi");
+
+        // Share the projection weights so the only difference is the bias.
+        for (dst, src) in [
+            (&mut without_alibi.q_proj, &with_alibi.q_proj),
+            (&mut without_alibi.k_proj, &with_alibi.k_proj),
+            (&mut without_alibi.v_proj, &with_alibi.v_proj),
+            (&mut without_alibi.dense, &with_alibi.dense),
+        ] {
+            dst.set_weight(src.weight().clone()).expect("copy weight");
+        }
+        // Re-borrow immutably after the weight copy.
+        let with_alibi = &with_alibi;
+        let without_alibi = &without_alibi;
+
+        let seq_len = 4;
+        let hidden = config_alibi.hidden_size;
+        let input_data: Vec<f32> =
+            (0..seq_len * hidden).map(|i| ((i % 13) as f32 - 6.0) * 0.05).collect();
+        let input = Tensor::from_vec(input_data, &[1, seq_len, hidden]).expect("input");
+
+        let biased = with_alibi.forward(input.clone()).expect("ALiBi forward must succeed");
+        let plain = without_alibi.forward(input).expect("plain forward");
+
+        let biased_data = biased.data().expect("biased data");
+        let plain_data = plain.data().expect("plain data");
+        assert_eq!(biased_data.len(), plain_data.len());
+        let max_diff = biased_data
+            .iter()
+            .zip(plain_data.iter())
+            .fold(0.0f32, |acc, (a, b)| acc.max((a - b).abs()));
+        assert!(
+            max_diff > 1e-6,
+            "ALiBi must change the attention output (max diff {max_diff})"
+        );
+    }
+
+    /// The bias is built as `[1, num_heads, seq, seq]` and must broadcast over a
+    /// real batch dimension.
+    #[test]
+    fn test_falcon_attention_alibi_batched_forward() {
+        let mut config = tiny_falcon_config();
+        config.alibi = true;
+        let attn = FalconAttention::new(&config).expect("attention");
+
+        let batch = 2;
+        let seq_len = 3;
+        let hidden = config.hidden_size;
+        let data: Vec<f32> =
+            (0..batch * seq_len * hidden).map(|i| ((i % 11) as f32 - 5.0) * 0.05).collect();
+        let input = Tensor::from_vec(data.clone(), &[batch, seq_len, hidden]).expect("input");
+        let out = attn.forward(input).expect("batched ALiBi forward must succeed");
+        assert_eq!(out.shape(), &[batch, seq_len, hidden]);
+
+        // Each batch element is independent: running item 0 alone must match.
+        let single = Tensor::from_vec(data[..seq_len * hidden].to_vec(), &[1, seq_len, hidden])
+            .expect("single");
+        let single_out = attn.forward(single).expect("single forward").data().expect("data");
+        let batched = out.data().expect("batched data");
+        for (i, expected) in single_out.iter().enumerate() {
+            assert!(
+                (batched[i] - expected).abs() < 1e-5,
+                "batch element 0 diverged at {i}: {} vs {expected}",
+                batched[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_falcon_attention_alibi_output_depends_on_input() {
+        let mut config = tiny_falcon_config();
+        config.alibi = true;
+        let attn = FalconAttention::new(&config).expect("attention");
+
+        let seq_len = 3;
+        let hidden = config.hidden_size;
+        let make = |scale: f32| {
+            let data: Vec<f32> =
+                (0..seq_len * hidden).map(|i| ((i % 7) as f32 - 3.0) * scale).collect();
+            Tensor::from_vec(data, &[1, seq_len, hidden]).expect("input")
+        };
+
+        let out_a = attn.forward(make(0.05)).expect("forward a");
+        let out_b = attn.forward(make(0.5)).expect("forward b");
+        let a = out_a.data().expect("data a");
+        let b = out_b.data().expect("data b");
+        let max_diff = a.iter().zip(b.iter()).fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()));
+        assert!(max_diff > 1e-6, "output must depend on the input");
     }
 
     // ---- Causal mask ----

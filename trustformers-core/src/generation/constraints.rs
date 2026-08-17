@@ -1,13 +1,21 @@
 use crate::errors::{Result, TrustformersError};
-use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use super::config::GuidedGenerationConfig;
+use super::grammar::Grammar;
+use super::json_schema::JsonSchema;
+use super::regex_constraint::RegexConstraint;
 
-/// Constraint validator for guided generation
+/// Constraint validator for guided generation.
+///
+/// Every configured constraint is enforced for real.  The two questions the
+/// decoder asks - "may this token be appended?" ([`Self::validate_token`]) and
+/// "is the text finished?" ([`Self::is_complete`]) - are answered with prefix
+/// viability and full acceptance respectively, for each of the four constraint
+/// kinds (regex, choice list, JSON schema, grammar).
 #[derive(Debug)]
 pub struct ConstraintValidator {
-    regex: Option<Regex>,
+    regex: Option<RegexConstraint>,
     choice_list: Option<HashSet<String>>,
     json_schema: Option<JsonSchemaValidator>,
     grammar: Option<GrammarValidator>,
@@ -15,12 +23,9 @@ pub struct ConstraintValidator {
 
 impl ConstraintValidator {
     pub fn new(config: &GuidedGenerationConfig) -> Result<Self> {
-        let regex = if let Some(pattern) = &config.regex_pattern {
-            Some(Regex::new(pattern).map_err(|e| {
-                TrustformersError::invalid_input(format!("Invalid regex pattern: {}", e))
-            })?)
-        } else {
-            None
+        let regex = match &config.regex_pattern {
+            Some(pattern) => Some(RegexConstraint::new(pattern)?),
+            None => None,
         };
 
         let choice_list = config
@@ -48,6 +53,12 @@ impl ConstraintValidator {
         })
     }
 
+    /// Whether appending `new_token` to `current_text` keeps every constraint
+    /// satisfiable.
+    ///
+    /// A token is admissible when the resulting text can *still grow into* a
+    /// conforming string - not only when it already conforms - otherwise no
+    /// constrained sequence longer than one token could ever be decoded.
     pub fn validate_token(
         &self,
         current_text: &str,
@@ -58,7 +69,7 @@ impl ConstraintValidator {
 
         // Check regex constraint
         if let Some(regex) = &self.regex {
-            if !regex.is_match(&potential_text) && !self.is_partial_match(regex, &potential_text) {
+            if !regex.is_viable_prefix(&potential_text) {
                 return false;
             }
         }
@@ -88,10 +99,14 @@ impl ConstraintValidator {
         true
     }
 
+    /// Whether `text` satisfies every configured constraint completely.
+    ///
+    /// The regex constraint is anchored at both ends here: a document that
+    /// merely *contains* a match is not a conforming document.
     pub fn is_complete(&self, text: &str) -> bool {
         // Check if the current text satisfies all constraints completely
         if let Some(regex) = &self.regex {
-            if !regex.is_match(text) {
+            if !regex.is_full_match(text) {
                 return false;
             }
         }
@@ -117,39 +132,9 @@ impl ConstraintValidator {
         true
     }
 
-    fn is_partial_match(&self, regex: &Regex, text: &str) -> bool {
-        // For regex, check if text could be extended to match
-        // This is a simplified implementation - in practice would need more sophisticated partial matching
-
-        // If text is empty, it's a valid prefix for any pattern
-        if text.is_empty() {
-            return true;
-        }
-
-        // Check if the text is already a full match
-        if regex.is_match(text) {
-            return true;
-        }
-
-        // Check if this text is a partial match by trying to extend it
-        // For a simple heuristic, check if any suffix could match the pattern
-        for i in 0..text.len() {
-            if regex.find(&text[i..]).is_some() {
-                return true;
-            }
-        }
-
-        // Check if the pattern could start with this text
-        // For common patterns like "hello\s+world", "hello" should be valid
-        let test_extensions = vec![" ", "\\s", " world", "  world"];
-        for ext in test_extensions {
-            let test_text = format!("{}{}", text, ext);
-            if regex.is_match(&test_text) {
-                return true;
-            }
-        }
-
-        false
+    /// The compiled regular-expression constraint, if one was configured.
+    pub fn regex(&self) -> Option<&RegexConstraint> {
+        self.regex.as_ref()
     }
 
     fn is_valid_prefix(&self, text: &str, choices: &HashSet<String>) -> bool {
@@ -173,26 +158,53 @@ impl ConstraintValidator {
     }
 }
 
-/// JSON Schema validator for constrained generation
+/// JSON Schema validator for constrained generation.
+///
+/// The supplied schema is compiled once and genuinely enforced - see
+/// [`JsonSchema`] for the list of supported keywords.
 #[derive(Debug)]
 pub struct JsonSchemaValidator {
-    #[allow(dead_code)]
-    schema: String,
-    #[allow(dead_code)]
-    brace_stack: Vec<char>,
+    schema: JsonSchema,
 }
 
 impl JsonSchemaValidator {
     pub fn new(schema: &str) -> Result<Self> {
-        // Parse and validate the JSON schema
-        Ok(Self {
-            schema: schema.to_string(),
-            brace_stack: Vec::new(),
-        })
+        let schema = JsonSchema::parse(schema).map_err(|error| {
+            TrustformersError::invalid_input(format!("invalid JSON schema: {error}"))
+        })?;
+        Ok(Self { schema })
     }
 
+    /// The compiled schema.
+    pub fn schema(&self) -> &JsonSchema {
+        &self.schema
+    }
+
+    /// Check whether `text` can still grow into a schema-conforming document.
+    ///
+    /// Two things are checked: the bracket/quote structure must be consistent
+    /// with *some* completion, and if `text` already parses as a whole JSON
+    /// document it must satisfy the schema.  A genuinely partial document
+    /// (`{"a": ` and friends) cannot be validated against value constraints
+    /// yet, and is accepted so decoding can continue.
     pub fn validate_partial(&self, text: &str) -> bool {
-        // Simplified JSON validation - checks for balanced braces and basic structure
+        if !Self::structure_is_open(text) {
+            return false;
+        }
+        match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(document) => self.schema.validate(&document).is_ok(),
+            Err(_) => true,
+        }
+    }
+
+    /// Check whether `text` is a complete document that satisfies the schema.
+    pub fn validate_complete(&self, text: &str) -> bool {
+        self.schema.validate_text(text).is_ok()
+    }
+
+    /// Balanced-bracket scan that tolerates unclosed structures but rejects
+    /// closers that never had an opener.
+    fn structure_is_open(text: &str) -> bool {
         let mut stack = Vec::new();
         let mut in_string = false;
         let mut escape_next = false;
@@ -225,59 +237,59 @@ impl JsonSchemaValidator {
             }
         }
 
-        // For partial validation, we allow unclosed structures
         true
-    }
-
-    pub fn validate_complete(&self, text: &str) -> bool {
-        // Check if it's valid complete JSON
-        serde_json::from_str::<serde_json::Value>(text).is_ok()
     }
 }
 
-/// Grammar validator for constrained generation
+/// Grammar validator for constrained generation.
+///
+/// The BNF definition is compiled into a [`Grammar`] and checked with an
+/// Earley recogniser, so partial validation answers the real question - "can
+/// this text still become a sentence of the language?" - rather than accepting
+/// everything.  A definition that contains no rules at all means "no grammar
+/// constraint" and accepts any text.
 #[derive(Debug)]
 pub struct GrammarValidator {
-    #[allow(dead_code)]
-    rules: HashMap<String, Vec<String>>,
-    #[allow(dead_code)]
-    current_state: String,
+    grammar: Option<Grammar>,
 }
 
 impl GrammarValidator {
     pub fn new(grammar: &str) -> Result<Self> {
-        // Parse BNF-style grammar rules
-        let mut rules = HashMap::new();
+        let grammar = Grammar::parse(grammar).map_err(|error| {
+            TrustformersError::invalid_input(format!("invalid grammar: {error}"))
+        })?;
+        Ok(Self { grammar })
+    }
 
-        // Simple grammar parsing - in practice would use a proper parser
-        for line in grammar.lines() {
-            if let Some((lhs, rhs)) = line.split_once("::=") {
-                let rule_name = lhs.trim().to_string();
-                let alternatives: Vec<String> =
-                    rhs.split('|').map(|alt| alt.trim().to_string()).collect();
-                rules.insert(rule_name, alternatives);
-            }
+    /// The compiled grammar, or `None` when the definition declared no rules.
+    pub fn grammar(&self) -> Option<&Grammar> {
+        self.grammar.as_ref()
+    }
+
+    /// `true` when `text` is a prefix of some sentence in the language.
+    pub fn validate_partial(&self, text: &str) -> bool {
+        match &self.grammar {
+            Some(grammar) => grammar.recognize(text).viable,
+            None => true,
         }
-
-        Ok(Self {
-            rules,
-            current_state: "start".to_string(),
-        })
     }
 
-    pub fn validate_partial(&self, _text: &str) -> bool {
-        // Simplified grammar validation
-        // In practice would need a proper parsing algorithm
-        true
+    /// `true` when `text` is itself a sentence in the language.
+    pub fn validate_complete(&self, text: &str) -> bool {
+        match &self.grammar {
+            Some(grammar) => grammar.recognize(text).complete,
+            None => true,
+        }
     }
 
-    pub fn validate_complete(&self, _text: &str) -> bool {
-        // Check if text matches the complete grammar
-        true
-    }
-
-    pub fn get_valid_next_tokens(&self, _current_state: &str) -> Vec<String> {
-        // Return valid tokens for current grammar state
-        vec![]
+    /// Terminal strings that may legally follow `prefix`.
+    ///
+    /// Returns an empty vector when the grammar is unconstrained or when
+    /// `prefix` is already a dead end.
+    pub fn get_valid_next_tokens(&self, prefix: &str) -> Vec<String> {
+        match &self.grammar {
+            Some(grammar) => grammar.recognize(prefix).next_terminals,
+            None => Vec::new(),
+        }
     }
 }

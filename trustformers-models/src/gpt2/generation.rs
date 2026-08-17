@@ -165,12 +165,11 @@ impl GenerativeModel for Gpt2LMHeadModel {
                 )?;
                 Ok(vec![result])
             },
-            GenerationMode::ContrastiveSearch { top_k: _, alpha: _ } => {
-                // Contrastive search requires tracking hidden states
-                // For now, return an error indicating this is not yet implemented
-                Err(TrustformersError::model_error(
-                    "Contrastive search not yet implemented for GPT-2".to_string(),
-                ))
+            GenerationMode::ContrastiveSearch { top_k, alpha } => {
+                let result = self.generate_contrastive_internal(
+                    input_ids, max_length, *top_k, *alpha, &config,
+                )?;
+                Ok(vec![result])
             },
         }
     }
@@ -225,7 +224,146 @@ impl GenerativeModel for Gpt2LMHeadModel {
     }
 }
 
+/// Cosine similarity between two equal-length vectors.
+///
+/// Zero vectors have no direction, so their similarity is defined as 0 rather
+/// than producing a NaN that would silently win an `argmax`.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0.0f32;
+    let mut norm_a = 0.0f32;
+    let mut norm_b = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    let denominator = norm_a.sqrt() * norm_b.sqrt();
+    if denominator == 0.0 {
+        0.0
+    } else {
+        dot / denominator
+    }
+}
+
 impl Gpt2LMHeadModel {
+    /// Contrastive search decoding (Su et al., 2022).
+    ///
+    /// At every step the `top_k` most likely continuations are re-scored with a
+    /// degeneration penalty:
+    ///
+    /// ```text
+    ///   score(v) = (1 - alpha) * p(v | prefix)
+    ///            - alpha * max_j cos(h_v, h_j)
+    /// ```
+    ///
+    /// where `h_v` is the representation the model gives the candidate token once
+    /// it is appended and `h_j` ranges over the representations of the tokens
+    /// already in the prefix. A candidate that merely repeats something already
+    /// present therefore loses to a slightly less likely but more novel one.
+    ///
+    /// This used to be an error arm: the `ContrastiveSearch` variant was publicly
+    /// constructible and documented, but calling it returned
+    /// `"Contrastive search not yet implemented for GPT-2"`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `top_k` is zero, when `alpha` is outside `[0, 1]`, when the
+    /// prompt is empty, or when a forward pass fails.
+    fn generate_contrastive_internal(
+        &self,
+        input_ids: Vec<u32>,
+        max_length: usize,
+        top_k: usize,
+        alpha: f32,
+        config: &GenerationConfig,
+    ) -> Result<Vec<u32>> {
+        if top_k == 0 {
+            return Err(TrustformersError::model_error(
+                "contrastive search requires top_k >= 1".to_string(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&alpha) {
+            return Err(TrustformersError::model_error(format!(
+                "contrastive search requires alpha in [0, 1], got {alpha}"
+            )));
+        }
+        if input_ids.is_empty() {
+            return Err(TrustformersError::model_error(
+                "contrastive search requires a non-empty prompt".to_string(),
+            ));
+        }
+
+        let mut generated = input_ids;
+
+        while generated.len() < max_length {
+            if GenerationUtils::should_stop(&generated, config, generated.len()) {
+                break;
+            }
+
+            let (mut logits, context_states) = self.logits_and_hidden_states(&generated)?;
+
+            GenerationUtils::apply_repetition_penalty(
+                &mut logits,
+                &generated,
+                config.repetition_penalty,
+                config.repetition_penalty_decay,
+            );
+            GenerationUtils::apply_frequency_penalty(
+                &mut logits,
+                &generated,
+                config.frequency_penalty,
+            );
+            GenerationUtils::apply_presence_penalty(
+                &mut logits,
+                &generated,
+                config.presence_penalty,
+            );
+
+            let probabilities = GenerationUtils::softmax(&logits);
+            let mut ranked: Vec<(usize, f32)> = probabilities.iter().copied().enumerate().collect();
+            ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            ranked.truncate(top_k.min(ranked.len()));
+
+            let mut best: Option<(u32, f32)> = None;
+            for (token_id, probability) in ranked {
+                let candidate_token = token_id as u32;
+                let mut candidate_sequence = generated.clone();
+                candidate_sequence.push(candidate_token);
+
+                let (_, candidate_states) = self.logits_and_hidden_states(&candidate_sequence)?;
+                let candidate_state = candidate_states.last().ok_or_else(|| {
+                    TrustformersError::model_error(
+                        "forward pass produced no hidden states for the candidate".to_string(),
+                    )
+                })?;
+
+                let max_similarity = context_states
+                    .iter()
+                    .map(|state| cosine_similarity(candidate_state, state))
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let max_similarity = if max_similarity.is_finite() { max_similarity } else { 0.0 };
+
+                let score = (1.0 - alpha) * probability - alpha * max_similarity;
+                if best.is_none_or(|(_, best_score)| score > best_score) {
+                    best = Some((candidate_token, score));
+                }
+            }
+
+            let (next_token, _) = best.ok_or_else(|| {
+                TrustformersError::model_error(
+                    "contrastive search found no candidate tokens".to_string(),
+                )
+            })?;
+            generated.push(next_token);
+
+            if config.eos_token_id.is_some_and(|eos| eos == next_token) {
+                break;
+            }
+        }
+
+        Ok(generated)
+    }
+
     /// Internal greedy generation with full config support
     fn generate_greedy_internal(
         &self,

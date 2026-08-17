@@ -1,5 +1,5 @@
 use crate::stablelm::config::StableLMConfig;
-use scirs2_core::ndarray::{Array1, Array2, Axis}; // SciRS2 Integration Policy (Array2 in tests)
+use scirs2_core::ndarray::{Array1, Array2, ArrayD, Axis, IxDyn}; // SciRS2 Integration Policy (Array2 in tests)
 use trustformers_core::{
     device::Device,
     errors::{tensor_op_error, Result, TrustformersError},
@@ -43,29 +43,62 @@ impl Layer for RMSNorm {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Normalise **each hidden vector independently**.
+    ///
+    /// RMSNorm is defined per token: `x / sqrt(mean(x_i^2) + eps) * weight`,
+    /// where the mean runs over the last (hidden) axis only. Averaging over the
+    /// whole tensor instead would leak information across tokens and batches.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        match &input {
-            Tensor::F32(arr) => {
-                let mean_sq = arr.mapv(|x| x * x).mean().unwrap_or(0.0);
-                let rms = (mean_sq + self.eps).sqrt();
-                let normalized = arr.mapv(|x| x / rms);
-
-                match &self.weight {
-                    Tensor::F32(weight_arr) => {
-                        let result = &normalized * weight_arr;
-                        Ok(Tensor::F32(result))
-                    },
-                    _ => Err(tensor_op_error(
-                        "tensor_operation",
-                        "Unsupported tensor type".to_string(),
-                    )),
-                }
+        let arr = match &input {
+            Tensor::F32(arr) => arr,
+            _ => {
+                return Err(tensor_op_error(
+                    "RMSNorm::forward",
+                    "Unsupported tensor type".to_string(),
+                ))
             },
-            _ => Err(tensor_op_error(
-                "tensor_operation",
-                "Unsupported tensor type".to_string(),
-            )),
+        };
+        let weight_arr = match &self.weight {
+            Tensor::F32(weight_arr) => weight_arr,
+            _ => {
+                return Err(tensor_op_error(
+                    "RMSNorm::forward",
+                    "Unsupported weight tensor type".to_string(),
+                ))
+            },
+        };
+
+        let hidden = *arr.shape().last().ok_or_else(|| {
+            tensor_op_error(
+                "RMSNorm::forward",
+                "input must have at least one axis".to_string(),
+            )
+        })?;
+        if weight_arr.len() != hidden {
+            return Err(tensor_op_error(
+                "RMSNorm::forward",
+                format!(
+                    "weight length {} does not match hidden size {hidden}",
+                    weight_arr.len()
+                ),
+            ));
         }
+
+        let weight: Vec<f32> = weight_arr.iter().copied().collect();
+        let data: Vec<f32> = arr.iter().copied().collect();
+        let mut normalized = Vec::with_capacity(data.len());
+        for chunk in data.chunks(hidden) {
+            let mean_sq = chunk.iter().map(|x| x * x).sum::<f32>() / hidden as f32;
+            let inv_rms = 1.0 / (mean_sq + self.eps).sqrt();
+            for (value, w) in chunk.iter().zip(weight.iter()) {
+                normalized.push(value * inv_rms * w);
+            }
+        }
+
+        let out = ArrayD::from_shape_vec(arr.raw_dim(), normalized).map_err(|e| {
+            tensor_op_error("RMSNorm::forward", format!("failed to rebuild tensor: {e}"))
+        })?;
+        Ok(Tensor::F32(out))
     }
 }
 
@@ -136,68 +169,122 @@ impl RotaryEmbedding {
         &self.device
     }
 
-    pub fn forward(&self, q: &Tensor, k: &Tensor, seq_len: usize) -> Result<(Tensor, Tensor)> {
-        let rotary_dim = ((self.head_dim as f32) * self.partial_rotary_factor) as usize;
+    /// Number of head dimensions that are actually rotated (`partial_rotary_factor`).
+    pub fn rotary_dim(&self) -> usize {
+        (((self.head_dim as f32) * self.partial_rotary_factor) as usize).min(self.head_dim)
+    }
 
-        match (q, k, &self.sin_cached, &self.cos_cached) {
-            (
-                Tensor::F32(q_arr),
-                Tensor::F32(k_arr),
-                Tensor::F32(sin_arr),
-                Tensor::F32(cos_arr),
-            ) => {
-                // Apply partial rotary embeddings
-                let mut q_rot = q_arr.clone();
-                let mut k_rot = k_arr.clone();
+    /// Rotate a flat `[batch, seq_len, num_heads, head_dim]` buffer in place.
+    ///
+    /// The rotation follows the HuggingFace `rotate_half` convention used by
+    /// StableLM: for the first `rotary_dim` channels the pair `(i, i + rotary_dim/2)`
+    /// is rotated by the angle cached for the token's position; channels beyond
+    /// `rotary_dim` are left untouched (partial rotary embeddings).
+    ///
+    /// `num_heads` is a parameter rather than an assumption, so query heads and
+    /// (fewer) key/value heads can both be rotated correctly under GQA.
+    pub fn rotate_in_place(
+        &self,
+        data: &mut [f32],
+        batch: usize,
+        seq_len: usize,
+        num_heads: usize,
+        head_dim: usize,
+    ) -> Result<()> {
+        if head_dim != self.head_dim {
+            return Err(tensor_op_error(
+                "RotaryEmbedding::rotate_in_place",
+                format!(
+                    "head_dim {head_dim} does not match the cached head_dim {}",
+                    self.head_dim
+                ),
+            ));
+        }
+        if seq_len > self.max_seq_len {
+            return Err(tensor_op_error(
+                "RotaryEmbedding::rotate_in_place",
+                format!(
+                    "sequence length {seq_len} exceeds max_position_embeddings {}",
+                    self.max_seq_len
+                ),
+            ));
+        }
+        let expected = batch * seq_len * num_heads * head_dim;
+        if data.len() != expected {
+            return Err(tensor_op_error(
+                "RotaryEmbedding::rotate_in_place",
+                format!("expected {expected} elements, got {}", data.len()),
+            ));
+        }
 
-                // Only rotate the first rotary_dim dimensions
-                if rotary_dim > 0 && seq_len <= self.max_seq_len {
-                    // Get shapes before mutable operations to avoid borrow checker issues
-                    let q_shape = q_rot.shape().to_vec();
-                    let _k_shape = k_rot.shape().to_vec();
+        let half = self.rotary_dim() / 2;
+        if half == 0 {
+            return Ok(());
+        }
 
-                    // Apply RoPE to query and key tensors
-                    for seq_idx in 0..seq_len {
-                        for dim_idx in 0..(rotary_dim / 2) {
-                            let cos_val = cos_arr[[seq_idx, dim_idx]];
-                            let sin_val = sin_arr[[seq_idx, dim_idx]];
+        let (cos_arr, sin_arr) = match (&self.cos_cached, &self.sin_cached) {
+            (Tensor::F32(cos_arr), Tensor::F32(sin_arr)) => (cos_arr, sin_arr),
+            _ => {
+                return Err(tensor_op_error(
+                    "RotaryEmbedding::rotate_in_place",
+                    "rotary caches must be F32".to_string(),
+                ))
+            },
+        };
 
-                            // Apply rotation: [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]
-                            // This is a simplified implementation for the core rotation logic
-                            for batch in 0..q_shape[0] {
-                                for head in 0..q_shape[1] {
-                                    if seq_idx < q_shape[2] && dim_idx < rotary_dim / 2 {
-                                        let x1_idx = [batch, head, seq_idx, dim_idx * 2];
-                                        let x2_idx = [batch, head, seq_idx, dim_idx * 2 + 1];
-
-                                        if x2_idx[3] < q_shape[3] {
-                                            let q_x1 = q_rot[x1_idx];
-                                            let q_x2 = q_rot[x2_idx];
-                                            let k_x1 = k_rot[x1_idx];
-                                            let k_x2 = k_rot[x2_idx];
-
-                                            // Query rotation
-                                            q_rot[x1_idx] = q_x1 * cos_val - q_x2 * sin_val;
-                                            q_rot[x2_idx] = q_x1 * sin_val + q_x2 * cos_val;
-
-                                            // Key rotation
-                                            k_rot[x1_idx] = k_x1 * cos_val - k_x2 * sin_val;
-                                            k_rot[x2_idx] = k_x1 * sin_val + k_x2 * cos_val;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+        for b in 0..batch {
+            for pos in 0..seq_len {
+                for head in 0..num_heads {
+                    let base = ((b * seq_len + pos) * num_heads + head) * head_dim;
+                    for i in 0..half {
+                        let cos_val = cos_arr[[pos, i]];
+                        let sin_val = sin_arr[[pos, i]];
+                        let x0 = data[base + i];
+                        let x1 = data[base + i + half];
+                        data[base + i] = x0 * cos_val - x1 * sin_val;
+                        data[base + i + half] = x0 * sin_val + x1 * cos_val;
                     }
                 }
-
-                Ok((Tensor::F32(q_rot), Tensor::F32(k_rot)))
-            },
-            _ => Err(tensor_op_error(
-                "tensor_operation",
-                "Unsupported tensor type".to_string(),
-            )),
+            }
         }
+        Ok(())
+    }
+
+    /// Apply RoPE to query and key tensors shaped `[batch, seq_len, heads, head_dim]`.
+    ///
+    /// Query and key may carry a different number of heads (grouped-query
+    /// attention); each tensor is rotated according to its own head count.
+    pub fn forward(&self, q: &Tensor, k: &Tensor, seq_len: usize) -> Result<(Tensor, Tensor)> {
+        let rotate = |tensor: &Tensor| -> Result<Tensor> {
+            let arr = match tensor {
+                Tensor::F32(arr) => arr,
+                _ => {
+                    return Err(tensor_op_error(
+                        "RotaryEmbedding::forward",
+                        "Unsupported tensor type".to_string(),
+                    ))
+                },
+            };
+            let shape = arr.shape().to_vec();
+            if shape.len() != 4 {
+                return Err(tensor_op_error(
+                    "RotaryEmbedding::forward",
+                    format!("expected [batch, seq_len, heads, head_dim], got {shape:?}"),
+                ));
+            }
+            let mut data: Vec<f32> = arr.iter().copied().collect();
+            self.rotate_in_place(&mut data, shape[0], shape[1], shape[2], shape[3])?;
+            let rotated = ArrayD::from_shape_vec(IxDyn(&shape), data).map_err(|e| {
+                tensor_op_error(
+                    "RotaryEmbedding::forward",
+                    format!("failed to rebuild tensor: {e}"),
+                )
+            })?;
+            Ok(Tensor::F32(rotated))
+        };
+
+        let _ = seq_len; // the sequence length is taken from the tensor shape
+        Ok((rotate(q)?, rotate(k)?))
     }
 }
 
@@ -271,26 +358,63 @@ impl StableLMAttention {
         &self.device
     }
 
-    fn repeat_kv(&self, hidden_states: &Tensor, n_rep: usize) -> Result<Tensor> {
+    /// Repeat each key/value head `n_rep` times along the head axis.
+    ///
+    /// `hidden_states` must be 4-D `[batch, seq_len, num_kv_heads, head_dim]`.
+    /// The result is `[batch, seq_len, num_kv_heads * n_rep, head_dim]` in which
+    /// KV head `i` occupies output heads `i*n_rep .. (i+1)*n_rep` — the same
+    /// grouping HuggingFace's `repeat_kv` produces, so query head `q` pairs with
+    /// KV head `q / n_rep`.
+    pub fn repeat_kv(&self, hidden_states: &Tensor, n_rep: usize) -> Result<Tensor> {
+        if n_rep == 0 {
+            return Err(tensor_op_error(
+                "StableLMAttention::repeat_kv",
+                "n_rep must be >= 1".to_string(),
+            ));
+        }
         if n_rep == 1 {
             return Ok(hidden_states.clone());
         }
 
         match hidden_states {
             Tensor::F32(arr) => {
-                // Repeat key/value heads for grouped-query attention
-                let _shape = arr.shape();
-                let mut repeated = arr.clone();
+                let shape = arr.shape().to_vec();
+                if shape.len() != 4 {
+                    return Err(tensor_op_error(
+                        "StableLMAttention::repeat_kv",
+                        format!("expected [batch, seq_len, num_kv_heads, head_dim], got {shape:?}"),
+                    ));
+                }
+                let (batch, seq_len, num_kv_heads, head_dim) =
+                    (shape[0], shape[1], shape[2], shape[3]);
 
-                // Simplified - actual implementation would properly repeat along head dimension
-                for _ in 1..n_rep {
-                    repeated = repeated.clone(); // Placeholder
+                let data: Vec<f32> = arr.iter().copied().collect();
+                let mut repeated = Vec::with_capacity(data.len() * n_rep);
+                for b in 0..batch {
+                    for t in 0..seq_len {
+                        for kv_head in 0..num_kv_heads {
+                            let base = ((b * seq_len + t) * num_kv_heads + kv_head) * head_dim;
+                            for _ in 0..n_rep {
+                                repeated.extend_from_slice(&data[base..base + head_dim]);
+                            }
+                        }
+                    }
                 }
 
-                Ok(Tensor::F32(repeated))
+                let out = ArrayD::from_shape_vec(
+                    IxDyn(&[batch, seq_len, num_kv_heads * n_rep, head_dim]),
+                    repeated,
+                )
+                .map_err(|e| {
+                    tensor_op_error(
+                        "StableLMAttention::repeat_kv",
+                        format!("failed to build repeated tensor: {e}"),
+                    )
+                })?;
+                Ok(Tensor::F32(out))
             },
             _ => Err(tensor_op_error(
-                "tensor_operation",
+                "StableLMAttention::repeat_kv",
                 "Unsupported tensor type".to_string(),
             )),
         }
@@ -309,16 +433,48 @@ impl Layer for StableLMAttention {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Causal grouped-query self-attention.
+    ///
+    /// Accepts `[seq_len, hidden_size]` or `[batch, seq_len, hidden_size]` and
+    /// returns a tensor of the same rank. The computation is the real thing:
+    /// `softmax(mask(Q Kᵀ) / sqrt(head_dim)) V` with RoPE applied to Q and K and
+    /// KV heads repeated to match the query heads.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let _batch_size = 1; // Simplified
-        let seq_len = 1; // Simplified
+        let in_shape = input.shape().to_vec();
+        let (batch, seq_len) =
+            match in_shape.len() {
+                2 => (1usize, in_shape[0]),
+                3 => (in_shape[0], in_shape[1]),
+                _ => return Err(tensor_op_error(
+                    "StableLMAttention::forward",
+                    format!(
+                        "expected [seq_len, hidden] or [batch, seq_len, hidden], got {in_shape:?}"
+                    ),
+                )),
+            };
+        let hidden = in_shape[in_shape.len() - 1];
+        let head_dim = self.head_dim;
+        if hidden != self.num_heads * head_dim {
+            return Err(tensor_op_error(
+                "StableLMAttention::forward",
+                format!(
+                    "input hidden size {hidden} != num_heads {} * head_dim {head_dim}",
+                    self.num_heads
+                ),
+            ));
+        }
 
         // Query, Key, Value projections
         let q = self.q_proj.forward(input.clone())?;
         let k = self.k_proj.forward(input.clone())?;
         let v = self.v_proj.forward(input)?;
 
-        // Apply rotary embeddings
+        // Reshape to [batch, seq_len, heads, head_dim]
+        let q = q.reshape(&[batch, seq_len, self.num_heads, head_dim])?;
+        let k = k.reshape(&[batch, seq_len, self.num_kv_heads, head_dim])?;
+        let v = v.reshape(&[batch, seq_len, self.num_kv_heads, head_dim])?;
+
+        // Apply rotary embeddings to queries and keys (values are not rotated)
         let (q_rot, k_rot) = self.rotary_emb.forward(&q, &k, seq_len)?;
 
         // Repeat KV heads if using grouped-query attention
@@ -326,20 +482,63 @@ impl Layer for StableLMAttention {
         let k_repeated = self.repeat_kv(&k_rot, n_rep)?;
         let v_repeated = self.repeat_kv(&v, n_rep)?;
 
-        // Compute attention scores
-        // Simplified - actual implementation would compute proper attention
-        let attn_output = match (&q_rot, &k_repeated, &v_repeated) {
-            (Tensor::F32(q_arr), Tensor::F32(_k_arr), Tensor::F32(_v_arr)) => {
-                // Placeholder for attention computation
-                Tensor::F32(q_arr.clone())
-            },
-            _ => {
-                return Err(tensor_op_error(
-                    "tensor_operation",
-                    "Unsupported tensor type".to_string(),
-                ))
-            },
+        let q_data = q_rot.data()?;
+        let k_data = k_repeated.data()?;
+        let v_data = v_repeated.data()?;
+
+        // Scaled dot-product attention with a causal mask.
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let num_heads = self.num_heads;
+        let mut context = vec![0.0f32; batch * seq_len * num_heads * head_dim];
+        let mut scores = vec![0.0f32; seq_len];
+
+        for b in 0..batch {
+            for head in 0..num_heads {
+                for query_pos in 0..seq_len {
+                    let q_base = ((b * seq_len + query_pos) * num_heads + head) * head_dim;
+
+                    // Scores over the causal prefix [0, query_pos].
+                    let mut max_score = f32::NEG_INFINITY;
+                    for key_pos in 0..=query_pos {
+                        let k_base = ((b * seq_len + key_pos) * num_heads + head) * head_dim;
+                        let dot: f32 = (0..head_dim)
+                            .map(|d| q_data[q_base + d] * k_data[k_base + d])
+                            .sum::<f32>()
+                            * scale;
+                        scores[key_pos] = dot;
+                        if dot > max_score {
+                            max_score = dot;
+                        }
+                    }
+
+                    // Softmax over the prefix (numerically stabilised).
+                    let mut sum = 0.0f32;
+                    for score in scores.iter_mut().take(query_pos + 1) {
+                        *score = (*score - max_score).exp();
+                        sum += *score;
+                    }
+                    let inv_sum = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+
+                    // Weighted sum of the value vectors.
+                    let out_base = ((b * seq_len + query_pos) * num_heads + head) * head_dim;
+                    for key_pos in 0..=query_pos {
+                        let weight = scores[key_pos] * inv_sum;
+                        let v_base = ((b * seq_len + key_pos) * num_heads + head) * head_dim;
+                        for d in 0..head_dim {
+                            context[out_base + d] += weight * v_data[v_base + d];
+                        }
+                    }
+                }
+            }
+        }
+
+        // Merge heads back into the hidden dimension and restore the input rank.
+        let merged_shape: Vec<usize> = if in_shape.len() == 2 {
+            vec![seq_len, hidden]
+        } else {
+            vec![batch, seq_len, hidden]
         };
+        let attn_output = Tensor::from_vec(context, &merged_shape)?;
 
         // Output projection
         self.o_proj.forward(attn_output)
@@ -999,6 +1198,254 @@ mod tests {
             assert_eq!(*layer.self_attn.device(), Device::CPU);
             assert_eq!(*layer.mlp.device(), Device::CPU);
         }
+        Ok(())
+    }
+
+    // ---- Grouped-query attention: repeat_kv must actually repeat ----
+
+    /// Tiny GQA config: 4 query heads, 2 KV heads, head_dim 4.
+    fn tiny_gqa_config() -> StableLMConfig {
+        StableLMConfig {
+            vocab_size: 32,
+            hidden_size: 16,
+            intermediate_size: 32,
+            num_hidden_layers: 1,
+            num_attention_heads: 4,
+            num_key_value_heads: Some(2),
+            max_position_embeddings: 16,
+            partial_rotary_factor: 0.5,
+            ..StableLMConfig::default()
+        }
+    }
+
+    #[test]
+    fn test_repeat_kv_repeats_along_head_axis() -> Result<()> {
+        let config = tiny_gqa_config();
+        let attn = StableLMAttention::new(&config)?;
+
+        // [batch=1, seq_len=2, num_kv_heads=2, head_dim=2]
+        let data: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        let kv = Tensor::from_vec(data, &[1, 2, 2, 2])?;
+
+        let repeated = attn.repeat_kv(&kv, 2)?;
+        assert_eq!(
+            repeated.shape(),
+            &[1, 2, 4, 2],
+            "repeat_kv must grow the head axis by n_rep"
+        );
+
+        let out = repeated.data()?;
+        // Token 0: kv head 0 = [0,1] -> output heads 0,1; kv head 1 = [2,3] -> heads 2,3.
+        assert_eq!(&out[0..2], &[0.0, 1.0]);
+        assert_eq!(&out[2..4], &[0.0, 1.0]);
+        assert_eq!(&out[4..6], &[2.0, 3.0]);
+        assert_eq!(&out[6..8], &[2.0, 3.0]);
+        // Token 1: kv head 0 = [4,5]; kv head 1 = [6,7].
+        assert_eq!(&out[8..10], &[4.0, 5.0]);
+        assert_eq!(&out[10..12], &[4.0, 5.0]);
+        assert_eq!(&out[12..14], &[6.0, 7.0]);
+        assert_eq!(&out[14..16], &[6.0, 7.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_repeat_kv_identity_for_single_repeat() -> Result<()> {
+        let config = tiny_gqa_config();
+        let attn = StableLMAttention::new(&config)?;
+        let data: Vec<f32> = (0..8).map(|i| i as f32 * 0.5).collect();
+        let kv = Tensor::from_vec(data.clone(), &[1, 2, 2, 2])?;
+        let repeated = attn.repeat_kv(&kv, 1)?;
+        assert_eq!(repeated.shape(), &[1, 2, 2, 2]);
+        assert_eq!(repeated.data()?, data);
+        Ok(())
+    }
+
+    #[test]
+    fn test_repeat_kv_rejects_non_4d() -> Result<()> {
+        let config = tiny_gqa_config();
+        let attn = StableLMAttention::new(&config)?;
+        let kv = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+        assert!(
+            attn.repeat_kv(&kv, 2).is_err(),
+            "repeat_kv must reject tensors that are not [b, s, kv_heads, head_dim]"
+        );
+        Ok(())
+    }
+
+    // ---- Real attention: shape, causality, cross-token dependence ----
+
+    #[test]
+    fn test_gqa_attention_forward_shape() -> Result<()> {
+        let config = tiny_gqa_config();
+        let attn = StableLMAttention::new(&config)?;
+        let seq_len = 3;
+        let data: Vec<f32> = (0..seq_len * config.hidden_size)
+            .map(|i| ((i % 5) as f32 - 2.0) * 0.1)
+            .collect();
+        let input = Tensor::from_vec(data, &[seq_len, config.hidden_size])?;
+        let output = attn.forward(input)?;
+        assert_eq!(output.shape(), &[seq_len, config.hidden_size]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_attention_reads_previous_tokens() -> Result<()> {
+        let config = tiny_gqa_config();
+        let attn = StableLMAttention::new(&config)?;
+        let seq_len = 3;
+        let hidden = config.hidden_size;
+        let base: Vec<f32> = (0..seq_len * hidden).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect();
+
+        let out_a = attn.forward(Tensor::from_vec(base.clone(), &[seq_len, hidden])?)?.data()?;
+
+        // Perturb token 0 only; the last token attends to it, so its output must move.
+        let mut perturbed = base.clone();
+        for value in perturbed.iter_mut().take(hidden) {
+            *value += 0.5;
+        }
+        let out_b = attn.forward(Tensor::from_vec(perturbed, &[seq_len, hidden])?)?.data()?;
+
+        let last = (seq_len - 1) * hidden;
+        let diff = out_a[last..]
+            .iter()
+            .zip(out_b[last..].iter())
+            .fold(0.0f32, |acc, (a, b)| acc.max((a - b).abs()));
+        assert!(
+            diff > 1e-6,
+            "the last token must attend to earlier tokens (diff {diff})"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_attention_is_causal() -> Result<()> {
+        let config = tiny_gqa_config();
+        let attn = StableLMAttention::new(&config)?;
+        let seq_len = 3;
+        let hidden = config.hidden_size;
+        let base: Vec<f32> = (0..seq_len * hidden).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect();
+
+        let out_a = attn.forward(Tensor::from_vec(base.clone(), &[seq_len, hidden])?)?.data()?;
+
+        // Perturb the LAST token; earlier positions must be unaffected.
+        let mut perturbed = base.clone();
+        for value in perturbed.iter_mut().skip((seq_len - 1) * hidden) {
+            *value += 0.75;
+        }
+        let out_b = attn.forward(Tensor::from_vec(perturbed, &[seq_len, hidden])?)?.data()?;
+
+        let prefix = (seq_len - 1) * hidden;
+        for i in 0..prefix {
+            assert!(
+                (out_a[i] - out_b[i]).abs() < 1e-5,
+                "causal attention must not let position {} see the future",
+                i / hidden
+            );
+        }
+        Ok(())
+    }
+
+    /// Reference-math check: with identity projections and RoPE disabled, the
+    /// attention output must equal a naive `softmax(x·xᵀ/sqrt(d)) x` computed
+    /// directly in the test.
+    #[test]
+    fn test_attention_matches_naive_reference() -> Result<()> {
+        let mut config = tiny_gqa_config();
+        config.num_key_value_heads = Some(config.num_attention_heads); // MHA
+        config.partial_rotary_factor = 0.0; // disable rotation for an exact reference
+        let mut attn = StableLMAttention::new(&config)?;
+
+        let hidden = config.hidden_size;
+        let identity: Vec<f32> = (0..hidden * hidden)
+            .map(|i| if i / hidden == i % hidden { 1.0 } else { 0.0 })
+            .collect();
+        for proj in [
+            &mut attn.q_proj,
+            &mut attn.k_proj,
+            &mut attn.v_proj,
+            &mut attn.o_proj,
+        ] {
+            proj.set_weight(Tensor::from_vec(identity.clone(), &[hidden, hidden])?)?;
+        }
+
+        let seq_len = 3;
+        let head_dim = hidden / config.num_attention_heads;
+        let x: Vec<f32> = (0..seq_len * hidden).map(|i| ((i % 9) as f32 - 4.0) * 0.15).collect();
+        let output = attn.forward(Tensor::from_vec(x.clone(), &[seq_len, hidden])?)?.data()?;
+
+        // Naive reference implementation.
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let mut expected = vec![0.0f32; seq_len * hidden];
+        for head in 0..config.num_attention_heads {
+            for query_pos in 0..seq_len {
+                let q_base = query_pos * hidden + head * head_dim;
+                let mut weights = Vec::with_capacity(query_pos + 1);
+                for key_pos in 0..=query_pos {
+                    let k_base = key_pos * hidden + head * head_dim;
+                    let dot: f32 =
+                        (0..head_dim).map(|d| x[q_base + d] * x[k_base + d]).sum::<f32>() * scale;
+                    weights.push(dot);
+                }
+                let max = weights.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let exps: Vec<f32> = weights.iter().map(|w| (w - max).exp()).collect();
+                let sum: f32 = exps.iter().sum();
+                for (key_pos, e) in exps.iter().enumerate() {
+                    let weight = e / sum;
+                    let v_base = key_pos * hidden + head * head_dim;
+                    for d in 0..head_dim {
+                        expected[q_base + d] += weight * x[v_base + d];
+                    }
+                }
+            }
+        }
+
+        for (i, (got, want)) in output.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-5,
+                "element {i}: got {got}, expected {want}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_rms_norm_normalises_each_token_independently() -> Result<()> {
+        let norm = RMSNorm::new(4, 1e-6)?;
+        // Two tokens with very different magnitudes.
+        let input = Tensor::from_vec(
+            vec![1.0, 1.0, 1.0, 1.0, 100.0, 100.0, 100.0, 100.0],
+            &[2, 4],
+        )?;
+        let output = norm.forward(input)?.data()?;
+        for value in &output {
+            assert!(
+                (value - 1.0).abs() < 1e-3,
+                "each token must be normalised to unit RMS, got {value}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_rotary_rotation_preserves_norm_and_changes_values() -> Result<()> {
+        let head_dim = 8;
+        let rope = RotaryEmbedding::new(head_dim, 16, 10000.0, 1.0)?;
+        let mut data: Vec<f32> = (0..2 * head_dim).map(|i| (i as f32 + 1.0) * 0.1).collect();
+        let original = data.clone();
+        // [batch=1, seq_len=2, heads=1, head_dim]
+        rope.rotate_in_place(&mut data, 1, 2, 1, head_dim)?;
+
+        // Position 0 has angle 0 → identity.
+        for i in 0..head_dim {
+            assert!((data[i] - original[i]).abs() < 1e-6);
+        }
+        // Position 1 must actually rotate.
+        let changed = (head_dim..2 * head_dim).any(|i| (data[i] - original[i]).abs() > 1e-6);
+        assert!(changed, "RoPE must modify the second position");
+        // Rotations preserve the vector norm.
+        let norm_before: f32 = original[head_dim..].iter().map(|v| v * v).sum::<f32>().sqrt();
+        let norm_after: f32 = data[head_dim..].iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm_before - norm_after).abs() < 1e-5);
         Ok(())
     }
 

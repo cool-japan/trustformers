@@ -28,9 +28,7 @@ pub enum DistillationStrategy {
         normalize: bool,
     },
     /// Progressive distillation: gradually increase student complexity.
-    Progressive {
-        stages: Vec<DistillationStage>,
-    },
+    Progressive { stages: Vec<DistillationStage> },
     /// Combined: soft targets + feature matching.
     Combined {
         soft_alpha: f64,
@@ -96,7 +94,11 @@ impl LogitTensor {
                 student: format!("{}", values.len()),
             });
         }
-        Ok(Self { values, seq_len, vocab_size })
+        Ok(Self {
+            values,
+            seq_len,
+            vocab_size,
+        })
     }
 
     /// Compute softmax with temperature over each position's vocab slice.
@@ -111,7 +113,8 @@ impl LogitTensor {
 
             // Numerically stable: subtract max before exp
             let max_val = slice.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let exps: Vec<f64> = slice.iter().map(|&v| ((v - max_val) / temperature).exp()).collect();
+            let exps: Vec<f64> =
+                slice.iter().map(|&v| ((v - max_val) / temperature).exp()).collect();
             let sum: f64 = exps.iter().sum();
             for e in exps {
                 out.push(e / sum);
@@ -153,7 +156,12 @@ pub struct FeatureMap {
 
 impl FeatureMap {
     pub fn new(values: Vec<f64>, seq_len: usize, hidden_size: usize, layer_index: usize) -> Self {
-        Self { values, seq_len, hidden_size, layer_index }
+        Self {
+            values,
+            seq_len,
+            hidden_size,
+            layer_index,
+        }
     }
 
     /// Compute the L2 norm of the feature vector for each token position.
@@ -179,7 +187,11 @@ pub struct DistillationLoss {
 
 impl DistillationLoss {
     pub fn new(config: DistillationConfig) -> Self {
-        Self { config, current_stage: 0, step: 0 }
+        Self {
+            config,
+            current_stage: 0,
+            step: 0,
+        }
     }
 
     /// Compute soft-target KD loss (KL divergence with temperature scaling).
@@ -251,11 +263,11 @@ impl DistillationLoss {
                 // For Combined, pair teacher/student layers by index up to min(len)
                 let n = teacher_features.len().min(student_features.len());
                 (0..n).map(|i| (i, i)).collect()
-            }
+            },
             _ => {
                 let n = teacher_features.len().min(student_features.len());
                 (0..n).map(|i| (i, i)).collect()
-            }
+            },
         };
 
         if layer_mapping.is_empty() {
@@ -283,15 +295,9 @@ impl DistillationLoss {
             }
 
             let layer_loss = match loss_type {
-                FeatureLossType::L2 => {
-                    compute_l2_loss(&t_feat.values, &s_feat.values)
-                }
-                FeatureLossType::Cosine => {
-                    compute_cosine_loss(t_feat, s_feat)
-                }
-                FeatureLossType::KL => {
-                    compute_kl_feature_loss(t_feat, s_feat)
-                }
+                FeatureLossType::L2 => compute_l2_loss(&t_feat.values, &s_feat.values),
+                FeatureLossType::Cosine => compute_cosine_loss(t_feat, s_feat),
+                FeatureLossType::KL => compute_kl_feature_loss(t_feat, s_feat),
             };
 
             total_loss += layer_loss;
@@ -329,7 +335,7 @@ impl DistillationLoss {
                     current_temperature: t,
                     stage: self.current_stage,
                 })
-            }
+            },
 
             DistillationStrategy::FeatureBased { loss_type, .. } => {
                 let lt = loss_type.clone();
@@ -345,7 +351,7 @@ impl DistillationLoss {
                     current_temperature: 1.0,
                     stage: self.current_stage,
                 })
-            }
+            },
 
             DistillationStrategy::AttentionTransfer { .. } => {
                 let hard_loss = cross_entropy_loss(student_logits, hard_labels)?;
@@ -357,7 +363,7 @@ impl DistillationLoss {
                     current_temperature: 1.0,
                     stage: self.current_stage,
                 })
-            }
+            },
 
             DistillationStrategy::Progressive { stages } => {
                 let stages = stages.clone();
@@ -380,9 +386,13 @@ impl DistillationLoss {
                     current_temperature: t,
                     stage: self.current_stage,
                 })
-            }
+            },
 
-            DistillationStrategy::Combined { soft_alpha, feature_alpha, temperature } => {
+            DistillationStrategy::Combined {
+                soft_alpha,
+                feature_alpha,
+                temperature,
+            } => {
                 let t = *temperature;
                 let sa = *soft_alpha;
                 let fa = *feature_alpha;
@@ -402,7 +412,7 @@ impl DistillationLoss {
                     current_temperature: t,
                     stage: self.current_stage,
                 })
-            }
+            },
         }
     }
 
@@ -462,8 +472,8 @@ fn compute_l2_loss(a: &[f64], b: &[f64]) -> f64 {
     if a.is_empty() {
         return 0.0;
     }
-    let mse: f64 = a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum::<f64>()
-        / a.len() as f64;
+    let mse: f64 =
+        a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum::<f64>() / a.len() as f64;
     mse
 }
 
@@ -483,11 +493,7 @@ fn compute_cosine_loss(t_feat: &FeatureMap, s_feat: &FeatureMap) -> f64 {
         let norm_t: f64 = tv.iter().map(|v| v * v).sum::<f64>().sqrt();
         let norm_s: f64 = sv.iter().map(|v| v * v).sum::<f64>().sqrt();
 
-        let cos_sim = if norm_t > 1e-12 && norm_s > 1e-12 {
-            dot / (norm_t * norm_s)
-        } else {
-            0.0
-        };
+        let cos_sim = if norm_t > 1e-12 && norm_s > 1e-12 { dot / (norm_t * norm_s) } else { 0.0 };
         total += 1.0 - cos_sim;
     }
     total / t_feat.seq_len as f64
@@ -688,10 +694,7 @@ pub fn attention_transfer_loss(
 ///
 /// `JSD(p, q) = 0.5 * KL(p || m) + 0.5 * KL(q || m)` where `m = 0.5*(p+q)`.
 /// Inputs are treated as unnormalised logits; softmax is applied internally.
-pub fn jsd_loss(
-    student_logits: &[f32],
-    teacher_logits: &[f32],
-) -> Result<f32, DistillError> {
+pub fn jsd_loss(student_logits: &[f32], teacher_logits: &[f32]) -> Result<f32, DistillError> {
     if student_logits.is_empty() || teacher_logits.is_empty() {
         return Err(DistillError::EmptyLogits);
     }
@@ -740,7 +743,12 @@ mod tests {
     }
 
     // Helper: build a one-hot-ish logit tensor where each position peaks at `peak_idx`
-    fn peaked_logits(seq_len: usize, vocab_size: usize, peak_idx: usize, peak_val: f64) -> LogitTensor {
+    fn peaked_logits(
+        seq_len: usize,
+        vocab_size: usize,
+        peak_idx: usize,
+        peak_val: f64,
+    ) -> LogitTensor {
         let mut values = vec![0.0f64; seq_len * vocab_size];
         for pos in 0..seq_len {
             values[pos * vocab_size + peak_idx] = peak_val;
@@ -775,8 +783,14 @@ mod tests {
         // Sums should be ≈ 1.0
         let sum_low: f64 = probs_low.iter().sum();
         let sum_high: f64 = probs_high.iter().sum();
-        assert!((sum_low - 1.0).abs() < 1e-10, "probs should sum to 1 (low T)");
-        assert!((sum_high - 1.0).abs() < 1e-10, "probs should sum to 1 (high T)");
+        assert!(
+            (sum_low - 1.0).abs() < 1e-10,
+            "probs should sum to 1 (low T)"
+        );
+        assert!(
+            (sum_high - 1.0).abs() < 1e-10,
+            "probs should sum to 1 (high T)"
+        );
     }
 
     // 2. argmax_per_position returns correct index
@@ -791,12 +805,18 @@ mod tests {
     #[test]
     fn test_feature_map_l2_norm() {
         // 2 positions, hidden=3: [[3,4,0], [0,0,5]]
-        let values = vec![3.0, 4.0, 0.0,  0.0, 0.0, 5.0];
+        let values = vec![3.0, 4.0, 0.0, 0.0, 0.0, 5.0];
         let fm = FeatureMap::new(values, 2, 3, 0);
         let norms = fm.l2_norm_per_token();
         assert_eq!(norms.len(), 2);
-        assert!((norms[0] - 5.0).abs() < 1e-10, "norm of (3,4,0) should be 5");
-        assert!((norms[1] - 5.0).abs() < 1e-10, "norm of (0,0,5) should be 5");
+        assert!(
+            (norms[0] - 5.0).abs() < 1e-10,
+            "norm of (3,4,0) should be 5"
+        );
+        assert!(
+            (norms[1] - 5.0).abs() < 1e-10,
+            "norm of (0,0,5) should be 5"
+        );
     }
 
     // 4. soft_target_loss numerical check: same logits → KL = 0
@@ -806,7 +826,10 @@ mod tests {
         let config = soft_config(4.0, 0.7);
         let distill = DistillationLoss::new(config);
         let loss = distill.soft_target_loss(&logits, &logits, 4.0).unwrap();
-        assert!(loss.abs() < 1e-10, "KL divergence should be 0 for identical distributions");
+        assert!(
+            loss.abs() < 1e-10,
+            "KL divergence should be 0 for identical distributions"
+        );
     }
 
     // 5. feature L2 loss: identical features → 0
@@ -828,13 +851,16 @@ mod tests {
         };
         let distill = DistillationLoss::new(config);
         let loss = distill.feature_loss(&[tf], &[sf], &FeatureLossType::L2).unwrap();
-        assert!(loss.abs() < 1e-10, "L2 loss on identical features should be 0");
+        assert!(
+            loss.abs() < 1e-10,
+            "L2 loss on identical features should be 0"
+        );
     }
 
     // 6. feature cosine loss: identical features → 0
     #[test]
     fn test_feature_cosine_loss_identical() {
-        let values: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0,  5.0, 6.0, 7.0, 8.0];
+        let values: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let tf = FeatureMap::new(values.clone(), 2, 4, 1);
         let sf = FeatureMap::new(values, 2, 4, 1);
 
@@ -850,7 +876,10 @@ mod tests {
         };
         let distill = DistillationLoss::new(config);
         let loss = distill.feature_loss(&[tf], &[sf], &FeatureLossType::Cosine).unwrap();
-        assert!(loss.abs() < 1e-10, "Cosine loss on identical features should be 0");
+        assert!(
+            loss.abs() < 1e-10,
+            "Cosine loss on identical features should be 0"
+        );
     }
 
     // 7. compute_loss combined strategy
@@ -884,17 +913,36 @@ mod tests {
         let mut distill = DistillationLoss::new(config);
         let result = distill.compute_loss(&t_logits, &s_logits, &t_feat, &s_feat, &labels).unwrap();
 
-        assert!(result.total_loss >= 0.0, "total loss should be non-negative");
-        assert!((result.soft_target_component).abs() < 1e-10, "soft targets identical → 0");
-        assert!((result.feature_component).abs() < 1e-10, "features identical → 0");
+        assert!(
+            result.total_loss >= 0.0,
+            "total loss should be non-negative"
+        );
+        assert!(
+            (result.soft_target_component).abs() < 1e-10,
+            "soft targets identical → 0"
+        );
+        assert!(
+            (result.feature_component).abs() < 1e-10,
+            "features identical → 0"
+        );
     }
 
     // 8. advance_stage increments stage counter
     #[test]
     fn test_advance_stage() {
         let stages = vec![
-            DistillationStage { stage_idx: 0, steps: 100, temperature: 5.0, alpha: 0.8 },
-            DistillationStage { stage_idx: 1, steps: 200, temperature: 3.0, alpha: 0.6 },
+            DistillationStage {
+                stage_idx: 0,
+                steps: 100,
+                temperature: 5.0,
+                alpha: 0.8,
+            },
+            DistillationStage {
+                stage_idx: 1,
+                steps: 200,
+                temperature: 3.0,
+                alpha: 0.6,
+            },
         ];
         let config = DistillationConfig {
             strategy: DistillationStrategy::Progressive { stages },
@@ -919,7 +967,10 @@ mod tests {
         let config = soft_config(4.0, 0.7);
         let distill = DistillationLoss::new(config);
         let loss = distill.soft_target_loss(&t_logits, &s_logits, 4.0).unwrap();
-        assert!(loss > 0.0, "KL divergence should be positive for different distributions");
+        assert!(
+            loss > 0.0,
+            "KL divergence should be positive for different distributions"
+        );
     }
 
     // 10. Zero loss when teacher equals student (compute_loss SoftTargets)
@@ -932,9 +983,7 @@ mod tests {
 
         let config = soft_config(4.0, 1.0); // alpha=1.0 means only distillation loss
         let mut distill = DistillationLoss::new(config);
-        let result = distill
-            .compute_loss(&logits, &logits, &[], &[], &labels)
-            .unwrap();
+        let result = distill.compute_loss(&logits, &logits, &[], &[], &labels).unwrap();
 
         assert!(
             result.soft_target_component.abs() < 1e-9,
@@ -1026,7 +1075,10 @@ mod tests {
         };
         let distill = DistillationLoss::new(config);
         let loss = distill.feature_loss(&tf, &sf, &FeatureLossType::L2).unwrap();
-        assert!(loss.abs() < 1e-10, "L2 loss for identical features should be 0");
+        assert!(
+            loss.abs() < 1e-10,
+            "L2 loss for identical features should be 0"
+        );
     }
 
     // HashMap usage test (ensures HashMap import is exercised)
@@ -1045,7 +1097,10 @@ mod tests {
     fn test_soft_target_kl_loss_identical() {
         let logits = vec![1.0f32, 2.0, 3.0, 1.0, 0.5];
         let loss = soft_target_kl_loss(&logits, &logits, 2.0).expect("ok");
-        assert!(loss.abs() < 1e-5, "KL of identical dists should be 0, got {loss}");
+        assert!(
+            loss.abs() < 1e-5,
+            "KL of identical dists should be 0, got {loss}"
+        );
     }
 
     // 16. soft_target_kl_loss different logits → positive loss
@@ -1054,7 +1109,10 @@ mod tests {
         let teacher = vec![10.0f32, 0.0, 0.0];
         let student = vec![0.0f32, 10.0, 0.0];
         let loss = soft_target_kl_loss(&student, &teacher, 1.0).expect("ok");
-        assert!(loss > 0.0, "KL loss should be positive for different dists, got {loss}");
+        assert!(
+            loss > 0.0,
+            "KL loss should be positive for different dists, got {loss}"
+        );
     }
 
     // 17. soft_target_kl_loss invalid temperature → error
@@ -1083,28 +1141,40 @@ mod tests {
         let loss_t4 = soft_target_kl_loss(&student, &teacher, 4.0).expect("ok");
         // Both should be positive; check they differ (T scaling changes both KL and T^2 factor)
         assert!(loss_t1 > 0.0 && loss_t4 > 0.0);
-        assert!((loss_t1 - loss_t4).abs() > 1e-6, "losses at T=1 and T=4 should differ");
+        assert!(
+            (loss_t1 - loss_t4).abs() > 1e-6,
+            "losses at T=1 and T=4 should differ"
+        );
     }
 
     // 20. combined_distillation_loss alpha=1 → only task_loss
     #[test]
     fn test_combined_distillation_loss_alpha_one() {
         let combined = combined_distillation_loss(3.0, 7.0, 1.0);
-        assert!((combined - 3.0f32).abs() < 1e-5, "alpha=1 → task_loss only, got {combined}");
+        assert!(
+            (combined - 3.0f32).abs() < 1e-5,
+            "alpha=1 → task_loss only, got {combined}"
+        );
     }
 
     // 21. combined_distillation_loss alpha=0 → only distill_loss
     #[test]
     fn test_combined_distillation_loss_alpha_zero() {
         let combined = combined_distillation_loss(3.0, 7.0, 0.0);
-        assert!((combined - 7.0f32).abs() < 1e-5, "alpha=0 → distill_loss only, got {combined}");
+        assert!(
+            (combined - 7.0f32).abs() < 1e-5,
+            "alpha=0 → distill_loss only, got {combined}"
+        );
     }
 
     // 22. combined_distillation_loss alpha=0.5 → average
     #[test]
     fn test_combined_distillation_loss_alpha_half() {
         let combined = combined_distillation_loss(2.0, 4.0, 0.5);
-        assert!((combined - 3.0f32).abs() < 1e-5, "alpha=0.5 → average=3.0, got {combined}");
+        assert!(
+            (combined - 3.0f32).abs() < 1e-5,
+            "alpha=0.5 → average=3.0, got {combined}"
+        );
     }
 
     // 23. feature_matching_loss identical → 0
@@ -1112,7 +1182,10 @@ mod tests {
     fn test_feature_matching_loss_identical() {
         let feats = vec![1.0f32, 2.0, 3.0, 4.0];
         let loss = feature_matching_loss(&feats, &feats).expect("ok");
-        assert!(loss.abs() < 1e-5, "MSE of identical features should be 0, got {loss}");
+        assert!(
+            loss.abs() < 1e-5,
+            "MSE of identical features should be 0, got {loss}"
+        );
     }
 
     // 24. feature_matching_loss known value
@@ -1130,7 +1203,10 @@ mod tests {
     fn test_attention_transfer_loss_identical() {
         let attn = vec![0.25f32, 0.25, 0.25, 0.25];
         let loss = attention_transfer_loss(&attn, &attn).expect("ok");
-        assert!(loss.abs() < 1e-5, "attention transfer loss for identical maps should be 0");
+        assert!(
+            loss.abs() < 1e-5,
+            "attention transfer loss for identical maps should be 0"
+        );
     }
 
     // 26. attention_transfer_loss different maps → positive
@@ -1139,7 +1215,10 @@ mod tests {
         let student = vec![1.0f32, 0.0, 0.0, 0.0];
         let teacher = vec![0.0f32, 0.0, 0.0, 1.0];
         let loss = attention_transfer_loss(&student, &teacher).expect("ok");
-        assert!(loss > 0.0, "attention transfer loss should be positive for different maps");
+        assert!(
+            loss > 0.0,
+            "attention transfer loss should be positive for different maps"
+        );
     }
 
     // 27. jsd_loss identical → 0
@@ -1147,7 +1226,10 @@ mod tests {
     fn test_jsd_loss_identical() {
         let logits = vec![1.0f32, 2.0, 3.0];
         let loss = jsd_loss(&logits, &logits).expect("ok");
-        assert!(loss.abs() < 1e-5, "JSD of identical dists should be 0, got {loss}");
+        assert!(
+            loss.abs() < 1e-5,
+            "JSD of identical dists should be 0, got {loss}"
+        );
     }
 
     // 28. jsd_loss orthogonal → max (≈ ln 2 ≈ 0.693)
@@ -1160,7 +1242,10 @@ mod tests {
         t[0] = 100.0;
         s[n - 1] = 100.0;
         let loss = jsd_loss(&s, &t).expect("ok");
-        assert!(loss > 0.0, "JSD of non-overlapping dists should be positive, got {loss}");
+        assert!(
+            loss > 0.0,
+            "JSD of non-overlapping dists should be positive, got {loss}"
+        );
         // JSD ≤ ln(2)
         assert!(loss <= 0.694 + 1e-4, "JSD should be ≤ ln(2), got {loss}");
     }
@@ -1185,8 +1270,14 @@ mod tests {
         let h2 = entropy(&p2);
         let h3 = entropy(&p3);
 
-        assert!(h1 < h2, "entropy at T=0.5 ({h1}) should be < entropy at T=2.0 ({h2})");
-        assert!(h2 < h3, "entropy at T=2.0 ({h2}) should be < entropy at T=8.0 ({h3})");
+        assert!(
+            h1 < h2,
+            "entropy at T=0.5 ({h1}) should be < entropy at T=2.0 ({h2})"
+        );
+        assert!(
+            h2 < h3,
+            "entropy at T=2.0 ({h2}) should be < entropy at T=8.0 ({h3})"
+        );
     }
 
     // 30. KL divergence is zero for identical distributions (standalone function)
@@ -1203,7 +1294,10 @@ mod tests {
         let teacher = vec![10.0f32, 0.0, 0.0, 0.0];
         let student = vec![0.0f32, 0.0, 0.0, 10.0];
         let loss = soft_target_kl_loss(&student, &teacher, 1.0).expect("ok");
-        assert!(loss > 0.0, "KL divergence must be > 0 for different distributions, got {loss}");
+        assert!(
+            loss > 0.0,
+            "KL divergence must be > 0 for different distributions, got {loss}"
+        );
     }
 
     // 32. Feature matching L2 loss for different activations is > 0
@@ -1212,7 +1306,10 @@ mod tests {
         let teacher_f = vec![1.0f32, 2.0, 3.0, 4.0];
         let student_f = vec![0.0f32, 0.0, 0.0, 0.0];
         let loss = feature_matching_loss(&student_f, &teacher_f).expect("ok");
-        assert!(loss > 0.0, "MSE should be positive for different activations, got {loss}");
+        assert!(
+            loss > 0.0,
+            "MSE should be positive for different activations, got {loss}"
+        );
     }
 
     // 33. Attention transfer: normalised identical maps → zero loss
@@ -1223,7 +1320,10 @@ mod tests {
         let map2 = vec![2.0f32, 4.0, 6.0, 8.0]; // same direction, double magnitude
         let loss = attention_transfer_loss(&map2, &map1).expect("ok");
         // Normalised vectors are the same → MSE = 0
-        assert!(loss.abs() < 1e-5, "scaled-identical attention maps should give 0 loss, got {loss}");
+        assert!(
+            loss.abs() < 1e-5,
+            "scaled-identical attention maps should give 0 loss, got {loss}"
+        );
     }
 
     // 34. Combined loss weighting: alpha * task + (1 - alpha) * distill
@@ -1231,15 +1331,28 @@ mod tests {
     fn test_combined_loss_weighting_numerically() {
         // task=4.0, distill=2.0, alpha=0.25 → 0.25*4 + 0.75*2 = 1.0 + 1.5 = 2.5
         let combined = combined_distillation_loss(4.0, 2.0, 0.25);
-        assert!((combined - 2.5f32).abs() < 1e-5, "expected 2.5, got {combined}");
+        assert!(
+            (combined - 2.5f32).abs() < 1e-5,
+            "expected 2.5, got {combined}"
+        );
     }
 
     // 35. Progressive distillation: second stage uses different temperature
     #[test]
     fn test_progressive_distillation_stage_temperature() {
         let stages = vec![
-            DistillationStage { stage_idx: 0, steps: 50, temperature: 8.0, alpha: 0.9 },
-            DistillationStage { stage_idx: 1, steps: 50, temperature: 2.0, alpha: 0.5 },
+            DistillationStage {
+                stage_idx: 0,
+                steps: 50,
+                temperature: 8.0,
+                alpha: 0.9,
+            },
+            DistillationStage {
+                stage_idx: 1,
+                steps: 50,
+                temperature: 2.0,
+                alpha: 0.5,
+            },
         ];
         let config = DistillationConfig {
             strategy: DistillationStrategy::Progressive { stages },
@@ -1257,15 +1370,21 @@ mod tests {
         let result_stage0 = distill
             .compute_loss(&t_logits, &s_logits, &[], &[], &labels)
             .expect("stage 0 loss");
-        assert!((result_stage0.current_temperature - 8.0).abs() < 1e-6,
-            "stage 0 temperature should be 8.0, got {}", result_stage0.current_temperature);
+        assert!(
+            (result_stage0.current_temperature - 8.0).abs() < 1e-6,
+            "stage 0 temperature should be 8.0, got {}",
+            result_stage0.current_temperature
+        );
 
         distill.advance_stage();
         let result_stage1 = distill
             .compute_loss(&t_logits, &s_logits, &[], &[], &labels)
             .expect("stage 1 loss");
-        assert!((result_stage1.current_temperature - 2.0).abs() < 1e-6,
-            "stage 1 temperature should be 2.0, got {}", result_stage1.current_temperature);
+        assert!(
+            (result_stage1.current_temperature - 2.0).abs() < 1e-6,
+            "stage 1 temperature should be 2.0, got {}",
+            result_stage1.current_temperature
+        );
     }
 
     // 36. TinyBERT-style: feature matching with linear transformation
@@ -1276,12 +1395,18 @@ mod tests {
         // Simulate: student after projection = teacher (projection aligns perfectly)
         let student_projected = teacher_f.clone();
         let loss = feature_matching_loss(&student_projected, &teacher_f).expect("ok");
-        assert!(loss.abs() < 1e-5, "projected student matching teacher → loss=0, got {loss}");
+        assert!(
+            loss.abs() < 1e-5,
+            "projected student matching teacher → loss=0, got {loss}"
+        );
 
         // Before projection (raw student differs): loss > 0
         let student_raw = vec![0.5f32, 1.0, 1.5, 2.0];
         let loss_raw = feature_matching_loss(&student_raw, &teacher_f).expect("ok");
-        assert!(loss_raw > 0.0, "un-projected student → positive loss, got {loss_raw}");
+        assert!(
+            loss_raw > 0.0,
+            "un-projected student → positive loss, got {loss_raw}"
+        );
     }
 
     // 37. Data-free distillation: generated logits drive a distillation loss
@@ -1293,7 +1418,10 @@ mod tests {
         // Generated student logits = teacher logits (perfect inversion)
         let student_generated = teacher_logits.clone();
         let loss = soft_target_kl_loss(&student_generated, &teacher_logits, 2.0).expect("ok");
-        assert!(loss.abs() < 1e-5, "perfect inversion should give near-zero loss, got {loss}");
+        assert!(
+            loss.abs() < 1e-5,
+            "perfect inversion should give near-zero loss, got {loss}"
+        );
 
         // A randomly-generated logit (LCG: multiplier=6364136223846793005, addend=1442695040888963407)
         let mut state: u64 = 42;
@@ -1304,39 +1432,62 @@ mod tests {
         let student_random: Vec<f32> = (0..5).map(|_| lcg_next(&mut state)).collect();
         let loss_random = soft_target_kl_loss(&student_random, &teacher_logits, 2.0).expect("ok");
         // Random student should generally not match teacher exactly
-        assert!(loss_random >= 0.0, "KL loss must be non-negative, got {loss_random}");
+        assert!(
+            loss_random >= 0.0,
+            "KL loss must be non-negative, got {loss_random}"
+        );
     }
 
     // 38. DistillationConfig construction for all strategy variants
     #[test]
     fn test_distillation_config_all_strategies() {
         let _soft = DistillationConfig {
-            strategy: DistillationStrategy::SoftTargets { temperature: 4.0, alpha: 0.7 },
-            teacher_layers: 12, student_layers: 6, vocab_size: 50000, hidden_size: 768,
+            strategy: DistillationStrategy::SoftTargets {
+                temperature: 4.0,
+                alpha: 0.7,
+            },
+            teacher_layers: 12,
+            student_layers: 6,
+            vocab_size: 50000,
+            hidden_size: 768,
         };
         let _feat = DistillationConfig {
             strategy: DistillationStrategy::FeatureBased {
                 layer_mapping: vec![(0, 0), (6, 3)],
                 loss_type: FeatureLossType::L2,
             },
-            teacher_layers: 12, student_layers: 6, vocab_size: 50000, hidden_size: 768,
+            teacher_layers: 12,
+            student_layers: 6,
+            vocab_size: 50000,
+            hidden_size: 768,
         };
         let _attn = DistillationConfig {
             strategy: DistillationStrategy::AttentionTransfer {
                 layer_pairs: vec![(0, 0)],
                 normalize: true,
             },
-            teacher_layers: 12, student_layers: 6, vocab_size: 50000, hidden_size: 768,
+            teacher_layers: 12,
+            student_layers: 6,
+            vocab_size: 50000,
+            hidden_size: 768,
         };
         let _prog = DistillationConfig {
             strategy: DistillationStrategy::Progressive { stages: vec![] },
-            teacher_layers: 12, student_layers: 6, vocab_size: 50000, hidden_size: 768,
+            teacher_layers: 12,
+            student_layers: 6,
+            vocab_size: 50000,
+            hidden_size: 768,
         };
         let _comb = DistillationConfig {
             strategy: DistillationStrategy::Combined {
-                soft_alpha: 0.4, feature_alpha: 0.3, temperature: 3.0,
+                soft_alpha: 0.4,
+                feature_alpha: 0.3,
+                temperature: 3.0,
             },
-            teacher_layers: 12, student_layers: 6, vocab_size: 50000, hidden_size: 768,
+            teacher_layers: 12,
+            student_layers: 6,
+            vocab_size: 50000,
+            hidden_size: 768,
         };
     }
 
@@ -1373,13 +1524,16 @@ mod tests {
         let config_wrong = soft_config(1.0, 0.0);
         let mut d_wrong = DistillationLoss::new(config_wrong);
 
-        let res_correct = d_correct.compute_loss(&teacher, &s_correct, &[], &[], &labels).expect("correct");
+        let res_correct = d_correct
+            .compute_loss(&teacher, &s_correct, &[], &[], &labels)
+            .expect("correct");
         let res_wrong = d_wrong.compute_loss(&teacher, &s_wrong, &[], &[], &labels).expect("wrong");
 
         assert!(
             res_correct.hard_label_component < res_wrong.hard_label_component,
             "correct prediction should have lower CE loss: {} vs {}",
-            res_correct.hard_label_component, res_wrong.hard_label_component
+            res_correct.hard_label_component,
+            res_wrong.hard_label_component
         );
     }
 
@@ -1396,11 +1550,17 @@ mod tests {
                 layer_mapping: vec![(0, 0)],
                 loss_type: FeatureLossType::KL,
             },
-            teacher_layers: 4, student_layers: 4, vocab_size: 50, hidden_size: 4,
+            teacher_layers: 4,
+            student_layers: 4,
+            vocab_size: 50,
+            hidden_size: 4,
         };
         let distill = DistillationLoss::new(config);
         let loss = distill.feature_loss(&[tf], &[sf], &FeatureLossType::KL).expect("ok");
-        assert!(loss.abs() < 1e-10, "KL feature loss for identical maps should be 0, got {loss}");
+        assert!(
+            loss.abs() < 1e-10,
+            "KL feature loss for identical maps should be 0, got {loss}"
+        );
     }
 
     // 42. Error: EmptyLogits from soft_target_kl_loss
@@ -1409,9 +1569,15 @@ mod tests {
         let empty: Vec<f32> = vec![];
         let non_empty = vec![1.0f32, 2.0];
         let err1 = soft_target_kl_loss(&empty, &non_empty, 1.0);
-        assert!(matches!(err1, Err(DistillError::EmptyLogits)), "empty student should error");
+        assert!(
+            matches!(err1, Err(DistillError::EmptyLogits)),
+            "empty student should error"
+        );
         let err2 = soft_target_kl_loss(&non_empty, &empty, 1.0);
-        assert!(matches!(err2, Err(DistillError::EmptyLogits)), "empty teacher should error");
+        assert!(
+            matches!(err2, Err(DistillError::EmptyLogits)),
+            "empty teacher should error"
+        );
     }
 
     // 43. Error: InvalidTemperature from soft_target_kl_loss with negative T
@@ -1419,7 +1585,10 @@ mod tests {
     fn test_soft_target_kl_loss_negative_temperature_error() {
         let logits = vec![1.0f32, 2.0, 3.0];
         let err = soft_target_kl_loss(&logits, &logits, -1.0);
-        assert!(matches!(err, Err(DistillError::InvalidTemperature(_))), "negative T should error");
+        assert!(
+            matches!(err, Err(DistillError::InvalidTemperature(_))),
+            "negative T should error"
+        );
     }
 
     // 44. Error: FeatureCountMismatch from feature_loss with missing layer index
@@ -1433,11 +1602,17 @@ mod tests {
                 layer_mapping: vec![(0, 99)], // student layer 99 does not exist
                 loss_type: FeatureLossType::L2,
             },
-            teacher_layers: 4, student_layers: 4, vocab_size: 50, hidden_size: 4,
+            teacher_layers: 4,
+            student_layers: 4,
+            vocab_size: 50,
+            hidden_size: 4,
         };
         let distill = DistillationLoss::new(config);
         let err = distill.feature_loss(&tf, &sf, &FeatureLossType::L2);
-        assert!(matches!(err, Err(DistillError::FeatureCountMismatch)), "missing layer should error");
+        assert!(
+            matches!(err, Err(DistillError::FeatureCountMismatch)),
+            "missing layer should error"
+        );
     }
 
     // 45. JSD symmetry: JSD(p, q) == JSD(q, p)
@@ -1476,7 +1651,10 @@ mod tests {
     #[test]
     fn test_combined_distillation_loss_alpha_clamped_above_one() {
         let combined = combined_distillation_loss(5.0, 9.0, 2.0); // alpha clamped to 1.0
-        assert!((combined - 5.0f32).abs() < 1e-5, "alpha>1 clamped to 1, got {combined}");
+        assert!(
+            (combined - 5.0f32).abs() < 1e-5,
+            "alpha>1 clamped to 1, got {combined}"
+        );
     }
 
     // 49. DistillationLoss::compute_loss with FeatureBased strategy
@@ -1487,8 +1665,18 @@ mod tests {
         let hidden_size = 4;
 
         let s_logits = peaked_logits(seq_len, vocab_size, 1, 2.0);
-        let t_feat = vec![FeatureMap::new(vec![1.0f64; seq_len * hidden_size], seq_len, hidden_size, 0)];
-        let s_feat = vec![FeatureMap::new(vec![2.0f64; seq_len * hidden_size], seq_len, hidden_size, 0)];
+        let t_feat = vec![FeatureMap::new(
+            vec![1.0f64; seq_len * hidden_size],
+            seq_len,
+            hidden_size,
+            0,
+        )];
+        let s_feat = vec![FeatureMap::new(
+            vec![2.0f64; seq_len * hidden_size],
+            seq_len,
+            hidden_size,
+            0,
+        )];
         let labels = vec![1usize; seq_len];
 
         let config = DistillationConfig {
@@ -1496,11 +1684,19 @@ mod tests {
                 layer_mapping: vec![(0, 0)],
                 loss_type: FeatureLossType::L2,
             },
-            teacher_layers: 4, student_layers: 4, vocab_size, hidden_size,
+            teacher_layers: 4,
+            student_layers: 4,
+            vocab_size,
+            hidden_size,
         };
         let mut distill = DistillationLoss::new(config);
-        let result = distill.compute_loss(&s_logits, &s_logits, &t_feat, &s_feat, &labels).expect("ok");
-        assert!(result.feature_component > 0.0, "feature loss should be > 0 for different activations");
+        let result = distill
+            .compute_loss(&s_logits, &s_logits, &t_feat, &s_feat, &labels)
+            .expect("ok");
+        assert!(
+            result.feature_component > 0.0,
+            "feature loss should be > 0 for different activations"
+        );
         assert!(result.total_loss > 0.0, "total loss should be positive");
     }
 
@@ -1511,24 +1707,36 @@ mod tests {
         let labels = vec![0usize];
         let config = DistillationConfig {
             strategy: DistillationStrategy::Progressive { stages: vec![] },
-            teacher_layers: 4, student_layers: 2, vocab_size: 5, hidden_size: 8,
+            teacher_layers: 4,
+            student_layers: 2,
+            vocab_size: 5,
+            hidden_size: 8,
         };
         let mut distill = DistillationLoss::new(config);
         let result = distill.compute_loss(&logits, &logits, &[], &[], &labels).expect("ok");
         // Empty stages falls back to defaults (T=4.0, alpha=0.7)
-        assert!((result.current_temperature - 4.0).abs() < 1e-6,
-            "empty stages should use default T=4.0, got {}", result.current_temperature);
+        assert!(
+            (result.current_temperature - 4.0).abs() < 1e-6,
+            "empty stages should use default T=4.0, got {}",
+            result.current_temperature
+        );
     }
 
     // 51. DistillationLoss advance_stage resets step counter
     #[test]
     fn test_advance_stage_resets_step_counter() {
-        let stages = vec![
-            DistillationStage { stage_idx: 0, steps: 10, temperature: 4.0, alpha: 0.7 },
-        ];
+        let stages = vec![DistillationStage {
+            stage_idx: 0,
+            steps: 10,
+            temperature: 4.0,
+            alpha: 0.7,
+        }];
         let config = DistillationConfig {
             strategy: DistillationStrategy::Progressive { stages },
-            teacher_layers: 4, student_layers: 2, vocab_size: 10, hidden_size: 8,
+            teacher_layers: 4,
+            student_layers: 2,
+            vocab_size: 10,
+            hidden_size: 8,
         };
         let mut distill = DistillationLoss::new(config);
         let logits = peaked_logits(1, 10, 0, 1.0);
@@ -1552,16 +1760,27 @@ mod tests {
                 layer_pairs: vec![(0, 0)],
                 normalize: true,
             },
-            teacher_layers: 6, student_layers: 3, vocab_size, hidden_size: 16,
+            teacher_layers: 6,
+            student_layers: 3,
+            vocab_size,
+            hidden_size: 16,
         };
         let mut distill = DistillationLoss::new(config);
         let result = distill.compute_loss(&logits, &logits, &[], &[], &labels).expect("ok");
         // AttentionTransfer uses only hard loss; soft and feature components should be 0
-        assert!((result.soft_target_component).abs() < 1e-10,
-            "soft_target should be 0 for AttentionTransfer, got {}", result.soft_target_component);
-        assert!((result.feature_component).abs() < 1e-10,
-            "feature should be 0 for AttentionTransfer, got {}", result.feature_component);
-        assert_eq!(result.total_loss, result.hard_label_component,
-            "total_loss should equal hard_label_component for AttentionTransfer");
+        assert!(
+            (result.soft_target_component).abs() < 1e-10,
+            "soft_target should be 0 for AttentionTransfer, got {}",
+            result.soft_target_component
+        );
+        assert!(
+            (result.feature_component).abs() < 1e-10,
+            "feature should be 0 for AttentionTransfer, got {}",
+            result.feature_component
+        );
+        assert_eq!(
+            result.total_loss, result.hard_label_component,
+            "total_loss should equal hard_label_component for AttentionTransfer"
+        );
     }
 }

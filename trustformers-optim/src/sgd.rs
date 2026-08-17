@@ -75,7 +75,7 @@ impl Optimizer for SGD {
                 let mut d_p = grad_arr.clone();
 
                 if self.config.momentum != 0.0 {
-                    let param_id = format!("{:p}", param.as_ptr());
+                    let param_id = self.state.param_key(param.as_ptr() as usize, param.len())?;
                     let buf = self
                         .state
                         .momentum

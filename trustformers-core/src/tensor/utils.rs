@@ -427,12 +427,30 @@ impl Tensor {
                 }
             },
 
-            // Metal → Metal (different device, currently just clone)
+            // Metal → Metal
             #[cfg(all(target_os = "macos", feature = "metal"))]
-            (Tensor::Metal(metal_data), crate::device::Device::Metal(_)) => {
-                // For now, just return a clone (buffer is reference counted)
-                // TODO: Implement actual device-to-device transfer if needed
-                Ok(Tensor::Metal(metal_data.clone()))
+            (Tensor::Metal(metal_data), crate::device::Device::Metal(target_device)) => {
+                // The Metal backend is a process-wide singleton bound to the system
+                // default device (see `gpu_ops::metal::get_metal_backend`), so the
+                // only reachable ordinal is `METAL_DEFAULT_DEVICE`. Requesting any
+                // other ordinal used to return a clone of the *source* buffer,
+                // silently reporting a transfer that never happened; report the
+                // unsupported request instead.
+                const METAL_DEFAULT_DEVICE: usize = 0;
+                if *target_device == METAL_DEFAULT_DEVICE {
+                    // Same device: the clone shares the same reference-counted
+                    // resident buffer (no copy, refcount increment only).
+                    Ok(Tensor::Metal(metal_data.clone()))
+                } else {
+                    Err(TrustformersError::hardware_error(
+                        format!(
+                            "Metal device-to-device transfer to ordinal {} is not supported: \
+                             the Metal backend exposes only the system default device (ordinal {})",
+                            target_device, METAL_DEFAULT_DEVICE
+                        ),
+                        "to_device_enum",
+                    ))
+                }
             },
 
             // Already on correct device - no-op

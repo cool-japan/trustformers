@@ -121,7 +121,8 @@ impl ScheduleFreeSGD {
         for param in parameters.iter_mut() {
             match param {
                 Tensor::F32(param_data) => {
-                    let param_id = format!("{:p}", param_data.as_ptr());
+                    let param_id =
+                        self.state.param_key(param_data.as_ptr() as usize, param_data.len())?;
 
                     if let Some(average_weights) = self.average_weights.get(&param_id) {
                         // In eval mode, use average weights instead of momentum weights
@@ -146,7 +147,8 @@ impl ScheduleFreeSGD {
         for param in parameters.iter_mut() {
             match param {
                 Tensor::F32(param_data) => {
-                    let param_id = format!("{:p}", param_data.as_ptr());
+                    let param_id =
+                        self.state.param_key(param_data.as_ptr() as usize, param_data.len())?;
 
                     if let Some(momentum_weights) = self.momentum_weights.get(&param_id) {
                         // In train mode, use momentum weights
@@ -171,7 +173,7 @@ impl Optimizer for ScheduleFreeSGD {
     fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
         match (parameter, grad) {
             (Tensor::F32(param), Tensor::F32(grad_arr)) => {
-                let param_id = format!("{:p}", param.as_ptr());
+                let param_id = self.state.param_key(param.as_ptr() as usize, param.len())?;
                 let size = grad_arr.len();
 
                 // Get values before mutable borrows
@@ -526,7 +528,7 @@ impl Optimizer for ScheduleFreeAdam {
     fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
         match (parameter, grad) {
             (Tensor::F32(param), Tensor::F32(grad_arr)) => {
-                let param_id = format!("{:p}", param.as_ptr());
+                let param_id = self.state.param_key(param.as_ptr() as usize, param.len())?;
                 let size = grad_arr.len();
 
                 // Get values before mutable borrows

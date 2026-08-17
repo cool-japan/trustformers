@@ -362,6 +362,13 @@ impl LazyVocab {
     pub fn try_get_vocab(&self) -> Option<Arc<RwLock<Vocab>>> {
         self.vocab.get().cloned()
     }
+
+    /// Get the full token→id map, loading the vocabulary if necessary.
+    pub fn get_full_vocab(&self) -> Result<HashMap<String, u32>> {
+        let vocab = self.get_vocab()?;
+        let vocab_guard = vocab.read().map_err(|_| anyhow::anyhow!("vocab lock poisoned"))?;
+        Ok(vocab_guard.get_vocab().clone())
+    }
 }
 
 /// Vocabulary that supports both in-memory and lazy loading
@@ -424,6 +431,16 @@ impl FlexibleVocab {
         match self {
             Self::Immediate(_) => true,
             Self::Lazy(lazy_vocab) => lazy_vocab.is_loaded(),
+        }
+    }
+
+    /// Get the full token→id map. For `Lazy`, this forces the vocabulary to
+    /// load rather than returning an empty map for a vocabulary that simply
+    /// hasn't been accessed yet.
+    pub fn get_full_vocab(&self) -> Result<HashMap<String, u32>> {
+        match self {
+            Self::Immediate(vocab) => Ok(vocab.get_vocab().clone()),
+            Self::Lazy(lazy_vocab) => lazy_vocab.get_full_vocab(),
         }
     }
 }

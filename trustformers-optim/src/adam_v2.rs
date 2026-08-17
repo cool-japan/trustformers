@@ -12,8 +12,7 @@
 //! - Thread-safe and serializable state management
 
 use crate::common::{
-    BiasCorrection, OptimizerState, ParameterIds, ParameterUpdate, StateMemoryStats,
-    WeightDecayMode,
+    BiasCorrection, OptimizerState, ParameterUpdate, StateMemoryStats, WeightDecayMode,
 };
 use crate::traits::{AdaptiveMomentumOptimizer, MomentumOptimizer, StatefulOptimizer};
 use std::collections::HashMap;
@@ -244,7 +243,7 @@ impl StandardizedAdam {
 
 impl Optimizer for StandardizedAdam {
     fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
-        let param_id = ParameterIds::from_tensor(parameter)?;
+        let param_id = self.state.param_key_for_tensor(parameter)?;
         match (parameter, grad) {
             (Tensor::F32(param), Tensor::F32(grad_arr)) => self.update_parameter(
                 param.as_slice_mut().ok_or_else(|| {

@@ -585,7 +585,12 @@ impl GpuAcceleratedOps {
     /// Softmax with GPU acceleration
     pub fn softmax(&self, input: &Tensor, dim: usize) -> Result<Tensor> {
         let input_shape = input.shape();
-        let output = Tensor::zeros(&input_shape)?;
+        if dim >= input_shape.len() {
+            return Err(TrustformersError::tensor_op_error(
+                "Softmax dimension out of bounds",
+                "softmax",
+            ));
+        }
 
         // Softmax: exp(x - max(x)) / sum(exp(x - max(x)))
         let max_vals = self.reduce_max(input, dim)?;
@@ -841,32 +846,36 @@ impl GpuAcceleratedOps {
     }
 
     // Helper methods for complex operations
+    //
+    // These back `softmax` above. `reduce_max`/`reduce_sum` both remove `dim`
+    // from the output shape (matching `Tensor::max_axes`/`sum_axes`), so the
+    // broadcast helpers reinsert a size-1 axis at `dim` before delegating to
+    // `Tensor::sub`/`Tensor::div`, which broadcast a trailing size-1 axis
+    // against the original (non-reduced) shape.
     fn reduce_max(&self, input: &Tensor, dim: usize) -> Result<Tensor> {
-        // Similar to reduce_sum but with max operation
-        let input_shape = input.shape();
-        let mut output_shape = input_shape.clone();
-        output_shape.remove(dim);
+        input.max_axes(&[dim])
+    }
 
-        // Implementation would be similar to reduce_sum
-        Tensor::zeros(&output_shape)
+    /// Reinsert a size-1 axis at `dim` into a tensor that had that axis
+    /// reduced away, so it can broadcast against the pre-reduction shape.
+    fn insert_reduced_axis(&self, tensor: &Tensor, dim: usize) -> Result<Tensor> {
+        let mut shape = tensor.shape();
+        shape.insert(dim, 1);
+        tensor.reshape(&shape)
     }
 
     fn subtract_broadcast(&self, a: &Tensor, b: &Tensor, dim: usize) -> Result<Tensor> {
-        // Broadcast subtraction
-        let a_shape = a.shape();
-        Tensor::zeros(&a_shape)
+        let b_expanded = self.insert_reduced_axis(b, dim)?;
+        a.sub(&b_expanded)
     }
 
     fn exp(&self, input: &Tensor) -> Result<Tensor> {
-        // Element-wise exponential
-        let input_shape = input.shape();
-        Tensor::zeros(&input_shape)
+        input.exp()
     }
 
     fn divide_broadcast(&self, a: &Tensor, b: &Tensor, dim: usize) -> Result<Tensor> {
-        // Broadcast division
-        let a_shape = a.shape();
-        Tensor::zeros(&a_shape)
+        let b_expanded = self.insert_reduced_axis(b, dim)?;
+        a.div(&b_expanded)
     }
 }
 
@@ -1002,5 +1011,60 @@ mod tests {
 
         let result = ops.synchronize();
         assert!(result.is_ok());
+    }
+
+    /// Regression test: `softmax`'s four helper ops (`reduce_max`,
+    /// `subtract_broadcast`, `exp`, `divide_broadcast`) used to be
+    /// `Tensor::zeros` stubs, so `softmax` always returned an all-zeros
+    /// tensor regardless of input. A real softmax must sum to 1 along `dim`
+    /// and must vary with the input.
+    #[test]
+    fn test_softmax_sums_to_one_and_is_not_zero() {
+        let config = GpuOpsConfig::default();
+        let ops = GpuAcceleratedOps::new(config).expect("operation failed in test");
+
+        let input = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 1.0, 1.0, 1.0, 1.0], &[2, 4])
+            .expect("failed to build input tensor");
+
+        let result = ops.softmax(&input, 1).expect("softmax failed");
+        assert_eq!(result.shape(), &[2, 4]);
+
+        let data = result.data().expect("failed to read softmax output");
+        // Must not be the old all-zeros stub output.
+        assert!(
+            data.iter().any(|&v| v.abs() > 1e-6),
+            "softmax output is all zeros"
+        );
+
+        // Each row must sum to 1.
+        for row in 0..2 {
+            let row_sum: f32 = data[row * 4..(row + 1) * 4].iter().sum();
+            assert!(
+                (row_sum - 1.0).abs() < 1e-4,
+                "row {} sums to {}, not 1",
+                row,
+                row_sum
+            );
+        }
+
+        // Reference check against the known-correct `Tensor::softmax`
+        // (independent implementation) for the varied row [1,2,3,4].
+        let expected = input.softmax(1).expect("reference softmax failed");
+        let expected_data = expected.data().expect("failed to read reference output");
+        for (a, b) in data.iter().zip(expected_data.iter()) {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "GPU-path softmax {} != reference {}",
+                a,
+                b
+            );
+        }
+
+        // The uniform row [1,1,1,1] must produce a uniform 0.25 distribution,
+        // confirming the max-subtraction and broadcast division are wired
+        // per-row rather than collapsed to a single scalar.
+        for &v in &data[4..8] {
+            assert!((v - 0.25).abs() < 1e-4, "uniform row entry {} != 0.25", v);
+        }
     }
 }

@@ -79,6 +79,83 @@ pub enum OpType {
     Equal,
     // Conditional operations
     Where, // requires 3 operands: condition, x, y
+    /// A chain of *unary* elementwise operations collapsed into a single node.
+    ///
+    /// The ops are stored in application order: `FusedElementwise(vec![Exp,
+    /// Sqrt])` computes `sqrt(exp(x))`. Evaluating it performs one traversal of
+    /// the data instead of one full-size allocation and traversal per link, so
+    /// an `n`-op chain over an `N`-element tensor drops from `n` intermediate
+    /// buffers to zero.
+    ///
+    /// Produced by [`TensorExpr::optimize_fusion`]; never built directly by the
+    /// public expression API.
+    FusedElementwise(Vec<OpType>),
+}
+
+impl OpType {
+    /// Whether this op maps one input element to one output element with no
+    /// dependence on any other element (so a chain of them can be fused into a
+    /// single pass).
+    ///
+    /// `Softmax` is deliberately excluded: it reduces over an axis. Binary ops
+    /// are elementwise but take two operands, so they are not part of a *unary*
+    /// fusion chain.
+    fn is_unary_elementwise(&self) -> bool {
+        matches!(
+            self,
+            OpType::ReLU
+                | OpType::Sigmoid
+                | OpType::Tanh
+                | OpType::GELU
+                | OpType::Pow(_)
+                | OpType::Sqrt
+                | OpType::Log
+                | OpType::Exp
+        )
+    }
+
+    /// Apply a single unary elementwise op to one `f32` value.
+    ///
+    /// The formulas mirror the corresponding `Tensor` methods exactly (notably
+    /// the tanh GELU approximation), so fusing a chain cannot change results.
+    fn apply_scalar_f32(&self, x: f32) -> Result<f32> {
+        Ok(match self {
+            OpType::ReLU => x.max(0.0),
+            OpType::Sigmoid => 1.0 / (1.0 + (-x).exp()),
+            OpType::Tanh => x.tanh(),
+            OpType::GELU => 0.5 * x * (1.0 + (0.7978845608 * (x + 0.044715 * x.powi(3))).tanh()),
+            OpType::Pow(power) => x.powf(*power as f32),
+            OpType::Sqrt => x.sqrt(),
+            OpType::Log => x.ln(),
+            OpType::Exp => x.exp(),
+            other => {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!("{:?} is not a unary elementwise operation", other),
+                    "OpType::apply_scalar_f32",
+                ));
+            },
+        })
+    }
+
+    /// `f64` counterpart of [`OpType::apply_scalar_f32`].
+    fn apply_scalar_f64(&self, x: f64) -> Result<f64> {
+        Ok(match self {
+            OpType::ReLU => x.max(0.0),
+            OpType::Sigmoid => 1.0 / (1.0 + (-x).exp()),
+            OpType::Tanh => x.tanh(),
+            OpType::GELU => 0.5 * x * (1.0 + (0.7978845608 * (x + 0.044715 * x.powi(3))).tanh()),
+            OpType::Pow(power) => x.powf(*power),
+            OpType::Sqrt => x.sqrt(),
+            OpType::Log => x.ln(),
+            OpType::Exp => x.exp(),
+            other => {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!("{:?} is not a unary elementwise operation", other),
+                    "OpType::apply_scalar_f64",
+                ));
+            },
+        })
+    }
 }
 
 /// Expression node in the computation graph
@@ -278,6 +355,29 @@ impl TensorExpr {
         self.unary_op(OpType::Softmax(axis))
     }
 
+    /// Elementwise square root.
+    ///
+    /// `OpType::Sqrt` was already evaluated by `eval_recursive` but had no
+    /// builder, so the operation was unreachable through the public API.
+    pub fn sqrt(self) -> Result<Self> {
+        self.unary_op(OpType::Sqrt)
+    }
+
+    /// Elementwise natural logarithm.
+    pub fn log(self) -> Result<Self> {
+        self.unary_op(OpType::Log)
+    }
+
+    /// Elementwise exponential.
+    pub fn exp(self) -> Result<Self> {
+        self.unary_op(OpType::Exp)
+    }
+
+    /// Elementwise power with a scalar exponent.
+    pub fn pow(self, exponent: f64) -> Result<Self> {
+        self.unary_op(OpType::Pow(exponent))
+    }
+
     /// Sum along specified axes
     pub fn sum(mut self, axes: Option<Vec<usize>>) -> Result<Self> {
         let result_shape = if let Some(ref axes) = axes {
@@ -433,9 +533,13 @@ impl TensorExpr {
 
     /// Evaluate the expression with optimization context
     pub fn eval_with_context(&self, context: &EvalContext) -> Result<Tensor> {
-        // First, optimize the expression if requested
-        let optimized_expr =
-            if context.hints.enable_fusion { self.optimize_fusion()? } else { self.clone() };
+        // First, optimize the expression if requested. `max_fusion_size` caps how
+        // many links one fused node may absorb.
+        let optimized_expr = if context.hints.enable_fusion {
+            self.optimize_fusion_with_limit(context.hints.max_fusion_size)?
+        } else {
+            self.clone()
+        };
 
         // Evaluate the optimized expression
         optimized_expr.eval_recursive(optimized_expr.root, context)
@@ -592,51 +696,107 @@ impl TensorExpr {
         )
     }
 
-    fn optimize_fusion(&self) -> Result<TensorExpr> {
-        // Simple fusion optimization: combine consecutive element-wise operations
-        let mut optimized = self.clone();
+    /// Rewrite chains of unary elementwise operations into single
+    /// [`OpType::FusedElementwise`] nodes.
+    ///
+    /// This is a real rewrite, not a report: the returned expression has fewer
+    /// nodes, and evaluating it performs one traversal per fused chain instead
+    /// of one full-size allocation and traversal per link. The previous version
+    /// discovered chains and then discarded them (`fuse_operations` had an empty
+    /// body), so `optimize_fusion` returned an unmodified clone.
+    ///
+    /// Only chains whose intermediate nodes have exactly one consumer are fused
+    /// -- a shared intermediate is needed by another branch, so collapsing it
+    /// would force it to be recomputed.
+    pub fn optimize_fusion(&self) -> Result<TensorExpr> {
+        self.optimize_fusion_with_limit(usize::MAX)
+    }
 
-        // Find fusion opportunities
-        let fusion_chains = optimized.find_fusion_chains();
-
-        // Apply fusions
-        for chain in fusion_chains {
-            optimized.fuse_operations(&chain)?;
+    /// [`TensorExpr::optimize_fusion`] with an explicit cap on how many
+    /// operations one fused node may absorb (`OptimizationHints::max_fusion_size`).
+    fn optimize_fusion_with_limit(&self, max_chain: usize) -> Result<TensorExpr> {
+        if max_chain < 2 {
+            return Ok(self.clone());
         }
 
+        let mut optimized = self.clone();
+        for chain in self.find_fusion_chains(max_chain) {
+            optimized.fuse_operations(&chain)?;
+        }
+        optimized.prune_unreachable_nodes();
         Ok(optimized)
     }
 
-    fn find_fusion_chains(&self) -> Vec<Vec<usize>> {
-        // Simplified: find chains of element-wise operations
-        let mut chains = Vec::new();
-        let mut visited = std::collections::HashSet::new();
+    /// How many nodes consume each node's output.
+    fn consumer_counts(&self) -> HashMap<usize, usize> {
+        let mut counts: HashMap<usize, usize> = HashMap::new();
+        for node in self.nodes.values() {
+            for &operand in &node.operands {
+                *counts.entry(operand).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
 
-        for &node_id in self.nodes.keys() {
-            if visited.contains(&node_id) {
+    /// Find maximal chains of unary elementwise nodes.
+    ///
+    /// A chain is returned outermost-first (`[outer, ..., inner]`); the node
+    /// *below* the innermost link stays untouched and becomes the fused node's
+    /// single operand.
+    fn find_fusion_chains(&self, max_len: usize) -> Vec<Vec<usize>> {
+        if max_len < 2 {
+            return Vec::new();
+        }
+
+        let consumers = self.consumer_counts();
+
+        // Visit consumers before their operands, so a chain always starts at the
+        // outermost link that is still free. Without that order, capping a chain
+        // (`max_len`) would strand the released interior nodes: they would still
+        // look like the middle of a longer chain and be skipped forever.
+        let node_ids = self.nodes_outermost_first();
+
+        let mut claimed = std::collections::HashSet::new();
+        let mut chains = Vec::new();
+
+        for node_id in node_ids {
+            if claimed.contains(&node_id) {
+                continue;
+            }
+            if !self.is_fusable_link(node_id) {
+                continue;
+            }
+            // Skip nodes that are still the interior of a chain rooted higher up.
+            // Once that root has been processed the consumer is claimed, and this
+            // node becomes a legal chain start on a later iteration.
+            if self.has_unclaimed_fusable_sole_consumer(node_id, &consumers, &claimed) {
                 continue;
             }
 
-            let mut chain = Vec::new();
+            let mut chain = vec![node_id];
             let mut current = node_id;
-
-            while let Some(node) = self.nodes.get(&current) {
-                if !self.is_node_elementwise(node) {
+            while chain.len() < max_len {
+                let Some(node) = self.nodes.get(&current) else {
+                    break;
+                };
+                let Some(&operand) = node.operands.first() else {
+                    break;
+                };
+                if !self.is_fusable_link(operand) {
                     break;
                 }
-
-                chain.push(current);
-                visited.insert(current);
-
-                // Move to next node if it has exactly one operand
-                if node.operands.len() == 1 {
-                    current = node.operands[0];
-                } else {
+                // Only absorb an intermediate that nothing else consumes.
+                if consumers.get(&operand).copied().unwrap_or(0) != 1 {
                     break;
                 }
+                chain.push(operand);
+                current = operand;
             }
 
-            if chain.len() > 1 {
+            if chain.len() >= 2 {
+                for &id in &chain {
+                    claimed.insert(id);
+                }
                 chains.push(chain);
             }
         }
@@ -644,36 +804,199 @@ impl TensorExpr {
         chains
     }
 
-    fn is_node_elementwise(&self, node: &ExprNode) -> bool {
-        matches!(
-            node.op,
-            OpType::Add
-                | OpType::Sub
-                | OpType::Mul
-                | OpType::Div
-                | OpType::ReLU
-                | OpType::Sigmoid
-                | OpType::Tanh
-                | OpType::GELU
-                | OpType::Pow(_)
-                | OpType::Sqrt
-                | OpType::Log
-                | OpType::Exp
-        )
+    /// Whether `node_id` is a non-leaf, single-operand, unary elementwise node.
+    fn is_fusable_link(&self, node_id: usize) -> bool {
+        match self.nodes.get(&node_id) {
+            Some(node) => {
+                !node.is_leaf && node.operands.len() == 1 && node.op.is_unary_elementwise()
+            },
+            None => false,
+        }
     }
 
-    fn fuse_operations(&mut self, chain: &[usize]) -> Result<()> {
-        // Simplified fusion: replace chain with a single fused operation
-        // In a real implementation, this would generate optimized kernels
+    fn has_unclaimed_fusable_sole_consumer(
+        &self,
+        node_id: usize,
+        consumers: &HashMap<usize, usize>,
+        claimed: &std::collections::HashSet<usize>,
+    ) -> bool {
+        if consumers.get(&node_id).copied().unwrap_or(0) != 1 {
+            return false;
+        }
+        self.nodes.values().any(|candidate| {
+            candidate.operands.first() == Some(&node_id)
+                && self.is_fusable_link(candidate.id)
+                && !claimed.contains(&candidate.id)
+        })
+    }
 
+    /// Node ids ordered so that every node precedes its operands (root first).
+    ///
+    /// Nodes unreachable from the root are appended in id order so the traversal
+    /// is total and deterministic.
+    fn nodes_outermost_first(&self) -> Vec<usize> {
+        let mut order = Vec::with_capacity(self.nodes.len());
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(self.root);
+
+        while let Some(id) = queue.pop_front() {
+            if !seen.insert(id) {
+                continue;
+            }
+            order.push(id);
+            if let Some(node) = self.nodes.get(&id) {
+                for &operand in &node.operands {
+                    queue.push_back(operand);
+                }
+            }
+        }
+
+        let mut orphans: Vec<usize> =
+            self.nodes.keys().copied().filter(|id| !seen.contains(id)).collect();
+        orphans.sort_unstable();
+        order.extend(orphans);
+        order
+    }
+
+    /// Replace `chain` (outermost first) with a single `FusedElementwise` node.
+    ///
+    /// The outermost node keeps its id, so every consumer -- including `root` --
+    /// keeps pointing at it; only its `op` and `operands` change.
+    fn fuse_operations(&mut self, chain: &[usize]) -> Result<()> {
         if chain.len() < 2 {
             return Ok(());
         }
 
-        // For now, just mark the optimization potential
-        // Real implementation would generate fused CUDA/OpenCL kernels
+        // Collect the ops innermost-first, which is application order.
+        let mut ops = Vec::with_capacity(chain.len());
+        for &node_id in chain.iter().rev() {
+            let node = self.nodes.get(&node_id).ok_or_else(|| {
+                TrustformersError::tensor_op_error(
+                    &format!("fusion chain references unknown node {}", node_id),
+                    "TensorExpr::fuse_operations",
+                )
+            })?;
+            // Flatten a previously fused node so repeated passes stay linear.
+            match &node.op {
+                OpType::FusedElementwise(inner) => ops.extend(inner.iter().cloned()),
+                other => ops.push(other.clone()),
+            }
+        }
 
+        let innermost = *chain.last().unwrap_or(&chain[0]);
+        let source = self
+            .nodes
+            .get(&innermost)
+            .and_then(|node| node.operands.first().copied())
+            .ok_or_else(|| {
+                TrustformersError::tensor_op_error(
+                    "innermost fusion link has no operand",
+                    "TensorExpr::fuse_operations",
+                )
+            })?;
+
+        let outermost = chain[0];
+        let fused = self.nodes.get_mut(&outermost).ok_or_else(|| {
+            TrustformersError::tensor_op_error(
+                &format!("fusion chain references unknown node {}", outermost),
+                "TensorExpr::fuse_operations",
+            )
+        })?;
+        fused.op = OpType::FusedElementwise(ops);
+        fused.operands = vec![source];
+
+        // The interior nodes are now unreachable; `prune_unreachable_nodes`
+        // removes them once every chain has been rewritten.
         Ok(())
+    }
+
+    /// Evaluate a fused chain of unary elementwise ops in a single traversal.
+    ///
+    /// One allocation for the output; every intermediate stays in a register.
+    /// The per-op formulas are the same ones the unfused `Tensor` methods use,
+    /// so results are bit-identical to evaluating the chain link by link
+    /// (modulo the intermediate rounding that no longer happens through memory).
+    fn eval_fused_elementwise(input: &Tensor, ops: &[OpType]) -> Result<Tensor> {
+        if ops.is_empty() {
+            return Ok(input.clone());
+        }
+        for op in ops {
+            if !op.is_unary_elementwise() {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!("{:?} cannot appear in a fused elementwise chain", op),
+                    "eval_fused_elementwise",
+                ));
+            }
+        }
+
+        match input {
+            Tensor::F32(a) => {
+                let mut result = a.as_standard_layout().into_owned();
+                for value in result.iter_mut() {
+                    let mut acc = *value;
+                    for op in ops {
+                        acc = op.apply_scalar_f32(acc)?;
+                    }
+                    *value = acc;
+                }
+                Ok(Tensor::F32(result))
+            },
+            Tensor::F64(a) => {
+                let mut result = a.as_standard_layout().into_owned();
+                for value in result.iter_mut() {
+                    let mut acc = *value;
+                    for op in ops {
+                        acc = op.apply_scalar_f64(acc)?;
+                    }
+                    *value = acc;
+                }
+                Ok(Tensor::F64(result))
+            },
+            // Integer / complex / device tensors have no fused kernel: fall back
+            // to applying the chain one operation at a time, which is exactly
+            // what an unfused expression would have done.
+            other => {
+                let mut current = other.clone();
+                for op in ops {
+                    current = match op {
+                        OpType::ReLU => current.relu()?,
+                        OpType::Sigmoid => current.sigmoid()?,
+                        OpType::Tanh => current.tanh()?,
+                        OpType::GELU => current.gelu()?,
+                        OpType::Pow(power) => current.pow_scalar(*power)?,
+                        OpType::Sqrt => current.sqrt()?,
+                        OpType::Log => current.log()?,
+                        OpType::Exp => current.exp()?,
+                        unsupported => {
+                            return Err(TrustformersError::tensor_op_error(
+                                &format!(
+                                    "{:?} cannot appear in a fused elementwise chain",
+                                    unsupported
+                                ),
+                                "eval_fused_elementwise",
+                            ));
+                        },
+                    };
+                }
+                Ok(current)
+            },
+        }
+    }
+
+    /// Drop nodes no longer reachable from the root.
+    fn prune_unreachable_nodes(&mut self) {
+        let mut reachable = std::collections::HashSet::new();
+        let mut stack = vec![self.root];
+        while let Some(id) = stack.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            if let Some(node) = self.nodes.get(&id) {
+                stack.extend(node.operands.iter().copied());
+            }
+        }
+        self.nodes.retain(|id, _| reachable.contains(id));
     }
 
     fn eval_recursive(&self, node_id: usize, _context: &EvalContext) -> Result<Tensor> {
@@ -719,6 +1042,7 @@ impl TensorExpr {
             OpType::Sigmoid => operands[0].sigmoid(),
             OpType::Tanh => operands[0].tanh(),
             OpType::GELU => operands[0].gelu(),
+            OpType::FusedElementwise(ops) => Self::eval_fused_elementwise(&operands[0], ops),
             OpType::Softmax(axis) => operands[0].softmax(*axis),
             OpType::Sum(axes) => {
                 match axes {
@@ -834,6 +1158,30 @@ impl TensorExpr {
                 OpType::Mean(axes) => format!("mean({}, axes={:?})", operand_strs[0], axes),
                 OpType::Reshape(shape) => format!("reshape({}, {:?})", operand_strs[0], shape),
                 OpType::Transpose => format!("transpose({})", operand_strs[0]),
+                OpType::Sqrt => format!("sqrt({})", operand_strs[0]),
+                OpType::Log => format!("log({})", operand_strs[0]),
+                OpType::Exp => format!("exp({})", operand_strs[0]),
+                OpType::Pow(exponent) => format!("pow({}, {})", operand_strs[0], exponent),
+                // Render a fused chain as the nested calls it replaced, so the
+                // printed expression stays readable after `optimize_fusion`.
+                OpType::FusedElementwise(ops) => {
+                    let mut rendered =
+                        operand_strs.first().cloned().unwrap_or_else(|| "<missing>".to_string());
+                    for op in ops {
+                        rendered = match op {
+                            OpType::ReLU => format!("relu({})", rendered),
+                            OpType::Sigmoid => format!("sigmoid({})", rendered),
+                            OpType::Tanh => format!("tanh({})", rendered),
+                            OpType::GELU => format!("gelu({})", rendered),
+                            OpType::Sqrt => format!("sqrt({})", rendered),
+                            OpType::Log => format!("log({})", rendered),
+                            OpType::Exp => format!("exp({})", rendered),
+                            OpType::Pow(exponent) => format!("pow({}, {})", rendered, exponent),
+                            other => format!("{:?}({})", other, rendered),
+                        };
+                    }
+                    format!("fused[{}]", rendered)
+                },
                 _ => format!("{:?}({})", node.op, operand_strs.join(", ")),
             }
         }
@@ -1006,6 +1354,178 @@ mod tests {
 
         assert!(expr1.can_fuse_with(&expr2));
 
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Elementwise fusion
+    // ------------------------------------------------------------------
+
+    /// Regression test: `optimize_fusion` used to return an unmodified clone
+    /// because `fuse_operations` had an empty body. The rewrite must actually
+    /// shrink the graph.
+    #[test]
+    fn optimize_fusion_collapses_a_unary_chain() -> Result<()> {
+        let a = Tensor::from_vec(vec![0.25f32, 1.0, 4.0, 9.0], &[4])?;
+        // sqrt(exp(relu(x))) -- three fusable unary links over one leaf.
+        let expr = TensorExpr::from(&a)?.relu()?.exp()?.sqrt()?;
+        assert_eq!(expr.operation_count(), 3);
+
+        let fused = expr.optimize_fusion()?;
+        assert_eq!(
+            fused.operation_count(),
+            1,
+            "three unary links must collapse into one fused node"
+        );
+        assert_eq!(fused.leaf_count(), 1);
+        Ok(())
+    }
+
+    /// The fused node must carry the ops in application order.
+    #[test]
+    fn fused_node_records_the_chain_in_application_order() -> Result<()> {
+        let a = Tensor::from_vec(vec![1.0f32, 2.0], &[2])?;
+        let expr = TensorExpr::from(&a)?.relu()?.exp()?.sqrt()?;
+        let fused = expr.optimize_fusion()?;
+
+        let root_op = fused
+            .nodes
+            .get(&fused.root)
+            .map(|node| node.op.clone())
+            .expect("root node exists");
+        match root_op {
+            OpType::FusedElementwise(ops) => {
+                assert_eq!(ops, vec![OpType::ReLU, OpType::Exp, OpType::Sqrt]);
+            },
+            other => panic!("expected a fused node, got {:?}", other),
+        }
+        Ok(())
+    }
+
+    /// Fusion must not change the numbers. Compared against a hand-computed
+    /// reference: sqrt(exp(relu(x))) == exp(relu(x)/2).
+    #[test]
+    fn fused_evaluation_matches_the_unfused_result_and_a_hand_reference() -> Result<()> {
+        let inputs = vec![-2.0f32, 0.0, 0.5, 2.0];
+        let a = Tensor::from_vec(inputs.clone(), &[4])?;
+        let expr = TensorExpr::from(&a)?.relu()?.exp()?.sqrt()?;
+
+        let unfused_ctx = EvalContext {
+            hints: OptimizationHints {
+                enable_fusion: false,
+                ..OptimizationHints::default()
+            },
+            ..EvalContext::default()
+        };
+        let unfused = expr.eval_with_context(&unfused_ctx)?.to_vec_f32()?;
+        let fused = expr.eval()?.to_vec_f32()?;
+
+        for (index, input) in inputs.iter().enumerate() {
+            let expected = (input.max(0.0) / 2.0).exp();
+            assert!(
+                (fused[index] - expected).abs() < 1e-5,
+                "fused[{index}] = {} but sqrt(exp(relu({input}))) = {expected}",
+                fused[index]
+            );
+            assert!(
+                (fused[index] - unfused[index]).abs() < 1e-5,
+                "fusion changed the result at {index}: {} vs {}",
+                fused[index],
+                unfused[index]
+            );
+        }
+        Ok(())
+    }
+
+    /// `max_fusion_size` must be honoured, and a limit below 2 disables fusion.
+    #[test]
+    fn max_fusion_size_caps_the_chain() -> Result<()> {
+        let a = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], &[4])?;
+        let expr = TensorExpr::from(&a)?.relu()?.exp()?.sqrt()?.tanh()?;
+        assert_eq!(expr.operation_count(), 4);
+
+        let capped = expr.optimize_fusion_with_limit(2)?;
+        assert_eq!(
+            capped.operation_count(),
+            2,
+            "a cap of 2 must leave two fused pairs"
+        );
+
+        let disabled = expr.optimize_fusion_with_limit(1)?;
+        assert_eq!(
+            disabled.operation_count(),
+            4,
+            "a cap below 2 disables fusion"
+        );
+
+        // The numbers survive either way.
+        let reference = expr.eval()?.to_vec_f32()?;
+        for value in capped.eval()?.to_vec_f32()?.iter().zip(reference.iter()) {
+            assert!((value.0 - value.1).abs() < 1e-5);
+        }
+        Ok(())
+    }
+
+    /// A single unary op is not a chain and must be left alone.
+    #[test]
+    fn a_lone_unary_op_is_not_fused() -> Result<()> {
+        let a = Tensor::from_vec(vec![-1.0f32, 1.0], &[2])?;
+        let expr = TensorExpr::from(&a)?.relu()?;
+        let fused = expr.optimize_fusion()?;
+        assert_eq!(fused.operation_count(), 1);
+        let root_op =
+            fused.nodes.get(&fused.root).map(|node| node.op.clone()).expect("root exists");
+        assert_eq!(root_op, OpType::ReLU);
+        Ok(())
+    }
+
+    /// A binary op breaks the chain: `relu(x) * relu(x)` has no 2-link unary run
+    /// rooted at the multiply, so nothing may be fused into it.
+    #[test]
+    fn a_binary_op_breaks_the_fusion_chain() -> Result<()> {
+        let a = Tensor::from_vec(vec![1.0f32, -1.0], &[2])?;
+        let b = Tensor::from_vec(vec![2.0f32, 3.0], &[2])?;
+        let expr = TensorExpr::from(&a)?.relu()?.mul(TensorExpr::from(&b)?.exp()?)?;
+        let before = expr.operation_count();
+        let fused = expr.optimize_fusion()?;
+        assert_eq!(
+            fused.operation_count(),
+            before,
+            "no unary chain of length >= 2 exists here"
+        );
+        // And the result must still be right: relu([1,-1]) * exp([2,3]).
+        let values = fused.eval()?.to_vec_f32()?;
+        assert!((values[0] - 2.0f32.exp()).abs() < 1e-4);
+        assert!(values[1].abs() < 1e-6);
+        Ok(())
+    }
+
+    /// Fusion must also leave `f64` results untouched.
+    #[test]
+    fn fusion_preserves_f64_results() -> Result<()> {
+        let a = Tensor::from_vec_with_dtype(vec![0.25f64, 1.0, 4.0], &[3], DType::F64)?;
+        let expr = TensorExpr::from(&a)?.sqrt()?.log()?;
+
+        let unfused_ctx = EvalContext {
+            hints: OptimizationHints {
+                enable_fusion: false,
+                ..OptimizationHints::default()
+            },
+            ..EvalContext::default()
+        };
+        let unfused = expr.eval_with_context(&unfused_ctx)?;
+        let fused = expr.eval()?;
+
+        match (unfused, fused) {
+            (Tensor::F64(u), Tensor::F64(f)) => {
+                for (a, b) in u.iter().zip(f.iter()) {
+                    assert!((a - b).abs() < 1e-12, "{a} vs {b}");
+                }
+                // ln(sqrt(4)) == ln(2)
+                assert!((f[[2]] - std::f64::consts::LN_2).abs() < 1e-12);
+            },
+            _ => panic!("F64 expected"),
+        }
         Ok(())
     }
 }

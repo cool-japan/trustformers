@@ -605,389 +605,9 @@ impl ThroughputTracker {
     }
 }
 
-/// Advanced gradient compression with multiple algorithms
-pub struct GradientCompressor {
-    config: CompressionConfig,
-    error_feedback_state: HashMap<String, Tensor>,
-    compression_stats: CompressionStats,
-}
+pub mod compression;
 
-#[derive(Debug, Clone)]
-pub struct CompressionStats {
-    pub total_compressed_bytes: usize,
-    pub total_uncompressed_bytes: usize,
-    pub average_compression_ratio: f32,
-    pub compression_time_ms: f32,
-    pub decompression_time_ms: f32,
-}
-
-impl Default for CompressionStats {
-    fn default() -> Self {
-        Self {
-            total_compressed_bytes: 0,
-            total_uncompressed_bytes: 0,
-            average_compression_ratio: 1.0,
-            compression_time_ms: 0.0,
-            decompression_time_ms: 0.0,
-        }
-    }
-}
-
-impl GradientCompressor {
-    pub fn new(config: CompressionConfig) -> Self {
-        Self {
-            config,
-            error_feedback_state: HashMap::new(),
-            compression_stats: CompressionStats::default(),
-        }
-    }
-
-    pub fn compress_gradients(
-        &mut self,
-        gradients: &HashMap<String, Tensor>,
-    ) -> Result<HashMap<String, CompressedGradient>> {
-        if !self.config.enabled {
-            // No compression - convert to "compressed" format for API consistency
-            return Ok(gradients
-                .iter()
-                .map(|(name, grad)| (name.clone(), CompressedGradient::uncompressed(grad.clone())))
-                .collect());
-        }
-
-        let start_time = Instant::now();
-        let mut compressed = HashMap::new();
-
-        for (name, gradient) in gradients {
-            let compressed_grad = match &self.config.algorithm {
-                CompressionType::None => CompressedGradient::uncompressed(gradient.clone()),
-                CompressionType::TopK { k } => self.compress_topk(gradient, *k)?,
-                CompressionType::RandomSparsification { ratio } => {
-                    self.compress_random(gradient, *ratio)?
-                },
-                CompressionType::Quantization { bits } => {
-                    self.compress_quantization(gradient, *bits)?
-                },
-                CompressionType::PowerSGD { rank } => self.compress_powersgd(gradient, *rank)?,
-                CompressionType::OneBitSGD => self.compress_onebit(gradient)?,
-                CompressionType::Adaptive => self.compress_adaptive(gradient)?,
-            };
-
-            // Apply error feedback if enabled
-            if self.config.error_feedback {
-                self.apply_error_feedback(name, gradient, &compressed_grad)?;
-            }
-
-            compressed.insert(name.clone(), compressed_grad);
-        }
-
-        let compression_time = start_time.elapsed();
-        self.compression_stats.compression_time_ms = compression_time.as_millis() as f32;
-
-        Ok(compressed)
-    }
-
-    fn compress_topk(&self, gradient: &Tensor, k: usize) -> Result<CompressedGradient> {
-        // Implementation of Top-K sparsification
-        let data = gradient.to_vec_u8()?;
-        let mut indexed_values: Vec<(usize, f32)> =
-            data.iter().enumerate().map(|(i, &v)| (i, (v as f32).abs())).collect();
-
-        // Sort by absolute value in descending order
-        indexed_values.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Keep only top k elements
-        indexed_values.truncate(k);
-
-        let indices: Vec<usize> = indexed_values.iter().map(|(i, _)| *i).collect();
-        let values: Vec<f32> = indexed_values.iter().map(|(i, _)| data[*i] as f32).collect();
-
-        Ok(CompressedGradient {
-            compression_type: CompressionType::TopK { k },
-            compressed_data: CompressedData::Sparse { indices, values },
-            original_shape: gradient.shape().to_vec(),
-            compression_ratio: k as f32 / data.len() as f32,
-        })
-    }
-
-    fn compress_random(&self, gradient: &Tensor, ratio: f32) -> Result<CompressedGradient> {
-        // Random sparsification implementation
-        let data = gradient.to_vec_u8()?;
-        let k = (data.len() as f32 * ratio) as usize;
-
-        // Randomly select k indices
-        use scirs2_core::random::*; // SciRS2 Integration Policy
-        let mut indices: Vec<usize> = (0..data.len()).collect();
-        let mut rng = thread_rng();
-        indices.shuffle(rng.rng_mut());
-        indices.truncate(k);
-        indices.sort(); // Sort for better cache locality
-
-        let values: Vec<f32> = indices.iter().map(|&i| data[i] as f32).collect();
-
-        Ok(CompressedGradient {
-            compression_type: CompressionType::RandomSparsification { ratio },
-            compressed_data: CompressedData::Sparse { indices, values },
-            original_shape: gradient.shape().to_vec(),
-            compression_ratio: ratio,
-        })
-    }
-
-    fn compress_quantization(&self, gradient: &Tensor, bits: u8) -> Result<CompressedGradient> {
-        // Quantization implementation
-        let data = gradient.to_vec_u8()?;
-        let levels = 2_u32.pow(bits as u32) as f32;
-
-        // Find min and max values
-        let min_val = data.iter().fold(f32::INFINITY, |a, &b| a.min(b as f32));
-        let max_val = data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b as f32));
-
-        // Quantize values
-        let scale = (max_val - min_val) / (levels - 1.0);
-        let quantized: Vec<u8> = data
-            .iter()
-            .map(|&v| ((v as f32 - min_val) / scale).round().clamp(0.0, levels - 1.0) as u8)
-            .collect();
-
-        Ok(CompressedGradient {
-            compression_type: CompressionType::Quantization { bits },
-            compressed_data: CompressedData::Quantized {
-                data: quantized,
-                min_val,
-                max_val,
-                levels: levels as u32,
-            },
-            original_shape: gradient.shape().to_vec(),
-            compression_ratio: bits as f32 / 32.0, // Assuming original is f32
-        })
-    }
-
-    fn compress_powersgd(&self, gradient: &Tensor, rank: usize) -> Result<CompressedGradient> {
-        // PowerSGD low-rank compression
-        // For simplicity, this is a placeholder implementation
-        // Real PowerSGD would perform SVD and low-rank approximation
-        let data = gradient.to_vec_u8()?;
-        let shape = gradient.shape();
-
-        // Simplified low-rank approximation
-        let total_elements = data.len();
-        let compressed_size = rank * (shape[0] + shape[1]); // For 2D matrices
-
-        if compressed_size >= total_elements {
-            // No compression benefit
-            return Ok(CompressedGradient::uncompressed(gradient.clone()));
-        }
-
-        // Placeholder compression (would implement actual SVD in production)
-        let compressed_data: Vec<f32> =
-            data[..compressed_size.min(data.len())].iter().map(|&x| x as f32).collect();
-
-        Ok(CompressedGradient {
-            compression_type: CompressionType::PowerSGD { rank },
-            compressed_data: CompressedData::LowRank {
-                data: compressed_data,
-            },
-            original_shape: shape.to_vec(),
-            compression_ratio: compressed_size as f32 / total_elements as f32,
-        })
-    }
-
-    fn compress_onebit(&self, gradient: &Tensor) -> Result<CompressedGradient> {
-        // 1-bit SGD compression
-        let data = gradient.to_vec_u8()?;
-        let norm = (data.iter().map(|&x| (x as f32) * (x as f32)).sum::<f32>()).sqrt();
-
-        // Sign and scale representation
-        let signs: Vec<bool> = data.iter().map(|&x| (x as i8) >= 0).collect();
-        let packed_signs = self.pack_bits(&signs);
-
-        Ok(CompressedGradient {
-            compression_type: CompressionType::OneBitSGD,
-            compressed_data: CompressedData::OneBit {
-                signs: packed_signs,
-                norm,
-            },
-            original_shape: gradient.shape().to_vec(),
-            compression_ratio: 1.0 / 32.0, // 1 bit vs 32 bits per element
-        })
-    }
-
-    fn compress_adaptive(&self, gradient: &Tensor) -> Result<CompressedGradient> {
-        // Adaptive compression based on gradient statistics
-        let data = gradient.to_vec_u8()?;
-        let f32_data: Vec<f32> = data.iter().map(|&x| x as f32).collect();
-        let variance = self.calculate_variance(&f32_data);
-
-        // Choose compression strategy based on gradient characteristics
-        if variance < self.config.adaptive_threshold {
-            // Low variance - use aggressive compression
-            self.compress_topk(gradient, data.len() / 20) // 5% sparsity
-        } else {
-            // High variance - use conservative compression
-            self.compress_topk(gradient, data.len() / 5) // 20% sparsity
-        }
-    }
-
-    fn pack_bits(&self, bits: &[bool]) -> Vec<u8> {
-        let mut packed = Vec::new();
-        for chunk in bits.chunks(8) {
-            let mut byte = 0u8;
-            for (i, &bit) in chunk.iter().enumerate() {
-                if bit {
-                    byte |= 1 << i;
-                }
-            }
-            packed.push(byte);
-        }
-        packed
-    }
-
-    fn calculate_variance(&self, data: &[f32]) -> f32 {
-        let mean = data.iter().sum::<f32>() / data.len() as f32;
-        let variance = data.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / data.len() as f32;
-        variance
-    }
-
-    fn apply_error_feedback(
-        &mut self,
-        name: &str,
-        original: &Tensor,
-        compressed: &CompressedGradient,
-    ) -> Result<()> {
-        // Error feedback implementation
-        let decompressed = compressed.decompress()?;
-        let error = original.sub(&decompressed)?;
-
-        if let Some(prev_error) = self.error_feedback_state.get_mut(name) {
-            *prev_error = prev_error.add(&error)?;
-        } else {
-            self.error_feedback_state.insert(name.to_string(), error);
-        }
-
-        Ok(())
-    }
-
-    pub fn get_compression_stats(&self) -> &CompressionStats {
-        &self.compression_stats
-    }
-}
-
-/// Compressed gradient representation
-#[derive(Debug, Clone)]
-pub struct CompressedGradient {
-    pub compression_type: CompressionType,
-    pub compressed_data: CompressedData,
-    pub original_shape: Vec<usize>,
-    pub compression_ratio: f32,
-}
-
-#[derive(Debug, Clone)]
-pub enum CompressedData {
-    Uncompressed(Tensor),
-    Sparse {
-        indices: Vec<usize>,
-        values: Vec<f32>,
-    },
-    Quantized {
-        data: Vec<u8>,
-        min_val: f32,
-        max_val: f32,
-        levels: u32,
-    },
-    LowRank {
-        data: Vec<f32>,
-    },
-    OneBit {
-        signs: Vec<u8>,
-        norm: f32,
-    },
-}
-
-impl CompressedGradient {
-    pub fn uncompressed(tensor: Tensor) -> Self {
-        let shape = tensor.shape().to_vec();
-        Self {
-            compression_type: CompressionType::None,
-            compressed_data: CompressedData::Uncompressed(tensor),
-            original_shape: shape,
-            compression_ratio: 1.0,
-        }
-    }
-
-    pub fn decompress(&self) -> Result<Tensor> {
-        match &self.compressed_data {
-            CompressedData::Uncompressed(tensor) => Ok(tensor.clone()),
-            CompressedData::Sparse { indices, values } => {
-                // Reconstruct sparse tensor
-                let total_elements = self.original_shape.iter().product();
-                let mut data = vec![0.0; total_elements];
-                for (&i, &value) in indices.iter().zip(values.iter()) {
-                    if i < data.len() {
-                        data[i] = value;
-                    }
-                }
-                Tensor::from_slice(&data, &self.original_shape)
-            },
-            CompressedData::Quantized {
-                data,
-                min_val,
-                max_val,
-                levels,
-            } => {
-                // Dequantize
-                let scale = (max_val - min_val) / (*levels as f32 - 1.0);
-                let dequantized: Vec<f32> =
-                    data.iter().map(|&q| min_val + q as f32 * scale).collect();
-                Tensor::from_slice(&dequantized, &self.original_shape)
-            },
-            CompressedData::LowRank { data } => {
-                // Reconstruct from low-rank representation (simplified)
-                let total_elements = self.original_shape.iter().product();
-                let mut full_data = vec![0.0; total_elements];
-                let copy_len = data.len().min(full_data.len());
-                full_data[..copy_len].copy_from_slice(&data[..copy_len]);
-                Tensor::from_slice(&full_data, &self.original_shape)
-            },
-            CompressedData::OneBit { signs, norm } => {
-                // Reconstruct from 1-bit representation
-                let total_elements = self.original_shape.iter().product();
-                let mut data = Vec::with_capacity(total_elements);
-                let scale = norm / (total_elements as f32).sqrt();
-
-                for &byte in signs {
-                    for bit in 0..8 {
-                        if data.len() >= total_elements {
-                            break;
-                        }
-                        let sign = if (byte >> bit) & 1 == 1 { 1.0 } else { -1.0 };
-                        data.push(sign * scale);
-                    }
-                }
-
-                data.truncate(total_elements);
-                Tensor::from_slice(&data, &self.original_shape)
-            },
-        }
-    }
-
-    pub fn size_bytes(&self) -> usize {
-        match &self.compressed_data {
-            CompressedData::Uncompressed(tensor) => tensor.memory_usage(),
-            CompressedData::Sparse { indices, values } => {
-                indices.len() * std::mem::size_of::<usize>()
-                    + values.len() * std::mem::size_of::<f32>()
-            },
-            CompressedData::Quantized { data, .. } => {
-                data.len() * std::mem::size_of::<u8>()
-                    + 3 * std::mem::size_of::<f32>()
-                    + std::mem::size_of::<u32>()
-            },
-            CompressedData::LowRank { data } => data.len() * std::mem::size_of::<f32>(),
-            CompressedData::OneBit { signs, .. } => {
-                signs.len() * std::mem::size_of::<u8>() + std::mem::size_of::<f32>()
-            },
-        }
-    }
-}
+pub use compression::{CompressedData, CompressedGradient, CompressionStats, GradientCompressor};
 
 /// Dynamic batching for optimal GPU utilization
 pub struct DynamicBatcher {
@@ -1047,8 +667,8 @@ impl DynamicBatcher {
                 self.current_batch_sizes[gpu_id] = new_batch;
                 adjusted = true;
 
-                println!(
-                    "GPU {}: Adjusted batch size {} -> {} (utilization: {:.1}%)",
+                log::debug!(
+                    "GPU {}: adjusted batch size {} -> {} (utilization: {:.1}%)",
                     gpu_id,
                     current_batch,
                     new_batch,
@@ -1121,7 +741,7 @@ impl FaultHandler {
         }
 
         self.failed_nodes.push(node_id);
-        println!("Node {} failed, attempting recovery...", node_id);
+        log::warn!("node {} failed, attempting recovery", node_id);
 
         if self.config.auto_replacement {
             // Attempt to restore from checkpoint and continue training
@@ -1133,7 +753,7 @@ impl FaultHandler {
 
     fn recover_from_failure(&mut self, _node_id: usize) -> Result<bool> {
         // Simplified recovery implementation
-        println!("Attempting recovery from latest checkpoint...");
+        log::info!("attempting recovery from the latest checkpoint");
 
         // In a real implementation, this would:
         // 1. Load latest checkpoint
@@ -1269,8 +889,8 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
             self.parameter_registry.insert(name, param_info);
         }
 
-        println!(
-            "Registered {} parameters for distributed training",
+        log::info!(
+            "registered {} parameters for distributed training",
             self.parameter_registry.len()
         );
         Ok(())
@@ -1323,10 +943,17 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
 
         self.step_count += 1;
 
-        // Check for fault tolerance events
+        // Signal that a checkpoint is due. This trainer holds parameter
+        // *metadata* only (see `parameter_registry`), so it cannot serialize
+        // model state itself; the owner drives
+        // `SmartCheckpointManager::create_checkpoint` with the real tensors.
+        // Claiming "checkpoint saved" here would be a fabrication.
         if self.fault_handler.should_checkpoint(self.step_count) {
-            // Perform checkpoint (simplified)
-            println!("Checkpoint saved at step {}", self.step_count);
+            log::info!(
+                "checkpoint interval reached at step {}; call \
+                 SmartCheckpointManager::create_checkpoint with the model state",
+                self.step_count
+            );
         }
 
         // Collect performance metrics
@@ -1400,93 +1027,141 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
         }
     }
 
-    /// Print detailed training statistics
-    pub fn print_training_stats(&self) {
-        let stats = self.get_training_stats();
+    /// Render the training statistics as a human-readable report.
+    ///
+    /// Prefer this over [`Self::print_training_stats`] inside libraries: it
+    /// returns the text instead of writing to stdout.
+    pub fn training_stats_report(&self) -> String {
+        use std::fmt::Write as _;
 
-        println!("\n🚀 Enhanced Distributed Training Statistics");
-        println!("===========================================");
-        println!("📊 Training Progress:");
-        println!("   Total Steps: {}", stats.total_steps);
-        println!(
-            "   Training Time: {:.2} minutes",
+        let stats = self.get_training_stats();
+        let mut report = String::new();
+
+        // Writing into a String is infallible, so the results are discarded
+        // deliberately rather than unwrapped.
+        let _ = writeln!(report, "Enhanced distributed training statistics");
+        let _ = writeln!(report, "Training progress:");
+        let _ = writeln!(report, "  total steps: {}", stats.total_steps);
+        let _ = writeln!(
+            report,
+            "  training time: {:.2} minutes",
             stats.training_time.as_secs_f32() / 60.0
         );
-        println!(
-            "   Average Throughput: {:.1} samples/sec",
+        let _ = writeln!(
+            report,
+            "  average throughput: {:.1} samples/sec",
             stats.average_throughput
         );
 
-        println!("\n⚡ GPU Performance:");
-        for (i, (&util, &memory)) in
+        let _ = writeln!(report, "GPU performance:");
+        for (index, (&utilization, &memory)) in
             stats.gpu_utilization.iter().zip(&stats.memory_usage).enumerate()
         {
-            println!(
-                "   GPU {}: Utilization {:.1}%, Memory {:.1}%",
-                i,
-                util * 100.0,
+            let _ = writeln!(
+                report,
+                "  GPU {}: utilization {:.1}%, memory {:.1}%",
+                index,
+                utilization * 100.0,
                 memory * 100.0
             );
         }
 
-        println!("\n📈 Optimization Metrics:");
-        println!(
-            "   Compression Ratio: {:.1}%",
+        let _ = writeln!(report, "Optimization metrics:");
+        let _ = writeln!(
+            report,
+            "  compression ratio: {:.1}%",
             stats.compression_ratio * 100.0
         );
-        println!(
-            "   Communication Overhead: {:.1}%",
+        let _ = writeln!(
+            report,
+            "  communication overhead: {:.1}%",
             stats.communication_overhead * 100.0
         );
-        println!("   Performance Trend: {:?}", stats.performance_trend);
+        let _ = writeln!(report, "  performance trend: {:?}", stats.performance_trend);
 
         if !stats.bottlenecks.is_empty() {
-            println!("\n⚠️  Identified Bottlenecks:");
+            let _ = writeln!(report, "Identified bottlenecks:");
             for bottleneck in &stats.bottlenecks {
                 match bottleneck {
                     Bottleneck::LowGpuUtilization {
                         gpu_id,
                         utilization,
                     } => {
-                        println!(
-                            "   - GPU {} low utilization: {:.1}%",
+                        let _ = writeln!(
+                            report,
+                            "  - GPU {} low utilization: {:.1}%",
                             gpu_id,
                             utilization * 100.0
                         );
                     },
                     Bottleneck::HighCommunicationOverhead { overhead } => {
-                        println!("   - High communication overhead: {:.1}%", overhead * 100.0);
+                        let _ = writeln!(
+                            report,
+                            "  - high communication overhead: {:.1}%",
+                            overhead * 100.0
+                        );
                     },
                     Bottleneck::HighMemoryUsage { gpu_id, usage } => {
-                        println!(
-                            "   - GPU {} high memory usage: {:.1}%",
+                        let _ = writeln!(
+                            report,
+                            "  - GPU {} high memory usage: {:.1}%",
                             gpu_id,
                             usage * 100.0
                         );
                     },
                     Bottleneck::InsufficientBandwidth { bandwidth_mbps } => {
-                        println!("   - Insufficient bandwidth: {:.0} Mbps", bandwidth_mbps);
+                        let _ = writeln!(
+                            report,
+                            "  - insufficient bandwidth: {:.0} Mbps",
+                            bandwidth_mbps
+                        );
                     },
                 }
             }
         }
 
-        println!("===========================================\n");
+        report
     }
 
-    /// Optimize hyperparameters for current distributed setup
+    /// Write [`Self::training_stats_report`] to stdout.
+    ///
+    /// This is an explicit, caller-initiated reporting helper; nothing on the
+    /// training hot path writes to stdout.
+    pub fn print_training_stats(&self) {
+        println!("{}", self.training_stats_report());
+    }
+
+    /// Whether the fault handler considers a checkpoint due at the current
+    /// step. The caller owns the model state and drives
+    /// [`crate::advanced_distributed_features::SmartCheckpointManager`].
+    pub fn checkpoint_due(&self) -> bool {
+        self.fault_handler.should_checkpoint(self.step_count)
+    }
+
+    /// Optimize hyperparameters for the current distributed setup.
+    ///
+    /// # Errors
+    ///
+    /// Distributed-aware hyperparameter optimization is **not implemented**.
+    /// The crate ships [`crate::hyperparameter_tuning`], but wiring it here
+    /// requires an evaluation callback (a way to run a trial and score it) that
+    /// this trainer does not have. Rather than returning an unmodified clone of
+    /// the optimizer while reporting success, this returns
+    /// [`TrustformersError`] describing what is missing whenever auto-tuning is
+    /// requested.
+    ///
+    /// With `config.monitoring.auto_tuning == false` the call is a no-op and
+    /// returns the current optimizer unchanged, which is honest: no
+    /// optimization was requested and none was performed.
     pub fn optimize_hyperparameters(&mut self) -> Result<T> {
         if self.config.monitoring.auto_tuning {
-            println!(
-                "🔍 Starting automated hyperparameter optimization for distributed training..."
-            );
-
-            // Use the hyperparameter tuning framework to optimize for distributed training
-            // This would integrate with the HyperparameterTuner module
-
-            // For now, return the current optimizer
-            // In a full implementation, this would run HPO and return optimized configuration
-            println!("✅ Hyperparameter optimization completed (placeholder)");
+            return Err(TrustformersError::not_implemented(
+                "distributed hyperparameter optimization: \
+                 EnhancedDistributedTrainer has no trial-evaluation callback, so no search can \
+                 be run. Drive crate::hyperparameter_tuning::HyperparameterTuner directly with \
+                 your own objective function, or disable config.monitoring.auto_tuning"
+                    .to_string(),
+            ));
         }
 
         Ok(self.optimizer.clone())

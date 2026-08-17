@@ -81,7 +81,10 @@ pub struct IpoConfig {
 
 impl Default for IpoConfig {
     fn default() -> Self {
-        Self { beta: 0.1, label_smoothing: 0.0 }
+        Self {
+            beta: 0.1,
+            label_smoothing: 0.0,
+        }
     }
 }
 
@@ -148,7 +151,9 @@ pub fn compute_ipo_loss(pairs: &[IpoPair], config: &IpoConfig) -> Result<IpoLoss
     let loss = mean_squared_deviation;
 
     if loss.is_nan() || loss.is_infinite() {
-        return Err(IpoError::NumericalError(format!("IPO loss is not finite: {loss}")));
+        return Err(IpoError::NumericalError(format!(
+            "IPO loss is not finite: {loss}"
+        )));
     }
 
     // Preference accuracy: fraction where h_θ > 0 (policy prefers chosen)
@@ -233,8 +238,7 @@ pub fn compare_ipo_dpo(
     let dpo_h_theta_mean = ipo_h_theta_mean;
 
     // Agreement: both should prefer the same direction (same sign of mean h_theta)
-    let preference_agreement =
-        (ipo_h_theta_mean > 0.0) == (dpo_h_theta_mean > 0.0)
+    let preference_agreement = (ipo_h_theta_mean > 0.0) == (dpo_h_theta_mean > 0.0)
         || (ipo_h_theta_mean == 0.0 && dpo_h_theta_mean == 0.0);
 
     Ok(IpoDpoComparison {
@@ -259,7 +263,10 @@ pub struct IpoTrainer {
 impl IpoTrainer {
     /// Create a new IPO trainer with the given configuration.
     pub fn new(config: IpoConfig) -> Self {
-        Self { config, history: Vec::new() }
+        Self {
+            config,
+            history: Vec::new(),
+        }
     }
 
     /// Compute the IPO loss for a batch of pairs and record the result.
@@ -414,7 +421,10 @@ mod tests {
             policy_log_prob_rejected: -3.0,
             reference_log_prob_rejected: -2.0,
         };
-        let config = IpoConfig { beta: 0.1, label_smoothing: 0.0 };
+        let config = IpoConfig {
+            beta: 0.1,
+            label_smoothing: 0.0,
+        };
         let result = compute_ipo_loss(&[pair], &config).expect("should succeed");
 
         assert_eq!(result.num_pairs, 1);
@@ -451,7 +461,10 @@ mod tests {
                 reference_log_prob_rejected: -1.0,
             },
         ];
-        let config = IpoConfig { beta: 0.5, label_smoothing: 0.0 };
+        let config = IpoConfig {
+            beta: 0.5,
+            label_smoothing: 0.0,
+        };
         // target = 1/(2*0.5) = 1.0
         let result = compute_ipo_loss(&pairs, &config).expect("should succeed");
         assert_eq!(result.num_pairs, 2);
@@ -479,7 +492,10 @@ mod tests {
                 policy_log_prob_rejected: -2.0,
                 reference_log_prob_rejected: -1.0,
             }];
-            let config = IpoConfig { beta, label_smoothing: 0.0 };
+            let config = IpoConfig {
+                beta,
+                label_smoothing: 0.0,
+            };
             let result = compute_ipo_loss(&pairs, &config).expect("should succeed");
             let expected_target = 1.0 / (2.0 * beta);
             assert!(
@@ -498,8 +514,14 @@ mod tests {
             policy_log_prob_rejected: -2.0,
             reference_log_prob_rejected: -1.0,
         };
-        let config_no_smooth = IpoConfig { beta: 1.0, label_smoothing: 0.0 };
-        let config_smooth = IpoConfig { beta: 1.0, label_smoothing: 0.1 };
+        let config_no_smooth = IpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.0,
+        };
+        let config_smooth = IpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.1,
+        };
 
         let result_no_smooth =
             compute_ipo_loss(&[pair.clone()], &config_no_smooth).expect("should succeed");
@@ -532,10 +554,17 @@ mod tests {
             policy_log_prob_rejected: -2.0,
             reference_log_prob_rejected: -1.5,
         };
-        let config_low_beta = IpoConfig { beta: 0.1, ..IpoConfig::default() };
-        let config_high_beta = IpoConfig { beta: 2.0, ..IpoConfig::default() };
+        let config_low_beta = IpoConfig {
+            beta: 0.1,
+            ..IpoConfig::default()
+        };
+        let config_high_beta = IpoConfig {
+            beta: 2.0,
+            ..IpoConfig::default()
+        };
 
-        let result_low = compute_ipo_loss(&[pair.clone()], &config_low_beta).expect("should succeed");
+        let result_low =
+            compute_ipo_loss(&[pair.clone()], &config_low_beta).expect("should succeed");
         let result_high = compute_ipo_loss(&[pair], &config_high_beta).expect("should succeed");
 
         // Higher beta => smaller target (1/(2β))
@@ -612,12 +641,21 @@ mod tests {
                 reference_log_prob_rejected: -1.5,
             },
         ];
-        let config = IpoConfig { beta: 0.5, ..IpoConfig::default() };
+        let config = IpoConfig {
+            beta: 0.5,
+            ..IpoConfig::default()
+        };
         let comparison = compare_ipo_dpo(&pairs, &config).expect("should succeed");
 
         // Both losses should be positive and finite
-        assert!(comparison.ipo_loss >= 0.0, "IPO loss should be non-negative");
-        assert!(comparison.dpo_loss >= 0.0, "DPO loss should be non-negative");
+        assert!(
+            comparison.ipo_loss >= 0.0,
+            "IPO loss should be non-negative"
+        );
+        assert!(
+            comparison.dpo_loss >= 0.0,
+            "DPO loss should be non-negative"
+        );
         assert!(comparison.ipo_loss.is_finite(), "IPO loss should be finite");
         assert!(comparison.dpo_loss.is_finite(), "DPO loss should be finite");
 
@@ -628,7 +666,10 @@ mod tests {
         );
 
         // Both have same direction (positive h_theta), so they should agree
-        assert!(comparison.preference_agreement, "IPO and DPO should agree on preference direction");
+        assert!(
+            comparison.preference_agreement,
+            "IPO and DPO should agree on preference direction"
+        );
     }
 
     // ── IpoTrainer tests ──────────────────────────────────────────────────────
@@ -698,7 +739,10 @@ mod tests {
         trainer.step(&[pair.clone()]).expect("step 1");
         trainer.step(&[pair.clone()]).expect("step 2");
         trainer.step(&[pair]).expect("step 3");
-        assert!(trainer.convergence_check(), "3 identical steps should be converged");
+        assert!(
+            trainer.convergence_check(),
+            "3 identical steps should be converged"
+        );
 
         // Now add a step with very different loss
         let diverging_pair = IpoPair {
@@ -708,7 +752,10 @@ mod tests {
             reference_log_prob_rejected: -1.0,
         };
         trainer.step(&[diverging_pair]).expect("diverging step");
-        assert!(!trainer.convergence_check(), "Diverging loss should not be converged");
+        assert!(
+            !trainer.convergence_check(),
+            "Diverging loss should not be converged"
+        );
     }
 
     // ── Error display tests ───────────────────────────────────────────────────
@@ -719,7 +766,10 @@ mod tests {
         let invalid_beta = IpoError::InvalidBeta("must be positive".to_string());
         let numerical = IpoError::NumericalError("Inf detected".to_string());
 
-        assert!(empty.to_string().contains("empty"), "EmptyBatch should mention 'empty'");
+        assert!(
+            empty.to_string().contains("empty"),
+            "EmptyBatch should mention 'empty'"
+        );
         assert!(
             invalid_beta.to_string().contains("beta"),
             "InvalidBeta should mention 'beta'"
@@ -750,15 +800,27 @@ mod tests {
             policy_log_prob_rejected: -3.0,
             reference_log_prob_rejected: -2.0,
         };
-        let config_zero = IpoConfig { beta: 0.0, ..IpoConfig::default() };
-        let config_neg = IpoConfig { beta: -1.0, ..IpoConfig::default() };
+        let config_zero = IpoConfig {
+            beta: 0.0,
+            ..IpoConfig::default()
+        };
+        let config_neg = IpoConfig {
+            beta: -1.0,
+            ..IpoConfig::default()
+        };
 
         assert!(
-            matches!(compute_ipo_loss(&[pair.clone()], &config_zero), Err(IpoError::InvalidBeta(_))),
+            matches!(
+                compute_ipo_loss(&[pair.clone()], &config_zero),
+                Err(IpoError::InvalidBeta(_))
+            ),
             "Zero beta should return InvalidBeta error"
         );
         assert!(
-            matches!(compute_ipo_loss(&[pair], &config_neg), Err(IpoError::InvalidBeta(_))),
+            matches!(
+                compute_ipo_loss(&[pair], &config_neg),
+                Err(IpoError::InvalidBeta(_))
+            ),
             "Negative beta should return InvalidBeta error"
         );
     }
@@ -780,120 +842,207 @@ mod extended_tests {
     #[test]
     fn test_ipo_loss_formula_direct() {
         let pair = make_pair_with_h_theta(3.0);
-        let config = IpoConfig { beta: 1.0, label_smoothing: 0.0 };
+        let config = IpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.0,
+        };
         let result = compute_ipo_loss(&[pair], &config).expect("should succeed");
         let expected_target = 0.5_f32;
         let expected_loss = (3.0_f32 - expected_target).powi(2);
-        assert!((result.target - expected_target).abs() < 1e-5,
-            "Expected target {expected_target}, got {}", result.target);
-        assert!((result.loss - expected_loss).abs() < 1e-5,
-            "Expected loss {expected_loss}, got {}", result.loss);
+        assert!(
+            (result.target - expected_target).abs() < 1e-5,
+            "Expected target {expected_target}, got {}",
+            result.target
+        );
+        assert!(
+            (result.loss - expected_loss).abs() < 1e-5,
+            "Expected loss {expected_loss}, got {}",
+            result.loss
+        );
     }
 
     #[test]
     fn test_ipo_optimal_point_zero_loss() {
         // beta=0.5, target=1.0; h_theta=1.0 → loss = 0
         let pair = make_pair_with_h_theta(1.0);
-        let config = IpoConfig { beta: 0.5, label_smoothing: 0.0 };
+        let config = IpoConfig {
+            beta: 0.5,
+            label_smoothing: 0.0,
+        };
         let result = compute_ipo_loss(&[pair], &config).expect("should succeed");
-        assert!(result.loss < 1e-5, "Loss should be ~0 at optimal point, got {}", result.loss);
+        assert!(
+            result.loss < 1e-5,
+            "Loss should be ~0 at optimal point, got {}",
+            result.loss
+        );
     }
 
     #[test]
     fn test_ipo_loss_always_non_negative() {
-        let config = IpoConfig { beta: 1.0, label_smoothing: 0.0 };
+        let config = IpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.0,
+        };
         for &h in &[-5.0_f32, -1.0, 0.0, 0.5, 1.0, 3.0, 10.0] {
             let pair = make_pair_with_h_theta(h);
             let result = compute_ipo_loss(&[pair], &config).expect("should succeed");
-            assert!(result.loss >= 0.0,
-                "Loss should be non-negative for h_theta={h}: loss={}", result.loss);
+            assert!(
+                result.loss >= 0.0,
+                "Loss should be non-negative for h_theta={h}: loss={}",
+                result.loss
+            );
         }
     }
 
     #[test]
     fn test_ipo_gradient_direction_below_target() {
         let pair = make_pair_with_h_theta(0.1);
-        let config = IpoConfig { beta: 1.0, label_smoothing: 0.0 };
+        let config = IpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.0,
+        };
         let result = compute_ipo_loss(&[pair], &config).expect("should succeed");
-        assert!(result.loss > 0.0, "Loss should be positive when h_theta < target");
+        assert!(
+            result.loss > 0.0,
+            "Loss should be positive when h_theta < target"
+        );
         let expected = (0.1_f32 - 0.5).powi(2);
-        assert!((result.loss - expected).abs() < 1e-5,
-            "Expected {expected}, got {}", result.loss);
+        assert!(
+            (result.loss - expected).abs() < 1e-5,
+            "Expected {expected}, got {}",
+            result.loss
+        );
     }
 
     #[test]
     fn test_ipo_gradient_direction_above_target() {
         let pair = make_pair_with_h_theta(2.0);
-        let config = IpoConfig { beta: 1.0, label_smoothing: 0.0 };
+        let config = IpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.0,
+        };
         let result = compute_ipo_loss(&[pair], &config).expect("should succeed");
-        assert!(result.loss > 0.0, "Loss should be positive when h_theta > target");
+        assert!(
+            result.loss > 0.0,
+            "Loss should be positive when h_theta > target"
+        );
         let expected = (2.0_f32 - 0.5).powi(2);
-        assert!((result.loss - expected).abs() < 1e-5,
-            "Expected {expected}, got {}", result.loss);
+        assert!(
+            (result.loss - expected).abs() < 1e-5,
+            "Expected {expected}, got {}",
+            result.loss
+        );
     }
 
     #[test]
     fn test_ipo_tau_strictness_lower_beta_larger_target() {
         let pair = make_pair_with_h_theta(1.0);
-        let config_low = IpoConfig { beta: 0.1, label_smoothing: 0.0 };
-        let config_high = IpoConfig { beta: 2.0, label_smoothing: 0.0 };
+        let config_low = IpoConfig {
+            beta: 0.1,
+            label_smoothing: 0.0,
+        };
+        let config_high = IpoConfig {
+            beta: 2.0,
+            label_smoothing: 0.0,
+        };
         let r_low = compute_ipo_loss(&[pair.clone()], &config_low).expect("ok");
         let r_high = compute_ipo_loss(&[pair], &config_high).expect("ok");
-        assert!(r_low.target > r_high.target,
-            "Lower beta should give larger target: low={}, high={}", r_low.target, r_high.target);
+        assert!(
+            r_low.target > r_high.target,
+            "Lower beta should give larger target: low={}, high={}",
+            r_low.target,
+            r_high.target
+        );
     }
 
     #[test]
     fn test_ipo_identical_chosen_rejected_zero_h_theta() {
         let pair = make_pair_with_h_theta(0.0);
         let beta = 2.0_f32;
-        let config = IpoConfig { beta, label_smoothing: 0.0 };
+        let config = IpoConfig {
+            beta,
+            label_smoothing: 0.0,
+        };
         let result = compute_ipo_loss(&[pair], &config).expect("should succeed");
         let expected_target = 1.0 / (2.0 * beta);
         let expected_loss = expected_target.powi(2);
-        assert!((result.loss - expected_loss).abs() < 1e-5,
-            "Expected loss {expected_loss}, got {}", result.loss);
+        assert!(
+            (result.loss - expected_loss).abs() < 1e-5,
+            "Expected loss {expected_loss}, got {}",
+            result.loss
+        );
     }
 
     #[test]
     fn test_ipo_batch_averaging() {
-        let config = IpoConfig { beta: 1.0, label_smoothing: 0.0 };
+        let config = IpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.0,
+        };
         let h_values = [0.0_f32, 1.0, 2.0, 3.0];
         let target = 0.5_f32;
         let pairs: Vec<IpoPair> = h_values.iter().map(|&h| make_pair_with_h_theta(h)).collect();
         let result = compute_ipo_loss(&pairs, &config).expect("should succeed");
-        let expected_loss: f32 = h_values.iter().map(|&h| (h - target).powi(2)).sum::<f32>()
-            / h_values.len() as f32;
-        assert!((result.loss - expected_loss).abs() < 1e-5,
-            "Expected mean loss {expected_loss}, got {}", result.loss);
+        let expected_loss: f32 =
+            h_values.iter().map(|&h| (h - target).powi(2)).sum::<f32>() / h_values.len() as f32;
+        assert!(
+            (result.loss - expected_loss).abs() < 1e-5,
+            "Expected mean loss {expected_loss}, got {}",
+            result.loss
+        );
     }
 
     #[test]
     fn test_ipo_label_smoothing_reduces_target() {
         let pair = make_pair_with_h_theta(1.0);
-        let config_no_smooth = IpoConfig { beta: 1.0, label_smoothing: 0.0 };
-        let config_smooth = IpoConfig { beta: 1.0, label_smoothing: 0.2 };
+        let config_no_smooth = IpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.0,
+        };
+        let config_smooth = IpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.2,
+        };
         let r1 = compute_ipo_loss(&[pair.clone()], &config_no_smooth).expect("ok");
         let r2 = compute_ipo_loss(&[pair], &config_smooth).expect("ok");
-        assert!(r2.target < r1.target,
-            "Label smoothing should reduce target: no_smooth={}, smooth={}", r1.target, r2.target);
+        assert!(
+            r2.target < r1.target,
+            "Label smoothing should reduce target: no_smooth={}, smooth={}",
+            r1.target,
+            r2.target
+        );
         let expected_smooth_target = (1.0 - 0.2_f32) / (2.0 * 1.0_f32);
-        assert!((r2.target - expected_smooth_target).abs() < 1e-5,
-            "Expected smoothed target {expected_smooth_target}, got {}", r2.target);
+        assert!(
+            (r2.target - expected_smooth_target).abs() < 1e-5,
+            "Expected smoothed target {expected_smooth_target}, got {}",
+            r2.target
+        );
     }
 
     #[test]
     fn test_ipo_vs_dpo_both_positive_finite() {
         let pair = make_pair_with_h_theta(5.0);
-        let config = IpoConfig { beta: 0.5, label_smoothing: 0.0 };
+        let config = IpoConfig {
+            beta: 0.5,
+            label_smoothing: 0.0,
+        };
         let comparison = compare_ipo_dpo(&[pair], &config).expect("should succeed");
-        assert!(comparison.ipo_loss >= 0.0, "IPO loss should be non-negative");
-        assert!(comparison.dpo_loss >= 0.0, "DPO loss should be non-negative");
+        assert!(
+            comparison.ipo_loss >= 0.0,
+            "IPO loss should be non-negative"
+        );
+        assert!(
+            comparison.dpo_loss >= 0.0,
+            "DPO loss should be non-negative"
+        );
         assert!(comparison.ipo_loss.is_finite(), "IPO loss should be finite");
         assert!(comparison.dpo_loss.is_finite(), "DPO loss should be finite");
         // target=1.0; IPO loss = (5-1)^2 = 16.0
-        assert!((comparison.ipo_loss - 16.0).abs() < 1e-4,
-            "Expected IPO loss 16.0, got {}", comparison.ipo_loss);
+        assert!(
+            (comparison.ipo_loss - 16.0).abs() < 1e-4,
+            "Expected IPO loss 16.0, got {}",
+            comparison.ipo_loss
+        );
     }
 
     #[test]
@@ -909,7 +1058,10 @@ mod extended_tests {
 
     #[test]
     fn test_ipo_trainer_mean_loss_correct() {
-        let config = IpoConfig { beta: 1.0, label_smoothing: 0.0 };
+        let config = IpoConfig {
+            beta: 1.0,
+            label_smoothing: 0.0,
+        };
         let mut trainer = IpoTrainer::new(config);
         // target=0.5; losses: (0-0.5)^2=0.25, (0.5-0.5)^2=0, (2-0.5)^2=2.25
         trainer.step(&[make_pair_with_h_theta(0.0)]).expect("step 1");
@@ -917,8 +1069,10 @@ mod extended_tests {
         trainer.step(&[make_pair_with_h_theta(2.0)]).expect("step 3");
         let expected_mean = (0.25 + 0.0 + 2.25) / 3.0;
         let mean = trainer.mean_loss();
-        assert!((mean - expected_mean).abs() < 1e-5,
-            "Expected mean_loss {expected_mean}, got {mean}");
+        assert!(
+            (mean - expected_mean).abs() < 1e-5,
+            "Expected mean_loss {expected_mean}, got {mean}"
+        );
     }
 
     #[test]
@@ -929,34 +1083,48 @@ mod extended_tests {
             .map(make_pair_with_h_theta)
             .collect();
         let result = compute_ipo_loss(&pairs, &config).expect("should succeed");
-        assert_eq!(result.preference_accuracy, 0.0,
-            "All negative h_theta should give accuracy=0, got {}", result.preference_accuracy);
+        assert_eq!(
+            result.preference_accuracy, 0.0,
+            "All negative h_theta should give accuracy=0, got {}",
+            result.preference_accuracy
+        );
     }
 
     #[test]
     fn test_ipo_large_batch_loss_finite() {
-        let config = IpoConfig { beta: 0.5, label_smoothing: 0.0 };
-        let pairs: Vec<IpoPair> = (0..100)
-            .map(|i| make_pair_with_h_theta((i as f32 - 50.0) * 0.1))
-            .collect();
+        let config = IpoConfig {
+            beta: 0.5,
+            label_smoothing: 0.0,
+        };
+        let pairs: Vec<IpoPair> =
+            (0..100).map(|i| make_pair_with_h_theta((i as f32 - 50.0) * 0.1)).collect();
         let result = compute_ipo_loss(&pairs, &config).expect("should succeed");
         assert!(result.loss.is_finite(), "Large batch loss should be finite");
-        assert!(result.loss >= 0.0, "Large batch loss should be non-negative");
+        assert!(
+            result.loss >= 0.0,
+            "Large batch loss should be non-negative"
+        );
         assert_eq!(result.num_pairs, 100);
     }
 
     #[test]
     fn test_ipo_loss_symmetric_around_target() {
         let beta = 1.0_f32;
-        let config = IpoConfig { beta, label_smoothing: 0.0 };
+        let config = IpoConfig {
+            beta,
+            label_smoothing: 0.0,
+        };
         let target = 1.0 / (2.0 * beta);
         let d = 1.5_f32;
         let pair_above = make_pair_with_h_theta(target + d);
         let pair_below = make_pair_with_h_theta(target - d);
         let r_above = compute_ipo_loss(&[pair_above], &config).expect("ok");
         let r_below = compute_ipo_loss(&[pair_below], &config).expect("ok");
-        assert!((r_above.loss - r_below.loss).abs() < 1e-5,
+        assert!(
+            (r_above.loss - r_below.loss).abs() < 1e-5,
             "Loss should be symmetric around target: above={}, below={}",
-            r_above.loss, r_below.loss);
+            r_above.loss,
+            r_below.loss
+        );
     }
 }

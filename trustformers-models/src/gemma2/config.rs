@@ -44,7 +44,16 @@ pub struct Gemma2Config {
     pub attention_logit_softcapping: f64,
     /// Soft-capping applied to final LM logits: `tanh(x/cap)*cap`
     pub final_logit_softcapping: f64,
-    /// Query pre-attention scalar — typically `head_dim^{-0.5}`
+    /// Query pre-attention scalar, matching the HuggingFace `config.json`
+    /// field of the same name: the attention scale is derived from it as
+    /// `scale = query_pre_attn_scalar ^ -0.5`, i.e. this field holds the
+    /// *denominator*, not the scale itself. For most Gemma-2 sizes it equals
+    /// `head_dim` (e.g. `256` for 2B/9B, giving `scale = 1/16`), but this is
+    /// not guaranteed in general — Gemma-2-27B deliberately sets it to `144`
+    /// while `head_dim=128`, giving `scale = 144^-0.5 = 1/12` rather than
+    /// `128^-0.5`. Storing the raw HF value here (instead of a precomputed
+    /// scale) means a real `config.json` can be deserialized into this
+    /// struct without silently corrupting attention scores.
     pub query_pre_attn_scalar: f64,
     /// Model type identifier
     pub model_type: String,
@@ -68,7 +77,9 @@ impl Default for Gemma2Config {
             sliding_window: 4096,
             attention_logit_softcapping: 50.0,
             final_logit_softcapping: 30.0,
-            query_pre_attn_scalar: 1.0 / (head_dim as f64).sqrt(),
+            // Raw HF `config.json` value for 9B (== head_dim); the attention
+            // scale is derived as `query_pre_attn_scalar^-0.5` at use site.
+            query_pre_attn_scalar: head_dim as f64,
             model_type: "gemma2".to_string(),
         }
     }
@@ -112,6 +123,16 @@ impl Config for Gemma2Config {
                 "sliding_window must be > 0".to_string(),
             ));
         }
+        if !(self.query_pre_attn_scalar > 0.0) {
+            // `query_pre_attn_scalar` is raised to the -0.5 power to obtain
+            // the attention scale; zero or negative values (including NaN,
+            // rejected by the negated `>` comparison) would produce an
+            // infinite or NaN scale.
+            return Err(invalid_config(
+                "config_field",
+                "query_pre_attn_scalar must be > 0".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -145,7 +166,9 @@ impl Gemma2Config {
             sliding_window: 4096,
             attention_logit_softcapping: 50.0,
             final_logit_softcapping: 30.0,
-            query_pre_attn_scalar: 1.0 / (head_dim as f64).sqrt(),
+            // Raw HF `config.json` value for 2B (== head_dim); see the
+            // field doc comment for why this is not pre-divided.
+            query_pre_attn_scalar: head_dim as f64,
             model_type: "gemma2-2b".to_string(),
         }
     }
@@ -238,9 +261,38 @@ mod tests {
 
     #[test]
     fn test_query_pre_attn_scalar_9b() {
+        // `query_pre_attn_scalar` stores the raw HuggingFace `config.json`
+        // value (the denominator the attention scale is derived from via
+        // `^-0.5`), not the precomputed scale itself -- see the field's doc
+        // comment. For the 9B preset this equals `head_dim` (256). The
+        // derived-scale formula itself (`256^-0.5 == 1/16`) is regression-
+        // tested in `gemma2::model::tests::
+        // test_attention_scale_matches_hf_formula_for_2b_9b`, which would
+        // FAIL if this field were ever misinterpreted as the scale directly
+        // (that bug would silently multiply every attention score by 256
+        // instead of 1/16 -- a 4096x error with no error returned).
         let cfg = Gemma2Config::gemma2_9b();
-        let expected = 1.0 / (256.0f64).sqrt();
-        assert!((cfg.query_pre_attn_scalar - expected).abs() < 1e-9);
+        assert!((cfg.query_pre_attn_scalar - 256.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_query_pre_attn_scalar() {
+        let mut cfg = Gemma2Config::gemma2_2b();
+        cfg.query_pre_attn_scalar = 0.0;
+        assert!(
+            cfg.validate().is_err(),
+            "query_pre_attn_scalar=0 must be rejected (it is raised to the -0.5 power)"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_negative_query_pre_attn_scalar() {
+        let mut cfg = Gemma2Config::gemma2_2b();
+        cfg.query_pre_attn_scalar = -1.0;
+        assert!(
+            cfg.validate().is_err(),
+            "negative query_pre_attn_scalar must be rejected"
+        );
     }
 
     #[test]

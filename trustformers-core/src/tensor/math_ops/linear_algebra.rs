@@ -42,10 +42,10 @@
 //! ```
 
 use super::super::{DType, Tensor};
-use super::stability::*;
 use crate::errors::{Result, TrustformersError};
-use scirs2_core::ndarray::{s, Array2, ArrayD, Axis, Ix2, IxDyn};
+use scirs2_core::ndarray::{Array2, ArrayD, Axis, Ix2, IxDyn};
 use scirs2_core::simd_ops::SimdUnifiedOps;
+use std::borrow::Cow;
 
 /// Direct BLAS GEMM using OxiBLAS for maximum performance
 /// OxiBLAS provides pure Rust BLAS with SIMD optimizations
@@ -60,9 +60,9 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
     // Row-major B(k×n) reinterpreted as col-major is Bᵀ(n×k), lda=n.
     // Row-major C(m×n) reinterpreted as col-major is Cᵀ(n×m), lda=n.
     // gemm(Bᵀ, Aᵀ) → Cᵀ = Bᵀ·Aᵀ = (A·B)ᵀ, so C buffer holds A·B. ✓
-    let a_t = MatRef::new(a.as_ptr(), k, m, k);
-    let b_t = MatRef::new(b.as_ptr(), n, k, n);
-    let c_t = MatMut::new(c.as_mut_ptr(), n, m, n);
+    let a_t = MatRef::from_column_major(a, k, m).expect("A slice must hold m*k elements");
+    let b_t = MatRef::from_column_major(b, n, k).expect("B slice must hold k*n elements");
+    let c_t = MatMut::from_column_major(c, n, m).expect("C slice must hold m*n elements");
 
     // GEMM: Cᵀ = 1.0 * Bᵀ * Aᵀ + 0.0 * Cᵀ
     gemm(1.0, b_t, a_t, 0.0, c_t);
@@ -81,9 +81,9 @@ fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize)
     // Row-major B(k×n) reinterpreted as col-major is Bᵀ(n×k), lda=n.
     // Row-major C(m×n) reinterpreted as col-major is Cᵀ(n×m), lda=n.
     // gemm(Bᵀ, Aᵀ) → Cᵀ = Bᵀ·Aᵀ = (A·B)ᵀ, so C buffer holds A·B. ✓
-    let a_t = MatRef::new(a.as_ptr(), k, m, k);
-    let b_t = MatRef::new(b.as_ptr(), n, k, n);
-    let c_t = MatMut::new(c.as_mut_ptr(), n, m, n);
+    let a_t = MatRef::from_column_major(a, k, m).expect("A slice must hold m*k elements");
+    let b_t = MatRef::from_column_major(b, n, k).expect("B slice must hold k*n elements");
+    let c_t = MatMut::from_column_major(c, n, m).expect("C slice must hold m*n elements");
 
     // GEMM: Cᵀ = 1.0 * Bᵀ * Aᵀ + 0.0 * Cᵀ
     gemm(1.0, b_t, a_t, 0.0, c_t);
@@ -122,6 +122,116 @@ fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize)
     c.copy_from_slice(c_arr.as_slice().expect("array must have contiguous layout"));
 }
 
+/// Batched GEMM over the trailing two axes of two `f32` arrays.
+///
+/// `a` has shape `[..leading, m, k]`, `b` has shape `[..leading, k, n]`, and the
+/// result has shape `[..leading, m, n]`. The leading (batch) axes must match
+/// exactly; broadcasting is not performed.
+///
+/// The implementation flattens the leading axes into a single batch dimension and
+/// runs one GEMM per batch **directly into** the destination buffer, in parallel
+/// across batches. No per-batch temporaries are allocated: the operands are read
+/// through their contiguous backing slices and the result chunk is written in
+/// place.
+fn batched_gemm_f32(a: &ArrayD<f32>, b: &ArrayD<f32>) -> Result<ArrayD<f32>> {
+    use scirs2_core::ndarray::{ArrayView2, ArrayViewMut2};
+    // The glob brings rayon's `IndexedParallelIterator` into scope when the
+    // `parallel` feature is on; without it `par_chunks_mut` degrades to
+    // `std::slice::ChunksMut` and the same `.enumerate().for_each(..)` applies.
+    #[allow(unused_imports)]
+    use scirs2_core::parallel_ops::{par_chunks_mut, *};
+
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+
+    if a_shape.len() != b_shape.len() || a_shape.len() < 3 {
+        return Err(TrustformersError::shape_error(format!(
+            "Batched matmul requires both operands to have the same rank (>= 3), got {:?} and {:?}",
+            a_shape, b_shape
+        )));
+    }
+
+    let nd = a_shape.len();
+    let leading = &a_shape[..nd - 2];
+    if leading != &b_shape[..nd - 2] {
+        return Err(TrustformersError::shape_error(format!(
+            "Batched matmul requires matching batch dimensions, got {:?} and {:?}",
+            &a_shape[..nd - 2],
+            &b_shape[..nd - 2]
+        )));
+    }
+
+    let m = a_shape[nd - 2];
+    let k = a_shape[nd - 1];
+    let n = b_shape[nd - 1];
+    if b_shape[nd - 2] != k {
+        return Err(TrustformersError::shape_error(format!(
+            "Matrix dimensions mismatch: {} vs {}",
+            k,
+            b_shape[nd - 2]
+        )));
+    }
+
+    let mut out_shape = leading.to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    let mut result = ArrayD::<f32>::zeros(IxDyn(&out_shape));
+
+    // Zero-sized products need no work (the zero-filled result is already correct).
+    if m == 0 || n == 0 || leading.iter().product::<usize>() == 0 {
+        return Ok(result);
+    }
+
+    // Borrow contiguous backing storage; copy only if a layout fix is required.
+    let a_cow = a.as_standard_layout();
+    let b_cow = b.as_standard_layout();
+    let a_data = a_cow.as_slice().ok_or_else(|| {
+        TrustformersError::tensor_op_error("Operand A is not contiguous", "matmul")
+    })?;
+    let b_data = b_cow.as_slice().ok_or_else(|| {
+        TrustformersError::tensor_op_error("Operand B is not contiguous", "matmul")
+    })?;
+    let out_data = result.as_slice_mut().ok_or_else(|| {
+        TrustformersError::tensor_op_error("Result buffer is not contiguous", "matmul")
+    })?;
+
+    // Direct BLAS pays off only for reasonably sized blocks; below the threshold
+    // ndarray's `general_mat_mul` (matrixmultiply kernels) writes in place too.
+    const MIN_SIZE_FOR_BLAS: usize = 32;
+    let use_blas = m >= MIN_SIZE_FOR_BLAS && n >= MIN_SIZE_FOR_BLAS && k >= MIN_SIZE_FOR_BLAS;
+
+    par_chunks_mut(out_data, m * n)
+        .enumerate()
+        .for_each(|(batch_index, out_chunk)| {
+            let a_offset = batch_index * m * k;
+            let b_offset = batch_index * k * n;
+            let a_block = &a_data[a_offset..a_offset + m * k];
+            let b_block = &b_data[b_offset..b_offset + k * n];
+
+            if use_blas {
+                blas_sgemm(a_block, b_block, out_chunk, m, k, n);
+            } else {
+                // INVARIANT: the slices above are exactly m*k, k*n and m*n elements
+                // long by construction, so these shape conversions cannot fail.
+                let a_view = ArrayView2::from_shape((m, k), a_block)
+                    .expect("a_block holds exactly m*k elements");
+                let b_view = ArrayView2::from_shape((k, n), b_block)
+                    .expect("b_block holds exactly k*n elements");
+                let mut out_view = ArrayViewMut2::from_shape((m, n), out_chunk)
+                    .expect("out_chunk holds exactly m*n elements");
+                scirs2_core::ndarray::linalg::general_mat_mul(
+                    1.0,
+                    &a_view,
+                    &b_view,
+                    0.0,
+                    &mut out_view,
+                );
+            }
+        });
+
+    Ok(result)
+}
+
 impl Tensor {
     /// Matrix multiplication with numerical stability enhancements.
     ///
@@ -130,12 +240,13 @@ impl Tensor {
     /// - Batched 3D matrix multiplication
     /// - Multi-headed 4D matrix multiplication (for attention mechanisms)
     ///
-    /// # Numerical Stability Features
+    /// # Numerical behaviour
     ///
-    /// - Automatic detection of unstable values (NaN, infinity, extreme values)
-    /// - Kahan summation algorithm for unstable inputs
-    /// - Memory layout optimization for performance
-    /// - Overflow/underflow protection
+    /// The product is always computed with the BLAS-accelerated GEMM path
+    /// (`oxiblas` on macOS, `scirs2-core` SIMD elsewhere); non-finite inputs
+    /// propagate through the result per IEEE-754 rather than being silently
+    /// rewritten. Operands are copied only when their memory layout is not
+    /// already row-major contiguous.
     ///
     /// # Arguments
     ///
@@ -250,20 +361,35 @@ impl Tensor {
             }
         }
 
-        // Ensure both inputs have contiguous memory layouts before any operations
-        let self_contiguous = match self {
-            Tensor::F32(a) => Tensor::F32(a.as_standard_layout().into_owned()),
-            Tensor::F64(a) => Tensor::F64(a.as_standard_layout().into_owned()),
-            _ => self.clone(),
+        // Ensure both inputs have contiguous memory layouts before any operations.
+        //
+        // The overwhelmingly common case is that both operands are already in
+        // standard (row-major) layout -- callers such as `Linear::forward` force
+        // contiguity themselves -- so materialise a copy *only* when the layout
+        // actually needs fixing. The previous unconditional
+        // `as_standard_layout().into_owned()` deep-copied both operands (96 MiB
+        // for a [2048,4096] x [4096,4096] product) before every GEMM.
+        let self_contiguous: Cow<'_, Tensor> = match self {
+            Tensor::F32(a) if !a.is_standard_layout() => {
+                Cow::Owned(Tensor::F32(a.as_standard_layout().into_owned()))
+            },
+            Tensor::F64(a) if !a.is_standard_layout() => {
+                Cow::Owned(Tensor::F64(a.as_standard_layout().into_owned()))
+            },
+            _ => Cow::Borrowed(self),
         };
 
-        let other_contiguous = match other {
-            Tensor::F32(a) => Tensor::F32(a.as_standard_layout().into_owned()),
-            Tensor::F64(a) => Tensor::F64(a.as_standard_layout().into_owned()),
-            _ => other.clone(),
+        let other_contiguous: Cow<'_, Tensor> = match other {
+            Tensor::F32(a) if !a.is_standard_layout() => {
+                Cow::Owned(Tensor::F32(a.as_standard_layout().into_owned()))
+            },
+            Tensor::F64(a) if !a.is_standard_layout() => {
+                Cow::Owned(Tensor::F64(a.as_standard_layout().into_owned()))
+            },
+            _ => Cow::Borrowed(other),
         };
 
-        match (&self_contiguous, &other_contiguous) {
+        match (self_contiguous.as_ref(), other_contiguous.as_ref()) {
             (Tensor::F32(a), Tensor::F32(b)) => {
                 let a_shape = a.shape();
                 let b_shape = b.shape();
@@ -296,40 +422,14 @@ impl Tensor {
                         .into_dimensionality::<Ix2>()
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
 
-                    // Check for stability before computation
-                    let has_unstable_a = a_2d.iter().any(|&x| !is_stable_f32(x));
-                    let has_unstable_b = b_2d.iter().any(|&x| !is_stable_f32(x));
-
-                    if has_unstable_a || has_unstable_b {
-                        // Use stabilized manual multiplication with Kahan summation
-                        let rows = a_2d.nrows();
-                        let cols = b_2d.ncols();
-                        let inner = a_2d.ncols();
-                        let mut result = ArrayD::zeros(IxDyn(&[rows, cols]));
-
-                        for i in 0..rows {
-                            for j in 0..cols {
-                                let mut sum = 0.0f32;
-                                let mut compensation = 0.0f32; // Kahan summation
-
-                                for k in 0..inner {
-                                    let a_val = stabilize_f32(a_2d[[i, k]]);
-                                    let b_val = stabilize_f32(b_2d[[k, j]]);
-                                    let product = a_val * b_val;
-
-                                    // Kahan summation for numerical stability
-                                    let y = product - compensation;
-                                    let t = sum + y;
-                                    compensation = (t - sum) - y;
-                                    sum = t;
-                                }
-
-                                result[[i, j]] = stabilize_f32(sum);
-                            }
-                        }
-
-                        Ok(Tensor::F32(result))
-                    } else {
+                    // NOTE: there is deliberately no pre-scan of the operands here.
+                    // The former `iter().any(|x| !is_stable_f32(x))` guard read
+                    // every element of both matrices (100 MiB of extra traffic for
+                    // a [2048,4096] x [4096,4096] product) just to pick a branch,
+                    // and it routed ordinary trained weights onto a scalar Kahan
+                    // loop that also rewrote sub-1e-7 values. NaN/Inf propagate
+                    // through GEMM per IEEE-754, which is the expected behaviour.
+                    {
                         // Use BLAS-accelerated GEMM via scirs2-core SimdUnifiedOps
                         // C = alpha * A * B + beta * C
                         // For simple matmul: alpha = 1.0, beta = 0.0
@@ -369,156 +469,15 @@ impl Tensor {
                         }
                     }
                 } else {
-                    // Batched matrix multiplication
-                    let mut result_shape = a_shape.to_vec();
-                    let last_idx = result_shape.len() - 1;
-                    result_shape[last_idx] = b_shape[b_shape.len() - 1];
-
-                    let mut result = ArrayD::zeros(IxDyn(&result_shape));
-
-                    // For simplicity, handle 3D case (batch matrix multiplication)
-                    if a_shape.len() == 3 && b_shape.len() == 3 {
-                        let batch_size = a_shape[0];
-                        let rows = a_shape[1];
-                        let cols = b_shape[2];
-
-                        for i in 0..batch_size {
-                            let a_slice = a.slice(s![i, .., ..]);
-                            let b_slice = b.slice(s![i, .., ..]);
-
-                            // Ensure standard (contiguous, row-major) layout with a single copy.
-                            let a_contiguous = a_slice.as_standard_layout().into_owned();
-                            let b_contiguous = b_slice.as_standard_layout().into_owned();
-
-                            let a_2d = a_contiguous
-                                .into_dimensionality::<Ix2>()
-                                .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                            let b_2d = b_contiguous
-                                .into_dimensionality::<Ix2>()
-                                .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-
-                            // Use direct BLAS for larger matrices
-                            const MIN_SIZE_FOR_BLAS: usize = 32;
-                            let inner = a_2d.ncols();
-                            let batch_result = if rows < MIN_SIZE_FOR_BLAS
-                                || cols < MIN_SIZE_FOR_BLAS
-                                || inner < MIN_SIZE_FOR_BLAS
-                            {
-                                a_2d.dot(&b_2d)
-                            } else {
-                                // Direct BLAS (Accelerate on macOS)
-                                // Arrays are standard-layout (from as_standard_layout above),
-                                // so borrow their backing slices directly — no Vec round-trip.
-                                let a_data = a_2d.as_slice().ok_or_else(|| {
-                                    crate::errors::compute_error(
-                                        "matmul",
-                                        "standard layout after as_standard_layout",
-                                    )
-                                })?;
-                                let b_data = b_2d.as_slice().ok_or_else(|| {
-                                    crate::errors::compute_error(
-                                        "matmul",
-                                        "standard layout after as_standard_layout",
-                                    )
-                                })?;
-                                let mut result_vec = vec![0.0f32; rows * cols];
-                                blas_sgemm(a_data, b_data, &mut result_vec, rows, inner, cols);
-                                Array2::from_shape_vec((rows, cols), result_vec).map_err(|e| {
-                                    crate::errors::compute_error(
-                                        "matmul",
-                                        format!(
-                                            "{}: {e}",
-                                            "matrix dimensions must match result_vec length"
-                                        ),
-                                    )
-                                })?
-                            };
-                            result.slice_mut(s![i, .., ..]).assign(&batch_result);
-                        }
-                    } else if a_shape.len() == 4 && b_shape.len() == 4 {
-                        // 4D batched matrix multiplication (for multi-head attention)
-                        // Handle as multiple 2D matrix multiplications with BLAS acceleration
-                        let batch_size = a_shape[0];
-                        let num_heads = a_shape[1];
-                        let seq_len_a = a_shape[2];
-                        let seq_len_b = b_shape[3];
-
-                        result =
-                            ArrayD::zeros(IxDyn(&[batch_size, num_heads, seq_len_a, seq_len_b]));
-
-                        for i in 0..batch_size {
-                            for j in 0..num_heads {
-                                // Extract 2D slices and ensure contiguous layout
-                                let a_slice = a.slice(s![i, j, .., ..]);
-                                let b_slice = b.slice(s![i, j, .., ..]);
-
-                                // Ensure standard (contiguous, row-major) layout with a single copy.
-                                let a_contiguous = a_slice.as_standard_layout().into_owned();
-                                let b_contiguous = b_slice.as_standard_layout().into_owned();
-
-                                // Convert to 2D arrays for GEMM
-                                let a_2d = a_contiguous
-                                    .into_dimensionality::<Ix2>()
-                                    .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                                let b_2d = b_contiguous
-                                    .into_dimensionality::<Ix2>()
-                                    .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-
-                                // Use direct BLAS for larger matrices
-                                const MIN_SIZE_FOR_BLAS: usize = 32;
-                                let inner = a_2d.ncols();
-                                let result_2d = if seq_len_a < MIN_SIZE_FOR_BLAS
-                                    || seq_len_b < MIN_SIZE_FOR_BLAS
-                                    || inner < MIN_SIZE_FOR_BLAS
-                                {
-                                    a_2d.dot(&b_2d)
-                                } else {
-                                    // Direct BLAS (Accelerate on macOS)
-                                    // Standard-layout (from as_standard_layout above): borrow slices.
-                                    let a_data = a_2d.as_slice().ok_or_else(|| {
-                                        crate::errors::compute_error(
-                                            "matmul",
-                                            "standard layout after as_standard_layout",
-                                        )
-                                    })?;
-                                    let b_data = b_2d.as_slice().ok_or_else(|| {
-                                        crate::errors::compute_error(
-                                            "matmul",
-                                            "standard layout after as_standard_layout",
-                                        )
-                                    })?;
-                                    let mut result_vec = vec![0.0f32; seq_len_a * seq_len_b];
-                                    blas_sgemm(
-                                        a_data,
-                                        b_data,
-                                        &mut result_vec,
-                                        seq_len_a,
-                                        inner,
-                                        seq_len_b,
-                                    );
-                                    Array2::from_shape_vec((seq_len_a, seq_len_b), result_vec)
-                                        .map_err(|e| {
-                                            crate::errors::compute_error(
-                                                "matmul",
-                                                format!(
-                                                    "{}: {e}",
-                                                    "result_vec has correct size for shape"
-                                                ),
-                                            )
-                                        })?
-                                };
-
-                                // Assign result back to 4D tensor
-                                result.slice_mut(s![i, j, .., ..]).assign(&result_2d);
-                            }
-                        }
-                    } else {
-                        return Err(TrustformersError::tensor_op_error(
-                            "Unsupported tensor dimensions for matmul",
-                            "matmul",
-                        ));
-                    }
-
+                    // Batched matrix multiplication (3-D and 4-D).
+                    //
+                    // Both operands are already row-major contiguous at this point,
+                    // so the per-(batch, head) `as_standard_layout().into_owned()`
+                    // copies the previous implementation performed were pure
+                    // overhead, as was the per-iteration `result_vec` + `assign`
+                    // round-trip. `batched_gemm_f32` writes each GEMM straight into
+                    // its slot of the destination and runs the batches in parallel.
+                    let result = batched_gemm_f32(a, b)?;
                     Ok(Tensor::F32(result))
                 }
             },
@@ -540,7 +499,7 @@ impl Tensor {
                 let original_dtype = self.dtype();
 
                 // Upcast `self` to an f32 tensor.
-                let self_f32 = match &self_contiguous {
+                let self_f32 = match self_contiguous.as_ref() {
                     Tensor::F16(a) => Tensor::F32(a.mapv(|x| x.to_f32())),
                     Tensor::BF16(a) => Tensor::F32(a.mapv(|x| x.to_f32())),
                     Tensor::F32(a) => Tensor::F32(a.clone()),
@@ -557,7 +516,7 @@ impl Tensor {
                 };
 
                 // Upcast `other` to an f32 tensor.
-                let other_f32 = match &other_contiguous {
+                let other_f32 = match other_contiguous.as_ref() {
                     Tensor::F16(b) => Tensor::F32(b.mapv(|x| x.to_f32())),
                     Tensor::BF16(b) => Tensor::F32(b.mapv(|x| x.to_f32())),
                     Tensor::F32(b) => Tensor::F32(b.clone()),
