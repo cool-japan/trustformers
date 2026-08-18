@@ -20,10 +20,6 @@ use super::orchestrator::TestProfile as OrchestratorTestProfile;
 
 #[derive(Debug)]
 pub struct ResultsSynthesizer {
-    /// Component manager reference
-    component_manager: Arc<ComponentManager>,
-    /// Cache coordinator reference
-    cache_coordinator: Arc<CacheCoordinator>,
     /// Synthesis algorithms configuration
     synthesis_config: Arc<TokioRwLock<SynthesisConfig>>,
     /// Synthesis statistics
@@ -163,12 +159,10 @@ pub struct SynthesisStatistics {
 impl ResultsSynthesizer {
     /// Create a new results synthesizer
     pub async fn new(
-        component_manager: Arc<ComponentManager>,
-        cache_coordinator: Arc<CacheCoordinator>,
+        _component_manager: Arc<ComponentManager>,
+        _cache_coordinator: Arc<CacheCoordinator>,
     ) -> Result<Self> {
         Ok(Self {
-            component_manager,
-            cache_coordinator,
             synthesis_config: Arc::new(TokioRwLock::new(SynthesisConfig::default())),
             synthesis_stats: Arc::new(SynthesisStatistics::default()),
         })

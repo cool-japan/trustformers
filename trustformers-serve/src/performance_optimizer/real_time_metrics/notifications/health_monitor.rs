@@ -10,9 +10,7 @@ use std::collections::HashMap;
 /// Channel health monitoring system
 #[derive(Debug)]
 
-pub struct ChannelHealthMonitor {
-    config: NotificationConfig,
-}
+pub struct ChannelHealthMonitor {}
 
 /// Channel health status
 #[derive(Debug, Clone)]
@@ -24,8 +22,8 @@ pub struct ChannelHealth {
 }
 
 impl ChannelHealthMonitor {
-    pub async fn new(config: NotificationConfig) -> Result<Self> {
-        Ok(Self { config })
+    pub async fn new(_config: NotificationConfig) -> Result<Self> {
+        Ok(Self {})
     }
 
     pub async fn start(&self) -> Result<()> {

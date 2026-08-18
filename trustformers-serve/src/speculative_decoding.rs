@@ -25,6 +25,7 @@ pub enum ServingError {
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -669,10 +670,31 @@ pub struct ModelInfo {
     pub context_length: usize,
 }
 
+/// One live speculative-decoding session, together with the moment it was last
+/// handed out by [`SpeculativeDecodingManager::get_decoder`].
+///
+/// The timestamp is what makes idle-based cleanup possible: without it,
+/// "inactive" cannot be distinguished from "in use", and the only implementable
+/// eviction policy is "evict everything".
+struct DecoderSession {
+    /// The session's decoder.
+    decoder: Arc<SpeculativeDecoder>,
+    /// Nanoseconds elapsed on [`SpeculativeDecodingManager::epoch`] at the most
+    /// recent [`SpeculativeDecodingManager::get_decoder`] call for this session.
+    ///
+    /// Stored atomically so the read-locked fast path can refresh it without
+    /// taking the map's write lock.
+    last_accessed_nanos: AtomicU64,
+}
+
 /// Manager for speculative decoding sessions
 pub struct SpeculativeDecodingManager {
-    decoders: Arc<RwLock<std::collections::HashMap<String, Arc<SpeculativeDecoder>>>>,
+    decoders: Arc<RwLock<std::collections::HashMap<String, DecoderSession>>>,
     default_config: SpeculativeDecodingConfig,
+    /// Monotonic reference point the per-session access stamps are measured
+    /// from. A monotonic clock is used rather than the wall clock so that a
+    /// system time adjustment cannot make a live session look idle.
+    epoch: Instant,
 }
 
 impl SpeculativeDecodingManager {
@@ -681,35 +703,76 @@ impl SpeculativeDecodingManager {
         Self {
             decoders: Arc::new(RwLock::new(std::collections::HashMap::new())),
             default_config,
+            epoch: Instant::now(),
         }
     }
 
-    /// Get or create a decoder for a session
+    /// Nanoseconds elapsed since this manager was created.
+    ///
+    /// Saturates at [`u64::MAX`] rather than wrapping; that bound is roughly
+    /// 584 years of uptime, so it is unreachable in practice and only exists so
+    /// the conversion cannot silently produce a small value.
+    fn now_nanos(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Get or create a decoder for a session.
+    ///
+    /// Every call stamps the session as accessed, which is what
+    /// [`Self::cleanup_inactive_sessions`] measures idleness against.
     pub async fn get_decoder(&self, session_id: &str) -> Arc<SpeculativeDecoder> {
-        let decoders = self.decoders.read().await;
+        let now = self.now_nanos();
 
-        if let Some(decoder) = decoders.get(session_id) {
-            decoder.clone()
-        } else {
-            drop(decoders);
-
-            let mut decoders = self.decoders.write().await;
-
-            // Double-check after acquiring write lock
-            if let Some(decoder) = decoders.get(session_id) {
-                decoder.clone()
-            } else {
-                let decoder = Arc::new(SpeculativeDecoder::new(self.default_config.clone()));
-                decoders.insert(session_id.to_string(), decoder.clone());
-                decoder
+        {
+            let decoders = self.decoders.read().await;
+            if let Some(session) = decoders.get(session_id) {
+                session.last_accessed_nanos.store(now, AtomicOrdering::Relaxed);
+                return Arc::clone(&session.decoder);
             }
         }
+
+        let mut decoders = self.decoders.write().await;
+
+        // Double-check after acquiring write lock
+        if let Some(session) = decoders.get(session_id) {
+            session.last_accessed_nanos.store(now, AtomicOrdering::Relaxed);
+            return Arc::clone(&session.decoder);
+        }
+
+        let decoder = Arc::new(SpeculativeDecoder::new(self.default_config.clone()));
+        decoders.insert(
+            session_id.to_string(),
+            DecoderSession {
+                decoder: Arc::clone(&decoder),
+                last_accessed_nanos: AtomicU64::new(now),
+            },
+        );
+        decoder
     }
 
     /// Remove a decoder session
     pub async fn remove_decoder(&self, session_id: &str) -> Option<Arc<SpeculativeDecoder>> {
         let mut decoders = self.decoders.write().await;
-        decoders.remove(session_id)
+        decoders.remove(session_id).map(|session| session.decoder)
+    }
+
+    /// Number of sessions currently held by this manager.
+    pub async fn session_count(&self) -> usize {
+        self.decoders.read().await.len()
+    }
+
+    /// How long `session_id` has been idle, or `None` when no such session
+    /// exists.
+    ///
+    /// Idleness is measured from the last [`Self::get_decoder`] call, which is
+    /// the same quantity [`Self::cleanup_inactive_sessions`] thresholds on.
+    pub async fn session_idle_time(&self, session_id: &str) -> Option<Duration> {
+        let now = self.now_nanos();
+        let decoders = self.decoders.read().await;
+        decoders.get(session_id).map(|session| {
+            let last = session.last_accessed_nanos.load(AtomicOrdering::Relaxed);
+            Duration::from_nanos(now.saturating_sub(last))
+        })
     }
 
     /// Get statistics for all sessions
@@ -717,8 +780,8 @@ impl SpeculativeDecodingManager {
         let decoders = self.decoders.read().await;
         let mut all_stats = std::collections::HashMap::new();
 
-        for (session_id, decoder) in decoders.iter() {
-            let stats = decoder.get_stats().await;
+        for (session_id, session) in decoders.iter() {
+            let stats = session.decoder.get_stats().await;
             all_stats.insert(session_id.clone(), stats);
         }
 
@@ -753,21 +816,26 @@ impl SpeculativeDecodingManager {
         aggregate
     }
 
-    /// Clean up inactive sessions
-    pub async fn cleanup_inactive_sessions(&self, _max_idle_time: Duration) {
+    /// Drop every session that has been idle for at least `max_idle_time`.
+    ///
+    /// Idleness is measured from the last [`Self::get_decoder`] call for that
+    /// session, so a session that is still being used is never evicted.
+    /// Returns the number of sessions removed.
+    ///
+    /// A `max_idle_time` of zero evicts every session, which is the correct
+    /// reading of "idle for at least no time at all" and the only case in which
+    /// this method clears the whole map.
+    pub async fn cleanup_inactive_sessions(&self, max_idle_time: Duration) -> usize {
+        let now = self.now_nanos();
+        let threshold = u64::try_from(max_idle_time.as_nanos()).unwrap_or(u64::MAX);
+
         let mut decoders = self.decoders.write().await;
-        let mut to_remove = Vec::new();
-
-        for (session_id, _) in decoders.iter() {
-            // In a real implementation, we would track last access time
-            // For now, this is a placeholder
-            to_remove.push(session_id.clone());
-        }
-
-        // Remove sessions that haven't been active
-        for session_id in to_remove {
-            decoders.remove(&session_id);
-        }
+        let before = decoders.len();
+        decoders.retain(|_, session| {
+            let last = session.last_accessed_nanos.load(AtomicOrdering::Relaxed);
+            now.saturating_sub(last) < threshold
+        });
+        before - decoders.len()
     }
 }
 
@@ -1118,6 +1186,84 @@ mod tests {
 
         let all_stats_after = manager.get_all_stats().await;
         assert_eq!(all_stats_after.len(), 0);
+    }
+
+    /// Regression: `cleanup_inactive_sessions` bound its `max_idle_time`
+    /// argument to `_max_idle_time` and removed *every* session on every call,
+    /// so a single sweep destroyed sessions that were actively being decoded
+    /// into. A session younger than the idle threshold must survive.
+    #[tokio::test]
+    async fn cleanup_keeps_sessions_younger_than_the_idle_threshold() {
+        let manager = SpeculativeDecodingManager::new(SpeculativeDecodingConfig::default());
+
+        let live = manager.get_decoder("live").await;
+        assert_eq!(manager.session_count().await, 1);
+
+        // The session was handed out microseconds ago; an hour of permitted
+        // idleness must not reach it. The old implementation removed it anyway.
+        let removed = manager.cleanup_inactive_sessions(Duration::from_secs(3600)).await;
+        assert_eq!(removed, 0, "an active session must not be swept");
+        assert_eq!(manager.session_count().await, 1);
+
+        // And it is the same decoder, not a silently recreated one.
+        assert!(Arc::ptr_eq(&live, &manager.get_decoder("live").await));
+    }
+
+    /// A session that really has gone idle past the threshold is evicted, and
+    /// the count of evictions is reported.
+    #[tokio::test]
+    async fn cleanup_evicts_sessions_past_the_idle_threshold() {
+        let manager = SpeculativeDecodingManager::new(SpeculativeDecodingConfig::default());
+
+        let _ = manager.get_decoder("stale_one").await;
+        let _ = manager.get_decoder("stale_two").await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let removed = manager.cleanup_inactive_sessions(Duration::from_millis(10)).await;
+        assert_eq!(removed, 2);
+        assert_eq!(manager.session_count().await, 0);
+    }
+
+    /// Touching a session refreshes its idle clock, so a sweep that would have
+    /// evicted it no longer does. This is the property the discarded argument
+    /// made impossible to express.
+    #[tokio::test]
+    async fn accessing_a_session_refreshes_its_idle_clock() {
+        let manager = SpeculativeDecodingManager::new(SpeculativeDecodingConfig::default());
+
+        let _ = manager.get_decoder("touched").await;
+        let _ = manager.get_decoder("untouched").await;
+
+        // Both sessions age well past the threshold used below.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let untouched_idle =
+            manager.session_idle_time("untouched").await.expect("session must exist");
+        assert!(untouched_idle >= Duration::from_millis(200));
+
+        // Re-acquiring "touched" stamps it as used right now; the sweep that
+        // immediately follows must therefore spare it and take only the other.
+        // The generous 100 ms budget keeps this deterministic on a loaded host.
+        let _ = manager.get_decoder("touched").await;
+        let removed = manager.cleanup_inactive_sessions(Duration::from_millis(100)).await;
+
+        assert_eq!(removed, 1, "only the untouched session is idle enough");
+        assert_eq!(manager.session_count().await, 1);
+        assert!(manager.session_idle_time("touched").await.is_some());
+        assert!(manager.session_idle_time("untouched").await.is_none());
+    }
+
+    /// Zero permitted idleness is the one case that clears everything, and it
+    /// says so through the returned count.
+    #[tokio::test]
+    async fn cleanup_with_zero_idle_time_clears_every_session() {
+        let manager = SpeculativeDecodingManager::new(SpeculativeDecodingConfig::default());
+
+        let _ = manager.get_decoder("a").await;
+        let _ = manager.get_decoder("b").await;
+
+        let removed = manager.cleanup_inactive_sessions(Duration::ZERO).await;
+        assert_eq!(removed, 2);
+        assert_eq!(manager.session_count().await, 0);
     }
 
     #[tokio::test]

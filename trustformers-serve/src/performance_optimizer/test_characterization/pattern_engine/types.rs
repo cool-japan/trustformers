@@ -18,25 +18,17 @@ use tokio::sync::Mutex as TokioMutex;
 
 use super::functions::{
     AdvancedPatternDetector, FeatureExtractor, MLPatternModel, PriorityCalculator,
-    RecommendationGenerator, StatisticalAlgorithm, TemporalAnalysisAlgorithm, TrendModel,
+    RecommendationGenerator, StatisticalAlgorithm, TemporalAnalysisAlgorithm,
 };
 
 // Re-export types moved to types_engine module for backward compatibility
 pub use super::types_engine::*;
 
 #[derive(Debug)]
-pub struct CorrelationMatrix {
-    matrix: HashMap<(String, String), f64>,
-    variable_names: Vec<String>,
-    last_updated: Instant,
-}
+pub struct CorrelationMatrix {}
 impl CorrelationMatrix {
     pub fn new() -> Self {
-        Self {
-            matrix: HashMap::new(),
-            variable_names: Vec::new(),
-            last_updated: Instant::now(),
-        }
+        Self {}
     }
 }
 #[derive(Debug, Clone, Copy)]
@@ -86,8 +78,6 @@ pub struct MachineLearningPatternAnalyzer {
     models: HashMap<String, Box<dyn MLPatternModel + Send + Sync>>,
     /// Training data buffer
     training_buffer: Arc<TokioMutex<Vec<TrainingDataPoint>>>,
-    /// Model performance metrics
-    performance_metrics: Arc<RwLock<MLPerformanceMetrics>>,
     /// Training scheduler
     training_scheduler: Arc<TokioMutex<TrainingScheduler>>,
     /// Feature extractors
@@ -99,7 +89,6 @@ impl MachineLearningPatternAnalyzer {
         let mut analyzer = Self {
             models: HashMap::new(),
             training_buffer: Arc::new(TokioMutex::new(Vec::new())),
-            performance_metrics: Arc::new(RwLock::new(MLPerformanceMetrics::default())),
             training_scheduler: Arc::new(TokioMutex::new(TrainingScheduler::new())),
             feature_extractors: Vec::new(),
         };
@@ -241,24 +230,18 @@ impl ClusteringModel {
 pub struct PatternRecommendationEngine {
     /// Recommendation generators
     generators: HashMap<String, Box<dyn RecommendationGenerator + Send + Sync>>,
-    /// Recommendation rules
-    rules: Arc<RwLock<RecommendationRuleSet>>,
     /// Priority calculators
     priority_calculators: Vec<Box<dyn PriorityCalculator + Send + Sync>>,
     /// Recommendation history
     history: Arc<TokioMutex<Vec<GeneratedRecommendation>>>,
-    /// Effectiveness tracking
-    effectiveness_tracking: Arc<RwLock<RecommendationEffectiveness>>,
 }
 impl PatternRecommendationEngine {
     /// Create a new recommendation engine
     pub async fn new() -> Result<Self> {
         let mut engine = Self {
             generators: HashMap::new(),
-            rules: Arc::new(RwLock::new(RecommendationRuleSet::default())),
             priority_calculators: Vec::new(),
             history: Arc::new(TokioMutex::new(Vec::new())),
-            effectiveness_tracking: Arc::new(RwLock::new(RecommendationEffectiveness::default())),
         };
         engine.initialize_generators().await?;
         engine.initialize_priority_calculators().await?;
@@ -376,10 +359,6 @@ pub struct PatternDetectorLibrary {
     detectors: HashMap<String, Box<dyn AdvancedPatternDetector + Send + Sync>>,
     /// Detector configurations
     detector_configs: HashMap<String, DetectorConfig>,
-    /// Detection cache
-    detection_cache: Arc<TokioMutex<DetectionCache>>,
-    /// Performance metrics
-    performance_metrics: Arc<RwLock<DetectorPerformanceMetrics>>,
 }
 impl PatternDetectorLibrary {
     /// Create a new pattern detector library
@@ -387,8 +366,6 @@ impl PatternDetectorLibrary {
         let mut library = Self {
             detectors: HashMap::new(),
             detector_configs: HashMap::new(),
-            detection_cache: Arc::new(TokioMutex::new(DetectionCache::new())),
-            performance_metrics: Arc::new(RwLock::new(DetectorPerformanceMetrics::default())),
         };
         library.initialize_builtin_detectors().await?;
         Ok(library)
@@ -686,10 +663,6 @@ pub struct PatternEvolutionAnalyzer {
     evolution_data: Arc<TokioMutex<HashMap<String, PatternEvolutionData>>>,
     /// Temporal analysis algorithms
     analysis_algorithms: Vec<Box<dyn TemporalAnalysisAlgorithm + Send + Sync>>,
-    /// Evolution metrics
-    metrics: Arc<RwLock<EvolutionMetrics>>,
-    /// Trend detection models
-    trend_models: HashMap<String, Box<dyn TrendModel + Send + Sync>>,
 }
 impl PatternEvolutionAnalyzer {
     /// Create a new pattern evolution analyzer
@@ -697,8 +670,6 @@ impl PatternEvolutionAnalyzer {
         let mut analyzer = Self {
             evolution_data: Arc::new(TokioMutex::new(HashMap::new())),
             analysis_algorithms: Vec::new(),
-            metrics: Arc::new(RwLock::new(EvolutionMetrics::default())),
-            trend_models: HashMap::new(),
         };
         analyzer.analysis_algorithms.push(Box::new(TrendAnalysisAlgorithm::new()));
         analyzer.analysis_algorithms.push(Box::new(SeasonalityAnalysisAlgorithm::new()));
@@ -755,28 +726,11 @@ pub struct DetectorMetadata {
 }
 /// Detection cache for performance optimization
 #[derive(Debug)]
-pub struct DetectionCache {
-    /// Cached results
-    cache: HashMap<String, CachedDetectionResult>,
-    /// Cache metadata
-    metadata: CacheMetadata,
-    /// Cache statistics
-    stats: CacheStats,
-}
+pub struct DetectionCache {}
 impl DetectionCache {
     /// Create a new detection cache
     pub fn new() -> Self {
-        let now = Instant::now();
-        Self {
-            cache: HashMap::new(),
-            metadata: CacheMetadata {
-                creation_time: now,
-                last_access: now,
-                access_count: 0,
-                size_bytes: 0,
-            },
-            stats: CacheStats::default(),
-        }
+        Self {}
     }
 }
 #[derive(Debug, Clone, Default)]
@@ -875,10 +829,6 @@ pub struct StatisticalPatternAnalyzer {
     config: Arc<RwLock<StatisticalAnalysisConfig>>,
     /// Historical data for time series analysis
     historical_data: Arc<TokioMutex<VecDeque<StatisticalDataPoint>>>,
-    /// Correlation matrix cache
-    correlation_cache: Arc<TokioMutex<CorrelationMatrix>>,
-    /// Statistical metrics
-    metrics: Arc<RwLock<StatisticalMetrics>>,
 }
 impl StatisticalPatternAnalyzer {
     /// Create a new statistical pattern analyzer
@@ -887,8 +837,6 @@ impl StatisticalPatternAnalyzer {
             algorithms: HashMap::new(),
             config: Arc::new(RwLock::new(StatisticalAnalysisConfig::default())),
             historical_data: Arc::new(TokioMutex::new(VecDeque::new())),
-            correlation_cache: Arc::new(TokioMutex::new(CorrelationMatrix::new())),
-            metrics: Arc::new(RwLock::new(StatisticalMetrics::default())),
         };
         analyzer.initialize_algorithms().await?;
         Ok(analyzer)

@@ -471,6 +471,146 @@ fn test_adaptive_inference_quality_preservation_is_one_when_full_pipeline_ran() 
     );
 }
 
+// ---------------------------------------------------------------------
+// calculate_performance_metrics / real_latency_percentiles: regression
+// coverage for the bug where `latency_percentiles` reported
+// `p90 = time_ms * 1.2` and `p99 = time_ms * 1.5` -- fixed multipliers of
+// the single current sample, with no relationship to any real spread --
+// even though `PerformanceTracker` already accumulates real per-call
+// history for other metrics. The fix threads that same history (plus the
+// in-flight call) through `trustformers_core::performance::LatencyMetrics::from_durations`.
+// ---------------------------------------------------------------------
+
+fn dummy_prediction() -> PipelineOutput {
+    PipelineOutput::Classification(vec![ClassificationOutput {
+        label: "x".to_string(),
+        score: 0.5,
+    }])
+}
+
+#[test]
+fn test_latency_percentiles_single_call_equal_the_one_real_sample() {
+    // A fresh engine has no prior history: the only honest percentile
+    // computation of a one-point distribution is that every percentile
+    // equals that one point -- p50 happens to match what the old fixed
+    // formula produced too, but p90/p99 must NOT be inflated multipliers.
+    let engine = mock_engine(0.5, small_early_exit_config());
+    let prediction = dummy_prediction();
+    let metrics = engine
+        .calculate_performance_metrics(42, 100.0, 0.0, 4, 4, &prediction, None)
+        .expect("calculate_performance_metrics must not error");
+
+    assert_eq!(metrics.latency_percentiles["p50"], 42.0);
+    assert_eq!(
+        metrics.latency_percentiles["p90"], 42.0,
+        "with only one real sample, p90 must equal that sample, not the old `time_ms * 1.2`"
+    );
+    assert_eq!(
+        metrics.latency_percentiles["p99"], 42.0,
+        "with only one real sample, p99 must equal that sample, not the old `time_ms * 1.5`"
+    );
+}
+
+#[test]
+fn test_latency_percentiles_reflect_real_accumulated_history_not_fixed_multiplier() {
+    // Regression test: seed real call-time history dominated by fast
+    // (10ms) calls, then compute performance metrics for one slow (1000ms)
+    // call. The old code derived p90/p99 purely from the *current* call
+    // (`1000.0 * 1.2 = 1200.0`, `1000.0 * 1.5 = 1500.0`), ignoring history
+    // entirely. The real percentile of a distribution that is 90% 10ms
+    // samples places both p90 and p99 at 10ms, not near the slow outlier.
+    let mut engine = mock_engine(0.5, small_early_exit_config());
+    for _ in 0..9 {
+        engine.performance_tracker.latency_samples.push(Duration::from_millis(10));
+    }
+
+    let prediction = dummy_prediction();
+    let metrics = engine
+        .calculate_performance_metrics(1000, 100.0, 0.0, 4, 4, &prediction, None)
+        .expect("calculate_performance_metrics must not error");
+
+    assert_ne!(
+        metrics.latency_percentiles["p90"], 1200.0,
+        "p90 must not be the old `time_ms * 1.2` formula"
+    );
+    assert_ne!(
+        metrics.latency_percentiles["p99"], 1500.0,
+        "p99 must not be the old `time_ms * 1.5` formula"
+    );
+    assert_eq!(
+        metrics.latency_percentiles["p90"], 10.0,
+        "with 9 of 10 real samples at 10ms, the real p90 must reflect that history"
+    );
+    assert_eq!(
+        metrics.latency_percentiles["p99"], 10.0,
+        "with 9 of 10 real samples at 10ms, the real p99 must reflect that history"
+    );
+}
+
+#[test]
+fn test_latency_samples_accumulate_across_adaptive_inference_calls() {
+    // End-to-end (not calling the private helper directly): each real
+    // `adaptive_inference` call must append its own measured time to
+    // `latency_samples` via `PerformanceTracker::update_final_metrics`.
+    let mut engine = mock_engine(0.5, small_early_exit_config());
+    assert!(engine.performance_tracker.latency_samples.is_empty());
+    engine.adaptive_inference("first".to_string()).expect("must succeed");
+    assert_eq!(engine.performance_tracker.latency_samples.len(), 1);
+    engine.adaptive_inference("second".to_string()).expect("must succeed");
+    assert_eq!(engine.performance_tracker.latency_samples.len(), 2);
+}
+
+fn dummy_result(total_computation_time_ms: u64) -> AdaptiveInferenceResult {
+    AdaptiveInferenceResult {
+        prediction: dummy_prediction(),
+        early_exit_result: None,
+        precision_used: PrecisionMode::Mixed,
+        layers_computed: 1,
+        layers_skipped: 0,
+        conditional_computations: 0,
+        total_computation_time_ms,
+        memory_peak_mb: 0.0,
+        energy_consumed_watts: 0.0,
+        quality_score: 0.5,
+        uncertainty_score: 0.5,
+        resource_efficiency: 0.5,
+        latency_vs_quality_tradeoff: 0.5,
+        adaptation_decisions: Vec::new(),
+        performance_metrics: PerformanceMetrics {
+            throughput_tokens_per_second: 1.0,
+            latency_percentiles: HashMap::new(),
+            memory_efficiency: 1.0,
+            energy_efficiency: 1.0,
+            quality_preservation: 1.0,
+            speedup_factor: 1.0,
+        },
+    }
+}
+
+#[test]
+fn test_latency_samples_history_is_capped() {
+    // Regression coverage for the bounded-history convention: calling the
+    // real `PerformanceTracker::update_final_metrics` more than
+    // `MAX_LATENCY_SAMPLES` times must evict the oldest sample rather than
+    // growing the vector unboundedly.
+    let mut engine = mock_engine(0.5, small_early_exit_config());
+    for i in 0..(PerformanceTracker::MAX_LATENCY_SAMPLES + 5) {
+        engine.performance_tracker.update_final_metrics(&dummy_result(i as u64));
+    }
+    assert_eq!(
+        engine.performance_tracker.latency_samples.len(),
+        PerformanceTracker::MAX_LATENCY_SAMPLES,
+        "latency_samples must be capped at MAX_LATENCY_SAMPLES, not grow unboundedly"
+    );
+    // The oldest samples (0, 1, 2, 3, 4) must have been evicted -- the
+    // remaining history must start at 5, not 0.
+    assert_eq!(
+        engine.performance_tracker.latency_samples[0],
+        Duration::from_millis(5),
+        "the oldest entries must be evicted, keeping only the most recent MAX_LATENCY_SAMPLES"
+    );
+}
+
 #[test]
 fn test_adaptive_inference_history_accumulates_across_calls() {
     let mut engine = mock_engine(0.5, small_early_exit_config());
@@ -659,4 +799,41 @@ fn test_adaptive_inference_layerwise_prediction_is_real_classification() {
             "expected a Classification prediction from MockLayerwiseModel::finish, got {other:?}"
         ),
     }
+}
+
+#[test]
+fn test_adaptive_inference_layerwise_updates_performance_tracker() {
+    // Regression test: `adaptive_inference_layerwise` used to return
+    // without ever calling `PerformanceTracker::update_final_metrics`,
+    // unlike `adaptive_inference` (which does, as its final step). A
+    // caller using only the layerwise path therefore saw
+    // `performance_tracker.{latency_samples,quality_scores,
+    // throughput_history,memory_snapshots,energy_snapshots}` stay
+    // permanently empty, starving `real_latency_percentiles`'s history on
+    // this path entirely.
+    let mut engine = layerwise_engine(small_early_exit_config());
+    assert!(engine.performance_tracker.latency_samples.is_empty());
+    assert!(engine.performance_tracker.quality_scores.is_empty());
+
+    let input = "hello".to_string();
+    engine.adaptive_inference_layerwise(&input).expect("must succeed");
+
+    assert_eq!(
+        engine.performance_tracker.latency_samples.len(),
+        1,
+        "a real call-time sample must be recorded on the layerwise path, not just the \
+         adaptive_inference() path"
+    );
+    assert_eq!(
+        engine.performance_tracker.quality_scores.len(),
+        1,
+        "the observed quality_score must be recorded on the layerwise path too"
+    );
+
+    engine.adaptive_inference_layerwise(&input).expect("must succeed");
+    assert_eq!(
+        engine.performance_tracker.latency_samples.len(),
+        2,
+        "each layerwise call must append its own sample"
+    );
 }

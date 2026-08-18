@@ -45,6 +45,12 @@ pub mod abi_checker;
 pub mod benchmarks;
 pub mod hardware;
 pub mod inference;
+/// Byte<->[`trustformers_core::Tensor`] codecs shared by platform FFI/JNI
+/// bridges (`android::jni` and friends). Kept as an always-compiled module
+/// -- not gated on `target_os = "android"` -- specifically so its
+/// regression tests actually run on every host this workspace builds on;
+/// see the module doc comment for why that separation matters.
+pub mod jni_codec;
 pub mod optimization;
 pub mod ui_testing;
 
@@ -66,16 +72,44 @@ pub mod ios_background;
 #[cfg(target_os = "ios")]
 pub mod ios_app_extensions;
 
-#[cfg(target_os = "ios")]
+// iCloud model sync. Not iOS-gated: `ios_icloud` no longer links any
+// iOS-only framework or `extern "C"` symbol (its previous CloudKit
+// `extern "C"` declarations called functions no object file in this
+// workspace ever defined, and were replaced with a real local
+// filesystem-backed store -- see `CloudKitManager`'s doc comment there), so
+// gating it to iOS only would mean its regression tests never actually ran
+// on any host this workspace builds on. Same reasoning as
+// `advanced_neural_engine_v4` above.
 pub mod ios_icloud;
 
 #[cfg(target_os = "android")]
 pub mod android;
 
-#[cfg(target_os = "android")]
+// Android Auto integration. Not previously mounted here at all (shipped as
+// dead source with no `pub mod` declaration anywhere in this crate, so it
+// never compiled or ran); its business logic is platform-neutral (no `jni`,
+// no `android_logger`, no `target_os` branching anywhere in the file) so,
+// per the same reasoning as `ios_icloud`/`advanced_neural_engine_v4` above,
+// it is mounted unconditionally rather than gated to a platform its own
+// code never actually requires.
+pub mod android_auto_support;
+
+// Android WorkManager integration. Not gated to `target_os = "android"`:
+// verified (2026-08-18) to have zero `jni`, zero `android_logger`, and zero
+// internal `#[cfg(target_os = "android")]` branching anywhere in the file --
+// its constraint checks (`get_current_memory_usage` via `sysinfo`,
+// `is_unmetered_network_available`, etc.) and its scheduling/queueing logic
+// are all plain, platform-neutral Rust, exactly the same reasoning as
+// `android_auto_support`/`ios_icloud`/`advanced_neural_engine_v4` above.
+// Gating it to Android-only would mean its regression tests never actually
+// ran on any host this workspace builds on.
 pub mod android_work_manager;
 
-#[cfg(target_os = "android")]
+// Android ContentProvider model-sharing integration. Same reasoning as
+// `android_work_manager` immediately above: no `jni`, no `android_logger`,
+// no internal `target_os` gate -- its `EncryptionManager` (real AES/ChaCha
+// AEAD) and `ModelStream` (real file streaming) are plain platform-neutral
+// Rust, verified (2026-08-18) to compile and pass its tests on this host.
 pub mod android_content_provider;
 
 #[cfg(target_os = "android")]
@@ -87,11 +121,30 @@ pub mod coreml;
 #[cfg(feature = "coreml")]
 pub mod coreml_converter;
 
+/// Hand-written protobuf wire format for the CoreML `Model.proto` subset
+/// [`coreml_converter`] emits. Kept as its own module (rather than inline in
+/// `coreml_converter.rs`) so the wire-format code -- verified byte-for-byte
+/// against Apple's own toolchain, see its module doc comment -- stays
+/// independently testable and the converter file stays under this
+/// workspace's file-size policy.
+#[cfg(feature = "coreml")]
+pub mod coreml_proto;
+
 #[cfg(feature = "nnapi")]
 pub mod nnapi;
 
 #[cfg(feature = "nnapi")]
 pub mod nnapi_converter;
+
+/// TensorFlow Lite NNAPI delegate. Previously shipped as orphaned source
+/// with no `pub mod` declaration anywhere in this crate -- it never
+/// compiled or ran, on any target, ever, despite every item inside it
+/// already being correctly `#[cfg(all(target_os = "android", feature =
+/// "tflite-nnapi"))]`-gated (matching the `tflite-nnapi = ["nnapi"]`
+/// feature this workspace's `Cargo.toml` already declares). Mounted here
+/// behind that same feature, matching `nnapi`/`nnapi_converter` above.
+#[cfg(feature = "tflite-nnapi")]
+pub mod tflite_nnapi_delegate;
 
 #[cfg(feature = "on-device-training")]
 pub mod training;

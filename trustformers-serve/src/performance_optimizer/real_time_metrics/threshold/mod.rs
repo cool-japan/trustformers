@@ -119,10 +119,8 @@ pub use monitor::{
 };
 pub use processors::{
     ChannelStats, CriticalAlertProcessor, CriticalProcessorConfig, DefaultAlertProcessor,
-    DefaultProcessorConfig, EmailChannelConfig, EmailNotificationChannel, LogChannelConfig,
-    LogNotificationChannel, PerformanceAlertProcessor, PerformanceProcessorConfig, ProcessorStats,
-    ResourceAlertProcessor, ResourceProcessorConfig, SlackChannelConfig, SlackNotificationChannel,
-    WebhookChannelConfig, WebhookNotificationChannel,
+    DefaultProcessorConfig, LogChannelConfig, LogNotificationChannel, PerformanceAlertProcessor,
+    PerformanceProcessorConfig, ProcessorStats, ResourceAlertProcessor, ResourceProcessorConfig,
 };
 pub use simple_evaluator::{EvaluatorStats, SimpleEvaluatorConfig, SimpleThresholdEvaluator};
 pub use statistical_evaluator::{

@@ -28,12 +28,14 @@ let renderer = FabricRenderer::new(config)?;
 ```
 */
 
+use crate::inference::MobileInferenceEngine;
 use crate::react_native::{InferenceRequest, InferenceResponse, PerformanceMetrics};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::sync::{Arc, Mutex};
+use trustformers_core::Tensor;
 use trustformers_core::TrustformersError;
 
 /// Configuration for Fabric renderer integration
@@ -176,6 +178,12 @@ pub struct FabricRenderer {
     jsi_runtime: Option<Arc<Mutex<JSIRuntime>>>,
     render_queue: Arc<Mutex<RenderQueue>>,
     component_registry: ComponentRegistry,
+    /// Real inference engine backing `perform_inference`/
+    /// `execute_standard_inference`. Previously this struct had no
+    /// inference engine at all, so `execute_standard_inference` built (and
+    /// then discarded) a `standard_request` and returned a hardcoded
+    /// `output_data: vec![1.0, 2.0, 3.0]` regardless of the request.
+    inference_engine: Arc<Mutex<MobileInferenceEngine>>,
 }
 
 impl FabricRenderer {
@@ -192,6 +200,10 @@ impl FabricRenderer {
             None
         };
 
+        let inference_engine = Arc::new(Mutex::new(MobileInferenceEngine::new(
+            crate::MobileConfig::default(),
+        )?));
+
         let mut renderer = Self {
             config,
             shadow_tree,
@@ -200,12 +212,24 @@ impl FabricRenderer {
             jsi_runtime,
             render_queue,
             component_registry,
+            inference_engine,
         };
 
         // Register default host components
         renderer.register_default_components()?;
 
         Ok(renderer)
+    }
+
+    /// Load a real model into this renderer's inference engine.
+    /// `perform_inference`/`execute_standard_inference` will error with a
+    /// clear "no model loaded" message (see `execute_standard_inference`)
+    /// until this has been called successfully at least once.
+    pub fn load_model(&self, model_path: &str) -> Result<(), TrustformersError> {
+        let mut engine = self.inference_engine.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire inference engine lock".to_string())
+        })?;
+        engine.load_model_from_file(model_path)
     }
 
     /// Register a custom host component
@@ -398,8 +422,12 @@ impl FabricRenderer {
         &self,
         request: &FabricInferenceRequest,
     ) -> Result<InferenceResponse, TrustformersError> {
-        // Convert Fabric request to standard inference request
-        let standard_request = InferenceRequest {
+        // `standard_request` (the shape a plain `react_native` bridge call
+        // would take) is kept only as documentation of the equivalence
+        // between the two request types; the fields actually driving real
+        // computation below (`input_data`/`input_shape`) come straight from
+        // `request` itself.
+        let _standard_request = InferenceRequest {
             request_id: request.request_id.clone(),
             model_id: request.model_id.clone(),
             input_data: request.input_data.clone(),
@@ -409,24 +437,66 @@ impl FabricRenderer {
             enable_postprocessing: request.enable_postprocessing,
         };
 
-        // For now, return a placeholder response
-        // In a real implementation, this would call the inference engine
-        Ok(InferenceResponse {
-            request_id: request.request_id.clone(),
-            success: true,
-            output_data: vec![1.0, 2.0, 3.0], // Placeholder
-            output_shape: vec![1, 3],
-            inference_time_ms: 100.0,
-            memory_used_mb: 50,
-            error_message: None,
-            metrics: PerformanceMetrics {
-                preprocessing_time_ms: 10.0,
-                inference_time_ms: 80.0,
-                postprocessing_time_ms: 10.0,
-                memory_allocation_mb: 50,
-                cache_hit_ratio: 0.8,
+        let preprocess_start = std::time::Instant::now();
+        let input_tensor = Tensor::from_vec(request.input_data.clone(), &request.input_shape)?;
+        let preprocessing_time_ms = preprocess_start.elapsed().as_secs_f64() * 1000.0;
+
+        let inference_start = std::time::Instant::now();
+        let inference_result = {
+            let mut engine = self.inference_engine.lock().map_err(|_| {
+                TrustformersError::runtime_error(
+                    "Failed to acquire inference engine lock".to_string(),
+                )
+            })?;
+            engine.inference(&input_tensor)
+        };
+        let inference_time_ms = inference_start.elapsed().as_secs_f64() * 1000.0;
+
+        match inference_result {
+            Ok(output_tensor) => {
+                let postprocess_start = std::time::Instant::now();
+                let output_data = output_tensor.data()?;
+                let output_shape = output_tensor.shape();
+                let postprocessing_time_ms = postprocess_start.elapsed().as_secs_f64() * 1000.0;
+                let total_time_ms =
+                    preprocessing_time_ms + inference_time_ms + postprocessing_time_ms;
+
+                Ok(InferenceResponse {
+                    request_id: request.request_id.clone(),
+                    success: true,
+                    output_data,
+                    output_shape,
+                    inference_time_ms: total_time_ms,
+                    memory_used_mb: (output_tensor.shape().iter().product::<usize>()
+                        * std::mem::size_of::<f32>())
+                        / (1024 * 1024),
+                    error_message: None,
+                    metrics: PerformanceMetrics {
+                        preprocessing_time_ms,
+                        inference_time_ms,
+                        postprocessing_time_ms,
+                        memory_allocation_mb: 0,
+                        cache_hit_ratio: 0.0,
+                    },
+                })
             },
-        })
+            Err(e) => Ok(InferenceResponse {
+                request_id: request.request_id.clone(),
+                success: false,
+                output_data: Vec::new(),
+                output_shape: Vec::new(),
+                inference_time_ms: preprocessing_time_ms + inference_time_ms,
+                memory_used_mb: 0,
+                error_message: Some(e.to_string()),
+                metrics: PerformanceMetrics {
+                    preprocessing_time_ms,
+                    inference_time_ms,
+                    postprocessing_time_ms: 0.0,
+                    memory_allocation_mb: 0,
+                    cache_hit_ratio: 0.0,
+                },
+            }),
+        }
     }
 }
 
@@ -1114,5 +1184,91 @@ mod tests {
             JSIValue::String(s) => assert_eq!(s, "test"),
             _ => panic!("Wrong JSI value type"),
         }
+    }
+
+    fn fabric_request(input_data: Vec<f32>, input_shape: Vec<usize>) -> FabricInferenceRequest {
+        FabricInferenceRequest {
+            request_id: "req-1".to_string(),
+            model_id: "model-1".to_string(),
+            input_data,
+            input_shape,
+            config_override: None,
+            enable_preprocessing: false,
+            enable_postprocessing: false,
+            node_handle: None,
+            priority: None,
+            concurrent_rendering: false,
+        }
+    }
+
+    /// Regression test for the previous `execute_standard_inference`,
+    /// which built (and discarded) a `standard_request` and always returned
+    /// `output_data: vec![1.0, 2.0, 3.0]` with a fixed `inference_time_ms:
+    /// 100.0` -- for *every* request, including one made before any model
+    /// was ever loaded. With no model loaded, `perform_inference` must now
+    /// report a real, honest failure rather than the old fabricated
+    /// "success".
+    #[test]
+    fn test_perform_inference_without_loaded_model_reports_real_failure() {
+        let renderer = FabricRenderer::new(FabricConfig::default()).expect("renderer creation");
+        let request = fabric_request(vec![1.0, 2.0, 3.0], vec![1, 3]);
+
+        let response = renderer.perform_inference(request).expect("perform_inference call");
+        assert!(
+            !response.success,
+            "no model is loaded, this must not report success"
+        );
+        assert!(response.output_data.is_empty());
+        assert!(response.error_message.is_some());
+    }
+
+    /// End-to-end: load a real two-layer safetensors checkpoint, then run
+    /// `perform_inference` and check the output is the real matmul chain's
+    /// result (not the old hardcoded `[1.0, 2.0, 3.0]`, and not an echo of
+    /// the input).
+    #[test]
+    fn test_perform_inference_with_loaded_model_runs_real_computation() {
+        use safetensors::tensor::TensorView;
+        use safetensors::Dtype;
+
+        // [in=4, out=2] then [in=2, out=1]: unambiguous width-reducing chain.
+        let w0: Vec<u8> = [1.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let w1: Vec<u8> = [1.0f32, 1.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let view0 = TensorView::new(Dtype::F32, vec![4, 2], &w0).expect("view0");
+        let view1 = TensorView::new(Dtype::F32, vec![2, 1], &w1).expect("view1");
+        let mut tensors: HashMap<String, TensorView> = HashMap::new();
+        tensors.insert("layer.0.weight".to_string(), view0);
+        tensors.insert("layer.1.weight".to_string(), view1);
+        let bytes = safetensors::serialize(&tensors, None).expect("serialize safetensors");
+
+        let path = std::env::temp_dir().join(format!(
+            "trustformers_mobile_fabric_test_{}_{}.safetensors",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        std::fs::write(&path, &bytes).expect("write temp safetensors file");
+
+        let renderer = FabricRenderer::new(FabricConfig::default()).expect("renderer creation");
+        let load_result = renderer.load_model(path.to_str().expect("utf8 path"));
+        let _ = std::fs::remove_file(&path);
+        load_result.expect("a real safetensors file with an unambiguous linear stack must load");
+
+        let request = fabric_request(vec![1.0, 2.0, 3.0, 4.0], vec![1, 4]);
+        let response = renderer.perform_inference(request).expect("perform_inference call");
+
+        assert!(response.success, "error was: {:?}", response.error_message);
+        assert_eq!(
+            response.output_shape,
+            vec![1, 1],
+            "the real two-layer projection must reduce width 4 -> 2 -> 1"
+        );
+        assert_ne!(
+            response.output_data,
+            vec![1.0, 2.0, 3.0],
+            "must not be the old hardcoded placeholder response"
+        );
     }
 }

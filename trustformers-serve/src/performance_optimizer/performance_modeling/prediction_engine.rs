@@ -784,8 +784,6 @@ impl PredictionCache {
 pub struct EnsembleCoordinator {
     /// Ensemble strategy
     strategy: EnsembleStrategy,
-    /// Strategy-specific parameters
-    parameters: HashMap<String, f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -798,10 +796,7 @@ pub struct WeightedPrediction {
 impl EnsembleCoordinator {
     /// Create new ensemble coordinator
     pub fn new(strategy: EnsembleStrategy) -> Self {
-        Self {
-            strategy,
-            parameters: HashMap::new(),
-        }
+        Self { strategy }
     }
 
     /// Combine predictions from multiple models

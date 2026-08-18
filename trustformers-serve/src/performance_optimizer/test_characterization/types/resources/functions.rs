@@ -3,7 +3,7 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::super::core::TestCharacterizationResult;
 use super::super::gpu::GpuMetrics;
@@ -12,14 +12,8 @@ use super::super::network_io::{IoMetrics, NetworkMetrics};
 use super::types::{MemoryUsageMetrics, ResourceAnalyzerConfig, ResourceMetrics};
 use super::types_3::{ResourceUsageDataPoint, ResourceUsageSnapshot};
 
-pub(crate) fn instant_now() -> Instant {
-    Instant::now()
-}
 pub(crate) fn duration_zero() -> Duration {
     Duration::from_secs(0)
-}
-pub(crate) fn empty_instant_duration_vec() -> Vec<(Instant, Duration)> {
-    Vec::new()
 }
 pub(crate) fn empty_duration_vec() -> Vec<Duration> {
     Vec::new()

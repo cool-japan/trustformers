@@ -326,7 +326,14 @@ impl SimpleCallback for LoggingCallback {
     }
 }
 
-/// Progress bar callback
+/// Progress bar callback.
+///
+/// `update_progress` below writes directly to stdout with `\r`-redrawn
+/// carriage returns, not through `tracing`: a line-based logger would emit
+/// one log line per training step instead of redrawing a single bar, which
+/// defeats the purpose of a progress indicator. This is an intentional,
+/// caller-opted-in stdout writer (a caller must explicitly attach this
+/// `SimpleCallback` to see it), not incidental print debugging.
 pub struct ProgressCallback {
     total_steps: u32,
     current_step: u32,

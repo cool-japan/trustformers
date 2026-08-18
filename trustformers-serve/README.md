@@ -1,6 +1,6 @@
 # TrustformeRS Serve
 
-**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~4,321 | **Public API Items:** 7,319 | **SLoC:** 283,692 | **Updated:** 2026-07-09
+**Version:** 0.2.1 | **Status:** Stable | **Tests:** 5,572 passed, 1 skipped, 0 failed (`cargo nextest run -p trustformers-serve`, default features, verified 2026-08-18) | **SLoC:** 278,397 (`tokei`, 2026-08-18) | **Updated:** 2026-08-18
 
 High-performance inference server for TrustformeRS models with advanced batching, multi-protocol APIs, cloud-native deployment, and comprehensive observability.
 
@@ -18,7 +18,9 @@ lambda = ["dep:lambda-web"]   # kept opt-in: lambda-web depends on banned brotli
 swagger-ui = ["dep:utoipa-swagger-ui"]  # kept opt-in: build-dep pulls banned `zip` crate; CDN-hosted /docs Swagger UI works without this feature
 ```
 
-`default = []` does **not** mean a minimal/lightweight build — it only means these three extras are off by default. Everything else is an unconditional dependency compiled in regardless of feature flags: all AWS SDK crates (SageMaker, SQS, CloudWatch, Lambda client), all Azure crates (`azure_core`, `azure_identity`, `azure_mgmt_machinelearningservices`, `azure_mgmt_web`), all GCP crates (`google-cloud-functions-v2`, `google-cloud-gax`), `async-nats`, `lapin` (RabbitMQ), `redis`, the full OpenTelemetry stack, `tonic`/`tonic-prost` (gRPC), `async-graphql`, `axum` (REST), and `utoipa` (OpenAPI spec generation). There is no `aws`, `gcp`, or `azure` feature to enable — the cloud SDKs are always compiled in.
+`default = []` does **not** mean a minimal/lightweight build — it only means these three extras are off by default. Everything else is an unconditional dependency compiled in regardless of feature flags: all AWS SDK crates (SageMaker, SQS, CloudWatch, Lambda client), `async-nats`, `lapin` (RabbitMQ), `redis`, the full OpenTelemetry stack, `tonic`/`tonic-prost` (gRPC), `async-graphql`, `axum` (REST), and `utoipa` (OpenAPI spec generation). There is no `aws` feature to enable — the AWS SDKs are always compiled in.
+>
+> **Updated 2026-08-18**: the Azure crates (`azure_core`, `azure_identity`, `azure_mgmt_machinelearningservices`, `azure_mgmt_web`) and GCP crates (`google-cloud-functions-v2`, `google-cloud-gax`) this paragraph used to list here were removed from `Cargo.toml` — none had a call site anywhere in `src/`, and the Azure/GCP serverless providers return a structured `NotImplemented` error rather than calling any SDK, so no capability was lost. `AzureMachineLearningProvider`'s inference path (`src/cloud_providers/rest.rs`) calls Azure's REST API directly over `reqwest` instead of the SDK, so Azure inference still works without that dependency.
 
 ### Dynamic Batching System
 
@@ -136,17 +138,17 @@ GPU kernel optimization to reduce memory bandwidth pressure:
 Asynchronous request ingestion via a shared `MessageQueueProducer`/`MessageQueueConsumer` trait abstraction:
 
 - **Apache Kafka** (`kafka` feature, requires system librdkafka): production-ready wire-protocol implementation — high-throughput topic-based routing, consumer groups, exactly-once semantics.
-- **RabbitMQ, Redis Streams, NATS, AWS SQS**: complete trait-based interface/scaffold, useful today for testing the orchestration and routing layer. These do not yet talk to a real broker — `send`/`poll` currently fabricate success/return empty without any network I/O. Real backend wiring (AMQP protocol, dead-letter exchanges, publisher confirms, etc.) is an open item; see [TODO.md](TODO.md).
+- **RabbitMQ, Redis Streams, NATS, AWS SQS**: as of 2026-08-18 these call real client libraries (`src/message_queue/{rabbitmq,nats,redis_streams,sqs}.rs` use `lapin`/`async_nats`/`redis`/the AWS SQS SDK respectively) rather than the no-op scaffold this section described through 0.2.0. Not independently exercised against a live broker in this documentation pass — see [TODO.md](TODO.md) for the exact verification state.
 
 ### Cloud Provider Support
 
-A unified multi-cloud provider abstraction (`CloudProvider` trait) with health-check orchestration and unified request/response types is implemented and tested across AWS, GCP, and Azure. Deployment-side integrations are real; per-provider **inference/deployment calls** are currently simulated pending real SDK wiring:
+A unified multi-cloud provider abstraction (`CloudProvider` trait) with health-check orchestration and unified request/response types is implemented and tested across AWS, GCP, and Azure. Deployment-side integrations are real.
 
-- **AWS**: EKS deployment, S3 model storage, CloudWatch metrics. SageMaker inference calls go through the provider abstraction but currently return a simulated response.
-- **GCP**: GKE autopilot, GCS model storage, Cloud Monitoring. Vertex AI inference calls are likewise simulated.
-- **Azure**: AKS deployment, Blob Storage, Azure Monitor. Azure ML inference calls are likewise simulated.
+- **AWS**: EKS deployment, S3 model storage, CloudWatch metrics. SageMaker inference goes through the provider abstraction.
+- **GCP**: GKE autopilot, GCS model storage, Cloud Monitoring. Vertex AI inference goes through the provider abstraction.
+- **Azure**: AKS deployment, Blob Storage, Azure Monitor. Azure ML inference (`AzureMachineLearningProvider`) makes a real `reqwest` REST call to the configured endpoint (`POST {base}/chat/completions` with an `api-key` header) — confirmed by reading `src/cloud_providers/rest.rs` on 2026-08-18. AWS/GCP inference not individually re-confirmed this pass; the shared fabricated-response macro (`impl_provider!`) that used to back all three is gone crate-wide (`rg impl_provider! src/cloud_providers.rs` finds nothing), which is the strongest available evidence they changed too, but each provider file should be spot-checked before relying on this for AWS/GCP specifically.
 
-See [TODO.md](TODO.md) for the current mock-vs-real boundary for message queues and cloud providers.
+See [TODO.md](TODO.md) for the current verification state of message queues and cloud providers.
 
 ### GDPR Compliance
 

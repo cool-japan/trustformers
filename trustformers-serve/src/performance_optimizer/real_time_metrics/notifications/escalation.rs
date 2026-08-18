@@ -8,13 +8,11 @@ use anyhow::Result;
 /// Escalation engine for advanced escalation workflows
 #[derive(Debug)]
 
-pub struct EscalationEngine {
-    config: NotificationConfig,
-}
+pub struct EscalationEngine {}
 
 impl EscalationEngine {
-    pub async fn new(config: NotificationConfig) -> Result<Self> {
-        Ok(Self { config })
+    pub async fn new(_config: NotificationConfig) -> Result<Self> {
+        Ok(Self {})
     }
 
     pub async fn start(&self) -> Result<()> {

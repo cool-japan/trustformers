@@ -28,7 +28,6 @@ use super::functions::ValidationConfig;
 use super::*;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -42,29 +41,20 @@ pub use super::types_profilers::*;
 
 /// Performance validator for quality assurance
 pub struct PerformanceValidator {
-    /// Result validation engine
-    validation_engine: ResultValidationEngine,
     /// Consistency checker
     consistency_checker: ConsistencyChecker,
     /// Outlier detection engine
     outlier_detector: OutlierDetector,
     /// Quality assurance engine
     qa_engine: QualityAssuranceEngine,
-    /// Validation configuration
-    config: ValidationConfig,
-    /// Validation state
-    state: Arc<Mutex<ValidationState>>,
 }
 impl PerformanceValidator {
     /// Create a new performance validator
-    pub async fn new(config: ValidationConfig) -> Result<Self> {
+    pub async fn new(_config: ValidationConfig) -> Result<Self> {
         Ok(Self {
-            validation_engine: ResultValidationEngine::new(),
             consistency_checker: ConsistencyChecker::new(),
             outlier_detector: OutlierDetector::new(),
             qa_engine: QualityAssuranceEngine::new(),
-            config,
-            state: Arc::new(Mutex::new(ValidationState::new())),
         })
     }
     /// Validate system readiness for profiling
@@ -235,21 +225,15 @@ pub struct ProfileResultsProcessor {
     optimization_recommender: OptimizationRecommender,
     /// Report generator
     report_generator: ReportGenerator,
-    /// Processing configuration
-    config: ResultsProcessingConfig,
-    /// Processing state
-    state: Arc<Mutex<ProcessingState>>,
 }
 impl ProfileResultsProcessor {
     /// Create a new results processor
-    pub async fn new(config: ResultsProcessingConfig) -> Result<Self> {
+    pub async fn new(_config: ResultsProcessingConfig) -> Result<Self> {
         Ok(Self {
             statistics_engine: StatisticalAnalysisEngine::new(),
             trend_analyzer: TrendAnalysisEngine::new(),
             optimization_recommender: OptimizationRecommender::new(),
             report_generator: ReportGenerator::new(),
-            config,
-            state: Arc::new(Mutex::new(ProcessingState::new())),
         })
     }
     /// Process comprehensive profiling results
@@ -534,21 +518,15 @@ pub struct MemoryProfiler {
     latency_tester: MemoryLatencyTester,
     /// NUMA topology analyzer
     numa_analyzer: NumaTopologyAnalyzer,
-    /// Memory profiling configuration
-    config: MemoryProfilingConfig,
-    /// Profiling state
-    state: Arc<Mutex<MemoryProfilingState>>,
 }
 impl MemoryProfiler {
     /// Create a new memory profiler
-    pub async fn new(config: MemoryProfilingConfig) -> Result<Self> {
+    pub async fn new(_config: MemoryProfilingConfig) -> Result<Self> {
         Ok(Self {
             hierarchy_analyzer: MemoryHierarchyAnalyzer::new(),
             bandwidth_tester: MemoryBandwidthTester::new(),
             latency_tester: MemoryLatencyTester::new(),
             numa_analyzer: NumaTopologyAnalyzer::new(),
-            config,
-            state: Arc::new(Mutex::new(MemoryProfilingState::default())),
         })
     }
     /// Profile comprehensive memory performance
@@ -626,12 +604,8 @@ pub struct BenchmarkExecutor {
     workload_analyzer: RealWorkloadAnalyzer,
     /// Micro-benchmark engine
     micro_benchmarks: MicroBenchmarkEngine,
-    /// Benchmark orchestrator
-    orchestrator: BenchmarkOrchestrator,
     /// Execution configuration
     config: BenchmarkConfig,
-    /// Execution state
-    state: Arc<Mutex<BenchmarkExecutionState>>,
 }
 impl BenchmarkExecutor {
     /// Create a new benchmark executor
@@ -640,9 +614,7 @@ impl BenchmarkExecutor {
             synthetic_benchmarks: SyntheticBenchmarkSuite::new(),
             workload_analyzer: RealWorkloadAnalyzer::new(),
             micro_benchmarks: MicroBenchmarkEngine::new(),
-            orchestrator: BenchmarkOrchestrator::new(),
             config,
-            state: Arc::new(Mutex::new(BenchmarkExecutionState::new())),
         })
     }
     /// Execute comprehensive benchmark suite
@@ -917,10 +889,6 @@ pub struct CpuProfiler {
     benchmark_suite: CpuBenchmarkSuite,
     /// Cache profiling engine
     cache_profiler: Arc<RwLock<CacheAnalyzer>>,
-    /// CPU profiling configuration
-    config: CpuProfilingConfig,
-    /// Profiling state
-    state: Arc<Mutex<CpuProfilingState>>,
 }
 impl CpuProfiler {
     /// Create a new CPU profiler with vendor optimizations
@@ -940,8 +908,6 @@ impl CpuProfiler {
             vendor_detector,
             benchmark_suite,
             cache_profiler,
-            config,
-            state: Arc::new(Mutex::new(CpuProfilingState::default())),
         })
     }
     /// Profile comprehensive CPU performance

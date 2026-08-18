@@ -2,6 +2,7 @@
 name = "trustformers-tokenizers"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -56,7 +57,10 @@ chrono.workspace = true
 rmp-serde.workspace = true
 # Additional dependencies for coverage and serialization
 unicode_categories.workspace = true
-serde_yaml.workspace = true
+# `serde_yaml_ng`, not `serde_yaml`: the original crate was archived by its
+# author and carries RUSTSEC-2024-0320 (unmaintained). `serde_yaml_ng` is the
+# maintained fork with the same API surface.
+serde_yaml_ng.workspace = true
 # Python bindings
 pyo3 = { workspace = true, features = ["extension-module"], optional = true }
 

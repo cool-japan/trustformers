@@ -123,8 +123,6 @@ impl FeatureStatisticsTracker {
             variance,
             min_value,
             max_value,
-            missing_count: 0,
-            total_count: values.len(),
         };
         self.feature_stats.insert(feature_name.to_string(), stats);
         self.last_updated = Utc::now();
@@ -810,8 +808,6 @@ struct FeatureStats {
     variance: f64,
     min_value: f64,
     max_value: f64,
-    missing_count: usize,
-    total_count: usize,
 }
 /// Feature statistics summary
 #[derive(Debug, Clone)]

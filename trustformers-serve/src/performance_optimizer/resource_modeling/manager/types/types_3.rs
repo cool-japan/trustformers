@@ -28,12 +28,10 @@ use super::types_2::{
 };
 
 /// Error recovery manager for fault tolerance
-pub struct ErrorRecoveryManager {
-    enable_recovery: bool,
-}
+pub struct ErrorRecoveryManager {}
 impl ErrorRecoveryManager {
-    pub async fn new(enable_recovery: bool) -> Result<Self> {
-        Ok(Self { enable_recovery })
+    pub async fn new(_enable_recovery: bool) -> Result<Self> {
+        Ok(Self {})
     }
     pub async fn start(&self) -> Result<()> {
         Ok(())
@@ -67,10 +65,6 @@ pub struct ComprehensiveAnalysisResults {
 pub struct ModelingOrchestrator {
     /// Component coordinator reference
     component_coordinator: Arc<ComponentCoordinator>,
-    /// Analysis scheduler reference
-    analysis_scheduler: Arc<AnalysisScheduler>,
-    /// Performance coordinator reference
-    performance_coordinator: Arc<PerformanceCoordinator>,
     /// Workflow definitions
     workflows: Arc<RwLock<HashMap<String, AnalysisWorkflow>>>,
     /// Active workflow executions
@@ -82,15 +76,13 @@ impl ModelingOrchestrator {
     /// Create a new modeling orchestrator
     pub async fn new(
         component_coordinator: Arc<ComponentCoordinator>,
-        analysis_scheduler: Arc<AnalysisScheduler>,
-        performance_coordinator: Arc<PerformanceCoordinator>,
+        _analysis_scheduler: Arc<AnalysisScheduler>,
+        _performance_coordinator: Arc<PerformanceCoordinator>,
     ) -> Result<Self> {
         let workflows = Arc::new(RwLock::new(HashMap::new()));
         let active_executions = Arc::new(RwLock::new(HashMap::new()));
         let orchestrator = Self {
             component_coordinator,
-            analysis_scheduler,
-            performance_coordinator,
             workflows,
             active_executions,
             execution_counter: Arc::new(AtomicU64::new(0)),

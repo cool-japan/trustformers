@@ -870,7 +870,7 @@ impl CoverageReportExporter {
         match format {
             ReportFormat::Json => serde_json::to_string_pretty(report)
                 .map_err(|e| anyhow!("Failed to serialize JSON: {}", e)),
-            ReportFormat::Yaml => serde_yaml::to_string(report)
+            ReportFormat::Yaml => serde_yaml_ng::to_string(report)
                 .map_err(|e| anyhow!("Failed to serialize YAML: {}", e)),
             ReportFormat::Html => Self::export_to_html(report),
             ReportFormat::Markdown => Self::export_to_markdown(report),
@@ -1152,6 +1152,37 @@ mod tests {
         assert!(json_result.is_ok());
         let json = json_result.expect("Operation failed in test");
         assert!(json.contains("vocabulary_coverage"));
+    }
+
+    /// The YAML branch of [`CoverageReportExporter::export_to_string`] had no
+    /// test at all, so nothing ever checked that its output is parseable YAML —
+    /// only that the crate compiled. The branch is now served by
+    /// `serde_yaml_ng` (the maintained fork of the archived `serde_yaml`,
+    /// RUSTSEC-2024-0320), so round-trip the report through it and compare the
+    /// fields on the way back.
+    #[test]
+    fn test_report_export_yaml_round_trip() {
+        let tokenizer = create_test_char_tokenizer();
+        let mut analyzer = CoverageAnalyzer::from_tokenizer(tokenizer);
+
+        analyzer.analyze_input("test").expect("Operation failed in test");
+        let report = analyzer.generate_report().expect("Operation failed in test");
+
+        let yaml = CoverageReportExporter::export_to_string(&report, &ReportFormat::Yaml)
+            .expect("YAML export must succeed");
+        assert!(yaml.contains("vocabulary_coverage"));
+
+        let parsed: CoverageReport =
+            serde_yaml_ng::from_str(&yaml).expect("exported YAML must parse back into a report");
+        assert_eq!(
+            parsed.vocabulary_coverage.coverage_percentage,
+            report.vocabulary_coverage.coverage_percentage
+        );
+        assert_eq!(
+            parsed.metadata.tokenizer_name,
+            report.metadata.tokenizer_name
+        );
+        assert_eq!(parsed.warnings.len(), report.warnings.len());
     }
 
     #[test]

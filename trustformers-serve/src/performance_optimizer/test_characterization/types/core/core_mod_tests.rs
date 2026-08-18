@@ -9,28 +9,6 @@ use std::time::Duration;
 use super::*;
 use crate::performance_optimizer::test_characterization::types::quality::SafetyValidationRule;
 
-struct Lcg {
-    state: u64,
-}
-
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Lcg { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005u64)
-            .wrapping_add(1442695040888963407u64);
-        self.state
-    }
-
-    fn next_f64(&mut self) -> f64 {
-        (self.next() >> 11) as f64 / (1u64 << 53) as f64
-    }
-}
-
 #[test]
 fn test_algorithm_selector_default() {
     let selector = AlgorithmSelector::default();

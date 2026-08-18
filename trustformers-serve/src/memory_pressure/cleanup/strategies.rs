@@ -636,7 +636,28 @@ pub struct CleanupQueueStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory_pressure::cleanup::handlers::GarbageCollectionHandler;
+    /// Handler that reclaims nothing and says so, used purely to exercise the
+    /// engine's registration and selection logic.
+    #[derive(Debug)]
+    struct NoopHandler;
+
+    impl CleanupHandler for NoopHandler {
+        fn cleanup(&self, _pressure_level: MemoryPressureLevel) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+
+        fn estimate_memory_freed(&self) -> u64 {
+            0
+        }
+
+        fn get_priority(&self) -> u32 {
+            100
+        }
+
+        fn name(&self) -> &'static str {
+            "Noop"
+        }
+    }
 
     #[tokio::test]
     async fn test_strategy_engine_creation() {
@@ -652,7 +673,7 @@ mod tests {
         let config = CleanupEngineConfig::default();
         let engine = CleanupStrategyEngine::new(config);
 
-        let handler = Arc::new(GarbageCollectionHandler::new());
+        let handler = Arc::new(NoopHandler);
         engine.register_handler(CleanupStrategy::GarbageCollection, handler).await;
 
         let strategies = engine.select_strategies(MemoryPressureLevel::Medium, None).await;
@@ -665,7 +686,7 @@ mod tests {
         let engine = CleanupStrategyEngine::new(config);
 
         // Register a handler
-        let handler = Arc::new(GarbageCollectionHandler::new());
+        let handler = Arc::new(NoopHandler);
         engine.register_handler(CleanupStrategy::GarbageCollection, handler).await;
 
         // Low pressure should have fewer strategies
@@ -681,7 +702,7 @@ mod tests {
         let engine = CleanupStrategyEngine::new(config);
 
         // Register a handler first
-        let handler = Arc::new(GarbageCollectionHandler::new());
+        let handler = Arc::new(NoopHandler);
         engine.register_handler(CleanupStrategy::GarbageCollection, handler).await;
 
         let context = CleanupContext::new(MemoryPressureLevel::Medium, 0.7, 1024 * 1024 * 1024);

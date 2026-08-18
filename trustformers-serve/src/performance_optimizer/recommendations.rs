@@ -55,8 +55,6 @@ pub struct BatchingRecommendation {
 
 /// Recommendation engine for performance optimization
 pub struct RecommendationEngine {
-    /// Optimization history for analysis
-    optimization_history: OptimizationHistory,
     /// Recommendation scoring weights
     scoring_weights: ScoringWeights,
     /// Minimum confidence threshold for recommendations
@@ -397,9 +395,8 @@ pub struct RollbackPlan {
 
 impl RecommendationEngine {
     /// Create new recommendation engine
-    pub fn new(optimization_history: OptimizationHistory) -> Self {
+    pub fn new(_optimization_history: OptimizationHistory) -> Self {
         Self {
-            optimization_history,
             scoring_weights: ScoringWeights::default(),
             confidence_threshold: 0.7,
         }

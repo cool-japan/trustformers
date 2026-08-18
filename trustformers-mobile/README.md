@@ -6,7 +6,7 @@ Mobile deployment infrastructure for running transformer models on iOS and Andro
 
 ## Status
 
-**Alpha**: Core mobile infrastructure — device detection, battery/thermal/network-aware adaptation, OTA model management, quantization, and the mobile performance profiler — is implemented and covered by ~742 passing crate-level tests (0 clippy warnings, 26 doctests passing / 0 failed / 2 ignored). iOS (Core ML/Metal via `TrustformersKit`) and Android (JNI/NNAPI via the `trustformers-android` AAR) native bridges are implemented and exercised by real Swift/Java/Kotlin source. Cross-platform framework integration is uneven: Flutter (`trustformers_flutter`) and Unity (`com.trustformers.mobile`) ship real Dart/C# packages backed by this crate's FFI; React Native currently has Rust-side JSI/Turbo Module bridge code and a detailed usage example, but no packaged npm module lives in this repository yet. A small number of advanced/experimental modules (post-quantum and homomorphic-encryption primitives in `advanced_security.rs`) are simplified reference code rather than production-grade — see [Known Limitations](#known-limitations).
+**Alpha**: Core mobile infrastructure — device detection, battery/thermal/network-aware adaptation, OTA model management, quantization, and the mobile performance profiler — is implemented and covered by 1,036 passing crate-level tests, default features (`cargo nextest run -p trustformers-mobile`, verified 2026-08-18; 4 skipped, 0 failed). This undercounts total coverage: 91 more tests behind the non-default `on-device-training` feature, plus Metal-specific tests, aren't included. iOS (Core ML/Metal via `TrustformersKit`) and Android (JNI/NNAPI via the `trustformers-android` AAR) native bridges are implemented and exercised by real Swift/Java/Kotlin source. Cross-platform framework integration is uneven: Flutter (`trustformers_flutter`) and Unity (`com.trustformers.mobile`) ship real Dart/C# packages backed by this crate's FFI; React Native currently has Rust-side JSI/Turbo Module bridge code and a detailed usage example, but no packaged npm module lives in this repository yet. `advanced_security.rs`'s post-quantum and homomorphic-encryption primitives are real algorithms (FIPS 203/204/205, Paillier, Shamir, Schnorr — see [Known Limitations](#known-limitations)), not placeholder reference code, though they haven't been independently security-audited.
 
 Public API surface: **~3,860 public items** (functions, structs, enums, traits — including impl-block methods) across 187 files in `src/`. No `todo!()`/`unimplemented!()` macros remain in the crate; where simplified/placeholder logic does exist (see below), it returns a working value rather than panicking.
 
@@ -348,10 +348,11 @@ cd android-lib && ./gradlew test
 ## Known Limitations
 
 - Alpha status: API surface may still change before a Stable designation
-- `advanced_security.rs` implements post-quantum KEM (Kyber/McEliece stand-ins), homomorphic encryption, and secure multi-party computation as **simplified/mock reference code**, not audited cryptography — do not depend on it for real confidentiality guarantees yet
+- **Updated 2026-08-18** (this line previously said "simplified/mock reference code"; it no longer is): `advanced_security.rs` implements real ML-KEM-768/ML-DSA-65/SLH-DSA-SHAKE-128f (FIPS 203/204/205, via the `ml-kem`/`ml-dsa`/`slh-dsa` RustCrypto crates), real Paillier additively-homomorphic encryption, and real Shamir secret sharing — each with regression tests. Genuinely unimplemented pieces (full FHE, Classic McEliece, Falcon, circuit proof systems, garbled circuits) return a structured error naming what's actually available rather than a placeholder. Real remaining caveats: the RustCrypto PQC crates state they haven't been independently audited, and the Paillier/Schnorr code's `num-bigint`-based `modpow` isn't constant-time, so it isn't hardened against a local timing attacker — keep both in mind before depending on this for real confidentiality guarantees.
 - `react-native-plugin/` in this repository contains a usage example (`TrustformersCompleteExample.tsx`) only — there is no `package.json` or module source here, so React Native integration is not yet an installable package from this repo
 - Flutter, Unity, iOS, and Android sub-packages version independently at `1.0.0` and do not track the workspace's `0.2.1` release
 - `tflite_nnapi_delegate.rs` is fully written but has no `pub mod` declaration anywhere in `lib.rs` — the `tflite-nnapi` Cargo feature currently gates nothing (orphaned, same pattern as the now-fixed `swin`/`deit` in `trustformers-models` before this release, or the now-deleted `android_renderscript.rs` here). Not yet triaged: wire it up or delete it.
+- `battery.rs`'s `power_consumption_mw` field is hardcoded (`Some(2500.0)`, `Some(2200.0)`, `Some(1800.0)` at various call sites) rather than read from a real platform power API or honestly returned as `None`; the rest of `battery.rs` (battery level, charging state, thermal correlation) is real.
 - Core ML Neural Engine requires iOS 16+ for latest features
 - NNAPI performance varies significantly across Android devices
 - Large models require quantization for mobile deployment
@@ -364,8 +365,8 @@ cd android-lib && ./gradlew test
 - More AR/VR integrations
 - Real-time collaboration features
 - WebNN integration for future platforms
-- Replace the `advanced_security.rs` placeholder cryptography with audited implementations
-- Publish an actual npm package for the React Native bridge
+- Get the real PQC/Paillier/Schnorr cryptography in `advanced_security.rs` (see Known Limitations above) independently security-audited
+- Publish an actual npm package for the React Native bridge (`react-native-plugin/` still ships only an example directory as of 2026-08-18)
 
 ## License
 

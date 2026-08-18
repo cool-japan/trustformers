@@ -34,11 +34,11 @@ Python bindings.
 ✅ **SIMD ACCELERATION** — AVX2 (x86_64) and NEON (aarch64) intrinsics for character classification, with a scalar fallback elsewhere
 ✅ **ASYNC TOKENIZATION** — non-blocking encode/decode via `tokio` (`AsyncTokenizer`); CPU-parallel batches separately via `scirs2-core`
 ✅ **VOCABULARY INTELLIGENCE** — `VocabIntelligenceAnalyzer` (semantic/compression/cross-lingual/domain/evolution analysis + scoring)
-⚠️ **PURE-RUST HYGIENE FOLLOW-UP** — the `hangul = "0.1.3"` dependency has no references anywhere in `src/` (Korean Hangul decomposition uses inline Unicode code-point arithmetic instead); candidate for removal or wiring-in
+✅ **HANGUL DEPENDENCY REMOVED** (verified stale 2026-08-18) — `Cargo.toml` no longer declares `hangul`; Korean Hangul decomposition uses inline Unicode code-point arithmetic (`korean.rs`). This line previously described it as a still-present "candidate for removal"; the removal already landed (see CHANGELOG 0.2.0).
 
 ### Test Metrics
-- **Test Count:** ~500 tests in this crate (workspace-wide: 18,102 passed / 0 failed / 119 skipped — verified 2026-07-01)
-- **Pass Rate:** 100%
+- **Test Count:** `cargo nextest run -p trustformers-tokenizers` (2026-08-18, default features) — 620 tests, 619 passed, **1 FAILED**, 0 skipped. Workspace-wide baseline reported to this documentation pass: 20,629 passed / 43 skipped / 0 failed (`cargo nextest run --workspace`, default features) — that baseline predates the one failure below, which was found while writing this file; see root `TODO.md` P0 #1.
+- **Pass Rate:** 99.8% in this crate right now, not 100% — `workspace_hygiene::workspace_dependency_table_has_no_unused_entries` fails: `trustformers-serve` dropped 7 cloud-SDK dependencies with no remaining consumer, and root `Cargo.toml`'s `[workspace.dependencies]` still declares all 7. This crate's test is correctly catching a real, current problem in a manifest this crate does not own; see root `TODO.md` for the fix (delete the 7 lines from root `Cargo.toml`).
 - **Public API Surface:** ~1,341 `pub fn`/`struct`/`enum`/`trait` items (+2 for `NFKCNormalizer`/`NFKDNormalizer`, added 2026-07-09)
 - **SLoC:** 51,372 (`tokei src/`, 68 files, 2026-07-01)
 - **Coverage:** Encoding/decoding, special tokens, edge cases, language-specific, domain-specific
@@ -350,8 +350,7 @@ Reference docs live under `docs/migration/`:
   - Design: 3 new files under docs/. Follow docs/migration/README.md's STRUCTURE (tables, checklists, troubleshooting section) but NOT its content practice — that file was found to contain fabricated benchmark numbers and references to APIs that don't exist anywhere in src/. Every code sample in the new docs must be grep-verified against a real `pub fn` signature before inclusion. Use README.md's honest style as the tone template instead.
   - Files: new docs/tokenizer-selection-guide.md, docs/performance-tuning-guide.md, docs/troubleshooting-guide.md.
   - Tests: grep every method name used in the new docs against `grep -rn "pub fn <name>" src/` before finalizing.
-  - Risk: repeating docs/migration/README.md's fabrication pattern — explicitly guard against it.
-- [~] Write tokenizer-selection/performance-tuning/troubleshooting guides (planned 2026-07-05) — see the combined plan block above; same deliverable, implemented once.
+  - Risk: repeating docs/migration/README.md's fabrication pattern — explicitly guard against it. (2026-08-18: that pattern was found and fixed this pass — the migration guides' invented performance tables are removed. The 3 new guide files below still don't exist; this remains genuinely open.)
 
 ---
 
@@ -359,7 +358,7 @@ Reference docs live under `docs/migration/`:
 
 ### Test Coverage
 
-- ✅ **~500 unit tests** in this crate, 100% pass rate (workspace-wide: 18,102 passed / 0 failed / 119 skipped, 2026-07-01)
+- **620 tests** in this crate as of 2026-08-18 (`cargo nextest run -p trustformers-tokenizers`), 619 passing — **not** 100%: see "Test Metrics" above for the 1 currently-failing hygiene test, which is a real, current finding, not flaky.
 - ✅ **Encoding/Decoding Correctness** — round-trip verification
 - ✅ **Special Token Handling** — insertion/preservation checks
 - ✅ **Edge Cases** — empty strings, very long texts, Unicode
@@ -379,7 +378,6 @@ Reference docs live under `docs/migration/`:
 - `jax`, `tensorflow`, `pytorch` features are pure-Rust detection/data-structure/metadata layers — not real JAX/TensorFlow/PyTorch execution (each adds zero extra crate dependencies)
 - `gpu` feature: no real CUDA/ROCm/OpenCL/Vulkan kernel dispatch is compiled in (this crate is pure Rust with no unsafe FFI GPU driver bindings) — `GpuTokenizer::tokenize_batch` always executes via the real wrapped `Tokenizer`, sequentially or chunked across CPU cores in parallel (`scirs2_core::parallel_ops`) depending on `GpuTokenizerConfig::enable_gpu`; set `require_real_gpu: true` to get a hard `BackendUnavailable` error instead of the CPU fallback
 - `onnx` feature: no real ONNX protobuf format or ONNX Runtime session — `OnnxTokenizerExporter` writes (and `OnnxTokenizerRuntime` reads back) this crate's own JSON interchange format, structured to mirror ONNX's graph/tensor model; `OnnxTokenizerRuntime::tokenize` performs real greedy longest-match tokenization against the real vocabulary recovered from that file (not hash-derived), and rejects a genuine binary `.onnx` protobuf file with a structured error rather than fabricating a vocabulary for it
-- The `hangul = "0.1.3"` dependency has no references in `src/`; Korean Hangul decomposition uses inline Unicode arithmetic instead
 - `AutoTokenizer` is Python-only; Rust callers use `TokenizerWrapper` (enum dispatch) or a concrete tokenizer type directly
 - This crate's `pyproject.toml` still targets a `maturin` extension-module build, but `Cargo.toml` no longer declares a `cdylib` target (moved to `trustformers-py`) — `maturin build` here will not currently produce a working native module
 - No `python/tests/` directory exists yet
@@ -436,16 +434,12 @@ Reference docs live under `docs/migration/`:
   - Files: trustformers-tokenizers/src/visualization.rs, src/alignment.rs.
   - Tests: invariant test that computed byte ranges exactly tile 0..text.len() with no gaps/overlaps.
   - Risk: low — confirmed no dependency cycle risk; just don't add trustformers-debug as a dependency, copy the small pattern.
-- [~] Delete unused hangul dependency (planned 2026-07-05)
-  - Goal/Design: remove hangul = "0.1.3" from Cargo.toml — confirmed zero usage anywhere (korean.rs hand-rolls the real Unicode arithmetic); also confirmed the crate wouldn't even fully solve the problem if wired in (decomposition-only, no composition function).
-  - Files: trustformers-tokenizers/Cargo.toml; drop orphaned mentions in TODO.md/README.md.
-  - Tests: cargo tree -i hangul reports not-found after removal.
-  - Risk: none — highest-confidence item in the batch.
+- [x] Delete unused hangul dependency — **done, verified 2026-08-18**: `rg hangul trustformers-tokenizers/Cargo.toml` finds nothing; `cargo tree -i hangul` would report not-found. This item was still open in this file despite the removal already having landed (CHANGELOG 0.2.0).
 - [ ] Automatic tokenizer repair/optimization
 
 ### Housekeeping
 - [ ] Add a `python/tests/` suite (referenced in older docs but never created)
-- [~] Write tokenizer-selection/performance-tuning/troubleshooting guides (planned 2026-07-05) — see the combined plan block above; same deliverable, implemented once.
+- This guide-writing item was previously also listed here as a third copy; collapsed into the single entry above (search "tokenizer-selection" in this file) rather than tracked three times, per the 2026-08-18 documentation pass.
 
 ---
 
@@ -453,7 +447,7 @@ Reference docs live under `docs/migration/`:
 
 ### Code Standards
 - **Use trustformers-core/scirs2-core abstractions only** (no external deps directly — enforced via `trustformers-core::tokenizer_backend` for the upstream `tokenizers` crate)
-- **File size limit:** <2000 lines per file — currently satisfied; largest file is `src/gpu_tokenization.rs` at 1,616 lines (verified 2026-07-01)
+- **File size limit:** <2000 lines per file — currently satisfied; largest file is `src/advanced_vocab_intelligence/avi_analyzer.rs` at 1,539 lines (`wc -l`, verified 2026-08-18; `gpu_tokenization.rs`, previously cited as largest at 1,616 lines, is now 865 lines)
 - **Error handling:** Use `Result<T, TrustformersError>`
 - **Testing:** Comprehensive test coverage required
 - **Naming:** snake_case for all identifiers
@@ -480,6 +474,6 @@ cargo clippy -p trustformers-tokenizers --all-features -- -D warnings
 **Last Updated:** 2026-07-09
 **Version:** 0.2.1
 **Status:** Stable
-**Test Coverage:** ~500 tests in this crate, 100% pass rate (workspace: 18,102 passed / 0 failed / 119 skipped)
-**Public API:** ~1,341 items
-**SLoC:** 51,372
+**Test Coverage:** 620 tests in this crate as of 2026-08-18, 619 passing (see "Test Metrics" above for the 1 current, real failure — a hygiene gate catching an orphaned root-manifest entry, not a bug in this crate)
+**Public API:** ~1,341 items (not re-counted this pass)
+**SLoC:** 45,325 (`tokei`, 2026-08-18)

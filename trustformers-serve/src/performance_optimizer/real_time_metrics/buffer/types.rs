@@ -10,10 +10,9 @@ use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{HashMap, VecDeque},
     io::{Read, Write},
-    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc, Weak,
+        Arc,
     },
     time::{Duration, Instant},
 };
@@ -539,8 +538,6 @@ pub struct CircularBuffer<T> {
     id: String,
     /// Overflow strategy when buffer is full
     overflow_strategy: OverflowStrategy,
-    /// Memory pool reference for efficient allocation
-    pool_ref: Option<Weak<BufferPool<T>>>,
 }
 impl<T> CircularBuffer<T> {
     /// Create a new circular buffer with specified capacity
@@ -571,7 +568,6 @@ impl<T> CircularBuffer<T> {
             created_at: Instant::now(),
             id,
             overflow_strategy: OverflowStrategy::Overwrite,
-            pool_ref: None,
         }
     }
     /// Create a new buffer with custom configuration
@@ -588,7 +584,6 @@ impl<T> CircularBuffer<T> {
             created_at: Instant::now(),
             id,
             overflow_strategy: strategy,
-            pool_ref: None,
         }
     }
     /// Push a new item into the buffer
@@ -877,16 +872,6 @@ impl<T> MemoryStorage<T> {
 /// File-based storage backend for persistence
 #[derive(Debug)]
 pub struct FileStorage<T> {
-    /// Base directory for file storage
-    base_dir: PathBuf,
-    /// Storage statistics
-    stats: Arc<StorageStats>,
-    /// Compression configuration
-    compression: Option<CompressionConfig>,
-    /// File rotation configuration
-    rotation_config: FileRotationConfig,
-    /// Concurrent file operations limit
-    operation_semaphore: Arc<Semaphore>,
     /// Phantom data to maintain generic type parameter
     _phantom: std::marker::PhantomData<T>,
 }

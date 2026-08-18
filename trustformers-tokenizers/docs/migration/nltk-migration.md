@@ -5,13 +5,8 @@ This guide will help you migrate from NLTK's tokenization tools to TrustformeRS 
 ## Why Migrate from NLTK?
 
 ### Performance Benefits
-| Metric | NLTK | TrustformeRS Tokenizers | Improvement |
-|--------|------|-------------------------|-------------|
-| **Tokenization Speed** | 50K tokens/sec | 1.1M tokens/sec | **2200% faster** |
-| **Memory Usage** | 200MB baseline | 60MB baseline | **70% less memory** |
-| **Binary Size** | 100MB | 20MB | **80% smaller** |
-| **Cold Start Time** | 2000ms | 150ms | **92% faster startup** |
-| **Batch Processing** | 80K tokens/sec | 3.8M tokens/sec | **4750% faster batching** |
+
+> **Note (2026-08-18):** this section previously carried a table of specific tokens/sec, memory, binary-size, and startup-time figures presented as a measured comparison against NLTK. No benchmark harness in this repository produced those numbers, and the "TrustformeRS Tokenizers" figure quoted for the identical code path is different in every one of this crate's migration guides (1.1M tokens/sec here, 1.2M in the HuggingFace guide, 1.3M in the Fairseq guide, and so on) — real measurements of the same binary don't vary by which competitor they're being compared against. The table has been removed rather than left in place or re-guessed. To get real numbers, run this crate's own Criterion benchmark (`trustformers-tokenizers/benches/tokenizer_performance.rs`) against a real NLTK installation on your own hardware.
 
 ### Feature Advantages
 - **Modern tokenization algorithms** with backward compatibility

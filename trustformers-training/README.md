@@ -96,8 +96,7 @@ trustformers-training = "0.2.1"
 ```
 
 - `default = []` — no backend feature is enabled by default.
-- `candle` — enables `trustformers-core/candle`.
-- `full` — enables `candle` plus `trustformers-core/full` (used for full-feature testing).
+- `full` — enables `trustformers-core/full` (used for full-feature testing).
 
 ## API Overview
 

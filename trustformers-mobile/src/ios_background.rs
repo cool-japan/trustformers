@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use trustformers_core::{CoreError, Tensor};
+use trustformers_core::{Tensor, TrustformersError};
 
 /// iOS background processing configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +101,12 @@ pub struct iOSBackgroundManager {
     task_queue: Arc<Mutex<Vec<PendingTask>>>,
     background_state: Arc<Mutex<BackgroundState>>,
     stats: Arc<Mutex<BackgroundStats>>,
+    /// The real engine [`Self::power_efficient_inference`]/
+    /// [`Self::standard_inference`] run against, loaded via
+    /// [`Self::load_model_from_file`]. `None` until a model is loaded --
+    /// background inference on no model is a hard error (see those
+    /// methods), never a fabricated identity pass.
+    inference_engine: Arc<Mutex<Option<crate::inference::MobileInferenceEngine>>>,
 }
 
 impl iOSBackgroundManager {
@@ -113,7 +119,21 @@ impl iOSBackgroundManager {
             task_queue: Arc::new(Mutex::new(Vec::new())),
             background_state: Arc::new(Mutex::new(BackgroundState::Foreground)),
             stats: Arc::new(Mutex::new(BackgroundStats::default())),
+            inference_engine: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Load a real model (safetensors / PyTorch `.bin`/`.pt`/`.pth` / ONNX,
+    /// auto-detected -- see [`crate::inference::MobileInferenceEngine`])
+    /// for [`Self::power_efficient_inference`]/[`Self::standard_inference`]
+    /// to run background inference against. Must succeed before any
+    /// background inference task can complete.
+    pub fn load_model_from_file(&self, model_path: &str) -> Result<()> {
+        let mut engine = crate::inference::MobileInferenceEngine::new(self.mobile_config.clone())?;
+        engine.load_model_from_file(model_path)?;
+        let mut slot = self.inference_engine.lock().unwrap_or_else(|p| p.into_inner());
+        *slot = Some(engine);
+        Ok(())
     }
 
     /// Register background task capability
@@ -214,7 +234,7 @@ impl iOSBackgroundManager {
 
         if !is_background {
             return Err(
-                TrustformersError::InvalidState("Not in background mode".to_string()).into(),
+                TrustformersError::invalid_state("Not in background mode".to_string()).into(),
             );
         }
 
@@ -265,7 +285,7 @@ impl iOSBackgroundManager {
     /// Handle silent notification for background processing
     pub fn handle_silent_notification(&self, user_info: HashMap<String, String>) -> Result<()> {
         if !self.config.silent_notifications {
-            return Err(TrustformersError::InvalidState(
+            return Err(TrustformersError::invalid_state(
                 "Silent notifications not enabled".to_string(),
             )
             .into());
@@ -292,7 +312,7 @@ impl iOSBackgroundManager {
     /// Handle Background App Refresh
     pub fn handle_background_app_refresh(&self) -> Result<()> {
         if !self.config.background_app_refresh {
-            return Err(TrustformersError::InvalidState(
+            return Err(TrustformersError::invalid_state(
                 "Background App Refresh not enabled".to_string(),
             )
             .into());
@@ -431,17 +451,39 @@ impl iOSBackgroundManager {
         }
     }
 
-    /// Power-efficient inference for background processing
+    /// Power-efficient inference for background processing: the real
+    /// engine loaded via [`Self::load_model_from_file`], with FP16 already
+    /// applied by [`Self::apply_background_optimizations`] ahead of this
+    /// call. A distinct "reduced model complexity" execution path (e.g.
+    /// early-exit/adaptive depth) is not implemented -- FP16 is the one
+    /// power/latency optimization actually applied today; this no longer
+    /// pretends to apply more by returning the input unchanged. Previously
+    /// `Ok(input.clone())` regardless of whether any model was even
+    /// loaded.
     fn power_efficient_inference(&self, input: &Tensor) -> Result<Tensor> {
-        // Use reduced model complexity for background inference
-        // This would integrate with the adaptive inference engine
-        Ok(input.clone()) // Placeholder
+        self.run_loaded_model(input)
     }
 
-    /// Standard inference
+    /// Standard (non-power-conserving) inference: the same real loaded
+    /// engine as [`Self::power_efficient_inference`]. Previously
+    /// `Ok(input.clone())`.
     fn standard_inference(&self, input: &Tensor) -> Result<Tensor> {
-        // Regular inference pipeline
-        Ok(input.clone()) // Placeholder
+        self.run_loaded_model(input)
+    }
+
+    /// Shared real-execution path for both inference modes above: locks
+    /// [`Self::inference_engine`] and runs `input` through it, erroring
+    /// honestly (not returning `input` unchanged) when no model has been
+    /// loaded yet.
+    fn run_loaded_model(&self, input: &Tensor) -> Result<Tensor> {
+        let mut slot = self.inference_engine.lock().unwrap_or_else(|p| p.into_inner());
+        let engine = slot.as_mut().ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "no model is loaded (call iOSBackgroundManager::load_model_from_file first)"
+                    .to_string(),
+            )
+        })?;
+        engine.inference(input)
     }
 
     /// Check for model updates in background
@@ -576,22 +618,38 @@ impl iOSBackgroundManager {
         }
     }
 
-    /// Estimate memory usage
+    /// Real resident memory usage of this process, in MB, via `sysinfo` --
+    /// the same crate/pattern `crash_reporter::collect_memory_usage` and
+    /// `profiler::collect_real_platform_metrics` already use. Previously a
+    /// hardcoded `25` regardless of actual memory pressure.
     fn estimate_memory_usage(&self) -> u32 {
-        // Estimate current memory usage in MB
-        25 // Placeholder
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+        let pid = Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+        system.process(pid).map(|p| (p.memory() / (1024 * 1024)) as u32).unwrap_or(0)
     }
 
-    /// Estimate power consumption
-    fn estimate_power_consumption(&self) -> f32 {
-        // Estimate power consumption in watts
-        0.5 // Placeholder
+    /// Power draw in watts has no portable `sysinfo`-or-otherwise API this
+    /// pure-Rust crate can read from -- a real reading needs
+    /// platform-specific power telemetry (e.g. iOS's private power APIs)
+    /// this module does not bridge to. `None` is the honest "not
+    /// measurable from here" answer, matching the same convention
+    /// `battery::BatteryReading::power_consumption_mw` already uses in
+    /// this crate. Previously a hardcoded `0.5` regardless of the device's
+    /// actual power draw.
+    fn estimate_power_consumption(&self) -> Option<f32> {
+        None
     }
 
     /// Log background events
     fn log_background_event(&self, message: &str) {
-        // In a real implementation, this would use proper logging
-        println!("[iOS Background] {}", message);
+        tracing::debug!(target: "trustformers_mobile::ios_background", "{message}");
     }
 
     /// Get background processing statistics
@@ -666,7 +724,10 @@ pub struct BackgroundInferenceResult {
     pub output: Tensor,
     pub execution_time: Duration,
     pub memory_used_mb: u32,
-    pub power_consumption: f32,
+    /// `None` when power draw could not be measured (always, on this
+    /// pure-Rust crate today -- see [`iOSBackgroundManager::estimate_power_consumption`]'s
+    /// doc comment) rather than a fabricated wattage figure.
+    pub power_consumption: Option<f32>,
     pub task_id: String,
 }
 
@@ -746,5 +807,41 @@ mod tests {
         };
 
         assert!(task.priority_score() >= 3.0);
+    }
+
+    /// Regression test for the previous `estimate_memory_usage`, which
+    /// returned the hardcoded constant `25` regardless of this process's
+    /// actual memory footprint. A real `sysinfo`-backed measurement of a
+    /// live process must report a real, positive RSS.
+    #[test]
+    fn test_estimate_memory_usage_reports_a_real_positive_value() {
+        let background_config = iOSBackgroundConfig::default();
+        let mobile_config = MobileConfig::default();
+        let manager =
+            iOSBackgroundManager::new(background_config, mobile_config).expect("manager creation");
+
+        let usage = manager.estimate_memory_usage();
+        assert!(
+            usage > 0,
+            "a live test process must have nonzero measured RSS, not the old hardcoded 25 \
+             (which this assertion cannot distinguish from a real number that happened to also \
+             be nonzero -- the point is this is a real `sysinfo` call, not that its exact value \
+             matters)"
+        );
+    }
+
+    /// Regression test for the previous `estimate_power_consumption`,
+    /// which returned the hardcoded constant `0.5` watts regardless of
+    /// actual power draw -- a specific-looking number with zero
+    /// measurement behind it. This crate has no real power-draw sensor
+    /// API, so the honest answer is `None`, not an invented wattage.
+    #[test]
+    fn test_estimate_power_consumption_is_honest_none_not_a_fabricated_wattage() {
+        let background_config = iOSBackgroundConfig::default();
+        let mobile_config = MobileConfig::default();
+        let manager =
+            iOSBackgroundManager::new(background_config, mobile_config).expect("manager creation");
+
+        assert_eq!(manager.estimate_power_consumption(), None);
     }
 }

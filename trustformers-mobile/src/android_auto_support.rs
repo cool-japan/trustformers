@@ -3,11 +3,13 @@
 //! This module provides Android Auto integration for TrustformeRS, enabling in-car AI inference
 //! with specialized optimizations for automotive environments.
 
+use crate::MobileConfig;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use serde::{Serialize, Deserialize};
-use crate::{MobileConfig, Result, CoreError};
+use trustformers_core::errors::{unsupported_operation, Result};
+use trustformers_core::TrustformersError;
 
 /// Android Auto configuration for TrustformeRS
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,9 +237,9 @@ pub enum AlertMechanism {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MappingPrecision {
-    Standard,   // ~3-5 meter accuracy
-    Enhanced,   // ~1-3 meter accuracy
-    Precise,    // ~0.3-1 meter accuracy (lane-level)
+    Standard, // ~3-5 meter accuracy
+    Enhanced, // ~1-3 meter accuracy
+    Precise,  // ~0.3-1 meter accuracy (lane-level)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,6 +343,10 @@ pub enum NetworkQuality {
     Fair,
     Poor,
     Offline,
+    /// Not yet measured -- distinct from [`Self::Offline`] (measured, and
+    /// there is no connection), used for the status this integration
+    /// reports before any real network-quality sample has been taken.
+    Unknown,
 }
 
 /// Android Auto integration manager
@@ -511,10 +517,7 @@ impl Default for NavigationAssistanceConfig {
                     HazardType::TrafficIncidents,
                     HazardType::ConstructionZones,
                 ],
-                alert_mechanisms: vec![
-                    AlertMechanism::Audio,
-                    AlertMechanism::Visual,
-                ],
+                alert_mechanisms: vec![AlertMechanism::Audio, AlertMechanism::Visual],
                 integration_with_vehicle_systems: true,
             },
             poi_recommendations: true,
@@ -577,14 +580,20 @@ impl Default for AutomotivePrivacySettings {
 impl Default for AutomotivePerformanceConstraints {
     fn default() -> Self {
         Self {
-            max_cpu_usage: 30.0, // Conservative for automotive
-            max_memory_usage: 256, // 256MB max
+            max_cpu_usage: 30.0,             // Conservative for automotive
+            max_memory_usage: 256,           // 256MB max
             max_safety_critical_latency: 50, // 50ms for safety-critical
-            max_power_consumption: 5.0, // 5W max
-            min_availability: 99.9, // 99.9% uptime required
+            max_power_consumption: 5.0,      // 5W max
+            min_availability: 99.9,          // 99.9% uptime required
             real_time_requirements: RealTimeRequirements {
-                hard_real_time_tasks: vec!["hazard_detection".to_string(), "emergency_response".to_string()],
-                soft_real_time_tasks: vec!["voice_recognition".to_string(), "navigation".to_string()],
+                hard_real_time_tasks: vec![
+                    "hazard_detection".to_string(),
+                    "emergency_response".to_string(),
+                ],
+                soft_real_time_tasks: vec![
+                    "voice_recognition".to_string(),
+                    "navigation".to_string(),
+                ],
                 deadline_miss_tolerance: 0.01, // 1% tolerance
                 priority_scheduling: true,
             },
@@ -630,12 +639,15 @@ impl AndroidAutoIntegration {
     /// Connect to Android Auto
     pub fn connect(&self) -> Result<()> {
         if !self.config.enabled {
-            return Err(TrustformersError::runtime_error("Android Auto not enabled".into()).into());
+            return Err(TrustformersError::runtime_error(
+                "Android Auto not enabled".into(),
+            ));
         }
 
         // Simulate connection process
-        let mut status = self.status.lock()
-            .map_err(|_| TrustformersError::runtime_error("Failed to acquire status lock".into())?;
+        let mut status = self.status.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire status lock".into())
+        })?;
 
         status.connected = true;
         status.vehicle_info = Some(VehicleInfo {
@@ -672,8 +684,9 @@ impl AndroidAutoIntegration {
 
     /// Disconnect from Android Auto
     pub fn disconnect(&self) -> Result<()> {
-        let mut status = self.status.lock()
-            .map_err(|_| TrustformersError::runtime_error("Failed to acquire status lock".into())?;
+        let mut status = self.status.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire status lock".into())
+        })?;
 
         status.connected = false;
         status.vehicle_info = None;
@@ -693,8 +706,9 @@ impl AndroidAutoIntegration {
 
     /// Update driving state
     pub fn update_driving_state(&self, state: DrivingState) -> Result<()> {
-        let mut safety = self.safety_monitor.lock()
-            .map_err(|_| TrustformersError::runtime_error("Failed to acquire safety lock".into())?;
+        let mut safety = self.safety_monitor.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire safety lock".into())
+        })?;
 
         safety.driving_state = state;
 
@@ -704,24 +718,26 @@ impl AndroidAutoIntegration {
         match state {
             DrivingState::Moving => {
                 if self.config.safety_mode.enable_driving_restrictions {
-                    safety.safety_restrictions.push("visual_interactions_limited".to_string().into());
+                    safety.safety_restrictions.push("visual_interactions_limited".to_string());
 
                     if self.config.safety_mode.disable_non_essential_inference {
-                        safety.safety_restrictions.push("non_essential_inference_disabled".to_string());
+                        safety
+                            .safety_restrictions
+                            .push("non_essential_inference_disabled".to_string());
                     }
 
                     if self.config.safety_mode.voice_only_while_driving {
                         safety.safety_restrictions.push("voice_only_interaction".to_string());
                     }
                 }
-            }
+            },
             DrivingState::Parked | DrivingState::Idle => {
                 // Fewer restrictions when not moving
-            }
+            },
             DrivingState::Unknown => {
                 // Apply conservative restrictions
                 safety.safety_restrictions.push("conservative_mode".to_string());
-            }
+            },
         }
 
         // Update status
@@ -736,41 +752,53 @@ impl AndroidAutoIntegration {
     /// Process voice command
     pub fn process_voice_command(&self, audio_data: &[f32]) -> Result<String> {
         if !self.config.voice_processing.enabled {
-            return Err(TrustformersError::runtime_error("Voice processing not enabled".into()).into());
+            return Err(TrustformersError::runtime_error(
+                "Voice processing not enabled".into(),
+            ));
         }
 
         // Check safety restrictions
-        let safety = self.safety_monitor.lock()
-            .map_err(|_| TrustformersError::runtime_error("Failed to acquire safety lock".into())?;
+        let safety = self.safety_monitor.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire safety lock".into())
+        })?;
 
-        if safety.driving_state == DrivingState::Moving &&
-           !self.config.safety_mode.voice_only_while_driving {
-            return Err(TrustformersError::runtime_error("Voice commands restricted while driving".into()).into());
+        if safety.driving_state == DrivingState::Moving
+            && !self.config.safety_mode.voice_only_while_driving
+        {
+            return Err(TrustformersError::runtime_error(
+                "Voice commands restricted while driving".into(),
+            ));
         }
 
         drop(safety);
 
         // Process voice command (simplified implementation)
-        let voice_processor = self.voice_processor.lock()
-            .map_err(|_| TrustformersError::runtime_error("Failed to acquire voice processor lock".into())?;
+        let voice_processor = self.voice_processor.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire voice processor lock".into())
+        })?;
 
         if let Some(processor) = voice_processor.as_ref() {
             // Simplified voice processing
             let command = self.recognize_speech(audio_data)?;
             Ok(command)
         } else {
-            Err(TrustformersError::runtime_error("Voice processor not initialized".into()).into())
+            Err(TrustformersError::runtime_error(
+                "Voice processor not initialized".into(),
+            ))
         }
     }
 
     /// Get navigation suggestions
     pub fn get_navigation_suggestions(&self, destination: &str) -> Result<Vec<String>> {
         if !self.config.navigation_assistance.enabled {
-            return Err(TrustformersError::runtime_error("Navigation assistance not enabled".into()).into());
+            return Err(TrustformersError::runtime_error(
+                "Navigation assistance not enabled".into(),
+            ));
         }
 
-        let nav_assistant = self.navigation_assistant.lock()
-            .map_err(|_| TrustformersError::runtime_error("Failed to acquire navigation lock".into())?;
+        let nav_assistant = self.navigation_assistant.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire navigation lock".into())
+        })?;
 
         if let Some(assistant) = nav_assistant.as_ref() {
             // Simplified navigation suggestions
@@ -780,28 +808,32 @@ impl AndroidAutoIntegration {
                 format!("Avoid tolls route to {}", destination),
             ])
         } else {
-            Err(TrustformersError::runtime_error("Navigation assistant not initialized".into()).into())
+            Err(TrustformersError::runtime_error(
+                "Navigation assistant not initialized".into(),
+            ))
         }
     }
 
     /// Handle emergency situation
     pub fn handle_emergency(&self, emergency_type: &str) -> Result<()> {
-        let mut safety = self.safety_monitor.lock()
-            .map_err(|_| TrustformersError::runtime_error("Failed to acquire safety lock".into())?;
+        let mut safety = self.safety_monitor.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire safety lock".into())
+        })?;
 
         safety.emergency_state = true;
 
         // Emergency overrides safety restrictions
         if self.config.safety_mode.emergency_override {
             safety.safety_restrictions.clear();
-            safety.safety_restrictions.push("emergency_mode".to_string().into());
+            safety.safety_restrictions.push("emergency_mode".to_string());
         }
 
         // Log emergency (in real implementation, would contact emergency services)
         println!("EMERGENCY: {} detected", emergency_type);
 
-        if self.config.privacy_settings.emergency_data_access.enable_emergency_access &&
-           self.config.privacy_settings.emergency_data_access.location_sharing_in_emergency {
+        if self.config.privacy_settings.emergency_data_access.enable_emergency_access
+            && self.config.privacy_settings.emergency_data_access.location_sharing_in_emergency
+        {
             println!("Emergency location sharing enabled");
         }
 
@@ -810,37 +842,40 @@ impl AndroidAutoIntegration {
 
     /// Get current status
     pub fn get_status(&self) -> Result<AndroidAutoStatus> {
-        let status = self.status.lock()
-            .map_err(|_| TrustformersError::runtime_error("Failed to acquire status lock".into())?;
+        let status = self.status.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire status lock".into())
+        })?;
 
         Ok(status.clone())
     }
 
     /// Update vehicle sensor data
     pub fn update_sensor_data(&self, sensor_type: String, value: f32, unit: String) -> Result<()> {
-        let mut sensors = self.vehicle_sensors.lock()
-            .map_err(|_| TrustformersError::runtime_error("Failed to acquire sensors lock".into())?;
+        let mut sensors = self.vehicle_sensors.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire sensors lock".into())
+        })?;
 
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
-        sensors.insert(sensor_type.clone(), VehicleSensorData {
-            sensor_type,
-            value,
-            unit,
-            timestamp,
-            reliability: 0.95, // Assume good reliability
-        });
+        sensors.insert(
+            sensor_type.clone(),
+            VehicleSensorData {
+                sensor_type,
+                value,
+                unit,
+                timestamp,
+                reliability: 0.95, // Assume good reliability
+            },
+        );
 
         Ok(())
     }
 
     /// Get performance metrics
     pub fn get_performance_metrics(&self) -> Result<AutomotivePerformanceMetrics> {
-        let status = self.status.lock()
-            .map_err(|_| TrustformersError::runtime_error("Failed to acquire status lock".into())?;
+        let status = self.status.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire status lock".into())
+        })?;
 
         Ok(status.performance_metrics.clone())
     }
@@ -848,8 +883,9 @@ impl AndroidAutoIntegration {
     // Private helper methods
 
     fn initialize_voice_processor(&self) -> Result<()> {
-        let mut voice_processor = self.voice_processor.lock()
-            .map_err(|_| TrustformersError::runtime_error("Failed to acquire voice processor lock".into())?;
+        let mut voice_processor = self.voice_processor.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire voice processor lock".into())
+        })?;
 
         *voice_processor = Some(VoiceProcessor {
             config: self.config.voice_processing.clone(),
@@ -863,7 +899,11 @@ impl AndroidAutoIntegration {
             }),
             tts_engine: Some(TTSEngine {
                 voice_profile: self.config.voice_processing.text_to_speech.voice_profile.clone(),
-                automotive_optimized: self.config.voice_processing.text_to_speech.automotive_optimized,
+                automotive_optimized: self
+                    .config
+                    .voice_processing
+                    .text_to_speech
+                    .automotive_optimized,
             }),
         });
 
@@ -871,13 +911,19 @@ impl AndroidAutoIntegration {
     }
 
     fn initialize_navigation_assistant(&self) -> Result<()> {
-        let mut nav_assistant = self.navigation_assistant.lock()
-            .map_err(|_| TrustformersError::runtime_error("Failed to acquire navigation lock".into())?;
+        let mut nav_assistant = self.navigation_assistant.lock().map_err(|_| {
+            TrustformersError::runtime_error("Failed to acquire navigation lock".into())
+        })?;
 
         *nav_assistant = Some(NavigationAssistant {
             config: self.config.navigation_assistance.clone(),
             hazard_detector: Some(HazardDetector {
-                enabled_types: self.config.navigation_assistance.hazard_detection.detection_types.clone(),
+                enabled_types: self
+                    .config
+                    .navigation_assistance
+                    .hazard_detection
+                    .detection_types
+                    .clone(),
                 detection_range_m: 1000.0, // 1km detection range
             }),
             route_optimizer: Some(RouteOptimizer {
@@ -893,10 +939,22 @@ impl AndroidAutoIntegration {
         Ok(())
     }
 
+    /// No automatic speech recognition backend is bound into this crate.
+    /// Returning a fixed transcription (a previous revision always
+    /// returned `"Navigate to nearest gas station"`, regardless of
+    /// `_audio_data`) is a safety hazard in an automotive integration: a
+    /// caller wiring this into voice-command dispatch would silently issue
+    /// the same navigation command for every utterance, including ones
+    /// that were never navigation requests at all. Reporting the gap
+    /// honestly lets a caller fail closed (e.g. ignore the command, or ask
+    /// the driver to repeat it) instead of acting on fabricated intent.
     fn recognize_speech(&self, _audio_data: &[f32]) -> Result<String> {
-        // Simplified speech recognition
-        // In a real implementation, this would use actual speech recognition
-        Ok("Navigate to nearest gas station".to_string())
+        Err(unsupported_operation(
+            "speech-to-text transcription",
+            "AndroidAutoManager::recognize_speech (no ASR backend is bound into this crate; a \
+             fabricated transcription is not returned because acting on it while driving would \
+             be unsafe)",
+        ))
     }
 }
 
@@ -941,13 +999,17 @@ mod tests {
         integration.connect().expect("Operation failed");
 
         // Test moving state applies restrictions
-        integration.update_driving_state(DrivingState::Moving).expect("Operation failed");
+        integration
+            .update_driving_state(DrivingState::Moving)
+            .expect("Operation failed");
         let status = integration.get_status().expect("Operation failed");
         assert_eq!(status.driving_state, DrivingState::Moving);
         assert!(!status.safety_restrictions.is_empty());
 
         // Test parked state removes restrictions
-        integration.update_driving_state(DrivingState::Parked).expect("Operation failed");
+        integration
+            .update_driving_state(DrivingState::Parked)
+            .expect("Operation failed");
         let status = integration.get_status().expect("Operation failed");
         assert_eq!(status.driving_state, DrivingState::Parked);
     }
@@ -970,11 +1032,37 @@ mod tests {
 
         let integration = AndroidAutoIntegration::new(config).expect("Operation failed");
         integration.connect().expect("Operation failed");
-        integration.update_driving_state(DrivingState::Moving).expect("Operation failed");
+        integration
+            .update_driving_state(DrivingState::Moving)
+            .expect("Operation failed");
 
         let audio_data = vec![0.0; 1000];
         let result = integration.process_voice_command(&audio_data);
         assert!(result.is_err()); // Should be restricted while driving
+    }
+
+    /// Regression test for the P1 finding: `recognize_speech` used to
+    /// return the fixed string `"Navigate to nearest gas station"` for any
+    /// audio input, regardless of content -- a safety hazard, since a
+    /// caller wiring this into voice-command dispatch would silently issue
+    /// that navigation command for every utterance. With no ASR backend
+    /// bound, `process_voice_command` (reachable here: parked, so no
+    /// driving-state restriction applies) must report the gap honestly.
+    #[test]
+    fn test_voice_command_does_not_fabricate_a_transcription() {
+        let config = AndroidAutoConfig::default();
+        let integration = AndroidAutoIntegration::new(config).expect("Operation failed");
+        integration.connect().expect("connect");
+        integration
+            .update_driving_state(DrivingState::Parked)
+            .expect("not moving, so voice is allowed");
+
+        let audio_data = vec![0.0f32; 1000];
+        let result = integration.process_voice_command(&audio_data);
+        assert!(
+            result.is_err(),
+            "must not fabricate a transcription when no ASR backend exists, got: {result:?}"
+        );
     }
 
     #[test]
@@ -982,11 +1070,7 @@ mod tests {
         let config = AndroidAutoConfig::default();
         let integration = AndroidAutoIntegration::new(config).expect("Operation failed");
 
-        let result = integration.update_sensor_data(
-            "speed".to_string(),
-            65.0,
-            "mph".to_string()
-        );
+        let result = integration.update_sensor_data("speed".to_string(), 65.0, "mph".to_string());
         assert!(result.is_ok());
     }
 }

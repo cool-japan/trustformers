@@ -430,7 +430,6 @@ impl Drop for SharedKVCacheRef {
 /// KV Cache manager
 pub struct KVCacheManager {
     shared_cache: SharedKVCache,
-    config: KVCacheConfig,
     metrics: Arc<CacheStatsCollector>,
 }
 
@@ -440,7 +439,6 @@ impl KVCacheManager {
 
         Self {
             shared_cache,
-            config,
             metrics,
         }
     }

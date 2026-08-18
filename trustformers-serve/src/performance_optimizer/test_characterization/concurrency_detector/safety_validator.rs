@@ -6,22 +6,12 @@
 use super::super::types::*;
 use anyhow::Result;
 use chrono::Utc;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::{collections::HashMap, sync::Arc, time::Instant};
-
-/// Implementation priority for safety violations
-#[derive(Debug, Clone)]
-pub struct ImplementationPriority {
-    pub priority_level: u8,
-    pub priority_name: String,
-}
 
 pub struct SafetyValidator {
     /// Safety validation rules
     validation_rules: Arc<Mutex<Vec<Box<dyn SafetyValidationRule + Send + Sync>>>>,
-
-    /// Safety constraint database
-    constraint_db: Arc<RwLock<SafetyConstraintDatabase>>,
 
     /// Validation history
     validation_history: Arc<Mutex<SafetyValidationHistory>>,
@@ -41,11 +31,8 @@ impl SafetyValidator {
         validation_rules.push(Box::new(ConcurrencySafetyRule::new()));
         validation_rules.push(Box::new(IsolationSafetyRule::new()));
 
-        let constraint_db = SafetyConstraintDatabase::new();
-
         Ok(Self {
             validation_rules: Arc::new(Mutex::new(validation_rules)),
-            constraint_db: Arc::new(RwLock::new(constraint_db)),
             validation_history: Arc::new(Mutex::new(SafetyValidationHistory::new())),
             config,
         })
@@ -238,41 +225,6 @@ impl SafetyValidator {
             ViolationType::Custom(ref custom) => {
                 format!("Address custom safety concern: {}", custom)
             },
-        }
-    }
-
-    /// Calculates implementation priority
-    fn calculate_implementation_priority(
-        &self,
-        violation: &SafetyViolation,
-    ) -> ImplementationPriority {
-        match violation.severity {
-            ViolationSeverity::Critical => ImplementationPriority {
-                priority_level: 4,
-                priority_name: "Immediate".to_string(),
-            },
-            ViolationSeverity::High => ImplementationPriority {
-                priority_level: 3,
-                priority_name: "High".to_string(),
-            },
-            ViolationSeverity::Medium => ImplementationPriority {
-                priority_level: 2,
-                priority_name: "Medium".to_string(),
-            },
-            ViolationSeverity::Low => ImplementationPriority {
-                priority_level: 1,
-                priority_name: "Low".to_string(),
-            },
-        }
-    }
-
-    /// Estimates safety impact
-    fn estimate_safety_impact(&self, violation: &SafetyViolation) -> f32 {
-        match violation.severity {
-            ViolationSeverity::Critical => 1.0,
-            ViolationSeverity::High => 0.8,
-            ViolationSeverity::Medium => 0.6,
-            ViolationSeverity::Low => 0.4,
         }
     }
 

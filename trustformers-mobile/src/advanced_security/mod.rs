@@ -25,8 +25,10 @@
 //! - **Fully homomorphic encryption** (BGV / BFV / CKKS / TFHE). Paillier gives
 //!   ciphertext addition and ciphertext×plaintext multiplication; ciphertext ×
 //!   ciphertext needs an FHE scheme this crate does not ship.
-//! - **Classic McEliece** and **Falcon**: no vetted pure-Rust implementation
-//!   exists on crates.io.
+//! - **Classic McEliece** and **Falcon** (FN-DSA): not implemented here.
+//!   Pure-Rust crates exist, but none is a RustCrypto implementation of a
+//!   finalized FIPS standard, so this crate does not ship them under a
+//!   security-critical API.
 //! - **Circuit proof systems** (Groth16 / PLONK / STARKs / Bulletproofs): the
 //!   sigma protocol here proves knowledge of a discrete log bound to a context
 //!   string, not arbitrary circuit satisfiability.
@@ -227,8 +229,8 @@ pub struct QuantumResistantConfig {
 
 /// Quantum-resistant encryption algorithms.
 ///
-/// Only [`QuantumResistantAlgorithm::MlKem768`] is implemented; the rest have
-/// no vetted pure-Rust implementation and are reported as unsupported.
+/// Only [`QuantumResistantAlgorithm::MlKem768`] is implemented; the rest are
+/// not implemented here and are reported as unsupported.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuantumResistantAlgorithm {
     /// FIPS 203 ML-KEM-768 (formerly CRYSTALS-Kyber). **Implemented.**
@@ -1083,8 +1085,8 @@ pub struct ZKProof {
 /// [`QuantumResistantAlgorithm::ClassicMcEliece`],
 /// [`QuantumResistantAlgorithm::Multivariate`],
 /// [`QuantumResistantAlgorithm::HashBased`] and
-/// [`QuantumResistantSignature::Falcon`] have no vetted pure-Rust
-/// implementation on crates.io. Selecting one makes [`Self::new`] return a
+/// [`QuantumResistantSignature::Falcon`] are not implemented here (see the
+/// [`pqc`] module docs for why). Selecting one makes [`Self::new`] return a
 /// structured
 /// [`UnsupportedOperation`](trustformers_core::errors::ErrorKind::UnsupportedOperation)
 /// error naming the algorithms that are real.
@@ -1118,7 +1120,7 @@ impl QuantumResistantEngine {
     ///
     /// # Errors
     /// Returns [`UnsupportedOperation`](trustformers_core::errors::ErrorKind::UnsupportedOperation)
-    /// for an algorithm with no vetted pure-Rust implementation.
+    /// for an algorithm that is not implemented here.
     pub fn new(config: QuantumResistantConfig) -> Result<Self> {
         Self::check_algorithms(&config)?;
         let signer = match config.signature_algorithm {

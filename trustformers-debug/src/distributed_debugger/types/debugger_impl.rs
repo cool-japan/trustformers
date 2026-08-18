@@ -1012,7 +1012,6 @@ impl DistributedDebugger {
         participating_nodes: HashSet<NodeId>,
         metadata: HashMap<String, String>,
     ) -> Result<Uuid> {
-        let mut coordination_engine = self.coordination_engine.lock().await;
         let operation_id = Uuid::new_v4();
         let operation = CoordinatedOperation {
             operation_id,
@@ -1025,8 +1024,24 @@ impl DistributedDebugger {
             dependencies: Vec::new(),
             metadata,
         };
-        coordination_engine.active_operations.insert(operation_id, operation);
-        if let Some(protocol) = coordination_engine.coordination_protocols.get(&operation_type) {
+
+        // Register the operation and read out its protocol (owned, via
+        // `.cloned()`), then drop the guard immediately: `execute_coordination_step`
+        // and `rollback_operation` below each independently take
+        // `self.coordination_engine.lock().await` again (see e.g.
+        // `broadcast_operation_info`), and `tokio::sync::Mutex` is not
+        // reentrant. The original version bound `protocol` as a `&_` borrowing
+        // from this guard, which -- since the borrow had to stay live across
+        // every `.await` inside the loop below -- forced the guard itself to
+        // stay held for the whole loop, deadlocking the task the first time
+        // any coordination step ran.
+        let protocol = {
+            let mut coordination_engine = self.coordination_engine.lock().await;
+            coordination_engine.active_operations.insert(operation_id, operation);
+            coordination_engine.coordination_protocols.get(&operation_type).cloned()
+        };
+
+        if let Some(protocol) = protocol {
             info!(
                 "Starting coordinated operation {:?} with protocol: {}",
                 operation_type, protocol.protocol_name
@@ -1050,6 +1065,7 @@ impl DistributedDebugger {
                     },
                 }
             }
+            let mut coordination_engine = self.coordination_engine.lock().await;
             if let Some(op) = coordination_engine.active_operations.get_mut(&operation_id) {
                 op.operation_state = OperationState::Completed;
             }
@@ -1424,5 +1440,63 @@ impl DistributedDebugger {
                 .distribution_metrics
                 .balance_score,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: `coordinate_operation` used to hold its `coordination_engine`
+    /// guard across the entire coordination-step loop -- the old code bound
+    /// `protocol` as a `&_` borrowing from that guard, and since `protocol` was
+    /// used across every `.await` in the loop, the borrow (and so the guard)
+    /// had to stay live for the whole loop.
+    ///
+    /// The first step of the default `DistributedDebugSession` protocol (see
+    /// `init_coordination_protocols`) is a `Broadcast` step, which dispatches
+    /// to `broadcast_operation_info` -- itself independently taking
+    /// `self.coordination_engine.lock().await`. Against the old code, reaching
+    /// that step deadlocked the task on its own already-held lock: this test
+    /// would simply hang forever rather than fail cleanly.
+    #[tokio::test]
+    async fn coordinate_operation_does_not_deadlock_on_the_default_broadcast_step() {
+        let config = DistributedDebugConfig::default();
+        let node_id = NodeId::new(0, "test-host".to_string());
+        let debugger = DistributedDebugger::new(config, node_id);
+
+        let mut nodes = HashSet::new();
+        nodes.insert(NodeId::new(1, "peer-host".to_string()));
+
+        // Wrapped in a timeout so a reintroduced regression fails fast with a
+        // clear panic instead of hanging the whole test binary.
+        let operation_id = tokio::time::timeout(
+            Duration::from_secs(5),
+            debugger.coordinate_operation(
+                OperationType::DistributedDebugSession,
+                nodes,
+                HashMap::new(),
+            ),
+        )
+        .await
+        .expect("coordination must not deadlock")
+        .expect("coordination must complete without error");
+
+        // Confirms the function actually ran to its end (re-acquiring the lock
+        // after the loop), not just that some earlier `return` short-circuited it.
+        let coordination_engine = debugger.coordination_engine.lock().await;
+        let recorded = coordination_engine
+            .active_operations
+            .get(&operation_id)
+            .expect("the operation must have been recorded");
+        assert!(
+            matches!(recorded.operation_state, OperationState::Completed),
+            "expected OperationState::Completed, got {:?}",
+            recorded.operation_state
+        );
+        assert_eq!(
+            coordination_engine.coordination_state.coordination_metrics.total_operations,
+            1
+        );
     }
 }

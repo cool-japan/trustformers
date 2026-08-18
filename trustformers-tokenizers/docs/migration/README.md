@@ -5,20 +5,13 @@ Welcome to the TrustformeRS Tokenizers migration guide! This comprehensive colle
 ## Why Migrate to TrustformeRS Tokenizers?
 
 ### Key Advantages
-- **🚀 Performance**: Up to 10x faster than Python-based alternatives
-- **🔒 Memory Efficient**: Optimized memory usage with zero-copy operations
-- **🌍 Cross-Platform**: Rust-based with bindings for Python, JavaScript, and more
-- **🔧 Feature Rich**: Comprehensive tokenization algorithms and formats
-- **🎯 Production Ready**: Battle-tested with enterprise-grade reliability
+- **🔒 Memory Safety**: Rust's ownership model rules out a class of memory bugs common in native-extension tokenizers
+- **🌍 Cross-Platform**: Rust-based, with WebAssembly and Python bindings in this workspace
+- **🔧 Feature Rich**: BPE, WordPiece, SentencePiece (Unigram), and tiktoken-compatible tokenization in one crate
 
 ### Performance Comparison
-| Library | Tokenization Speed | Memory Usage | Binary Size |
-|---------|-------------------|--------------|-------------|
-| TrustformeRS | **1,000,000 tokens/sec** | **50MB** | **15MB** |
-| HuggingFace Tokenizers | 800,000 tokens/sec | 80MB | 25MB |
-| spaCy | 100,000 tokens/sec | 150MB | 50MB |
-| NLTK | 50,000 tokens/sec | 200MB | 100MB |
-| OpenAI tiktoken | 600,000 tokens/sec | 60MB | 20MB |
+
+> **Note (2026-08-18):** this section previously asserted "up to 10x faster than Python-based alternatives" and a table of specific tokens/sec/memory/binary-size numbers for TrustformeRS and four competitors, framed as a measured comparison. No benchmark harness in this repository produced those numbers, and the "TrustformeRS" figure here (1,000,000 tokens/sec) doesn't match the figure quoted for the identical code path in this crate's own per-library migration guides (1.1M in the tiktoken guide, 1.2M in the HuggingFace guide, 1.3M in the Fairseq guide, ...) — real measurements of the same binary don't vary by which document is citing them. Both claims have been removed rather than left in place or re-guessed. To get real numbers, run this crate's own Criterion benchmark (`trustformers-tokenizers/benches/tokenizer_performance.rs`) against a real installation of whichever library you're comparing against, on your own hardware.
 
 ## Migration Guides by Library
 

@@ -7,7 +7,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use trustformers_core::error::{CoreError, Result};
+use trustformers_core::errors::Result;
+use trustformers_core::TrustformersError;
+
+// Real AEAD primitives backing `EncryptionManager` -- RustCrypto's
+// `aes-gcm` and `chacha20poly1305`, already workspace dependencies.
+// `aead::Generate` sources the nonce from the operating system CSPRNG (the
+// `getrandom` cargo feature both crates enable by default), never a seeded
+// PRNG or a fixed value.
+use aes_gcm::aead::{Aead, Generate, KeyInit};
+use aes_gcm::{Aes128Gcm, Aes256Gcm};
+use chacha20poly1305::ChaCha20Poly1305;
 
 /// Android Content Provider for TrustformeRS models
 pub struct AndroidModelContentProvider {
@@ -546,23 +556,24 @@ impl AndroidModelContentProvider {
 
     fn validate_model_info(&self, model_info: &ModelInfo) -> Result<()> {
         if model_info.id.is_empty() {
-            return Err(
-                TrustformersError::config_error("Model ID cannot be empty", "validate").into(),
-            );
+            return Err(TrustformersError::config_error(
+                "Model ID cannot be empty",
+                "validate",
+            ));
         }
 
         if model_info.name.is_empty() {
-            return Err(
-                TrustformersError::config_error("Model name cannot be empty", "validate").into(),
-            );
+            return Err(TrustformersError::config_error(
+                "Model name cannot be empty",
+                "validate",
+            ));
         }
 
         if !model_info.file_path.exists() {
             return Err(TrustformersError::runtime_error(format!(
                 "Model file does not exist: {:?}",
                 model_info.file_path
-            ))
-            .into());
+            )));
         }
 
         Ok(())
@@ -623,20 +634,43 @@ impl ModelStream {
         })
     }
 
-    /// Read next chunk of model data
+    /// Read the next chunk of model data from the real file on disk at
+    /// `model_info.file_path`, starting at `current_position`. Previously a
+    /// `// Placeholder implementation` that synthesized `vec![0u8; ...]` --
+    /// every streamed chunk was zeroed regardless of the file's actual
+    /// contents. Uses `Read + Seek` so repeated calls resume from where the
+    /// last one left off without re-reading earlier bytes.
     pub fn read_chunk(&mut self) -> Result<Option<Vec<u8>>> {
-        // Implementation would read file chunks
-        // This is a placeholder
+        use std::io::{Read, Seek, SeekFrom};
+
         if self.current_position >= self.model_info.size_bytes as usize {
             return Ok(None);
         }
 
-        // Read chunk from file
         let chunk_end =
             (self.current_position + self.chunk_size).min(self.model_info.size_bytes as usize);
+        let chunk_len = chunk_end - self.current_position;
 
-        // Placeholder implementation
-        let chunk = vec![0u8; chunk_end - self.current_position];
+        let mut file = std::fs::File::open(&self.model_info.file_path).map_err(|e| {
+            TrustformersError::runtime_error(format!(
+                "failed to open model file {:?} for streaming: {e}",
+                self.model_info.file_path
+            ))
+        })?;
+        file.seek(SeekFrom::Start(self.current_position as u64)).map_err(|e| {
+            TrustformersError::runtime_error(format!(
+                "failed to seek model file {:?} to offset {}: {e}",
+                self.model_info.file_path, self.current_position
+            ))
+        })?;
+
+        let mut chunk = vec![0u8; chunk_len];
+        file.read_exact(&mut chunk).map_err(|e| {
+            TrustformersError::runtime_error(format!(
+                "failed to read {chunk_len} bytes from model file {:?} at offset {}: {e}",
+                self.model_info.file_path, self.current_position
+            ))
+        })?;
         self.current_position = chunk_end;
 
         Ok(Some(chunk))
@@ -662,7 +696,7 @@ impl ModelRegistry {
     fn register_model(&mut self, model_info: ModelInfo) -> Result<()> {
         let id = model_info.id.clone();
         self.models.insert(id.clone(), model_info);
-        self.usage_stats.insert(id, UsageStats::new().into());
+        self.usage_stats.insert(id, UsageStats::new());
         Ok(())
     }
 
@@ -689,11 +723,11 @@ impl ModelRegistry {
         // Apply sorting
         if let Some(sort_by) = params.sort_by {
             match sort_by {
-                SortOrder::Name => results.sort_by(|a, b| a.name.cmp(&b.name)),
-                SortOrder::Version => results.sort_by(|a, b| a.version.cmp(&b.version)),
-                SortOrder::Size => results.sort_by(|a, b| a.size_bytes.cmp(&b.size_bytes)),
-                SortOrder::CreatedAt => results.sort_by(|a, b| a.created_at.cmp(&b.created_at)),
-                SortOrder::ModifiedAt => results.sort_by(|a, b| a.modified_at.cmp(&b.modified_at)),
+                SortOrder::Name => results.sort_by_key(|a| a.name.clone()),
+                SortOrder::Version => results.sort_by_key(|a| a.version.clone()),
+                SortOrder::Size => results.sort_by_key(|a| a.size_bytes),
+                SortOrder::CreatedAt => results.sort_by_key(|a| a.created_at),
+                SortOrder::ModifiedAt => results.sort_by_key(|a| a.modified_at),
                 SortOrder::Usage => {
                     results.sort_by(|a, b| {
                         let usage_a =
@@ -750,7 +784,7 @@ impl ModelRegistry {
     }
 
     fn add_access_log(&mut self, model_id: String, log: AccessLog) {
-        self.access_logs.entry(model_id).or_insert_with(Vec::new).push(log);
+        self.access_logs.entry(model_id).or_default().push(log);
     }
 
     fn get_usage_stats(&self, model_id: &str) -> Option<UsageStats> {
@@ -838,18 +872,162 @@ impl SignatureVerifier {
     }
 }
 
+/// Key id [`EncryptionManager`] stores its one active symmetric key under.
+/// A future revision that needs multiple concurrent keys (e.g. one per
+/// model, for independent rotation) can extend `active_keys` to more than
+/// one entry; today's callers (`ContentProviderSecurity::encrypt_data`)
+/// only ever need one.
+const ACTIVE_KEY_ID: &str = "default";
+
 impl EncryptionManager {
+    /// Generates one real 32-byte symmetric key from the OS CSPRNG for this
+    /// instance's lifetime. Previously `active_keys` was constructed empty
+    /// and never populated by anything -- there was no key to encrypt with,
+    /// which fit the fact that [`Self::encrypt`] never actually used one.
     fn new(config: EncryptionConfig) -> Result<Self> {
+        let mut key = vec![0u8; 32];
+        getrandom::fill(&mut key).map_err(|e| {
+            TrustformersError::runtime_error(format!(
+                "failed to generate an encryption key from the OS CSPRNG: {e}"
+            ))
+        })?;
+
+        let mut active_keys = HashMap::new();
+        active_keys.insert(ACTIVE_KEY_ID.to_string(), key);
+
         Ok(Self {
             config,
-            active_keys: HashMap::new(),
+            active_keys,
         })
     }
 
+    fn active_key(&self) -> Result<&[u8]> {
+        self.active_keys.get(ACTIVE_KEY_ID).map(Vec::as_slice).ok_or_else(|| {
+            TrustformersError::runtime_error(
+                "EncryptionManager has no active key (internal error: EncryptionManager::new \
+                 should always populate one)"
+                    .to_string(),
+            )
+        })
+    }
+
+    /// Real AEAD sealing, algorithm selected by
+    /// `self.config.algorithm`. Output layout is `nonce (12 bytes) ||
+    /// ciphertext+tag`. Replaces a previous implementation documented `//
+    /// Placeholder encryption implementation` that was `Ok(data.to_vec())`
+    /// -- content marked for at-rest/in-transit encryption left the
+    /// function byte-for-byte identical to its plaintext input, with no
+    /// indication to any caller that nothing had actually been protected.
     fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
-        // Placeholder encryption implementation
-        // In real implementation, would use proper encryption
-        Ok(data.to_vec())
+        let key = self.active_key()?;
+
+        let (nonce_bytes, ciphertext): (Vec<u8>, Vec<u8>) = match self.config.algorithm {
+            EncryptionAlgorithm::AES256GCM => {
+                let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| {
+                    TrustformersError::runtime_error(format!(
+                        "failed to initialise AES-256-GCM cipher: {e}"
+                    ))
+                })?;
+                let nonce = aes_gcm::Nonce::generate();
+                let ct = cipher.encrypt(&nonce, data).map_err(|e| {
+                    TrustformersError::runtime_error(format!("AES-256-GCM encryption failed: {e}"))
+                })?;
+                (nonce.to_vec(), ct)
+            },
+            EncryptionAlgorithm::AES128GCM => {
+                let cipher = Aes128Gcm::new_from_slice(&key[..16]).map_err(|e| {
+                    TrustformersError::runtime_error(format!(
+                        "failed to initialise AES-128-GCM cipher: {e}"
+                    ))
+                })?;
+                let nonce = aes_gcm::Nonce::generate();
+                let ct = cipher.encrypt(&nonce, data).map_err(|e| {
+                    TrustformersError::runtime_error(format!("AES-128-GCM encryption failed: {e}"))
+                })?;
+                (nonce.to_vec(), ct)
+            },
+            EncryptionAlgorithm::ChaCha20Poly1305 => {
+                let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|e| {
+                    TrustformersError::runtime_error(format!(
+                        "failed to initialise ChaCha20-Poly1305 cipher: {e}"
+                    ))
+                })?;
+                let nonce = chacha20poly1305::Nonce::generate();
+                let ct = cipher.encrypt(&nonce, data).map_err(|e| {
+                    TrustformersError::runtime_error(format!(
+                        "ChaCha20-Poly1305 encryption failed: {e}"
+                    ))
+                })?;
+                (nonce.to_vec(), ct)
+            },
+        };
+
+        let mut out = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    /// Real AEAD opening matching [`Self::encrypt`]'s output layout and
+    /// algorithm selection. Returns an error -- not corrupted plaintext --
+    /// on the wrong key or tampered ciphertext, since every algorithm this
+    /// manager supports is an authenticated cipher.
+    #[allow(dead_code)] // the real counterpart to `encrypt`; not yet called by a decrypt-side caller in this module
+    fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
+        const NONCE_LEN: usize = 12;
+        if data.len() < NONCE_LEN {
+            return Err(TrustformersError::runtime_error(format!(
+                "encrypted data must be at least {NONCE_LEN} bytes (AEAD nonce size), got {}",
+                data.len()
+            )));
+        }
+        let key = self.active_key()?;
+        let (nonce_bytes, ciphertext) = data.split_at(NONCE_LEN);
+
+        let auth_fail = |e: aes_gcm::aead::Error| -> TrustformersError {
+            TrustformersError::runtime_error(format!(
+                "decryption failed: wrong key, or the ciphertext was corrupted or tampered with \
+                 ({e})"
+            ))
+        };
+
+        match self.config.algorithm {
+            EncryptionAlgorithm::AES256GCM => {
+                let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| {
+                    TrustformersError::runtime_error(format!(
+                        "failed to initialise AES-256-GCM cipher: {e}"
+                    ))
+                })?;
+                let nonce = aes_gcm::Nonce::try_from(nonce_bytes).map_err(|_| {
+                    TrustformersError::runtime_error("malformed AES-256-GCM nonce".to_string())
+                })?;
+                cipher.decrypt(&nonce, ciphertext).map_err(auth_fail)
+            },
+            EncryptionAlgorithm::AES128GCM => {
+                let cipher = Aes128Gcm::new_from_slice(&key[..16]).map_err(|e| {
+                    TrustformersError::runtime_error(format!(
+                        "failed to initialise AES-128-GCM cipher: {e}"
+                    ))
+                })?;
+                let nonce = aes_gcm::Nonce::try_from(nonce_bytes).map_err(|_| {
+                    TrustformersError::runtime_error("malformed AES-128-GCM nonce".to_string())
+                })?;
+                cipher.decrypt(&nonce, ciphertext).map_err(auth_fail)
+            },
+            EncryptionAlgorithm::ChaCha20Poly1305 => {
+                let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|e| {
+                    TrustformersError::runtime_error(format!(
+                        "failed to initialise ChaCha20-Poly1305 cipher: {e}"
+                    ))
+                })?;
+                let nonce = chacha20poly1305::Nonce::try_from(nonce_bytes).map_err(|_| {
+                    TrustformersError::runtime_error(
+                        "malformed ChaCha20-Poly1305 nonce".to_string(),
+                    )
+                })?;
+                cipher.decrypt(&nonce, ciphertext).map_err(auth_fail)
+            },
+        }
     }
 }
 
@@ -1123,9 +1301,9 @@ mod tests {
     #[test]
     fn test_compression_algorithm_variants() {
         let algos = vec![
-            CompressionAlgorithm::None,
-            CompressionAlgorithm::LZ4,
-            CompressionAlgorithm::ZSTD,
+            CompressionAlgorithm::Gzip,
+            CompressionAlgorithm::Lz4,
+            CompressionAlgorithm::Zstd,
         ];
         assert_eq!(algos.len(), 3);
     }
@@ -1146,14 +1324,15 @@ mod tests {
         let levels = vec![
             AccessLevel::Public,
             AccessLevel::Private,
-            AccessLevel::Shared,
+            AccessLevel::Restricted,
+            AccessLevel::System,
         ];
-        assert_eq!(levels.len(), 3);
+        assert_eq!(levels.len(), 4);
     }
 
     #[test]
     fn test_sort_order_variants() {
-        let orders = vec![SortOrder::Name, SortOrder::Size, SortOrder::Date];
+        let orders = vec![SortOrder::Name, SortOrder::Size, SortOrder::CreatedAt];
         assert_eq!(orders.len(), 3);
     }
 
@@ -1162,12 +1341,24 @@ mod tests {
         let config = ContentProviderConfig::default();
         let provider = AndroidModelContentProvider::new(config).expect("Operation failed");
 
+        // `validate_model_info` checks `file_path.exists()` for real (see its
+        // own doc comment), so this must point at an actual file rather than
+        // the fictitious `/models/test.bin` this test previously used --
+        // that path never existed on the test host and this assertion would
+        // fail against a real (non-placeholder) `validate_model_info`.
+        let dir = std::env::temp_dir();
+        let file_path = dir.join(format!(
+            "trustformers_mobile_valid_model_test_{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&file_path, b"fake model bytes").expect("write temp model file");
+
         let model = ModelInfo {
             id: "valid_model_id".to_string(),
             name: "Test Model".to_string(),
             version: "1.0".to_string(),
             model_type: ModelType::Transformer,
-            file_path: PathBuf::from("/models/test.bin"),
+            file_path: file_path.clone(),
             size_bytes: 10000,
             metadata: ModelMetadata {
                 description: "Test".to_string(),
@@ -1175,7 +1366,7 @@ mod tests {
                 dataset: None,
                 accuracy: Some(0.95),
                 latency_ms: Some(10.0),
-                memory_mb: Some(128),
+                memory_mb: Some(128.0),
                 tags: vec!["nlp".to_string()],
             },
             permissions: ModelPermissions {
@@ -1189,6 +1380,7 @@ mod tests {
         };
 
         assert!(provider.validate_model_info(&model).is_ok());
+        let _ = std::fs::remove_file(&file_path);
     }
 
     #[test]
@@ -1215,7 +1407,7 @@ mod tests {
             tags: vec![],
             limit: Some(50),
             offset: Some(10),
-            sort_by: Some(SortOrder::Date),
+            sort_by: Some(SortOrder::CreatedAt),
         };
         assert_eq!(params.limit, Some(50));
         assert_eq!(params.offset, Some(10));
@@ -1250,19 +1442,69 @@ mod tests {
 
     #[test]
     fn test_model_stream_progress() {
-        let stream = ModelStream {
-            data: vec![1, 2, 3, 4, 5],
-            chunk_size: 2,
-            position: 0,
-            total_size: 5,
+        // Regression test for `ModelStream::read_chunk`: it used to be a
+        // `// Placeholder implementation` that returned `vec![0u8; ...]`
+        // regardless of the file's real contents. Write real,
+        // non-all-zero bytes to a temp file and verify each streamed
+        // chunk matches them exactly (which a zero-fill fake would fail),
+        // and that `progress()` advances with `current_position`.
+        let dir = std::env::temp_dir();
+        let file_path = dir.join(format!(
+            "trustformers_mobile_stream_test_{}.bin",
+            std::process::id()
+        ));
+        let contents: Vec<u8> = (0..5u8).map(|b| b * 37 + 1).collect(); // non-zero, non-trivial bytes
+        std::fs::write(&file_path, &contents).expect("write temp model file");
+
+        let model_info = ModelInfo {
+            id: "stream_test".to_string(),
+            name: "Stream Test Model".to_string(),
+            version: "1.0".to_string(),
+            model_type: ModelType::Transformer,
+            file_path: file_path.clone(),
+            size_bytes: contents.len() as u64,
+            metadata: ModelMetadata {
+                description: "Test".to_string(),
+                architecture: "Transformer".to_string(),
+                dataset: None,
+                accuracy: None,
+                latency_ms: None,
+                memory_mb: None,
+                tags: vec![],
+            },
+            permissions: ModelPermissions {
+                public_access: true,
+                allowed_packages: vec![],
+                required_permissions: vec![],
+                access_level: AccessLevel::Public,
+            },
+            created_at: 0,
+            modified_at: 0,
         };
+
+        let mut stream = ModelStream::new(model_info, CompressionAlgorithm::Gzip)
+            .expect("ModelStream::new should succeed for a real file");
+        stream.chunk_size = 2;
         assert_eq!(stream.progress(), 0.0);
+
+        let mut read_back = Vec::new();
+        while let Some(chunk) = stream.read_chunk().expect("read_chunk should succeed") {
+            read_back.extend_from_slice(&chunk);
+        }
+        assert_eq!(
+            read_back, contents,
+            "streamed bytes must match the real file contents"
+        );
+        assert_eq!(stream.progress(), 1.0);
+
+        let _ = std::fs::remove_file(&file_path);
     }
 
     #[test]
     fn test_usage_stats_default() {
-        let stats = UsageStats::default();
-        assert_eq!(stats.total_queries, 0);
-        assert_eq!(stats.total_downloads, 0);
+        let stats = UsageStats::new();
+        assert_eq!(stats.total_accesses, 0);
+        assert_eq!(stats.successful_accesses, 0);
+        assert_eq!(stats.failed_accesses, 0);
     }
 }

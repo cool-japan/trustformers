@@ -2,6 +2,7 @@
 name = "trustformers-debug"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -46,10 +47,9 @@ sysinfo.workspace = true
 # real MLflow REST tracking) needs it.
 reqwest = { workspace = true, optional = true }
 
-# Video generation dependencies
+# Raster output dependencies (animated-GIF timelines, PNG heatmaps).
 gif = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
-ffmpeg-next = { workspace = true, optional = true }
 
 # Math and ML dependencies
 nalgebra.workspace = true
@@ -98,7 +98,13 @@ default = []
 # to send.
 http-integrations = ["dep:reqwest"]
 visual = ["plotters", "ratatui", "crossterm"]  # ratatui (maintained tui fork); pulls flate2 (non-default only)
-video = ["gif", "image", "ffmpeg-next"]
+# There is no `video` feature. It used to exist as `["gif", "image",
+# "ffmpeg-next"]`, but `ffmpeg-next` had zero call sites anywhere in the crate —
+# no frame encoder, no muxer, nothing — so the feature promised video export
+# that no code could produce, while its FFI build script broke
+# `cargo check --all-features` on any machine without the FFmpeg C libraries.
+# The raster code that really exists (PNG heatmaps, animated-GIF timelines) is
+# gated on the `image` / `gif` features below.
 gif = ["dep:gif", "image"]
 wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys", "web-sys"]
 atomics = []  # WebAssembly atomic operations and threading support

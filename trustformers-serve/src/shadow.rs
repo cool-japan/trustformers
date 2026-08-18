@@ -823,11 +823,27 @@ impl ShadowTestingService {
             latency_differences.iter().sum::<f64>() / latency_differences.len() as f64
         };
 
+        // Length and content differences are measured against the first shadow
+        // response, which is the one a single-shadow deployment has; reporting
+        // a hardcoded zero here previously made every comparison look
+        // byte-identical in length regardless of what came back.
+        let (response_length_difference, content_differences) = match shadow_responses.first() {
+            Some(first) => {
+                let production_len = production_response.payload.to_string().len() as i64;
+                let shadow_len = first.payload.to_string().len() as i64;
+                (
+                    shadow_len - production_len,
+                    describe_differences(&production_response.payload, &first.payload),
+                )
+            },
+            None => (0, Vec::new()),
+        };
+
         let comparison_metrics = ComparisonMetrics {
             similarity_score: avg_similarity,
             latency_difference_ms: avg_latency_diff,
-            response_length_difference: 0,
-            content_differences: vec![],
+            response_length_difference,
+            content_differences,
             token_differences: None,
             custom_metrics: HashMap::new(),
         };
@@ -842,18 +858,33 @@ impl ShadowTestingService {
         }
     }
 
-    /// Calculate similarity between two responses
+    /// Similarity between a production and a shadow response payload, in `[0, 1]`.
+    ///
+    /// This is a real structural comparison of the two JSON documents, not a
+    /// flag with a constant attached. Previously any pair of differing payloads
+    /// scored a fixed `0.8`, so a shadow model returning complete nonsense was
+    /// indistinguishable from one that differed by a single token — and that
+    /// figure was then averaged into [`ShadowStats::avg_similarity_score`] and
+    /// reported over HTTP as a measurement.
+    ///
+    /// The score is computed recursively over the JSON structure:
+    ///
+    /// * two values of different kinds (object vs array vs string …) score `0`;
+    /// * strings score by token overlap, see [`Self::string_similarity`];
+    /// * numbers score by relative difference, so `100.0` vs `101.0` is close
+    ///   to `1.0` while `1.0` vs `1000.0` is near `0`;
+    /// * booleans and nulls score `1` when equal and `0` otherwise;
+    /// * arrays score as the mean similarity of the positions they share,
+    ///   scaled by the fraction of positions that both actually have;
+    /// * objects score as the mean similarity over the union of their keys, so
+    ///   a key present in only one side counts as a `0` rather than being
+    ///   quietly skipped.
     fn calculate_similarity(
         &self,
         response1: &serde_json::Value,
         response2: &serde_json::Value,
     ) -> f64 {
-        // Simple similarity calculation (placeholder)
-        if response1 == response2 {
-            1.0
-        } else {
-            0.8 // Mock similarity score
-        }
+        json_similarity(response1, response2)
     }
 
     /// Update statistics
@@ -899,6 +930,203 @@ impl ShadowTestingService {
                 / total_requests;
         }
     }
+}
+
+/// Name the places where two JSON payloads actually differ.
+///
+/// Returns JSON-pointer-style paths (`/choices/0/text`) paired with a short
+/// description of the disagreement, so an operator reading a shadow comparison
+/// can see *what* diverged rather than only that something did. The list is
+/// capped at [`MAX_REPORTED_DIFFERENCES`] entries — a wholly different response
+/// would otherwise produce a path per leaf — and the cap is stated in the
+/// output rather than silently truncating.
+pub fn describe_differences(
+    production: &serde_json::Value,
+    shadow: &serde_json::Value,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_differences("", production, shadow, &mut out);
+    if out.len() > MAX_REPORTED_DIFFERENCES {
+        let hidden = out.len() - MAX_REPORTED_DIFFERENCES;
+        out.truncate(MAX_REPORTED_DIFFERENCES);
+        out.push(format!("… and {hidden} further difference(s) not listed"));
+    }
+    out
+}
+
+/// Upper bound on the number of individual differences reported by
+/// [`describe_differences`] before the rest are summarised as a count.
+pub const MAX_REPORTED_DIFFERENCES: usize = 32;
+
+/// Recursive worker behind [`describe_differences`].
+fn collect_differences(
+    path: &str,
+    production: &serde_json::Value,
+    shadow: &serde_json::Value,
+    out: &mut Vec<String>,
+) {
+    use serde_json::Value;
+
+    // Stop descending once the cap is exceeded; the caller summarises the rest.
+    if out.len() > MAX_REPORTED_DIFFERENCES {
+        return;
+    }
+    let here = if path.is_empty() { "/" } else { path };
+
+    match (production, shadow) {
+        (Value::Object(p), Value::Object(s)) => {
+            let mut keys: Vec<&String> = p.keys().collect();
+            keys.extend(s.keys());
+            keys.sort_unstable();
+            keys.dedup();
+            for key in keys {
+                let child = format!("{path}/{key}");
+                match (p.get(key), s.get(key)) {
+                    (Some(pv), Some(sv)) => collect_differences(&child, pv, sv, out),
+                    (Some(_), None) => out.push(format!("{child}: missing from shadow response")),
+                    (None, Some(_)) => {
+                        out.push(format!("{child}: present only in shadow response"))
+                    },
+                    (None, None) => {},
+                }
+            }
+        },
+        (Value::Array(p), Value::Array(s)) => {
+            if p.len() != s.len() {
+                out.push(format!(
+                    "{here}: length {} in production, {} in shadow",
+                    p.len(),
+                    s.len()
+                ));
+            }
+            for (index, (pv, sv)) in p.iter().zip(s.iter()).enumerate() {
+                collect_differences(&format!("{path}/{index}"), pv, sv, out);
+            }
+        },
+        (p, s) if p == s => {},
+        (p, s) => {
+            out.push(format!(
+                "{here}: {} vs {}",
+                truncate_for_report(&p.to_string()),
+                truncate_for_report(&s.to_string())
+            ));
+        },
+    }
+}
+
+/// Shorten a rendered JSON value so one long string cannot dominate a report.
+fn truncate_for_report(rendered: &str) -> String {
+    const LIMIT: usize = 60;
+    if rendered.chars().count() <= LIMIT {
+        return rendered.to_string();
+    }
+    let head: String = rendered.chars().take(LIMIT).collect();
+    format!("{head}…")
+}
+
+/// Structural similarity of two JSON values, in `[0, 1]`.
+///
+/// See [`ShadowTestingService::calculate_similarity`] for the rules. Kept as a
+/// free function so it can be exercised directly, without standing up a shadow
+/// testing service.
+pub fn json_similarity(a: &serde_json::Value, b: &serde_json::Value) -> f64 {
+    use serde_json::Value;
+
+    match (a, b) {
+        (Value::Null, Value::Null) => 1.0,
+        (Value::Bool(x), Value::Bool(y)) => {
+            if x == y {
+                1.0
+            } else {
+                0.0
+            }
+        },
+        (Value::Number(x), Value::Number(y)) => number_similarity(x, y),
+        (Value::String(x), Value::String(y)) => string_similarity(x, y),
+        (Value::Array(x), Value::Array(y)) => {
+            if x.is_empty() && y.is_empty() {
+                return 1.0;
+            }
+            let longest = x.len().max(y.len());
+            if longest == 0 {
+                return 1.0;
+            }
+            // Positions present in only one array contribute zero: a truncated
+            // response is genuinely less similar, not merely shorter.
+            let total: f64 = x.iter().zip(y.iter()).map(|(xi, yi)| json_similarity(xi, yi)).sum();
+            total / longest as f64
+        },
+        (Value::Object(x), Value::Object(y)) => {
+            let mut keys: Vec<&String> = x.keys().collect();
+            keys.extend(y.keys());
+            keys.sort_unstable();
+            keys.dedup();
+            if keys.is_empty() {
+                return 1.0;
+            }
+            let total: f64 = keys
+                .iter()
+                .map(|key| match (x.get(*key), y.get(*key)) {
+                    (Some(xv), Some(yv)) => json_similarity(xv, yv),
+                    // A key on one side only is a real difference.
+                    _ => 0.0,
+                })
+                .sum();
+            total / keys.len() as f64
+        },
+        // Different JSON kinds are not comparable on any scale that would mean
+        // anything; they are simply different.
+        _ => 0.0,
+    }
+}
+
+/// Similarity of two JSON numbers by relative difference.
+///
+/// Equal values score `1.0`. Otherwise the score falls off with the difference
+/// relative to the larger magnitude, so nearby values stay close to `1.0` and
+/// values differing by orders of magnitude approach `0.0`.
+fn number_similarity(x: &serde_json::Number, y: &serde_json::Number) -> f64 {
+    let (Some(xf), Some(yf)) = (x.as_f64(), y.as_f64()) else {
+        // Numbers outside f64 (e.g. u128-scale integers) can still be compared
+        // exactly for equality, which is the only honest answer available.
+        return if x == y { 1.0 } else { 0.0 };
+    };
+    if !xf.is_finite() || !yf.is_finite() {
+        return if xf == yf { 1.0 } else { 0.0 };
+    }
+    if (xf - yf).abs() < f64::EPSILON {
+        return 1.0;
+    }
+    let scale = xf.abs().max(yf.abs());
+    if scale < f64::EPSILON {
+        return 1.0;
+    }
+    (1.0 - (xf - yf).abs() / scale).clamp(0.0, 1.0)
+}
+
+/// Similarity of two strings by whitespace-token overlap (Jaccard index).
+///
+/// Token overlap is the right granularity for the generated text these shadow
+/// comparisons carry: it is insensitive to token order, which two samplings of
+/// the same model legitimately differ in, while still separating "almost the
+/// same answer" from "a different answer".
+fn string_similarity(x: &str, y: &str) -> f64 {
+    if x == y {
+        return 1.0;
+    }
+    let left: std::collections::BTreeSet<&str> = x.split_whitespace().collect();
+    let right: std::collections::BTreeSet<&str> = y.split_whitespace().collect();
+    if left.is_empty() && right.is_empty() {
+        // Two different strings of pure whitespace: not equal, but they carry
+        // no tokens to disagree about.
+        return 1.0;
+    }
+    let intersection = left.intersection(&right).count() as f64;
+    let union = left.union(&right).count() as f64;
+    if union < f64::EPSILON {
+        return 0.0;
+    }
+    intersection / union
 }
 
 impl Clone for ShadowTestingService {
@@ -1106,5 +1334,141 @@ mod tests {
             .await
             .expect("call must succeed");
         assert!(outcome.is_none());
+    }
+
+    // ── Regression tests: similarity used to be a constant ──
+
+    /// Regression: `calculate_similarity` returned a flat `0.8` for *every*
+    /// pair of differing payloads, and that number was averaged into
+    /// `ShadowStats::avg_similarity_score` and served over
+    /// `/shadow/stats`. A shadow model returning something unrelated must now
+    /// score far below one returning nearly the same answer.
+    #[test]
+    fn similarity_discriminates_between_near_and_unrelated_responses() {
+        let production = serde_json::json!({"text": "the quick brown fox jumps"});
+        let near = serde_json::json!({"text": "the quick brown fox leaps"});
+        let unrelated = serde_json::json!({"text": "unrelated content entirely here"});
+
+        let near_score = json_similarity(&production, &near);
+        let unrelated_score = json_similarity(&production, &unrelated);
+
+        assert!(
+            near_score > unrelated_score,
+            "a near-identical response must score higher: {near_score} vs {unrelated_score}"
+        );
+        // The old code gave both of these exactly 0.8.
+        assert_ne!(near_score, 0.8);
+        assert_ne!(unrelated_score, 0.8);
+        assert_eq!(unrelated_score, 0.0, "no shared tokens means no similarity");
+        assert!((0.0..=1.0).contains(&near_score));
+    }
+
+    #[test]
+    fn identical_payloads_score_one_and_different_kinds_score_zero() {
+        let value = serde_json::json!({"a": [1, 2, {"b": "c"}], "d": null});
+        assert_eq!(json_similarity(&value, &value.clone()), 1.0);
+
+        assert_eq!(
+            json_similarity(&serde_json::json!("1"), &serde_json::json!(1)),
+            0.0,
+            "a string and a number are not comparable"
+        );
+        assert_eq!(
+            json_similarity(&serde_json::json!([]), &serde_json::json!({})),
+            0.0
+        );
+    }
+
+    #[test]
+    fn numbers_score_by_relative_difference() {
+        let close = json_similarity(&serde_json::json!(100.0), &serde_json::json!(101.0));
+        let far = json_similarity(&serde_json::json!(1.0), &serde_json::json!(1000.0));
+        assert!(
+            close > 0.98,
+            "100 vs 101 should be nearly identical: {close}"
+        );
+        assert!(far < 0.01, "1 vs 1000 should be nearly unrelated: {far}");
+    }
+
+    #[test]
+    fn a_missing_object_key_lowers_the_score() {
+        let full = serde_json::json!({"a": 1, "b": 2});
+        let partial = serde_json::json!({"a": 1});
+        let score = json_similarity(&full, &partial);
+        assert!(
+            score > 0.0 && score < 1.0,
+            "a half-present object is neither identical nor unrelated: {score}"
+        );
+        assert!((score - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_truncated_array_lowers_the_score() {
+        let full = serde_json::json!([1, 2, 3, 4]);
+        let truncated = serde_json::json!([1, 2]);
+        let score = json_similarity(&full, &truncated);
+        assert!(
+            (score - 0.5).abs() < 1e-9,
+            "half the positions match: {score}"
+        );
+    }
+
+    /// Regression: `content_differences` was hardcoded to an empty vector and
+    /// `response_length_difference` to `0`, so a comparison never said what
+    /// diverged. Both must now be measured.
+    #[test]
+    fn differences_name_the_paths_that_actually_diverged() {
+        let production = serde_json::json!({"text": "hello", "tokens": 5, "model": "a"});
+        let shadow = serde_json::json!({"text": "goodbye", "tokens": 5, "extra": true});
+
+        let differences = describe_differences(&production, &shadow);
+        let joined = differences.join("\n");
+
+        assert!(
+            !differences.is_empty(),
+            "the old code always returned an empty list"
+        );
+        assert!(
+            joined.contains("/text"),
+            "the diverging field must be named: {joined}"
+        );
+        assert!(
+            joined.contains("/model") && joined.contains("missing from shadow"),
+            "a dropped field must be reported: {joined}"
+        );
+        assert!(
+            joined.contains("/extra") && joined.contains("only in shadow"),
+            "an added field must be reported: {joined}"
+        );
+        assert!(
+            !joined.contains("/tokens"),
+            "an identical field must not be reported as a difference: {joined}"
+        );
+    }
+
+    #[test]
+    fn identical_payloads_have_no_differences() {
+        let value = serde_json::json!({"text": "same", "n": [1, 2]});
+        assert!(describe_differences(&value, &value.clone()).is_empty());
+    }
+
+    #[test]
+    fn difference_reports_are_capped_and_say_so() {
+        let production: serde_json::Value = (0..100)
+            .map(|i| (format!("k{i}"), serde_json::json!(i)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        let shadow: serde_json::Value = (0..100)
+            .map(|i| (format!("k{i}"), serde_json::json!(i + 1)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+
+        let differences = describe_differences(&production, &shadow);
+        assert!(differences.len() <= MAX_REPORTED_DIFFERENCES + 1);
+        let last = differences.last().expect("at least one difference");
+        assert!(
+            last.contains("further difference(s) not listed"),
+            "truncation must be stated, not silent: {last}"
+        );
     }
 }

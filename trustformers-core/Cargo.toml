@@ -63,9 +63,6 @@ tokenizers.workspace = true  # Re-exported for trustformers-tokenizers per SciRS
 # Note: GPU backends (metal, cuda, opencl, wgpu) should be enabled via scirs2-core for policy compliance
 scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd"] }
 
-# Optional backends
-candle-core = { workspace = true, optional = true }
-
 # MPI for multi-node communication (optional - only needed for multi-node training)
 # `default-features = false` is declared on the workspace entry (it avoids the
 # libffi-sys C build that breaks macOS ARM64).
@@ -107,7 +104,12 @@ linalg = ["scirs2-core/linalg"]  # Linear algebra operations
 # Remote (HTTP) leaderboard storage backend. Opt-in because it pulls reqwest ->
 # rustls -> aws-lc-sys (C/C++). The file/in-memory backends work without it.
 remote-leaderboard = ["dep:reqwest"]
-candle = ["dep:candle-core"]
+# There is no `candle` feature. `Tensor` carried a `Candle(candle_core::Tensor)`
+# variant behind one, but nothing in the workspace ever constructed it: every
+# site that mentioned it was a match arm returning "Candle tensors not yet
+# supported". The feature therefore added a whole tensor backend (and, through
+# `candle-core`, the policy-banned `zip` 8.6.0) to `--all-features` builds while
+# providing no reachable behaviour, so it was removed.
 # Multi-threaded kernels (attention, SDPA, ...) via scirs2-core's rayon-backed
 # `parallel_ops`. scirs2-core is already built with this feature above, so the
 # flag documents the dependency rather than toggling it.
@@ -135,7 +137,7 @@ backtrace = []
 # Deprecated alias: oxicuda is now the `cuda` backend
 cuda-oxicuda = ["cuda"]
 # Full feature set for testing
-full = ["linalg", "candle", "parallel", "vulkan", "metal", "wgpu_backend", "opencl", "backtrace"]
+full = ["linalg", "parallel", "vulkan", "metal", "wgpu_backend", "opencl", "backtrace"]
 
 [[bench]]
 name = "tensor_operations"

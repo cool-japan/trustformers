@@ -39,8 +39,6 @@ pub struct PortReservationSystem {
     reservations: Arc<Mutex<HashMap<u16, PortReservationRequest>>>,
     /// Reservation history
     reservation_history: Arc<Mutex<Vec<PortReservationRequest>>>,
-    /// Conflict detection enabled
-    conflict_detection: bool,
 }
 
 impl NetworkPortManager {
@@ -393,7 +391,6 @@ impl PortReservationSystem {
         Self {
             reservations: Arc::new(Mutex::new(HashMap::new())),
             reservation_history: Arc::new(Mutex::new(Vec::new())),
-            conflict_detection: true,
         }
     }
 

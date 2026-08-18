@@ -2,7 +2,7 @@
 name = "trustformers-py"
 version = "0.2.1"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.89"
 authors = ["COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>"]
 license = "Apache-2.0"
 repository = "https://github.com/cool-japan/trustformers"

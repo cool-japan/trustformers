@@ -41,11 +41,13 @@
 //! them: they cannot be exercised by any test, they drift silently against the
 //! code that is live, and a reader cannot tell which of the two implementations
 //! is the real one.
-
-// Allow dead code for resource management infrastructure under development.
-// Placed after the module documentation: an inner attribute wedged between two
-// `//!` lines splits the rendered module doc in half.
-#![allow(dead_code)]
+//!
+//! ## Removed in 0.2.1: the module-wide `#![allow(dead_code)]`
+//!
+//! The blanket allow at the top of this module was hiding 19 warnings. Every one was a
+//! private item that nothing read: the fields have been removed together with
+//! the constructor arguments that fed them. The lint is enabled now, so the
+//! next unread field is reported instead of accumulating.
 
 pub mod allocation;
 pub mod cleanup;

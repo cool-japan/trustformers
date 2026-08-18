@@ -163,7 +163,7 @@ fn test_adaptive_pipeline<P>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     P: Pipeline<Output = PipelineOutput> + Clone,
-    P::Input: Clone + From<String>,
+    P::Input: Clone + From<String> + 'static,
 {
     println!("   Testing {} configuration...", config_name);
 

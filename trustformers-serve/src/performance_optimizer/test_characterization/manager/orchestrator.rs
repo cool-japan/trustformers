@@ -25,10 +25,6 @@ use tracing::{debug, error, instrument, warn};
 pub struct AnalysisOrchestrator {
     /// Component manager reference
     component_manager: Arc<ComponentManager>,
-    /// Analysis scheduler reference
-    analysis_scheduler: Arc<AnalysisScheduler>,
-    /// Cache coordinator reference
-    cache_coordinator: Arc<CacheCoordinator>,
     /// Error recovery manager reference
     error_recovery_manager: Arc<ErrorRecoveryManager>,
     /// Analysis phases configuration
@@ -140,14 +136,12 @@ impl AnalysisOrchestrator {
     /// Create a new analysis orchestrator
     pub async fn new(
         component_manager: Arc<ComponentManager>,
-        analysis_scheduler: Arc<AnalysisScheduler>,
-        cache_coordinator: Arc<CacheCoordinator>,
+        _analysis_scheduler: Arc<AnalysisScheduler>,
+        _cache_coordinator: Arc<CacheCoordinator>,
         error_recovery_manager: Arc<ErrorRecoveryManager>,
     ) -> Result<Self> {
         Ok(Self {
             component_manager,
-            analysis_scheduler,
-            cache_coordinator,
             error_recovery_manager,
             phases_config: Arc::new(TokioRwLock::new(AnalysisPhasesConfig::default())),
             orchestration_stats: Arc::new(OrchestrationStatistics::default()),

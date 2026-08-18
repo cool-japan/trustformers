@@ -7,7 +7,7 @@ use super::super::types::*;
 use crate::test_performance_monitoring::types::CachedSharingCapability;
 use anyhow::Result;
 use chrono::Utc;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -17,9 +17,6 @@ use std::{
 pub struct SharingCapabilityAnalyzer {
     /// Sharing analysis strategies
     strategies: Arc<Mutex<Vec<Box<dyn SharingAnalysisStrategy + Send + Sync>>>>,
-
-    /// Sharing patterns database
-    patterns_db: Arc<RwLock<SharingPatternsDatabase>>,
 
     /// Capability cache for performance
     capability_cache: Arc<Mutex<HashMap<String, CachedSharingCapability>>>,
@@ -42,11 +39,8 @@ impl SharingCapabilityAnalyzer {
         strategies.push(Box::new(TemporalSharingStrategy::new()?));
         strategies.push(Box::new(AdaptiveSharingStrategy::new()?));
 
-        let patterns_db = SharingPatternsDatabase::new();
-
         Ok(Self {
             strategies: Arc::new(Mutex::new(strategies)),
-            patterns_db: Arc::new(RwLock::new(patterns_db)),
             capability_cache: Arc::new(Mutex::new(HashMap::new())),
             performance_history: Arc::new(Mutex::new(SharingPerformanceHistory::new())),
             config,

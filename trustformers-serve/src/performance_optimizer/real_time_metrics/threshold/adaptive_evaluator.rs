@@ -116,9 +116,6 @@ pub struct AdaptationRecord {
 pub struct PatternDetector {
     /// Detected patterns
     patterns: HashMap<String, DetectedPattern>,
-
-    /// Pattern history
-    pattern_history: VecDeque<PatternEvent>,
 }
 
 /// Detected pattern information
@@ -181,9 +178,6 @@ pub struct PatternEvent {
 /// Seasonal analyzer for time-based adaptations
 #[derive(Debug)]
 pub struct SeasonalAnalyzer {
-    /// Seasonal models
-    models: HashMap<String, SeasonalModel>,
-
     /// Seasonal factors
     factors: HashMap<String, f32>,
 }
@@ -407,19 +401,6 @@ impl AdaptiveThresholdEvaluator {
         // Check evaluation confidence
         evaluation.confidence > 0.8
     }
-
-    /// Calculate threshold adjustment
-    fn calculate_adjustment(
-        &self,
-        adaptation: &AdaptiveThreshold,
-        evaluation: &ThresholdEvaluation,
-    ) -> f64 {
-        let effectiveness_factor = (0.5 - adaptation.effectiveness) as f64;
-        let confidence_factor = evaluation.confidence as f64;
-        let learning_factor = self.config.learning_rate as f64;
-
-        effectiveness_factor * confidence_factor * learning_factor
-    }
 }
 
 impl ThresholdEvaluator for AdaptiveThresholdEvaluator {
@@ -622,7 +603,6 @@ impl PatternDetector {
     pub fn new() -> Self {
         Self {
             patterns: HashMap::new(),
-            pattern_history: VecDeque::new(),
         }
     }
 }
@@ -637,7 +617,6 @@ impl SeasonalAnalyzer {
     /// Create a new seasonal analyzer
     pub fn new() -> Self {
         Self {
-            models: HashMap::new(),
             factors: HashMap::new(),
         }
     }

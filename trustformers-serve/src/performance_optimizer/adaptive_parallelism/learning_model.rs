@@ -171,13 +171,27 @@ impl AdaptiveLearningModel {
         })
     }
 
-    /// Adjust parallelism estimate based on learned patterns
+    /// Adjust parallelism estimate based on learned patterns.
+    ///
+    /// A model that has not seen a single training example has learned no
+    /// pattern, so the initial estimate is returned untouched — including its
+    /// `method`, which is not stamped `_ml_adjusted`. Before 0.2.1 the
+    /// underlying regressor answered `0.5` for an untrained prediction, which
+    /// this method read as "increase parallelism by 50%": an adjustment
+    /// invented by a model that had learned nothing.
     pub async fn adjust_estimate(
         &self,
         initial_estimate: &ParallelismEstimate,
         characteristics: &TestCharacteristics,
         system_state: &SystemState,
     ) -> Result<ParallelismEstimate> {
+        if self.model_state.read().training_examples_count == 0 {
+            log::debug!(
+                "Skipping ML parallelism adjustment: the learning model has no training examples"
+            );
+            return Ok(initial_estimate.clone());
+        }
+
         // Prepare features for prediction
         let features = self.extract_features(characteristics, system_state)?;
 
@@ -344,6 +358,31 @@ impl AdaptiveLinearRegression {
         }
     }
 
+    /// Coefficient of determination of the current weights over `examples`.
+    ///
+    /// Returns `0.0` for an empty set — no examples means no measured fit — and
+    /// propagates a prediction failure rather than substituting a default.
+    fn training_r_squared(&self, examples: &[TrainingExample]) -> Result<f64> {
+        if examples.is_empty() {
+            return Ok(0.0);
+        }
+
+        let count = examples.len() as f64;
+        let mean_target = examples.iter().map(|e| e.target).sum::<f64>() / count;
+        let mut squared_error_sum = 0.0_f64;
+        for example in examples {
+            let residual = self.predict(&example.features)? - example.target;
+            squared_error_sum += residual * residual;
+        }
+        let total_sum_of_squares =
+            examples.iter().map(|e| (e.target - mean_target).powi(2)).sum::<f64>();
+
+        if total_sum_of_squares <= f64::EPSILON {
+            return Ok(if squared_error_sum <= f64::EPSILON { 1.0 } else { 0.0 });
+        }
+        Ok(1.0 - squared_error_sum / total_sum_of_squares)
+    }
+
     /// Initialize weights if needed
     fn ensure_weights_initialized(&mut self, feature_count: usize) {
         if self.weights.len() != feature_count {
@@ -361,7 +400,13 @@ impl LearningAlgorithm for AdaptiveLinearRegression {
             self.update_single(example)?;
         }
 
-        // Return current model state
+        // Accuracy is measured against the examples just trained on, so it is a
+        // training-set fit and nothing more; held-out accuracy comes from
+        // `ModelValidation`. It used to be the literal 0.8 regardless of what
+        // the model had learned, which made an untrainable model indis-
+        // tinguishable from a converged one.
+        let accuracy = self.training_r_squared(&training_data.examples)?;
+
         Ok(ModelState {
             parameters: self.get_parameters(),
             weights: self.weights.clone(),
@@ -370,17 +415,21 @@ impl LearningAlgorithm for AdaptiveLinearRegression {
             last_training: Utc::now(),
             performance_metrics: ModelPerformanceMetrics::default(),
             learning_rate: self.learning_rate,
-            accuracy: 0.8, // Placeholder - should be calculated
+            accuracy,
             last_updated: Utc::now(),
             training_examples_count: training_data.examples.len(),
         })
     }
 
     fn predict(&self, input: &[f64]) -> Result<f64> {
-        // If model hasn't been trained yet (no weights), return a default prediction
+        // An untrained model has no prediction to give. Returning a "neutral"
+        // 0.5 here made every downstream metric look like a measurement of a
+        // model that had never seen a single example.
         if self.weights.is_empty() {
-            // Return a neutral prediction (e.g., average of expected range)
-            return Ok(0.5);
+            return Err(anyhow::anyhow!(
+                "{} has not been trained: no weights are initialised, so it cannot predict",
+                self.name
+            ));
         }
 
         if self.weights.len() != input.len() {
@@ -403,7 +452,8 @@ impl LearningAlgorithm for AdaptiveLinearRegression {
             self.update_single(example)?;
         }
 
-        // Return updated model state
+        let accuracy = self.training_r_squared(new_data)?;
+
         Ok(ModelState {
             parameters: self.get_parameters(),
             weights: self.weights.clone(),
@@ -412,7 +462,7 @@ impl LearningAlgorithm for AdaptiveLinearRegression {
             last_training: Utc::now(),
             performance_metrics: ModelPerformanceMetrics::default(),
             learning_rate: self.learning_rate,
-            accuracy: 0.8, // Placeholder - should be calculated
+            accuracy,
             last_updated: Utc::now(),
             training_examples_count: new_data.len(),
         })

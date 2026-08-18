@@ -4,17 +4,14 @@
 
 use super::super::types::{CacheHierarchy, MemoryType};
 use super::functions::{
-    CapabilityAssessmentCache, CapabilityAssessmentConfig, CpuVendorDetector, GpuDetectionCache,
-    GpuDetectionConfig, GpuVendorDetector, HardwareValidationConfig, MemoryDetectionConfig,
-    MotherboardDetectionCache, MotherboardDetectionConfig, NetworkDetectionCache,
-    NetworkDetectionConfig, StorageDetectionCache, StorageDetectionConfig, ValidationResultCache,
-    ValidationRule, VendorOptimizationCache, VendorOptimizationConfig,
+    CapabilityAssessmentConfig, CpuVendorDetector, GpuDetectionConfig, HardwareValidationConfig,
+    MemoryDetectionConfig, MotherboardDetectionConfig, NetworkDetectionConfig,
+    StorageDetectionConfig, VendorOptimizationConfig,
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use std::{
-    collections::HashMap,
     fs,
     path::Path,
     sync::Arc,
@@ -29,25 +26,17 @@ use super::super::types::{
     GpuDeviceModel, GpuHardwareProfile, GpuUtilizationCharacteristics, MemoryHardwareProfile,
     MemoryModule, MemoryPerformanceMetrics, MotherboardHardwareProfile, MotherboardInfo,
     NetworkHardwareProfile, NetworkInterface, StorageDevice, StorageHardwareProfile,
-    SystemCapabilityAssessment, ValidationResult, VendorOptimizationRules, VendorOptimizations,
+    SystemCapabilityAssessment, ValidationResult, VendorOptimizations,
 };
 
 /// System capability assessment and feature enumeration
 ///
 /// Comprehensive analysis of system capabilities including compute power,
 /// memory bandwidth, I/O performance, and specialized hardware features.
-pub struct CapabilityAssessor {
-    /// Capability assessment cache
-    capability_cache: Arc<Mutex<CapabilityAssessmentCache>>,
-    /// Assessment configuration
-    config: CapabilityAssessmentConfig,
-}
+pub struct CapabilityAssessor {}
 impl CapabilityAssessor {
-    pub async fn new(config: CapabilityAssessmentConfig) -> Result<Self> {
-        Ok(Self {
-            capability_cache: Arc::new(Mutex::new(CapabilityAssessmentCache::new())),
-            config,
-        })
+    pub async fn new(_config: CapabilityAssessmentConfig) -> Result<Self> {
+        Ok(Self {})
     }
     pub async fn assess_system_capabilities(
         &self,
@@ -64,21 +53,10 @@ impl CapabilityAssessor {
 ///
 /// Validates detection results, performs consistency checks, and
 /// ensures hardware information accuracy and reliability.
-pub struct HardwareValidator {
-    /// Validation cache
-    validation_cache: Arc<Mutex<ValidationResultCache>>,
-    /// Validation rules
-    validation_rules: Vec<Box<dyn ValidationRule + Send + Sync>>,
-    /// Validation configuration
-    config: HardwareValidationConfig,
-}
+pub struct HardwareValidator {}
 impl HardwareValidator {
-    pub async fn new(config: HardwareValidationConfig) -> Result<Self> {
-        Ok(Self {
-            validation_cache: Arc::new(Mutex::new(ValidationResultCache::new())),
-            validation_rules: Vec::new(),
-            config,
-        })
+    pub async fn new(_config: HardwareValidationConfig) -> Result<Self> {
+        Ok(Self {})
     }
     pub async fn validate_hardware_profile(
         &self,
@@ -330,21 +308,10 @@ impl AmdCpuDetector {
 ///
 /// Advanced GPU detection supporting NVIDIA, AMD, Intel, and other vendors
 /// with performance analysis and compute capability assessment.
-pub struct GpuDetector {
-    /// GPU detection cache
-    gpu_cache: Arc<Mutex<GpuDetectionCache>>,
-    /// Vendor-specific GPU detectors
-    vendor_detectors: Vec<Box<dyn GpuVendorDetector + Send + Sync>>,
-    /// GPU detection configuration
-    config: GpuDetectionConfig,
-}
+pub struct GpuDetector {}
 impl GpuDetector {
-    pub async fn new(config: GpuDetectionConfig) -> Result<Self> {
-        Ok(Self {
-            gpu_cache: Arc::new(Mutex::new(GpuDetectionCache::new())),
-            vendor_detectors: Vec::new(),
-            config,
-        })
+    pub async fn new(_config: GpuDetectionConfig) -> Result<Self> {
+        Ok(Self {})
     }
     pub async fn detect_gpu_hardware(&self) -> Result<GpuHardwareProfile> {
         Ok(GpuHardwareProfile::default())
@@ -365,18 +332,10 @@ impl GpuDetector {
 ///
 /// Detects storage devices, analyzes performance capabilities, and
 /// provides storage optimization recommendations.
-pub struct StorageDetector {
-    /// Storage detection cache
-    storage_cache: Arc<Mutex<StorageDetectionCache>>,
-    /// Storage analysis configuration
-    config: StorageDetectionConfig,
-}
+pub struct StorageDetector {}
 impl StorageDetector {
-    pub async fn new(config: StorageDetectionConfig) -> Result<Self> {
-        Ok(Self {
-            storage_cache: Arc::new(Mutex::new(StorageDetectionCache::new())),
-            config,
-        })
+    pub async fn new(_config: StorageDetectionConfig) -> Result<Self> {
+        Ok(Self {})
     }
     pub async fn detect_storage_hardware(&self) -> Result<StorageHardwareProfile> {
         Ok(StorageHardwareProfile::default())
@@ -404,21 +363,10 @@ impl CpuDetectionCache {
 ///
 /// Analyzes vendor-specific hardware features and provides
 /// optimization recommendations based on detected hardware.
-pub struct VendorOptimizationEngine {
-    /// Optimization cache
-    optimization_cache: Arc<Mutex<VendorOptimizationCache>>,
-    /// Vendor optimization rules
-    optimization_rules: HashMap<String, VendorOptimizationRules>,
-    /// Optimization configuration
-    config: VendorOptimizationConfig,
-}
+pub struct VendorOptimizationEngine {}
 impl VendorOptimizationEngine {
-    pub async fn new(config: VendorOptimizationConfig) -> Result<Self> {
-        Ok(Self {
-            optimization_cache: Arc::new(Mutex::new(VendorOptimizationCache::new())),
-            optimization_rules: HashMap::new(),
-            config,
-        })
+    pub async fn new(_config: VendorOptimizationConfig) -> Result<Self> {
+        Ok(Self {})
     }
     pub async fn analyze_vendor_optimizations(
         &self,
@@ -433,18 +381,10 @@ impl VendorOptimizationEngine {
 ///
 /// Comprehensive network interface detection including performance
 /// characteristics and network optimization capabilities.
-pub struct NetworkDetector {
-    /// Network detection cache
-    network_cache: Arc<Mutex<NetworkDetectionCache>>,
-    /// Network analysis configuration
-    config: NetworkDetectionConfig,
-}
+pub struct NetworkDetector {}
 impl NetworkDetector {
-    pub async fn new(config: NetworkDetectionConfig) -> Result<Self> {
-        Ok(Self {
-            network_cache: Arc::new(Mutex::new(NetworkDetectionCache::new())),
-            config,
-        })
+    pub async fn new(_config: NetworkDetectionConfig) -> Result<Self> {
+        Ok(Self {})
     }
     pub async fn detect_network_hardware(&self) -> Result<NetworkHardwareProfile> {
         Ok(NetworkHardwareProfile::default())
@@ -1007,18 +947,10 @@ impl MemoryDetector {
 ///
 /// Detects motherboard information, chipset capabilities, and
 /// system-level hardware features.
-pub struct MotherboardDetector {
-    /// Motherboard detection cache
-    motherboard_cache: Arc<Mutex<MotherboardDetectionCache>>,
-    /// Motherboard detection configuration
-    config: MotherboardDetectionConfig,
-}
+pub struct MotherboardDetector {}
 impl MotherboardDetector {
-    pub async fn new(config: MotherboardDetectionConfig) -> Result<Self> {
-        Ok(Self {
-            motherboard_cache: Arc::new(Mutex::new(MotherboardDetectionCache::new())),
-            config,
-        })
+    pub async fn new(_config: MotherboardDetectionConfig) -> Result<Self> {
+        Ok(Self {})
     }
     pub async fn detect_motherboard_hardware(&self) -> Result<MotherboardHardwareProfile> {
         Ok(MotherboardHardwareProfile::default())

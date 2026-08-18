@@ -21,14 +21,10 @@ use crate::performance_optimizer::test_characterization::manager::performance_co
 
 #[derive(Debug)]
 pub struct ReportingCoordinator {
-    /// Results synthesizer reference
-    results_synthesizer: Arc<ResultsSynthesizer>,
     /// Performance coordinator reference
     performance_coordinator: Arc<PerformanceCoordinator>,
     /// Engine statistics reference
     engine_stats: Arc<EngineStatistics>,
-    /// Report templates
-    report_templates: Arc<ReportTemplates>,
     /// Report cache
     report_cache: Arc<TokioMutex<HashMap<String, CachedReport>>>,
     /// Reporting configuration
@@ -150,10 +146,10 @@ pub struct ResourceUtilizationSummary {
     pub peak_memory_mb: f64,
     /// Average memory usage
     pub avg_memory_mb: f64,
-    /// Network I/O
-    pub network_io_bps: u64,
-    /// Disk I/O
-    pub disk_io_bps: u64,
+    /// Network I/O in bytes per second, `None` when unmeasured on this build.
+    pub network_io_bps: Option<u64>,
+    /// Disk I/O in bytes per second, `None` when unmeasured on this platform.
+    pub disk_io_bps: Option<u64>,
     /// Resource efficiency score
     pub efficiency_score: f64,
 }
@@ -396,15 +392,13 @@ impl Default for ReportingConfig {
 impl ReportingCoordinator {
     /// Create a new reporting coordinator
     pub async fn new(
-        results_synthesizer: Arc<ResultsSynthesizer>,
+        _results_synthesizer: Arc<ResultsSynthesizer>,
         performance_coordinator: Arc<PerformanceCoordinator>,
         engine_stats: Arc<EngineStatistics>,
     ) -> Result<Self> {
         Ok(Self {
-            results_synthesizer,
             performance_coordinator,
             engine_stats,
-            report_templates: Arc::new(ReportTemplates::default()),
             report_cache: Arc::new(TokioMutex::new(HashMap::new())),
             config: Arc::new(ReportingConfig::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -481,11 +475,15 @@ impl ReportingCoordinator {
         let phase_breakdown = self.generate_phase_breakdown().await;
 
         // Create resource utilization summary
+        // The coordinator keeps one live sample rather than a series, so the
+        // peak and the mean are the same measurement. They used to differ by a
+        // hard-coded 0.8 / 0.9 factor, which manufactured an "average" out of
+        // a single reading.
         let resource_utilization = ResourceUtilizationSummary {
             peak_cpu_percent: performance_metrics.cpu_usage_percent,
-            avg_cpu_percent: performance_metrics.cpu_usage_percent * 0.8, // Simplified
+            avg_cpu_percent: performance_metrics.cpu_usage_percent,
             peak_memory_mb: performance_metrics.memory_usage_mb,
-            avg_memory_mb: performance_metrics.memory_usage_mb * 0.9, // Simplified
+            avg_memory_mb: performance_metrics.memory_usage_mb,
             network_io_bps: performance_metrics.network_io_bps,
             disk_io_bps: performance_metrics.disk_io_bps,
             efficiency_score: self.calculate_efficiency_score(&performance_metrics),

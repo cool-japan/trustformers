@@ -2,13 +2,13 @@
 //!
 //! This module provides the fundamental `Tensor` type that serves as the backbone
 //! for all numerical computations in TrustformeRS. It offers a unified interface
-//! over different backend implementations (ndarray, PyTorch, Candle) while
-//! maintaining high performance through SIMD optimizations.
+//! over different backend implementations (ndarray on the CPU, Metal on Apple
+//! GPUs) while maintaining high performance through SIMD optimizations.
 //!
 //! # Overview
 //!
 //! The `Tensor` enum provides:
-//! - Multi-backend support (CPU via ndarray, GPU via PyTorch/Candle)
+//! - Multi-backend support (CPU via ndarray, GPU via Metal on macOS)
 //! - Common tensor operations (matmul, add, softmax, etc.)
 //! - Broadcasting and shape manipulation
 //! - Gradient-related operations for training
@@ -138,13 +138,14 @@ impl DType {
 /// - `F32`: 32-bit floating point tensors (most common for neural networks)
 /// - `F64`: 64-bit floating point tensors (for high precision requirements)
 /// - `I64`: 64-bit integer tensors (for indices and discrete values)
-/// - `Candle`: Candle backend (requires `candle` feature)
+/// - `Metal`: GPU-resident tensor on Apple silicon (requires the `metal`
+///   feature on macOS)
 ///
 /// # Backend Selection
 ///
 /// The default backend is ndarray (CPU), which provides good performance for
-/// small to medium models. For larger models or when GPU acceleration is needed,
-/// enable the `candle` feature.
+/// small to medium models. GPU acceleration comes from the `metal` feature on
+/// macOS and from the `hardware_acceleration` module elsewhere.
 ///
 /// # Example
 ///
@@ -256,9 +257,6 @@ pub enum Tensor {
     // Sparse tensor variant
     Sparse(crate::sparse_tensor::SparseTensor),
     // GPU support available via hardware acceleration module (CUDA, ROCm, Intel OneAPI, Vulkan, Metal)
-    // and backend-specific implementations (Candle)
-    #[cfg(feature = "candle")]
-    Candle(candle_core::Tensor),
     // Metal GPU-resident tensor (data lives on GPU)
     #[cfg(all(target_os = "macos", feature = "metal"))]
     Metal(MetalTensorData),
@@ -281,8 +279,6 @@ impl Clone for Tensor {
             Tensor::CF16(arr) => Tensor::CF16(arr.clone()),
             Tensor::CBF16(arr) => Tensor::CBF16(arr.clone()),
             Tensor::Sparse(s) => Tensor::Sparse(s.clone()),
-            #[cfg(feature = "candle")]
-            Tensor::Candle(t) => Tensor::Candle(t.clone()),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => Tensor::Metal(data.clone()),
             #[cfg(feature = "cuda")]
@@ -305,8 +301,6 @@ impl std::fmt::Debug for Tensor {
             Tensor::CF16(_) => write!(f, "Tensor::CF16(shape: {:?}, dtype: CF16)", self.shape()),
             Tensor::CBF16(_) => write!(f, "Tensor::CBF16(shape: {:?}, dtype: CBF16)", self.shape()),
             Tensor::Sparse(s) => write!(f, "Tensor::Sparse({:?})", s),
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => write!(f, "Tensor::Candle(shape: {:?})", self.shape()),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => write!(
                 f,
@@ -322,12 +316,6 @@ impl std::fmt::Debug for Tensor {
         }
     }
 }
-
-// Safety: The Candle backend is internally thread-safe:
-// - Candle: Tensors are designed to be thread-safe with reference-counted storage.
-// Multiple threads can safely hold references to the same tensor.
-#[cfg(feature = "candle")]
-unsafe impl Sync for Tensor {}
 
 // The implementations are in separate modules but the methods are part of the Tensor impl blocks
 

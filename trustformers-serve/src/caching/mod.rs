@@ -6,9 +6,13 @@
 //! - KV cache sharing
 //! - Distributed caching support
 //! - Cache warming
-
-// Allow dead code for caching infrastructure under development
-#![allow(dead_code)]
+//!
+//! ## Removed in 0.2.1: the module-wide `#![allow(dead_code)]`
+//!
+//! The blanket allow at the top of this module was hiding 3 warnings. Every one was a
+//! private item that nothing read: the fields have been removed together with
+//! the constructor arguments that fed them. The lint is enabled now, so the
+//! next unread field is reported instead of accumulating.
 
 pub mod config;
 pub mod distributed;
@@ -64,7 +68,6 @@ pub struct CachingService {
     distributed_cache: Option<Arc<DistributedCache>>,
     cache_warmer: Arc<CacheWarmer>,
     metrics: Arc<CacheStatsCollector>,
-    config: CacheConfig,
 }
 
 impl CachingService {
@@ -106,7 +109,6 @@ impl CachingService {
             distributed_cache,
             cache_warmer,
             metrics,
-            config,
         }
     }
 

@@ -11,8 +11,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
 use super::types::{
-    AlertThreshold, PerformanceBaseline, PerformanceTrend, ResourceStatistics,
-    ResourceUtilizationMetrics, SystemPerformanceSnapshot,
+    AlertThreshold, PerformanceBaseline, ResourceStatistics, ResourceUtilizationMetrics,
+    SystemPerformanceSnapshot,
 };
 
 /// Comprehensive statistics collection and analysis system
@@ -124,8 +124,6 @@ pub enum AggregationMethod {
 
 /// Analytics engine for performance analysis
 pub struct AnalyticsEngine {
-    /// Trend analyzer
-    trend_analyzer: TrendAnalyzer,
     /// Anomaly detector
     anomaly_detector: AnomalyDetector,
     /// Performance predictor
@@ -146,39 +144,19 @@ pub struct ReportGenerator {
 pub struct MetricsAggregator {
     /// Aggregated metrics
     aggregated_metrics: Arc<Mutex<HashMap<String, AggregatedMetric>>>,
-    /// Aggregation configuration
-    config: AggregationSettings,
 }
 
 /// Trend analysis system
-pub struct TrendAnalyzer {
-    /// Historical trends
-    historical_trends: Arc<Mutex<HashMap<String, PerformanceTrend>>>,
-}
+pub struct TrendAnalyzer {}
 
 /// Anomaly detection system
-pub struct AnomalyDetector {
-    /// Anomaly detection models
-    detection_models: HashMap<String, AnomalyDetectionModel>,
-    /// Detected anomalies
-    detected_anomalies: Arc<Mutex<Vec<PerformanceAnomaly>>>,
-}
+pub struct AnomalyDetector {}
 
 /// Performance prediction system
-pub struct PerformancePredictor {
-    /// Prediction models
-    prediction_models: HashMap<String, PredictionModel>,
-    /// Prediction cache
-    prediction_cache: Arc<Mutex<HashMap<String, PerformancePrediction>>>,
-}
+pub struct PerformancePredictor {}
 
 /// Bottleneck analysis system
-pub struct BottleneckAnalyzer {
-    /// Detected bottlenecks
-    detected_bottlenecks: Arc<Mutex<Vec<PerformanceBottleneck>>>,
-    /// Analysis configuration
-    config: BottleneckAnalysisConfig,
-}
+pub struct BottleneckAnalyzer {}
 
 /// Aggregated metric
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -593,7 +571,6 @@ impl AnalyticsEngine {
     /// Create new analytics engine
     pub fn new() -> Self {
         Self {
-            trend_analyzer: TrendAnalyzer::new(),
             anomaly_detector: AnomalyDetector::new(),
             performance_predictor: PerformancePredictor::new(),
             bottleneck_analyzer: BottleneckAnalyzer::new(),
@@ -731,10 +708,9 @@ impl ReportGenerator {
 
 impl MetricsAggregator {
     /// Create new metrics aggregator
-    pub fn new(config: AggregationSettings) -> Self {
+    pub fn new(_config: AggregationSettings) -> Self {
         Self {
             aggregated_metrics: Arc::new(Mutex::new(HashMap::new())),
-            config,
         }
     }
 
@@ -767,9 +743,7 @@ impl Default for TrendAnalyzer {
 impl TrendAnalyzer {
     /// Create new trend analyzer
     pub fn new() -> Self {
-        Self {
-            historical_trends: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self {}
     }
 }
 
@@ -782,10 +756,7 @@ impl Default for AnomalyDetector {
 impl AnomalyDetector {
     /// Create new anomaly detector
     pub fn new() -> Self {
-        Self {
-            detection_models: HashMap::new(),
-            detected_anomalies: Arc::new(Mutex::new(Vec::new())),
-        }
+        Self {}
     }
 
     /// Detect anomalies in performance data
@@ -807,10 +778,7 @@ impl Default for PerformancePredictor {
 impl PerformancePredictor {
     /// Create new performance predictor
     pub fn new() -> Self {
-        Self {
-            prediction_models: HashMap::new(),
-            prediction_cache: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self {}
     }
 
     /// Predict future performance
@@ -843,10 +811,7 @@ impl Default for BottleneckAnalyzer {
 impl BottleneckAnalyzer {
     /// Create new bottleneck analyzer
     pub fn new() -> Self {
-        Self {
-            detected_bottlenecks: Arc::new(Mutex::new(Vec::new())),
-            config: BottleneckAnalysisConfig::default(),
-        }
+        Self {}
     }
 
     /// Analyze performance bottlenecks

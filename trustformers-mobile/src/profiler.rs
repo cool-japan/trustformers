@@ -941,6 +941,80 @@ pub struct ProfilingStatistics {
     pub data_collection_rate_hz: f32,
 }
 
+/// Real CPU/memory figures via `sysinfo`, shared by every
+/// [`PlatformProfiler::collect_metrics`] implementation below. Mirrors
+/// `crash_reporter`'s `collect_cpu_info`/`collect_memory_usage` (same
+/// crate, same already-vetted pattern: two CPU-usage samples separated by
+/// `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`, this process's RSS for the
+/// "heap"-shaped figure). GPU and detailed per-connection network metrics
+/// have no portable `sysinfo` source, so [`PlatformMetrics::gpu_metrics`]
+/// stays `None` and [`PlatformMetrics::network_metrics`] stays at its
+/// honest zero [`Default`] -- not fabricated. Previously every
+/// `collect_metrics` implementation in this file was
+/// `Ok(PlatformMetrics::default())`, i.e. these same zero defaults
+/// presented as if they were a real collection result regardless of
+/// whether profiling had even started.
+fn collect_real_platform_metrics() -> PlatformMetrics {
+    use sysinfo::System;
+
+    let mut system = System::new();
+    system.refresh_cpu_usage();
+    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    system.refresh_cpu_usage();
+    system.refresh_memory();
+
+    let per_core_utilization: Vec<f32> = system.cpus().iter().map(|c| c.cpu_usage()).collect();
+    let frequency_mhz: Vec<u32> = system.cpus().iter().map(|c| c.frequency() as u32).collect();
+    let utilization_percent = system.global_cpu_usage();
+    let load_average = {
+        let load = System::load_average();
+        [load.one as f32, load.five as f32, load.fifteen as f32]
+    };
+
+    let total_mb = (system.total_memory() / (1024 * 1024)) as usize;
+    let used_mb = (system.used_memory() / (1024 * 1024)) as usize;
+    let available_mb = (system.available_memory() / (1024 * 1024)) as usize;
+    let usage_fraction = if total_mb > 0 { used_mb as f32 / total_mb as f32 } else { 0.0 };
+    let pressure_level = if usage_fraction >= 0.95 {
+        MemoryPressureLevel::Critical
+    } else if usage_fraction >= 0.85 {
+        MemoryPressureLevel::High
+    } else if usage_fraction >= 0.6 {
+        MemoryPressureLevel::Medium
+    } else {
+        MemoryPressureLevel::Low
+    };
+
+    PlatformMetrics {
+        cpu_metrics: CpuMetrics {
+            utilization_percent,
+            per_core_utilization,
+            frequency_mhz,
+            // `sysinfo` (with this crate's enabled feature set) does not
+            // expose a portable context-switch counter or a user/kernel
+            // time split; left at the honest `Default` zero rather than
+            // invented.
+            context_switches_per_sec: 0,
+            load_average,
+            user_time_percent: 0.0,
+            kernel_time_percent: 0.0,
+            idle_time_percent: (100.0 - utilization_percent).max(0.0),
+        },
+        gpu_metrics: None,
+        memory_metrics: MemoryMetrics {
+            total_usage_mb: used_mb,
+            available_mb,
+            pressure_level,
+            page_faults_per_sec: 0,
+            allocations_per_sec: 0,
+            deallocations_per_sec: 0,
+            gc_metrics: None,
+        },
+        network_metrics: NetworkMetrics::default(),
+        platform_specific: HashMap::new(),
+    }
+}
+
 // Platform-specific profiler implementations
 pub struct IOSProfiler {
     instruments_integration: bool,
@@ -973,17 +1047,15 @@ impl IOSProfiler {
         })
     }
 
+    /// Whether Apple's Instruments tooling is actually attached to this
+    /// process. This crate has no `os_signpost`/DTrace-style hook to check
+    /// that for real (doing so needs linking Apple's profiling frameworks,
+    /// which this pure-Rust crate does not), so the honest answer is
+    /// always `false` -- not the unconditional `true` a previous revision
+    /// returned on every iOS build regardless of whether Instruments was
+    /// running at all.
     fn check_instruments_availability() -> bool {
-        // Check if Instruments tools are available
-        #[cfg(target_os = "ios")]
-        {
-            // Platform-specific check for Instruments
-            true // Placeholder
-        }
-        #[cfg(not(target_os = "ios"))]
-        {
-            false
-        }
+        false
     }
 }
 
@@ -999,15 +1071,33 @@ impl PlatformProfiler for IOSProfiler {
     }
 
     fn collect_metrics(&self) -> Result<PlatformMetrics> {
-        // Collect iOS-specific metrics
-        Ok(PlatformMetrics::default())
+        Ok(collect_real_platform_metrics())
     }
 
     fn export_data(&self, format: ExportFormat) -> Result<Vec<u8>> {
         match format {
+            // A real export of this profiler's own currently-collected
+            // metrics (`serde_json::to_vec`, not an empty placeholder).
+            ExportFormat::JSON => serde_json::to_vec(&self.collect_metrics()?).map_err(|e| {
+                TrustformersError::runtime_error(format!("failed to serialize metrics: {e}")).into()
+            }),
             ExportFormat::Instruments => {
-                // Export in Instruments format
-                Ok(vec![])
+                // Apple's Instruments `.trace` bundle is a proprietary
+                // binary format this crate does not implement a writer
+                // for (unlike `coreml_proto`'s CoreML protobuf subset,
+                // there is no local Apple tool on this machine that can
+                // verify a hand-rolled encoding of it). Returning `Ok(vec![])`
+                // here, as a previous revision did, would be indistinguishable
+                // from "successfully exported an empty trace" -- an honest
+                // error is the only correct answer until a real encoder
+                // exists.
+                Err(TrustformersError::runtime_error(
+                    "Instruments (.trace) export is not implemented: this crate does not write \
+                     Apple's proprietary Instruments trace format. Use ExportFormat::JSON for a \
+                     real export of the collected metrics."
+                        .to_string(),
+                )
+                .into())
             },
             _ => Err(TrustformersError::config_error(
                 "Export format not supported on iOS",
@@ -1038,28 +1128,21 @@ impl AndroidProfiler {
         })
     }
 
+    /// Whether systrace is actually tracing this process. Checking that
+    /// for real needs the `android.os.Trace` JNI API (or reading
+    /// `/sys/kernel/tracing/tracing_on`, which typically needs the
+    /// `adb shell` debug user, not this app's own runtime uid); this crate
+    /// wires up neither, so the honest answer is always `false` -- not the
+    /// unconditional `true` a previous revision returned on every Android
+    /// build regardless of whether systrace was attached at all.
     fn check_systrace_availability() -> bool {
-        // Check if systrace is available
-        #[cfg(target_os = "android")]
-        {
-            true // Placeholder
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            false
-        }
+        false
     }
 
+    /// Same honesty policy as [`Self::check_systrace_availability`] for
+    /// Perfetto: no real integration hook exists in this crate.
     fn check_perfetto_availability() -> bool {
-        // Check if Perfetto is available
-        #[cfg(target_os = "android")]
-        {
-            true // Placeholder
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            false
-        }
+        false
     }
 }
 
@@ -1075,15 +1158,31 @@ impl PlatformProfiler for AndroidProfiler {
     }
 
     fn collect_metrics(&self) -> Result<PlatformMetrics> {
-        // Collect Android-specific metrics
-        Ok(PlatformMetrics::default())
+        Ok(collect_real_platform_metrics())
     }
 
     fn export_data(&self, format: ExportFormat) -> Result<Vec<u8>> {
         match format {
+            // A real export of this profiler's own currently-collected
+            // metrics.
+            ExportFormat::JSON => serde_json::to_vec(&self.collect_metrics()?).map_err(|e| {
+                TrustformersError::runtime_error(format!("failed to serialize metrics: {e}")).into()
+            }),
             ExportFormat::Trace | ExportFormat::Perfetto => {
-                // Export in systrace/Perfetto format
-                Ok(vec![])
+                // Both systrace's and Perfetto's real trace formats
+                // (Perfetto's is a specific protobuf schema) are binary
+                // formats this crate does not implement an encoder for,
+                // and there is no local tool on this machine that could
+                // verify a hand-rolled one. `Ok(vec![])`, as a previous
+                // revision returned, is indistinguishable from "exported
+                // an empty trace" -- an honest error is correct until a
+                // real encoder exists.
+                Err(TrustformersError::runtime_error(format!(
+                    "{format:?} export is not implemented: this crate does not write systrace's \
+                     or Perfetto's real trace formats. Use ExportFormat::JSON for a real export \
+                     of the collected metrics."
+                ))
+                .into())
             },
             _ => Err(TrustformersError::config_error(
                 "Export format not supported on Android",
@@ -1123,15 +1222,29 @@ impl PlatformProfiler for GenericProfiler {
     }
 
     fn collect_metrics(&self) -> Result<PlatformMetrics> {
-        // Collect generic metrics
-        Ok(PlatformMetrics::default())
+        Ok(collect_real_platform_metrics())
     }
 
     fn export_data(&self, format: ExportFormat) -> Result<Vec<u8>> {
         match format {
-            ExportFormat::JSON | ExportFormat::CSV => {
-                // Export in generic formats
-                Ok(vec![])
+            ExportFormat::JSON => serde_json::to_vec(&self.collect_metrics()?).map_err(|e| {
+                TrustformersError::runtime_error(format!("failed to serialize metrics: {e}")).into()
+            }),
+            // A real (if minimal, hand-rolled for this one fixed schema)
+            // CSV row of the collected metrics -- not the empty
+            // placeholder a previous revision returned for both formats.
+            ExportFormat::CSV => {
+                let metrics = self.collect_metrics()?;
+                let header = "cpu_utilization_percent,memory_used_mb,memory_available_mb,\
+                               memory_pressure_level\n";
+                let row = format!(
+                    "{},{},{},{:?}\n",
+                    metrics.cpu_metrics.utilization_percent,
+                    metrics.memory_metrics.total_usage_mb,
+                    metrics.memory_metrics.available_mb,
+                    metrics.memory_metrics.pressure_level
+                );
+                Ok([header, &row].concat().into_bytes())
             },
             _ => Err(TrustformersError::config_error(
                 "Export format not supported",
@@ -1839,5 +1952,104 @@ mod tests {
         let deserialized: ExportFormat =
             serde_json::from_str(&serialized).expect("Operation failed");
         assert_eq!(format, deserialized);
+    }
+
+    /// Regression test for the previous `collect_metrics`, which was
+    /// `Ok(PlatformMetrics::default())` for every platform profiler --
+    /// indistinguishable from "profiling collected literally nothing"
+    /// (`per_core_utilization: vec![]`, `frequency_mhz: vec![]`) regardless
+    /// of whether profiling had even started. Real `sysinfo`-backed
+    /// collection must report at least one CPU core on any host this
+    /// workspace actually builds and tests on.
+    #[test]
+    fn test_collect_metrics_reports_real_per_core_data_not_empty_default() {
+        for metrics in [
+            IOSProfiler::new()
+                .expect("IOSProfiler::new")
+                .collect_metrics()
+                .expect("collect"),
+            AndroidProfiler::new()
+                .expect("AndroidProfiler::new")
+                .collect_metrics()
+                .expect("collect"),
+            GenericProfiler::new()
+                .expect("GenericProfiler::new")
+                .collect_metrics()
+                .expect("collect"),
+        ] {
+            assert!(
+                !metrics.cpu_metrics.per_core_utilization.is_empty(),
+                "must report real per-core data, not the empty `PlatformMetrics::default()` \
+                 vector every profiler used to return unconditionally"
+            );
+            assert!(!metrics.cpu_metrics.frequency_mhz.is_empty());
+            assert_eq!(
+                metrics.cpu_metrics.per_core_utilization.len(),
+                metrics.cpu_metrics.frequency_mhz.len()
+            );
+        }
+    }
+
+    /// Regression test for the previous `check_instruments_availability` /
+    /// `check_systrace_availability` / `check_perfetto_availability`, which
+    /// each returned a hardcoded `true` under their respective
+    /// `#[cfg(target_os = ...)]` -- a fabricated "yes, this vendor tool is
+    /// attached" signal with no actual check behind it. None of this crate
+    /// has a real hook to verify vendor-tool attachment, so all three must
+    /// now honestly report `false`.
+    #[test]
+    fn test_vendor_tool_availability_checks_are_honest_not_fabricated() {
+        let ios = IOSProfiler::new().expect("IOSProfiler::new");
+        assert!(
+            !ios.instruments_integration,
+            "no real Instruments attachment check exists"
+        );
+
+        let android = AndroidProfiler::new().expect("AndroidProfiler::new");
+        assert!(
+            !android.systrace_integration,
+            "no real systrace attachment check exists"
+        );
+        assert!(
+            !android.perfetto_integration,
+            "no real Perfetto attachment check exists"
+        );
+    }
+
+    /// Regression test for `export_data`, which previously returned
+    /// `Ok(vec![])` -- indistinguishable from "successfully exported an
+    /// empty trace" -- for `Instruments`/`Trace`/`Perfetto`/`CSV`, formats
+    /// this crate cannot actually produce (or, for `CSV`, simply never
+    /// populated). `JSON` must now be a real serialization of real
+    /// collected metrics, and the unimplemented binary vendor formats must
+    /// error rather than silently succeed with nothing.
+    #[test]
+    fn test_export_data_is_real_json_or_an_honest_error_never_fake_empty_success() {
+        let ios = IOSProfiler::new().expect("IOSProfiler::new");
+        let json = ios.export_data(ExportFormat::JSON).expect("JSON export should succeed");
+        assert!(!json.is_empty());
+        let parsed: PlatformMetrics =
+            serde_json::from_slice(&json).expect("exported JSON must round-trip");
+        assert!(!parsed.cpu_metrics.per_core_utilization.is_empty());
+        assert!(
+            ios.export_data(ExportFormat::Instruments).is_err(),
+            "must not fake-succeed at a format this crate cannot actually write"
+        );
+
+        let android = AndroidProfiler::new().expect("AndroidProfiler::new");
+        assert!(android.export_data(ExportFormat::JSON).is_ok());
+        assert!(android.export_data(ExportFormat::Trace).is_err());
+        assert!(android.export_data(ExportFormat::Perfetto).is_err());
+
+        let generic = GenericProfiler::new().expect("GenericProfiler::new");
+        assert!(generic.export_data(ExportFormat::JSON).is_ok());
+        let csv = generic.export_data(ExportFormat::CSV).expect("CSV export should succeed");
+        let csv_text = String::from_utf8(csv).expect("CSV must be valid UTF-8");
+        assert!(csv_text.starts_with("cpu_utilization_percent,"));
+        assert_eq!(
+            csv_text.lines().count(),
+            2,
+            "a header row plus exactly one data row"
+        );
     }
 }

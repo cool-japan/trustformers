@@ -12,7 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::sync::{mpsc, oneshot, RwLock, Semaphore};
 use uuid::Uuid;
 
 /// Pipeline stage identifier
@@ -149,16 +149,27 @@ pub struct StageMetrics {
 }
 
 /// Pipeline stage definition
+///
+/// The two channel ends are the *same* queue: `input_tx` is how a producer —
+/// [`PipelineParallelismManager::submit_request`] for the first stage, the
+/// preceding stage thereafter — hands a request to this stage, and `input_rx`
+/// is what this stage's processing loop reads from.
+///
+/// Before 0.2.1 the stage instead held its own detached `output_tx` whose
+/// receiver was dropped at construction, so requests submitted to a stage went
+/// nowhere and the "completed" response was fabricated by a timer.
 #[derive(Debug)]
 pub struct PipelineStage {
     /// Stage identifier
     pub id: StageId,
     /// Stage name/description
     pub name: String,
-    /// Input channel for receiving requests
-    pub input_rx: mpsc::Receiver<PipelineRequest>,
-    /// Output channel for sending processed requests
-    pub output_tx: mpsc::Sender<PipelineRequest>,
+    /// Sending end of this stage's own input queue, cloned by whoever feeds it.
+    pub input_tx: mpsc::Sender<PipelineRequest>,
+    /// Receiving end of this stage's input queue, drained by its processing
+    /// loop. Wrapped so the loop can hold it across awaits without keeping the
+    /// stage's own lock.
+    pub input_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<PipelineRequest>>>,
     /// Semaphore for controlling concurrency
     pub concurrency_limit: Arc<Semaphore>,
     /// Stage configuration
@@ -224,6 +235,34 @@ impl StageStats {
     }
 }
 
+/// The work one pipeline stage performs on a request.
+///
+/// The pipeline machinery here owns scheduling, back-pressure, ordering and
+/// accounting; it deliberately owns no opinion about what a "stage" computes.
+/// That belongs to the caller, who installs an executor with
+/// [`PipelineParallelismManager::with_stage_executor`].
+///
+/// Without an installed executor the manager refuses work outright — see
+/// [`PipelineError::NoStageExecutor`]. It does **not** substitute a stand-in
+/// that sleeps for a plausible interval and reports invented utilisation
+/// figures, which is what this module did before 0.2.1: `submit_request`
+/// returned a fixed 100 ms later with a `"dummy"` model id, and every stage
+/// recorded a hardcoded 80% GPU utilisation and 100 operations into statistics
+/// that were then exported as measurements.
+#[async_trait::async_trait]
+pub trait StageExecutor: Send + Sync {
+    /// Run `stage_id`'s share of the work for `request`.
+    ///
+    /// Implementations report their own measured [`StageMetrics`]; the pipeline
+    /// fills in the wall-clock latency it observed regardless, so an executor
+    /// that leaves `latency_us` at zero is corrected rather than believed.
+    async fn execute(
+        &self,
+        request: &PipelineRequest,
+        stage_id: StageId,
+    ) -> Result<StageResult, PipelineError>;
+}
+
 /// Main pipeline parallelism manager
 #[derive(Clone)]
 pub struct PipelineParallelismManager {
@@ -237,6 +276,17 @@ pub struct PipelineParallelismManager {
     stats: Arc<PipelineStats>,
     /// Request tracker for monitoring
     request_tracker: Arc<RwLock<HashMap<PipelineRequestId, RequestTracker>>>,
+    /// The work each stage performs. `None` until
+    /// [`PipelineParallelismManager::with_stage_executor`] installs one, and
+    /// while it is `None` the pipeline accepts no requests.
+    stage_executor: Option<Arc<dyn StageExecutor>>,
+    /// Completion slots for in-flight requests, keyed by request id.
+    ///
+    /// The final stage sends the finished request through its slot; the
+    /// `submit_request` call that is waiting receives it. This is what makes the
+    /// returned request the one that actually traversed the pipeline instead of
+    /// a value constructed after a fixed sleep.
+    completions: Arc<RwLock<HashMap<PipelineRequestId, oneshot::Sender<PipelineRequest>>>>,
 }
 
 /// Request tracking information
@@ -307,7 +357,25 @@ impl PipelineParallelismManager {
             assignment_strategy,
             stats,
             request_tracker: Arc::new(RwLock::new(HashMap::new())),
+            stage_executor: None,
+            completions: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    /// Install the executor that performs each stage's work.
+    ///
+    /// Until one is installed, [`Self::submit_request`] fails with
+    /// [`PipelineError::NoStageExecutor`] rather than returning a synthesized
+    /// response.
+    #[must_use]
+    pub fn with_stage_executor(mut self, executor: Arc<dyn StageExecutor>) -> Self {
+        self.stage_executor = Some(executor);
+        self
+    }
+
+    /// Whether this pipeline can actually process a request.
+    pub fn has_stage_executor(&self) -> bool {
+        self.stage_executor.is_some()
     }
 
     /// Initialize pipeline stages
@@ -323,24 +391,22 @@ impl PipelineParallelismManager {
         let mut stages = Vec::new();
 
         for (i, stage_config) in stage_configs.into_iter().enumerate() {
-            let (_input_tx, input_rx) = mpsc::channel(self.config.stage_buffer_size);
-            let (output_tx, _output_rx) = mpsc::channel(self.config.stage_buffer_size);
+            // One queue per stage, both ends retained: the sender is what
+            // producers clone, the receiver is what this stage's loop drains.
+            // Retaining both is what makes the pipeline actually connected —
+            // previously the receiving end of the stage's own output channel
+            // was dropped immediately, so nothing could ever flow.
+            let (input_tx, input_rx) = mpsc::channel(self.config.stage_buffer_size);
 
             let stage = PipelineStage {
                 id: i,
                 name: format!("Stage-{}", i),
-                input_rx,
-                output_tx,
+                input_tx,
+                input_rx: Arc::new(tokio::sync::Mutex::new(input_rx)),
                 concurrency_limit: Arc::new(Semaphore::new(self.config.max_concurrent_per_stage)),
                 config: stage_config,
                 stats: Arc::new(StageStats::default()),
             };
-
-            // Connect stages (except for the last one)
-            if i < self.config.num_stages - 1 {
-                // Connect this stage's output to next stage's input
-                // This will be handled in the stage processing loop
-            }
 
             stages.push(Arc::new(RwLock::new(stage)));
         }
@@ -353,32 +419,125 @@ impl PipelineParallelismManager {
         Ok(())
     }
 
-    /// Submit a request for pipeline processing
-    pub async fn submit_request(&self, request: PipelineRequest) -> Result<PipelineRequest> {
-        self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
-        self.stats.active_requests.fetch_add(1, Ordering::Relaxed);
+    /// Submit a request and wait for the pipeline to finish it.
+    ///
+    /// The returned request is the one that actually traversed the stages,
+    /// carrying each stage's real [`StageResult`] in
+    /// [`PipelineRequest::stage_results`]. It is delivered through a completion
+    /// channel the final stage sends on, so nothing is returned until the work
+    /// is genuinely done.
+    ///
+    /// # Errors
+    ///
+    /// * [`PipelineError::NoStageExecutor`] when no executor has been installed
+    ///   with [`Self::with_stage_executor`] — the pipeline cannot compute
+    ///   anything and says so instead of synthesizing a response.
+    /// * [`PipelineError::ConfigurationError`] when the stages have not been
+    ///   initialised, or the assigned stage does not exist.
+    /// * [`PipelineError::StageTimeout`] when the configured
+    ///   `stage_timeout_ms` budget elapses for every stage without the request
+    ///   emerging.
+    /// * [`PipelineError::ProcessingError`] when a stage fails, or the pipeline
+    ///   shuts down while the request is in flight.
+    pub async fn submit_request(
+        &self,
+        request: PipelineRequest,
+    ) -> Result<PipelineRequest, PipelineError> {
+        if self.stage_executor.is_none() {
+            return Err(PipelineError::NoStageExecutor);
+        }
 
-        // Track request
+        let request_id = request.id;
+        let (completion_tx, completion_rx) = oneshot::channel();
+
+        let stage_id = self.assign_request_to_stage(&request).await.map_err(|e| {
+            PipelineError::ConfigurationError {
+                message: e.to_string(),
+            }
+        })?;
+
+        // Register the completion slot *before* the request can reach the final
+        // stage, so a fast pipeline cannot complete into a slot that does not
+        // exist yet.
+        self.completions.write().await.insert(request_id, completion_tx);
+
         let tracker = RequestTracker {
             metadata: request.metadata.clone(),
-            current_stage: None,
+            current_stage: Some(stage_id),
             stage_completion_times: HashMap::new(),
             start_time: Instant::now(),
         };
-        self.request_tracker.write().await.insert(request.id, tracker);
+        self.request_tracker.write().await.insert(request_id, tracker);
 
-        // Get first stage assignment
-        let stage_id = self.assign_request_to_stage(&request).await?;
+        self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.stats.active_requests.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
 
-        // Send to first stage
-        let stages = self.stages.read().await;
-        if let Some(stage) = stages.get(stage_id) {
-            let stage_guard = stage.read().await;
-            stage_guard.output_tx.send(request.clone()).await?;
+        // Hand the request to its first stage. Every early return from here on
+        // must undo the bookkeeping above, or the pipeline reports work that is
+        // not in flight.
+        let send_outcome = {
+            let stages = self.stages.read().await;
+            match stages.get(stage_id) {
+                Some(stage) => {
+                    let sender = stage.read().await.input_tx.clone();
+                    sender.send(request).await.map_err(|_| PipelineError::ProcessingError {
+                        error: format!("stage {stage_id} is no longer accepting requests"),
+                    })
+                },
+                None => Err(PipelineError::ConfigurationError {
+                    message: format!(
+                        "stage {stage_id} does not exist; call initialize_stages() first"
+                    ),
+                }),
+            }
+        };
+        if let Err(e) = send_outcome {
+            self.abandon_request(request_id).await;
+            return Err(e);
         }
 
-        // Wait for completion (simplified - in practice you'd use channels/futures)
-        self.wait_for_completion(request.id).await
+        // A request may legitimately visit every stage, so the whole-pipeline
+        // budget is the per-stage budget times the number of stages.
+        let budget = Duration::from_millis(self.config.stage_timeout_ms)
+            .saturating_mul(self.config.num_stages.max(1) as u32);
+
+        let outcome = match tokio::time::timeout(budget, completion_rx).await {
+            Ok(Ok(completed)) => Ok(completed),
+            Ok(Err(_)) => Err(PipelineError::ProcessingError {
+                error: "the pipeline dropped the request before it completed".to_string(),
+            }),
+            Err(_) => Err(PipelineError::StageTimeout { stage_id }),
+        };
+
+        match outcome {
+            Ok(completed) => {
+                let elapsed = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                self.stats.completed_requests.fetch_add(1, Ordering::Relaxed);
+                self.stats.total_latency_us.fetch_add(elapsed, Ordering::Relaxed);
+                self.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
+                self.request_tracker.write().await.remove(&request_id);
+                self.completions.write().await.remove(&request_id);
+                Ok(completed)
+            },
+            Err(e) => {
+                self.stats.failed_requests.fetch_add(1, Ordering::Relaxed);
+                self.abandon_request(request_id).await;
+                Err(e)
+            },
+        }
+    }
+
+    /// Drop the bookkeeping for a request that never entered, or never left,
+    /// the pipeline.
+    ///
+    /// `active_requests` is decremented here rather than only on the success
+    /// path, so a rejected or timed-out request cannot leave the gauge showing
+    /// work that is not happening.
+    async fn abandon_request(&self, request_id: PipelineRequestId) {
+        self.completions.write().await.remove(&request_id);
+        self.request_tracker.write().await.remove(&request_id);
+        self.stats.active_requests.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Assign request to optimal stage
@@ -435,129 +594,123 @@ impl PipelineParallelismManager {
         for (i, stage) in stages.iter().enumerate() {
             let stage_clone = stage.clone();
             let config = self.config.clone();
-            let next_stage = if i < stages.len() - 1 { Some(stages[i + 1].clone()) } else { None };
+            // The *next* stage's sender is what this stage forwards to.
+            let next_sender = match stages.get(i + 1) {
+                Some(next) => Some(next.read().await.input_tx.clone()),
+                None => None,
+            };
+            let executor = self.stage_executor.clone();
+            let completions = Arc::clone(&self.completions);
 
             tokio::spawn(async move {
-                Self::process_stage(stage_clone, next_stage, config).await;
+                Self::process_stage(stage_clone, next_sender, config, executor, completions).await;
             });
         }
 
         Ok(())
     }
 
-    /// Process requests for a single stage
+    /// Drain one stage's queue, running the installed executor on each request.
+    ///
+    /// A request either moves on to `next_sender`, or — when this is the last
+    /// stage, or the executor marked the result final — is delivered to the
+    /// caller waiting on its completion slot. A request that fails, or that
+    /// finishes with nowhere to go and no waiter, is dropped after being counted
+    /// as an error; it is never silently reported as a success.
     async fn process_stage(
         stage: Arc<RwLock<PipelineStage>>,
-        next_stage: Option<Arc<RwLock<PipelineStage>>>,
+        next_sender: Option<mpsc::Sender<PipelineRequest>>,
         _config: PipelineConfig,
+        executor: Option<Arc<dyn StageExecutor>>,
+        completions: Arc<RwLock<HashMap<PipelineRequestId, oneshot::Sender<PipelineRequest>>>>,
     ) {
+        let (stage_id, receiver, semaphore, stats) = {
+            let guard = stage.read().await;
+            (
+                guard.id,
+                Arc::clone(&guard.input_rx),
+                Arc::clone(&guard.concurrency_limit),
+                Arc::clone(&guard.stats),
+            )
+        };
+
         loop {
             let mut request = {
-                let mut stage_guard = stage.write().await;
-                match stage_guard.input_rx.recv().await {
+                let mut rx = receiver.lock().await;
+                match rx.recv().await {
                     Some(req) => req,
-                    None => {
-                        // Channel closed, exit
-                        break;
-                    },
+                    // Every sender is gone: the pipeline is shutting down.
+                    None => break,
                 }
             };
 
-            // Acquire semaphore for concurrency control
-            let semaphore = {
-                let stage_guard = stage.read().await;
-                stage_guard.concurrency_limit.clone()
-            };
             // Permit held for RAII; on a closed semaphore (shutdown) proceed unlimited.
             let _permit = semaphore.acquire().await.ok();
 
-            // Record stage start
-            let stage_id = {
-                let stage_guard = stage.read().await;
-                stage_guard.stats.record_request_start();
-                stage_guard.id
-            };
-
+            stats.record_request_start();
             let start_time = Instant::now();
             request.stage_times.insert(stage_id, start_time);
 
-            // Process request (simplified - call actual model processing)
-            let result = Self::process_request_at_stage(&mut request, stage_id).await;
+            let outcome = match &executor {
+                Some(executor) => executor.execute(&request, stage_id).await,
+                // Unreachable through `submit_request`, which refuses before a
+                // request can be queued; stated explicitly rather than assumed.
+                None => Err(PipelineError::NoStageExecutor),
+            };
 
             let processing_time = start_time.elapsed();
 
-            match result {
-                Ok(stage_result) => {
-                    request.stage_results.insert(stage_id, stage_result.clone());
+            match outcome {
+                Ok(mut stage_result) => {
+                    // The stage's own latency claim is replaced by what the
+                    // pipeline actually measured, so the exported figure cannot
+                    // be an executor's guess.
+                    stage_result.processing_time = processing_time;
+                    stage_result.metrics.latency_us =
+                        u64::try_from(processing_time.as_micros()).unwrap_or(u64::MAX);
 
-                    // Record completion
-                    {
-                        let stage_guard = stage.read().await;
-                        stage_guard.stats.record_request_complete(processing_time);
-                    }
+                    let is_final = stage_result.is_final;
+                    request.stage_results.insert(stage_id, stage_result);
+                    stats.record_request_complete(processing_time);
 
-                    // Send to next stage or complete
-                    if let Some(next) = &next_stage {
-                        if !stage_result.is_final {
-                            let next_guard = next.read().await;
-                            let _ = next_guard.output_tx.send(request).await;
-                        }
+                    match (is_final, &next_sender) {
+                        // More pipeline to traverse.
+                        (false, Some(next)) => {
+                            if next.send(request).await.is_err() {
+                                // The next stage is gone; the request cannot
+                                // complete, and its waiter must not hang.
+                                stats.record_error();
+                                break;
+                            }
+                        },
+                        // Finished: hand it back to whoever is waiting.
+                        _ => {
+                            let waiter = completions.write().await.remove(&request.id);
+                            match waiter {
+                                Some(slot) => {
+                                    // A closed slot means the submitter gave up
+                                    // (timed out); nothing further to do.
+                                    let _ = slot.send(request);
+                                },
+                                None => {
+                                    // Completed work nobody is waiting for: an
+                                    // abandoned or duplicate request. Counted,
+                                    // not reported as a success.
+                                    stats.record_error();
+                                },
+                            }
+                        },
                     }
                 },
-                Err(_) => {
-                    // Record error
-                    let stage_guard = stage.read().await;
-                    stage_guard.stats.record_error();
+                Err(e) => {
+                    tracing::warn!("pipeline stage {stage_id} failed a request: {e}");
+                    stats.record_error();
+                    // Drop the completion slot so the submitter fails fast
+                    // instead of waiting out the full timeout budget.
+                    completions.write().await.remove(&request.id);
                 },
             }
         }
-    }
-
-    /// Process request at specific stage (placeholder)
-    async fn process_request_at_stage(
-        request: &mut PipelineRequest,
-        stage_id: StageId,
-    ) -> Result<StageResult> {
-        // Simulate processing
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        let metrics = StageMetrics {
-            latency_us: 10_000,
-            memory_usage: 1024 * 1024, // 1MB
-            gpu_utilization: Some(0.8),
-            cpu_utilization: 0.6,
-            operation_count: 100,
-        };
-
-        Ok(StageResult {
-            data: request.data.clone(),
-            processing_time: Duration::from_millis(10),
-            metrics,
-            is_final: stage_id == 3, // Assume stage 3 is final
-        })
-    }
-
-    /// Wait for request completion (simplified)
-    async fn wait_for_completion(&self, request_id: PipelineRequestId) -> Result<PipelineRequest> {
-        // In practice, this would use proper async channels/futures
-        // This is a simplified placeholder
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Create dummy response
-        Ok(PipelineRequest {
-            id: request_id,
-            data: vec![0u8; 100],
-            metadata: RequestMetadata {
-                model_id: "dummy".to_string(),
-                priority: RequestPriority::Normal,
-                device_type: DeviceType::Any,
-                complexity_score: 1.0,
-                correlation_id: None,
-            },
-            stage_results: HashMap::new(),
-            created_at: Instant::now(),
-            stage_times: HashMap::new(),
-        })
     }
 
     /// Get pipeline statistics
@@ -663,6 +816,12 @@ pub enum PipelineError {
 
     #[error("Processing error: {error}")]
     ProcessingError { error: String },
+
+    #[error(
+        "no stage executor is installed: this pipeline cannot process requests. \
+         Install one with PipelineParallelismManager::with_stage_executor()"
+    )]
+    NoStageExecutor,
 }
 
 #[cfg(test)]
@@ -715,5 +874,236 @@ mod tests {
         stats.record_request_complete(Duration::from_millis(100));
         assert_eq!(stats.active_requests.load(Ordering::Relaxed), 0);
         assert_eq!(stats.requests_processed.load(Ordering::Relaxed), 1);
+    }
+
+    // ── Regression tests: the pipeline used to fabricate its own results ──
+
+    /// An executor that performs real, verifiable work: it appends the stage id
+    /// to the request payload, so the returned data proves which stages ran and
+    /// in what order.
+    struct AppendStageIdExecutor {
+        /// Stage after which the pipeline is done.
+        final_stage: StageId,
+    }
+
+    #[async_trait::async_trait]
+    impl StageExecutor for AppendStageIdExecutor {
+        async fn execute(
+            &self,
+            request: &PipelineRequest,
+            stage_id: StageId,
+        ) -> Result<StageResult, PipelineError> {
+            let mut data = request
+                .stage_results
+                .get(&stage_id.wrapping_sub(1))
+                .map(|previous| previous.data.clone())
+                .unwrap_or_else(|| request.data.clone());
+            data.push(u8::try_from(stage_id).unwrap_or(u8::MAX));
+
+            Ok(StageResult {
+                data,
+                // Deliberately wrong: the pipeline must overwrite both of these
+                // with what it actually measured.
+                processing_time: Duration::ZERO,
+                metrics: StageMetrics::default(),
+                is_final: stage_id == self.final_stage,
+            })
+        }
+    }
+
+    /// An executor that always fails, to check the error path.
+    struct FailingExecutor;
+
+    #[async_trait::async_trait]
+    impl StageExecutor for FailingExecutor {
+        async fn execute(
+            &self,
+            _request: &PipelineRequest,
+            stage_id: StageId,
+        ) -> Result<StageResult, PipelineError> {
+            Err(PipelineError::ProcessingError {
+                error: format!("stage {stage_id} refused"),
+            })
+        }
+    }
+
+    fn test_config(num_stages: usize) -> PipelineConfig {
+        PipelineConfig {
+            num_stages,
+            stage_timeout_ms: 2_000,
+            ..PipelineConfig::default()
+        }
+    }
+
+    fn stage_configs(count: usize) -> Vec<StageConfig> {
+        (0..count)
+            .map(|i| StageConfig {
+                device: DeviceType::Any,
+                layer_range: (i, i + 1),
+                parameters: HashMap::new(),
+                memory_limit_mb: None,
+                timeout: Duration::from_secs(1),
+            })
+            .collect()
+    }
+
+    fn test_request(data: Vec<u8>) -> PipelineRequest {
+        PipelineRequest {
+            id: Uuid::new_v4(),
+            data,
+            metadata: RequestMetadata {
+                model_id: "test-model".to_string(),
+                priority: RequestPriority::Normal,
+                device_type: DeviceType::Any,
+                complexity_score: 1.0,
+                correlation_id: None,
+            },
+            stage_results: HashMap::new(),
+            created_at: Instant::now(),
+            stage_times: HashMap::new(),
+        }
+    }
+
+    /// Regression: `submit_request` slept 100 ms and returned a fabricated
+    /// request — a fixed 100-byte zero payload with the model id `"dummy"` and
+    /// no stage results — regardless of what was submitted or whether any stage
+    /// had run. The response must now be the request that really traversed the
+    /// pipeline.
+    #[tokio::test]
+    async fn submit_request_returns_the_request_that_actually_traversed_the_pipeline() {
+        let manager = PipelineParallelismManager::new(test_config(2))
+            .expect("manager builds")
+            .with_stage_executor(Arc::new(AppendStageIdExecutor { final_stage: 1 }));
+        manager.initialize_stages(stage_configs(2)).await.expect("stages initialise");
+
+        let request = test_request(vec![7, 7, 7]);
+        let submitted_id = request.id;
+        let completed = manager.submit_request(request).await.expect("pipeline completes");
+
+        assert_eq!(
+            completed.id, submitted_id,
+            "the answer must be for this request"
+        );
+        assert_eq!(
+            completed.metadata.model_id, "test-model",
+            "the old code returned the literal model id \"dummy\""
+        );
+        assert_ne!(
+            completed.data,
+            vec![0u8; 100],
+            "the old code returned a fixed 100-byte zero payload"
+        );
+        assert!(
+            !completed.stage_results.is_empty(),
+            "the old code returned no stage results at all"
+        );
+
+        // The executor appends its stage id, so the final payload proves both
+        // stages ran, in order, on the submitted bytes.
+        let last_stage = completed.stage_results.keys().max().copied().expect("a stage ran");
+        assert_eq!(
+            completed.stage_results[&last_stage].data,
+            vec![7, 7, 7, 0, 1]
+        );
+    }
+
+    /// Regression: every stage recorded a hardcoded 10 ms latency, 1 MB of
+    /// memory, 80% GPU utilisation and 100 operations into statistics that
+    /// `get_stats()` exports. Latency must now be measured, and an executor that
+    /// reports nothing must not have numbers invented for it.
+    #[tokio::test]
+    async fn stage_metrics_are_measured_rather_than_invented() {
+        let manager = PipelineParallelismManager::new(test_config(1))
+            .expect("manager builds")
+            .with_stage_executor(Arc::new(AppendStageIdExecutor { final_stage: 0 }));
+        manager.initialize_stages(stage_configs(1)).await.expect("stages initialise");
+
+        let completed =
+            manager.submit_request(test_request(vec![1])).await.expect("pipeline completes");
+        let result = completed.stage_results.get(&0).expect("stage 0 ran");
+
+        // The executor returned Duration::ZERO and a default StageMetrics; the
+        // pipeline replaced the latency with its own measurement.
+        assert!(
+            result.processing_time > Duration::ZERO,
+            "processing time must be measured, not taken from the executor's claim"
+        );
+        assert_ne!(
+            result.metrics.latency_us, 10_000,
+            "10_000 µs was the old hardcoded value"
+        );
+        assert_eq!(
+            result.metrics.latency_us,
+            u64::try_from(result.processing_time.as_micros()).unwrap_or(u64::MAX)
+        );
+        // Fields the executor genuinely did not measure stay at zero rather
+        // than being filled with plausible-looking numbers.
+        assert_eq!(result.metrics.gpu_utilization, None, "0.8 was invented");
+        assert_eq!(result.metrics.operation_count, 0, "100 was invented");
+        assert_eq!(result.metrics.memory_usage, 0, "1 MB was invented");
+
+        let stats = manager.get_stats().await;
+        assert_eq!(stats.completed_requests, 1);
+        assert_eq!(stats.failed_requests, 0);
+        assert_eq!(
+            stats.active_requests, 0,
+            "the in-flight gauge must return to zero"
+        );
+        assert!(stats.avg_pipeline_latency_us > 0.0);
+    }
+
+    /// A pipeline with no executor must refuse work rather than answer with a
+    /// synthesized response.
+    #[tokio::test]
+    async fn a_pipeline_without_an_executor_refuses_requests() {
+        let manager = PipelineParallelismManager::new(test_config(2)).expect("manager builds");
+        assert!(!manager.has_stage_executor());
+        manager.initialize_stages(stage_configs(2)).await.expect("stages initialise");
+
+        let error = manager
+            .submit_request(test_request(vec![1, 2, 3]))
+            .await
+            .expect_err("must not fabricate a response");
+        assert!(matches!(error, PipelineError::NoStageExecutor));
+
+        // A refused request must not be counted as in flight.
+        assert_eq!(manager.get_stats().await.active_requests, 0);
+    }
+
+    /// A failing stage surfaces as an error promptly, and is counted as a
+    /// failure rather than reported as a completion.
+    #[tokio::test]
+    async fn a_failing_stage_is_reported_as_a_failure() {
+        let manager = PipelineParallelismManager::new(test_config(1))
+            .expect("manager builds")
+            .with_stage_executor(Arc::new(FailingExecutor));
+        manager.initialize_stages(stage_configs(1)).await.expect("stages initialise");
+
+        let error = manager
+            .submit_request(test_request(vec![1]))
+            .await
+            .expect_err("a failing stage must not produce a completion");
+        assert!(matches!(error, PipelineError::ProcessingError { .. }));
+
+        let stats = manager.get_stats().await;
+        assert_eq!(stats.completed_requests, 0);
+        assert_eq!(stats.failed_requests, 1);
+        assert_eq!(stats.active_requests, 0);
+        assert_eq!(stats.stage_stats[0].error_count, 1);
+    }
+
+    /// Submitting before `initialize_stages` must be an error, not a wait.
+    #[tokio::test]
+    async fn submitting_to_an_uninitialised_pipeline_is_a_configuration_error() {
+        let manager = PipelineParallelismManager::new(test_config(2))
+            .expect("manager builds")
+            .with_stage_executor(Arc::new(AppendStageIdExecutor { final_stage: 1 }));
+
+        let error = manager
+            .submit_request(test_request(vec![1]))
+            .await
+            .expect_err("there is no stage to run on");
+        assert!(matches!(error, PipelineError::ConfigurationError { .. }));
+        assert_eq!(manager.get_stats().await.active_requests, 0);
     }
 }

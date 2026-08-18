@@ -890,46 +890,35 @@ impl MobileIntegrationTestFramework {
         })
     }
 
-    /// Run comprehensive integration tests
+    /// Run comprehensive integration tests.
+    ///
+    /// # Errors
+    ///
+    /// Always: every collector this method would call
+    /// (`run_platform_tests`, `run_backend_tests`,
+    /// `run_performance_benchmarks`, `run_compatibility_tests`,
+    /// `run_cross_platform_comparison`, `analyze_errors`) does not actually
+    /// exercise any device, backend, or model -- each was `// Placeholder
+    /// implementation` returning an empty map or an all-`0.0`/all-empty
+    /// results struct. Chained together as they were, the previous
+    /// implementation always returned `Ok(IntegrationTestResults)` with a
+    /// `TestSummary { total_tests: 0, passed_tests: 0, ..., success_rate:
+    /// 0.0 }` that every downstream report generator then rendered as "Test
+    /// completed successfully" -- a test suite that could never actually
+    /// fail, which is worse than no test suite at all in CI. Building the
+    /// real per-platform/per-backend device harness this type's fields
+    /// (`platform_validators`, `backend_validators`, ...) imply is
+    /// substantial, real work this pass does not fabricate a shortcut for;
+    /// what changes here is that a call to this method now says so
+    /// honestly instead of reporting a fabricated pass.
     pub async fn run_integration_tests(&mut self) -> Result<IntegrationTestResults> {
-        let start_time = Instant::now();
-
-        // Run platform-specific tests
-        let platform_results = self.run_platform_tests().await?;
-
-        // Run backend-specific tests
-        let backend_results = self.run_backend_tests().await?;
-
-        // Run performance benchmarks
-        let performance_results = self.run_performance_benchmarks().await?;
-
-        // Run compatibility tests
-        let compatibility_results = self.run_compatibility_tests().await?;
-
-        // Run cross-platform comparison
-        let cross_platform_comparison = self.run_cross_platform_comparison().await?;
-
-        // Analyze errors and patterns
-        let error_analysis = self.analyze_errors().await?;
-
-        // Generate recommendations
-        let recommendations = self
-            .generate_recommendations(&platform_results, &backend_results, &performance_results)
-            .await?;
-
-        // Create test summary
-        let summary = self.create_test_summary(start_time, &platform_results, &backend_results)?;
-
-        Ok(IntegrationTestResults {
-            summary,
-            platform_results,
-            backend_results,
-            performance_results,
-            compatibility_results,
-            cross_platform_comparison,
-            error_analysis,
-            recommendations,
-        })
+        Err(TrustformersError::not_implemented(
+            "MobileIntegrationTestFramework::run_integration_tests (no platform/backend test \
+             collector in this framework actually exercises a device, backend, or model yet; \
+             see this method's own doc comment)"
+                .to_string(),
+        )
+        .into())
     }
 
     /// Generate comprehensive test report
@@ -1118,38 +1107,106 @@ impl MobileIntegrationTestFramework {
             .map_err(|e| TrustformersError::serialization_error(e.to_string()).into())
     }
 
-    fn generate_html_report(&self, _results: &IntegrationTestResults) -> Result<String> {
-        // Placeholder implementation for HTML report generation
-        Ok(
-            "<html><body><h1>TrustformersRS Mobile Integration Test Report</h1></body></html>"
-                .to_string(),
-        )
+    /// Real HTML rendering of `results.summary`'s actual counts.
+    /// Previously an unconditional, `results`-ignoring
+    /// `<h1>TrustformersRS Mobile Integration Test Report</h1>` with no
+    /// pass/fail/duration content at all -- indistinguishable whether zero
+    /// tests ran or a thousand passed.
+    fn generate_html_report(&self, results: &IntegrationTestResults) -> Result<String> {
+        let s = &results.summary;
+        Ok(format!(
+            "<html><body><h1>TrustformeRS Mobile Integration Test Report</h1>\
+             <p>Total: {} | Passed: {} | Failed: {} | Skipped: {} | Success rate: {:.1}% | \
+             Duration: {:.2}s</p></body></html>",
+            s.total_tests,
+            s.passed_tests,
+            s.failed_tests,
+            s.skipped_tests,
+            s.success_rate * 100.0,
+            s.total_duration.as_secs_f64()
+        ))
     }
 
-    fn generate_markdown_report(&self, _results: &IntegrationTestResults) -> Result<String> {
-        // Placeholder implementation for Markdown report generation
-        Ok(
-            "# TrustformersRS Mobile Integration Test Report\n\nTest completed successfully."
-                .to_string(),
-        )
+    /// Real Markdown rendering of `results.summary`. Previously an
+    /// unconditional "Test completed successfully." regardless of
+    /// `results` -- including when `failed_tests > 0`.
+    fn generate_markdown_report(&self, results: &IntegrationTestResults) -> Result<String> {
+        let s = &results.summary;
+        Ok(format!(
+            "# TrustformeRS Mobile Integration Test Report\n\n\
+             - Total tests: {}\n- Passed: {}\n- Failed: {}\n- Skipped: {}\n\
+             - Success rate: {:.1}%\n- Duration: {:.2}s\n",
+            s.total_tests,
+            s.passed_tests,
+            s.failed_tests,
+            s.skipped_tests,
+            s.success_rate * 100.0,
+            s.total_duration.as_secs_f64()
+        ))
     }
 
-    fn generate_xml_report(&self, _results: &IntegrationTestResults) -> Result<String> {
-        // Placeholder implementation for XML report generation
-        Ok(
-            "<?xml version=\"1.0\"?><testReport><summary>Test completed</summary></testReport>"
-                .to_string(),
-        )
+    /// Real XML rendering of `results.summary`. Previously an unconditional
+    /// `<summary>Test completed</summary>` regardless of `results`.
+    fn generate_xml_report(&self, results: &IntegrationTestResults) -> Result<String> {
+        let s = &results.summary;
+        Ok(format!(
+            "<?xml version=\"1.0\"?><testReport><summary total=\"{}\" passed=\"{}\" \
+             failed=\"{}\" skipped=\"{}\" successRate=\"{:.4}\" \
+             durationSeconds=\"{:.2}\"/></testReport>",
+            s.total_tests,
+            s.passed_tests,
+            s.failed_tests,
+            s.skipped_tests,
+            s.success_rate,
+            s.total_duration.as_secs_f64()
+        ))
     }
 
-    fn generate_csv_report(&self, _results: &IntegrationTestResults) -> Result<String> {
-        // Placeholder implementation for CSV report generation
-        Ok("Test Name,Status,Duration,Platform,Backend\n".to_string())
+    /// Real CSV rows, one per individual test in every platform/backend
+    /// result `results` actually holds -- previously a header row only,
+    /// for every input, regardless of how many test results it held.
+    fn generate_csv_report(&self, results: &IntegrationTestResults) -> Result<String> {
+        let mut csv = String::from("Test Name,Status,Duration,Platform,Backend\n");
+        for (platform, r) in &results.platform_results {
+            for test in &r.test_results {
+                csv.push_str(&format!(
+                    "{},{:?},{:.3},{platform:?},\n",
+                    test.test_name,
+                    test.status,
+                    test.duration.as_secs_f64()
+                ));
+            }
+        }
+        for (backend, r) in &results.backend_results {
+            for test in &r.test_results {
+                csv.push_str(&format!(
+                    "{},{:?},{:.3},,{backend:?}\n",
+                    test.test_name,
+                    test.status,
+                    test.duration.as_secs_f64()
+                ));
+            }
+        }
+        Ok(csv)
     }
 
+    /// PDF generation is not implemented: this crate has no PDF-writing
+    /// library, and the previous implementation returned the literal
+    /// string `"integration_test_report.pdf"` -- a filename, not a path to
+    /// any file actually written, and not the PDF bytes themselves either.
+    /// A caller checking only `.is_ok()` would believe a real PDF had been
+    /// produced. Refusing honestly is strictly better than that.
+    ///
+    /// # Errors
+    ///
+    /// Always: see above.
     fn generate_pdf_report(&self, _results: &IntegrationTestResults) -> Result<String> {
-        // Placeholder implementation - would return path to generated PDF
-        Ok("integration_test_report.pdf".to_string())
+        Err(TrustformersError::not_implemented(
+            "PDF report generation (no PDF-writing library is linked into this crate; use \
+             ReportFormat::HTML, Markdown, XML, JSON, or CSV instead)"
+                .to_string(),
+        )
+        .into())
     }
 }
 
@@ -1587,6 +1644,171 @@ mod tests {
         let config = IntegrationTestConfig::default();
         let framework = MobileIntegrationTestFramework::new(config);
         assert!(framework.is_ok());
+    }
+
+    /// Regression test for the previous `run_integration_tests`: chaining
+    /// seven `// Placeholder implementation` collectors, it always
+    /// returned `Ok(IntegrationTestResults)` with an all-zero
+    /// `TestSummary` -- a test run that always "succeeds" at running zero
+    /// tests. It must now report honestly that no real collector exists
+    /// yet, rather than a fabricated empty pass.
+    #[tokio::test]
+    async fn test_run_integration_tests_reports_honest_error_not_fake_success() {
+        let config = IntegrationTestConfig::default();
+        let mut framework =
+            MobileIntegrationTestFramework::new(config).expect("framework creation");
+        let result = framework.run_integration_tests().await;
+        assert!(
+            result.is_err(),
+            "must not report a fabricated empty-but-successful test run"
+        );
+    }
+
+    fn minimal_integration_test_results(summary: TestSummary) -> IntegrationTestResults {
+        IntegrationTestResults {
+            summary,
+            platform_results: HashMap::new(),
+            backend_results: HashMap::new(),
+            performance_results: PerformanceBenchmarkResults {
+                memory_benchmarks: MemoryBenchmarkResults {
+                    peak_memory_usage_mb: 0.0,
+                    average_memory_usage_mb: 0.0,
+                    memory_leaks_detected: 0,
+                    memory_efficiency_score: 0.0,
+                    memory_optimization_effectiveness: 0.0,
+                },
+                latency_benchmarks: LatencyBenchmarkResults {
+                    avg_inference_latency_ms: 0.0,
+                    p95_inference_latency_ms: 0.0,
+                    p99_inference_latency_ms: 0.0,
+                    initialization_latency_ms: 0.0,
+                    model_loading_latency_ms: 0.0,
+                },
+                throughput_benchmarks: ThroughputBenchmarkResults {
+                    max_throughput_inferences_per_second: 0.0,
+                    sustained_throughput_inferences_per_second: 0.0,
+                    batch_processing_throughput: 0.0,
+                    concurrent_processing_throughput: 0.0,
+                },
+                power_benchmarks: PowerBenchmarkResults {
+                    avg_power_consumption_mw: 0.0,
+                    peak_power_consumption_mw: 0.0,
+                    power_efficiency_score: 0.0,
+                    battery_drain_percentage_per_hour: 0.0,
+                    thermal_impact_celsius: 0.0,
+                },
+                load_test_results: LoadTestResults {
+                    max_concurrent_users: 0,
+                    max_requests_per_second: 0.0,
+                    error_rate_under_load: 0.0,
+                    performance_degradation_factor: 0.0,
+                    recovery_time_seconds: 0.0,
+                },
+            },
+            compatibility_results: CompatibilityTestResults {
+                framework_compatibility: HashMap::new(),
+                version_compatibility: HashMap::new(),
+                model_compatibility: HashMap::new(),
+                api_compatibility: CompatibilityScores {
+                    overall_compatibility: 0.0,
+                    api_compatibility: 0.0,
+                    performance_compatibility: 0.0,
+                    behavior_compatibility: 0.0,
+                    feature_compatibility: 0.0,
+                },
+                overall_compatibility_score: 0.0,
+            },
+            cross_platform_comparison: CrossPlatformComparison {
+                data_consistency_score: 0.0,
+                api_consistency_score: 0.0,
+                performance_parity_score: 0.0,
+                behavior_consistency_score: 0.0,
+                feature_parity_score: 0.0,
+                platform_differences: Vec::new(),
+            },
+            error_analysis: ErrorAnalysis {
+                common_errors: Vec::new(),
+                error_patterns: Vec::new(),
+                error_frequency: HashMap::new(),
+                error_correlation: HashMap::new(),
+                error_trends: Vec::new(),
+            },
+            recommendations: Vec::new(),
+        }
+    }
+
+    /// Regression test for the previous `generate_html_report`/
+    /// `generate_markdown_report`/`generate_xml_report`: each ignored
+    /// `results` entirely and returned a canned "success"/"completed"
+    /// string, so a report generated from a summary with real failures
+    /// looked identical to one generated from an all-passing run. The real
+    /// pass/fail counts must now actually appear in the rendered output.
+    #[test]
+    fn test_report_generators_reflect_real_failure_counts_not_a_canned_success_string() {
+        let framework = MobileIntegrationTestFramework::new(IntegrationTestConfig::default())
+            .expect("framework creation");
+        let results = minimal_integration_test_results(TestSummary {
+            total_tests: 10,
+            passed_tests: 7,
+            failed_tests: 3,
+            skipped_tests: 0,
+            success_rate: 0.7,
+            total_duration: Duration::from_secs(5),
+            environment_info: TestEnvironmentInfo {
+                platform: MobilePlatform::Ios,
+                device_info: MobileDeviceInfo::default(),
+                test_framework_version: "1.0.0".to_string(),
+                test_start_time: "2026-01-01T00:00:00Z".to_string(),
+                test_end_time: "2026-01-01T00:00:05Z".to_string(),
+            },
+        });
+
+        let html = framework.generate_html_report(&results).expect("html report");
+        assert!(
+            html.contains('3'),
+            "HTML report must reflect the real failed-test count"
+        );
+
+        let markdown = framework.generate_markdown_report(&results).expect("markdown report");
+        assert!(
+            markdown.contains("Failed: 3"),
+            "Markdown report must reflect the real failed-test count, not a canned success \
+             message"
+        );
+
+        let xml = framework.generate_xml_report(&results).expect("xml report");
+        assert!(
+            xml.contains("failed=\"3\""),
+            "XML report must reflect the real failed count"
+        );
+    }
+
+    /// Regression test for the previous `generate_pdf_report`, which
+    /// returned the literal string `"integration_test_report.pdf"` -- a
+    /// filename, not a path to any file this crate actually wrote, and not
+    /// PDF bytes either. A caller checking only `.is_ok()` would believe a
+    /// real PDF had been produced.
+    #[test]
+    fn test_generate_pdf_report_is_honest_error_not_a_fake_filename() {
+        let framework = MobileIntegrationTestFramework::new(IntegrationTestConfig::default())
+            .expect("framework creation");
+        let results = minimal_integration_test_results(TestSummary {
+            total_tests: 0,
+            passed_tests: 0,
+            failed_tests: 0,
+            skipped_tests: 0,
+            success_rate: 0.0,
+            total_duration: Duration::from_secs(0),
+            environment_info: TestEnvironmentInfo {
+                platform: MobilePlatform::Ios,
+                device_info: MobileDeviceInfo::default(),
+                test_framework_version: "1.0.0".to_string(),
+                test_start_time: String::new(),
+                test_end_time: String::new(),
+            },
+        });
+
+        assert!(framework.generate_pdf_report(&results).is_err());
     }
 
     #[test]

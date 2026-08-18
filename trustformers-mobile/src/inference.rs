@@ -135,7 +135,13 @@ fn natural_key(s: &str) -> Vec<NaturalPart> {
 /// lexically. Falls back to a plain string comparison when the natural keys
 /// tie (e.g. one name is a strict prefix of the other), which keeps the
 /// order total and deterministic.
-fn natural_cmp(a: &str, b: &str) -> Ordering {
+///
+/// `pub(crate)` so other checkpoint-driven, architecture-free consumers of a
+/// flat named-tensor bag (e.g. `coreml_converter`'s layer derivation) sort
+/// checkpoint tensor names the same, single, correct way this crate has --
+/// rather than each reimplementing (and potentially disagreeing on) numeric-
+/// aware name ordering.
+pub(crate) fn natural_cmp(a: &str, b: &str) -> Ordering {
     let ka = natural_key(a);
     let kb = natural_key(b);
     for (pa, pb) in ka.iter().zip(kb.iter()) {
@@ -480,7 +486,10 @@ impl MobileInferenceEngine {
     /// warning rather than fabricated; a load that yields zero usable
     /// tensors is still rejected by the empty-weights check in
     /// [`Self::parse_model_format`].
-    fn parse_safetensors(data: &[u8]) -> Result<HashMap<String, Tensor>> {
+    /// `pub(crate)`: reused directly by `wasm::WasmMobileEngine::parse_model_weights`
+    /// so the WASM bridge parses real safetensors bytes through this exact,
+    /// already-tested decoder rather than a second, divergent copy of it.
+    pub(crate) fn parse_safetensors(data: &[u8]) -> Result<HashMap<String, Tensor>> {
         let parsed = SafeTensors::deserialize(data).map_err(|e| {
             invalid_format("a valid safetensors buffer", format!("parse error: {e}"))
         })?;
@@ -758,6 +767,40 @@ impl MobileInferenceEngine {
         self.config.max_memory_mb = base_memory + (batch_size - 1) * memory_per_batch;
 
         Ok(())
+    }
+
+    /// Whether a model is currently loaded (weights present and
+    /// [`Self::inference`] would not immediately error with "Model not
+    /// loaded"). Exposes the private `model_loaded` flag other modules in
+    /// this crate (e.g. `react_native`'s bridge, via its own differently-
+    /// shaped `is_model_loaded(&self, model_id: &str)`) need to answer that
+    /// question honestly instead of hardcoding `true`. Named
+    /// `has_loaded_model` rather than `is_model_loaded` specifically to
+    /// avoid colliding with that bridge method's inherent-impl name (same
+    /// type, same crate, different arity -- Rust does not allow overloading
+    /// by arity for inherent methods).
+    pub fn has_loaded_model(&self) -> bool {
+        self.model_loaded
+    }
+
+    /// Unload the currently loaded model, freeing its weights and any
+    /// cached inference results.
+    ///
+    /// This engine holds one active model at a time (see `model_weights:
+    /// Option<HashMap<String, Tensor>>` above); callers that need
+    /// multi-model bookkeeping (tracking several model IDs and which one is
+    /// currently active) layer that on top, e.g. `react_native`'s
+    /// `ModelManager`. After this call, [`Self::inference`] returns the
+    /// same "Model not loaded" error it would for a freshly constructed
+    /// engine, and [`Self::load_model`]/[`Self::load_model_from_file`] must
+    /// be called again before running inference. Named `clear_loaded_model`
+    /// rather than `unload_model` for the same arity-collision reason as
+    /// [`Self::has_loaded_model`] above.
+    pub fn clear_loaded_model(&mut self) {
+        self.model_weights = None;
+        self.model_loaded = false;
+        self.execution_plan.ordered_weight_names.clear();
+        self.cache = None;
     }
 
     /// Clear inference cache to free memory
@@ -1562,6 +1605,34 @@ mod tests {
         let result = engine.load_model(weights);
         assert!(result.is_ok());
         assert!(engine.model_loaded);
+    }
+
+    /// `has_loaded_model`/`clear_loaded_model` back real bridge methods
+    /// (e.g. `react_native`'s `MobileInferenceEngine::is_model_loaded`/
+    /// `unload_model` used to be a hardcoded `true` / a total no-op); the
+    /// engine's own accessor and unloader must reflect real state.
+    #[test]
+    fn test_has_loaded_model_and_clear_loaded_model_reflect_real_state() {
+        let config = MobileConfig::default();
+        let mut engine = MobileInferenceEngine::new(config).expect("Failed to create engine");
+        assert!(!engine.has_loaded_model());
+
+        let mut weights = HashMap::new();
+        weights.insert(
+            "layer1".to_string(),
+            Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+        );
+        engine.load_model(weights).expect("load_model failed");
+        assert!(engine.has_loaded_model());
+
+        engine.clear_loaded_model();
+        assert!(!engine.has_loaded_model());
+        assert!(engine.execution_plan.ordered_weight_names.is_empty());
+
+        // Inference after unload must fail the same way it would on a
+        // freshly constructed, never-loaded engine.
+        let input = Tensor::ones(&[1, 4]).expect("input tensor");
+        assert!(engine.inference(&input).is_err());
     }
 
     #[test]

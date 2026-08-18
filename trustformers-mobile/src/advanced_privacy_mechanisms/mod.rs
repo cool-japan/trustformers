@@ -850,8 +850,8 @@ impl Default for PostQuantumConfig {
 
 /// Key encapsulation mechanism algorithms.
 ///
-/// Only [`KEMAlgorithm::MlKem768`] is implemented; the others have no vetted
-/// pure-Rust implementation and are reported as unsupported.
+/// Only [`KEMAlgorithm::MlKem768`] is implemented; the others are not
+/// implemented here and are reported as unsupported.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KEMAlgorithm {
     /// FIPS 203 ML-KEM-768 (formerly CRYSTALS-Kyber). **Implemented.**

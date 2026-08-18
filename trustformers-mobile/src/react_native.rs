@@ -701,36 +701,59 @@ impl ReactNativeConfig {
     }
 }
 
-// Mock implementation of MobileInferenceEngine methods for React Native
+// React-Native-facing wrappers around the real `MobileInferenceEngine` API
+// (`inference.rs`). This used to be a "mock implementation... for React
+// Native" that shadowed the same method names with no-ops: `load_model_from_path`
+// did nothing, `run_inference` returned `input.clone()` unchanged,
+// `is_model_loaded` always answered `true`, `unload_model`/`configure_model`
+// were no-ops -- every one of `ReactNativeMobileModule`'s public methods
+// above (`load_model`, `inference`, `remove_model`, `configure_model`)
+// ultimately calls through here, so none of them ever touched real model
+// weights. `MobileInferenceEngine` holds one active model at a time (see
+// its `model_weights: Option<HashMap<String, Tensor>>`); `model_id` here
+// identifies *which* model the caller believes is active for logging
+// purposes; per-ID metadata (size, version, availability) is tracked
+// separately by this module's own `ModelManager`.
 impl MobileInferenceEngine {
     fn initialize(&mut self) -> Result<()> {
-        // Initialize inference engine
+        // `MobileInferenceEngine::new` already performs all real
+        // initialization (config validation, optimizer setup); there is
+        // nothing further to do before a model is loaded.
         Ok(())
     }
 
-    fn load_model_from_path(&mut self, _model_id: &str, _model_path: &str) -> Result<()> {
-        // Load model implementation
-        Ok(())
+    fn load_model_from_path(&mut self, model_id: &str, model_path: &str) -> Result<()> {
+        self.load_model_from_file(model_path).map_err(|e| {
+            CoreError::from(TrustformersError::runtime_error(format!(
+                "failed to load model '{model_id}' from '{model_path}': {e}"
+            )))
+        })
     }
 
     fn unload_model(&mut self, _model_id: &str) -> Result<()> {
-        // Unload model implementation
+        self.clear_loaded_model();
         Ok(())
     }
 
-    fn run_inference(&mut self, _model_id: &str, input: &Tensor) -> Result<Tensor> {
-        // Placeholder inference - return input tensor as output
-        Ok(input.clone())
+    fn run_inference(&mut self, model_id: &str, input: &Tensor) -> Result<Tensor> {
+        if !self.has_loaded_model() {
+            return Err(CoreError::from(TrustformersError::runtime_error(format!(
+                "cannot run inference for model '{model_id}': no model is currently loaded"
+            ))));
+        }
+        self.inference(input).map_err(|e| {
+            CoreError::from(TrustformersError::runtime_error(format!(
+                "inference failed for model '{model_id}': {e}"
+            )))
+        })
     }
 
     fn is_model_loaded(&self, _model_id: &str) -> bool {
-        // Check if model is loaded
-        true // Placeholder
+        self.has_loaded_model()
     }
 
-    fn configure_model(&mut self, _model_id: &str, _config: MobileConfig) -> Result<()> {
-        // Configure model with new settings
-        Ok(())
+    fn configure_model(&mut self, _model_id: &str, config: MobileConfig) -> Result<()> {
+        self.update_config(config).map_err(CoreError::from)
     }
 }
 
@@ -922,5 +945,75 @@ mod tests {
 
         let result = TrustformersReactNative::new(rn_config, mobile_config);
         assert!(result.is_ok());
+    }
+
+    /// Regression test for the previous "Mock implementation of
+    /// MobileInferenceEngine methods for React Native": `is_model_loaded`
+    /// always returned the literal `true`, `run_inference` always returned
+    /// `input.clone()` regardless of whether any model was loaded, and
+    /// `load_model_from_path` was a no-op that succeeded for any path
+    /// (including nonexistent ones). All three must now reflect real
+    /// engine state.
+    #[test]
+    fn test_bridge_is_model_loaded_and_run_inference_reflect_real_state() {
+        let config = MobileConfig::default();
+        let mut engine = MobileInferenceEngine::new(config).expect("engine creation failed");
+
+        // Before any model is loaded: old mock said `true` unconditionally.
+        assert!(!MobileInferenceEngine::is_model_loaded(&engine, "model-a"));
+
+        // Running inference with nothing loaded: old mock happily returned
+        // the input tensor back as a "successful" result.
+        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("tensor");
+        let result = MobileInferenceEngine::run_inference(&mut engine, "model-a", &input);
+        assert!(
+            result.is_err(),
+            "inference with no loaded model must not fabricate success"
+        );
+
+        // A nonexistent model file: old mock's `load_model_from_path`
+        // returned `Ok(())` for literally any path string.
+        let load_result = MobileInferenceEngine::load_model_from_path(
+            &mut engine,
+            "model-a",
+            "/nonexistent/definitely-not-a-real-model-file.safetensors",
+        );
+        assert!(
+            load_result.is_err(),
+            "loading a nonexistent file must not fabricate success"
+        );
+        assert!(
+            !MobileInferenceEngine::is_model_loaded(&engine, "model-a"),
+            "a failed load must not leave the engine reporting a loaded model"
+        );
+    }
+
+    /// After a real model load, `run_inference` must produce real computed
+    /// output (not an identity copy of the input) and `is_model_loaded`
+    /// must report `true`; after `unload_model`, both must revert.
+    #[test]
+    fn test_bridge_load_and_unload_round_trip_with_real_computation() {
+        let config = MobileConfig::default();
+        let mut engine = MobileInferenceEngine::new(config).expect("engine creation failed");
+
+        let mut weights = HashMap::new();
+        weights.insert(
+            "layer.weight".to_string(),
+            Tensor::from_vec(vec![2.0, 0.0, 0.0, 2.0], &[2, 2]).expect("weight tensor"),
+        );
+        engine.load_model(weights).expect("direct load_model failed");
+        assert!(MobileInferenceEngine::is_model_loaded(&engine, "model-a"));
+
+        let input = Tensor::from_vec(vec![1.0, 3.0], &[1, 2]).expect("input tensor");
+        let output = MobileInferenceEngine::run_inference(&mut engine, "model-a", &input)
+            .expect("inference should succeed with a loaded model");
+        assert_ne!(
+            output.data().expect("output data"),
+            input.data().expect("input data"),
+            "output must be real computed data, not the input echoed back"
+        );
+
+        MobileInferenceEngine::unload_model(&mut engine, "model-a").expect("unload failed");
+        assert!(!MobileInferenceEngine::is_model_loaded(&engine, "model-a"));
     }
 }

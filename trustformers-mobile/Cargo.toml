@@ -2,6 +2,7 @@
 name = "trustformers-mobile"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -63,7 +64,11 @@ chrono.workspace = true
 
 # System-level APIs
 libc.workspace = true
-sysinfo.workspace = true
+# `disk` feature: real available-storage detection in `android_work_manager`
+# (`AndroidWorkManager::check_storage_constraints`), matching the same
+# additive-feature pattern `trustformers-serve` already uses on top of this
+# workspace dependency.
+sysinfo = { workspace = true, features = ["disk"] }
 
 # CLI tools
 clap.workspace = true

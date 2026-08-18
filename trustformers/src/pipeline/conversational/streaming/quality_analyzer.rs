@@ -561,8 +561,18 @@ impl QualityAnalyzer {
             return AdvancedQualityMetrics::default();
         }
 
-        let window = self.metrics_window.read().await;
-        let historical = self.historical_metrics.read().await;
+        // Clone the windows out and drop the read guards immediately (the
+        // temporary guard produced by `.read().await` lives only for this
+        // statement, since `.clone()` resolves through `Deref` to the owned
+        // `VecDeque`, not to the guard itself). `calculate_performance_benchmarks`
+        // below independently takes `self.metrics_window.read().await` again
+        // internally, and `tokio::sync::RwLock` does not support reentrant
+        // same-task reads (a writer queued in between can deadlock the second
+        // read). Passing `&window`/`&historical` guards straight through, as
+        // the previous version did, kept that hazard live for the whole call
+        // chain below.
+        let window: VecDeque<QualityMeasurement> = self.metrics_window.read().await.clone();
+        let historical: VecDeque<StreamingQuality> = self.historical_metrics.read().await.clone();
 
         AdvancedQualityMetrics {
             perceptual_quality: self.calculate_perceptual_quality(&window).await,

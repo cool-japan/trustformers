@@ -29,10 +29,6 @@ pub struct EnhancedThroughputProcessor {
     historical_data: Arc<Mutex<VecDeque<f64>>>,
     /// Quality assessment thresholds
     quality_thresholds: QualityThresholds,
-    /// Trend analysis enabled
-    trend_analysis: bool,
-    /// Anomaly detection enabled
-    anomaly_detection: bool,
 }
 
 /// Quality assessment thresholds
@@ -71,8 +67,6 @@ impl EnhancedThroughputProcessor {
         Self {
             historical_data: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
             quality_thresholds: QualityThresholds::default(),
-            trend_analysis: true,
-            anomaly_detection: true,
         }
     }
 
@@ -301,12 +295,8 @@ impl EnhancedThroughputProcessor {
 
 /// Latency-focused feedback processor
 pub struct LatencyFeedbackProcessor {
-    /// Latency percentile targets
-    percentile_targets: HashMap<u8, Duration>,
     /// SLA thresholds
     sla_thresholds: SlaThresholds,
-    /// Performance degradation detection
-    degradation_detection: bool,
 }
 
 /// SLA threshold configuration
@@ -348,9 +338,7 @@ impl LatencyFeedbackProcessor {
         percentile_targets.insert(99, Duration::from_millis(1000));
 
         Self {
-            percentile_targets,
             sla_thresholds: SlaThresholds::default(),
-            degradation_detection: true,
         }
     }
 
@@ -505,10 +493,6 @@ impl LatencyFeedbackProcessor {
 pub struct ResourceUtilizationProcessor {
     /// Resource thresholds
     resource_thresholds: ResourceThresholds,
-    /// Efficiency calculation method
-    efficiency_method: EfficiencyCalculationMethod,
-    /// Bottleneck detection enabled
-    bottleneck_detection: bool,
 }
 
 /// Resource utilization thresholds
@@ -583,8 +567,6 @@ impl ResourceUtilizationProcessor {
     pub fn new() -> Self {
         Self {
             resource_thresholds: ResourceThresholds::default(),
-            efficiency_method: EfficiencyCalculationMethod::WeightedEfficiency,
-            bottleneck_detection: true,
         }
     }
 

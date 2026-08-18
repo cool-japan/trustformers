@@ -711,7 +711,6 @@ impl PredictiveModel for ExponentialSmoothingModel {
 /// ARIMA prediction model (simplified implementation)
 pub struct ARIMAModel {
     ar_coefficients: Vec<f64>,
-    ma_coefficients: Vec<f64>,
     differenced_data: Vec<f64>,
     trained: bool,
 }
@@ -726,7 +725,6 @@ impl ARIMAModel {
     pub fn new() -> Self {
         Self {
             ar_coefficients: vec![0.5], // Simple AR(1)
-            ma_coefficients: vec![0.3], // Simple MA(1)
             differenced_data: Vec::new(),
             trained: false,
         }

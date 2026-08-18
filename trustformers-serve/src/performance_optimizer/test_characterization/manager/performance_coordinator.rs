@@ -110,9 +110,16 @@ pub struct PerformanceMetrics {
     /// Memory usage in MB
     pub memory_usage_mb: f64,
     /// Network I/O in bytes per second
-    pub network_io_bps: u64,
+    /// Host network throughput in bytes per second, when it can be measured.
+    ///
+    /// Always `None` on this build: `sysinfo` is declared without its `network`
+    /// feature, so no interface counters are available. Reporting `0` would be
+    /// indistinguishable from an idle link.
+    pub network_io_bps: Option<u64>,
     /// Disk I/O in bytes per second
-    pub disk_io_bps: u64,
+    /// This process's disk throughput in bytes per second, measured over one
+    /// sampling interval. `None` when the platform does not report the process.
+    pub disk_io_bps: Option<u64>,
     /// Analysis throughput (analyses per minute)
     pub analysis_throughput: f64,
     /// Cache hit rate
@@ -134,8 +141,8 @@ impl Default for PerformanceMetrics {
         Self {
             cpu_usage_percent: 0.0,
             memory_usage_mb: 0.0,
-            network_io_bps: 0,
-            disk_io_bps: 0,
+            network_io_bps: None,
+            disk_io_bps: None,
             analysis_throughput: 0.0,
             cache_hit_rate: 0.0,
             error_rate: 0.0,
@@ -271,11 +278,14 @@ impl PerformanceCoordinator {
 
         metrics_guard.queue_depth = engine_stats.active_analyses.load(Ordering::Relaxed);
 
-        // Collect system metrics (simplified)
-        metrics_guard.cpu_usage_percent = Self::get_cpu_usage().await;
-        metrics_guard.memory_usage_mb = Self::get_memory_usage().await;
-        metrics_guard.network_io_bps = Self::get_network_io().await;
-        metrics_guard.disk_io_bps = Self::get_disk_io().await;
+        // Collect system metrics. Every one of these used to be a hash of the
+        // wall clock dressed up as a reading; they are measurements now, and
+        // the ones that cannot be measured say so.
+        let host = crate::server::system_stats::measure_host_async().await;
+        metrics_guard.cpu_usage_percent = host.cpu_percent;
+        metrics_guard.memory_usage_mb = host.used_memory_bytes as f64 / (1024.0 * 1024.0);
+        metrics_guard.network_io_bps = Self::network_io_bytes_per_second();
+        metrics_guard.disk_io_bps = Self::process_disk_bytes_per_second().await;
 
         // Calculate throughput (analyses per minute)
         // This is a simplified calculation
@@ -288,49 +298,45 @@ impl PerformanceCoordinator {
         Ok(())
     }
 
-    /// Get CPU usage (simplified implementation)
-    async fn get_cpu_usage() -> f64 {
-        // In a real implementation, this would query system metrics
-        // For now, return a random value between 0 and 100
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        SystemTime::now().hash(&mut hasher);
-        (hasher.finish() % 100) as f64
+    /// Host network throughput, in bytes per second.
+    ///
+    /// Always `None`: reading interface counters needs `sysinfo`'s `network`
+    /// feature, and the workspace declares `sysinfo` with
+    /// `default-features = false, features = ["system", "component"]`. Enabling
+    /// it is a manifest change, so until then this reports the absence of a
+    /// measurement rather than a number.
+    fn network_io_bytes_per_second() -> Option<u64> {
+        None
     }
 
-    /// Get memory usage (simplified implementation)
-    async fn get_memory_usage() -> f64 {
-        // In a real implementation, this would query system metrics
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+    /// Disk throughput of this process, in bytes per second.
+    ///
+    /// Measured by refreshing the process twice around a fixed interval and
+    /// dividing the bytes `sysinfo` attributes to it by the elapsed time.
+    /// Returns `None` when the platform does not report this process.
+    async fn process_disk_bytes_per_second() -> Option<u64> {
+        tokio::task::spawn_blocking(|| {
+            use sysinfo::{Pid, ProcessesToUpdate, System};
 
-        let mut hasher = DefaultHasher::new();
-        SystemTime::now().hash(&mut hasher);
-        ((hasher.finish() % 8192) + 1024) as f64 // Return between 1GB and 8GB
-    }
+            const SAMPLE: Duration = Duration::from_millis(200);
 
-    /// Get network I/O (simplified implementation)
-    async fn get_network_io() -> u64 {
-        // In a real implementation, this would query system metrics
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+            let pid = Pid::from_u32(std::process::id());
+            let mut system = System::new();
+            system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+            system.process(pid)?;
 
-        let mut hasher = DefaultHasher::new();
-        SystemTime::now().hash(&mut hasher);
-        hasher.finish() % 1000000 // Return up to 1MB/s
-    }
+            std::thread::sleep(SAMPLE);
+            let started = std::time::Instant::now();
+            system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+            let usage = system.process(pid)?.disk_usage();
+            let elapsed = started.elapsed().max(Duration::from_millis(1));
 
-    /// Get disk I/O (simplified implementation)
-    async fn get_disk_io() -> u64 {
-        // In a real implementation, this would query system metrics
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        SystemTime::now().hash(&mut hasher);
-        hasher.finish() % 500000 // Return up to 500KB/s
+            let bytes = usage.read_bytes.saturating_add(usage.written_bytes);
+            Some((bytes as f64 / elapsed.as_secs_f64()) as u64)
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     /// Check performance thresholds and generate alerts
@@ -460,5 +466,59 @@ impl PerformanceCoordinator {
 
         info!("PerformanceCoordinator shutdown completed");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Before 0.2.1 every one of these getters returned
+    /// `DefaultHasher(SystemTime::now()) % N`, so two calls a second apart gave
+    /// unrelated "measurements". These assertions pin the numbers to something
+    /// the host can actually be asked about.
+    #[tokio::test]
+    async fn cpu_and_memory_come_from_the_host_not_the_clock() {
+        let first = crate::server::system_stats::measure_host_async().await;
+        let second = crate::server::system_stats::measure_host_async().await;
+
+        assert!(
+            (0.0..=100.0).contains(&first.cpu_percent),
+            "CPU utilization must be a percentage, got {}",
+            first.cpu_percent
+        );
+        assert!(first.total_memory_bytes > 0, "the host reports its RAM");
+        assert!(first.used_memory_bytes > 0);
+        assert!(first.used_memory_bytes <= first.total_memory_bytes);
+
+        // The clock moved between the two samples; total RAM must not have.
+        assert_eq!(
+            first.total_memory_bytes, second.total_memory_bytes,
+            "total memory is a property of the host, not of the current time"
+        );
+    }
+
+    #[test]
+    fn network_throughput_is_absent_rather_than_invented() {
+        assert_eq!(
+            PerformanceCoordinator::network_io_bytes_per_second(),
+            None,
+            "sysinfo is built without its `network` feature, so there are no \
+             interface counters to read and none may be manufactured"
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_throughput_is_a_measurement_of_this_process() {
+        let rate = PerformanceCoordinator::process_disk_bytes_per_second().await;
+
+        // The platform either reports this process or it does not; what it must
+        // never do is return a number derived from the wall clock.
+        if let Some(bytes_per_second) = rate {
+            assert!(
+                bytes_per_second < 100 * 1024 * 1024 * 1024,
+                "an idle test process cannot be moving {bytes_per_second} B/s"
+            );
+        }
     }
 }

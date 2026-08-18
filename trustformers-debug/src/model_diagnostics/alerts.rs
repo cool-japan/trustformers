@@ -199,6 +199,56 @@ impl Default for AlertThresholds {
     }
 }
 
+/// POST a JSON alert payload to `url`, real HTTP delivery.
+///
+/// [`AlertManager::send_notification`] is a plain synchronous method (see its
+/// doc comment: making it `async` would ripple into every caller of the
+/// public [`AlertManager::add_alert`] API across the crate), so this cannot
+/// reuse the `async` `post_json` helper in `cicd_integration`. The blocking
+/// `reqwest` client is run on a dedicated OS thread rather than the caller's
+/// thread directly: `reqwest::blocking` internally starts its own Tokio
+/// runtime and panics if constructed on a thread that is already driving one
+/// (plausible here, since `AlertManager` may be invoked from async training
+/// loops elsewhere in the workspace). A fresh `std::thread` has no runtime
+/// affiliation, so this is safe regardless of the caller's context.
+#[cfg(feature = "http-integrations")]
+fn post_json_blocking(url: &str, payload: &serde_json::Value) -> Result<()> {
+    let url = url.to_string();
+    let payload = payload.clone();
+    std::thread::spawn(move || -> Result<()> {
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .post(&url)
+            .json(&payload)
+            // Bound the whole request (connect + send + receive): without this,
+            // an unresponsive webhook endpoint would hang this spawned thread
+            // (and so the `.join()` below, and so `send_notification`'s caller)
+            // indefinitely instead of surfacing as a delivery error.
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .map_err(|e| anyhow::anyhow!("webhook delivery failed: {e}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            anyhow::bail!("webhook delivery failed: HTTP {status}: {body}");
+        }
+        Ok(())
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("webhook delivery thread panicked"))?
+}
+
+/// Without `http-integrations`, no HTTP client exists in this build: fail
+/// honestly instead of pretending to deliver (mirrors
+/// `cicd_integration::post_json`'s disabled-feature branch).
+#[cfg(not(feature = "http-integrations"))]
+fn post_json_blocking(_url: &str, _payload: &serde_json::Value) -> Result<()> {
+    anyhow::bail!(
+        "HTTP notification delivery is not enabled: rebuild trustformers-debug with \
+         `--features http-integrations`"
+    )
+}
+
 impl AlertManager {
     /// Create a new alert manager.
     pub fn new() -> Self {
@@ -583,27 +633,58 @@ impl AlertManager {
     }
 
     /// Send notification for an alert.
+    ///
+    /// Each of the three channels below is opt-in via [`NotificationSettings`]
+    /// (all default to disabled except `console_notifications`). A channel
+    /// that is enabled but cannot actually deliver -- missing config, or a
+    /// build without the `http-integrations` feature -- returns `Err` instead
+    /// of silently doing nothing: the alert itself was already recorded in
+    /// [`Self::add_alert`] before this is called, so a delivery failure here
+    /// only means the *notification* did not go out, which the caller must
+    /// be able to observe.
     fn send_notification(
         &self,
         alert: &ModelDiagnosticAlert,
         severity: &AlertSeverity,
     ) -> Result<()> {
         if self.config.notification_settings.console_notifications {
+            // A caller-opted-in delivery channel in its own right (see the
+            // `file_logging`/`webhook_notifications` channels below), not
+            // incidental print debugging -- stdout is this channel's actual
+            // destination, so `println!` is correct here rather than `tracing`.
             println!("[{:?}] Alert: {:?}", severity, alert);
         }
 
         if self.config.notification_settings.file_logging {
-            if let Some(log_path) = &self.config.notification_settings.log_file_path {
-                // Would implement file logging here
-                let _ = log_path; // Suppress unused warning
-            }
+            let log_path =
+                self.config.notification_settings.log_file_path.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("file_logging is enabled but no log_file_path is configured")
+                })?;
+
+            use std::io::Write;
+            let line = format!("{} [{:?}] {:?}\n", Utc::now().to_rfc3339(), severity, alert);
+            let mut file =
+                std::fs::OpenOptions::new().create(true).append(true).open(log_path).map_err(
+                    |e| anyhow::anyhow!("failed to open alert log file {log_path}: {e}"),
+                )?;
+            file.write_all(line.as_bytes())
+                .map_err(|e| anyhow::anyhow!("failed to write alert log file {log_path}: {e}"))?;
         }
 
         if self.config.notification_settings.webhook_notifications {
-            if let Some(webhook_url) = &self.config.notification_settings.webhook_url {
-                // Would implement webhook notification here
-                let _ = webhook_url; // Suppress unused warning
-            }
+            let webhook_url =
+                self.config.notification_settings.webhook_url.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "webhook_notifications is enabled but no webhook_url is configured"
+                    )
+                })?;
+
+            let payload = serde_json::json!({
+                "severity": format!("{:?}", severity),
+                "alert": format!("{:?}", alert),
+                "timestamp": Utc::now().to_rfc3339(),
+            });
+            post_json_blocking(webhook_url, &payload)?;
         }
 
         Ok(())
@@ -699,5 +780,127 @@ mod tests {
         // Try to add duplicate - should be filtered out
         manager.add_alert(alert, AlertSeverity::Warning).expect("add operation failed");
         assert_eq!(manager.active_alerts.len(), 1);
+    }
+
+    fn sample_alert() -> ModelDiagnosticAlert {
+        ModelDiagnosticAlert::PerformanceDegradation {
+            metric: "loss".to_string(),
+            current: 1.5,
+            previous_avg: 1.0,
+            degradation_percent: 50.0,
+        }
+    }
+
+    /// Regression: `file_logging: true` used to silently discard
+    /// `log_file_path` (`let _ = log_path;`) and write nothing at all, while
+    /// `add_alert` still returned `Ok(())` as if the log had been written.
+    /// The configured path must now contain a real, readable line per alert.
+    #[test]
+    fn test_file_logging_writes_a_real_line_to_the_configured_path() {
+        let log_path = std::env::temp_dir().join(format!(
+            "trustformers_debug_alert_log_{}.txt",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&log_path); // start clean; ignore "did not exist"
+
+        let mut settings = NotificationSettings::default();
+        settings.console_notifications = false;
+        settings.file_logging = true;
+        settings.log_file_path = Some(log_path.to_string_lossy().into_owned());
+
+        let mut manager = AlertManager::with_config(
+            AlertConfig {
+                notification_settings: settings,
+                ..AlertConfig::default()
+            },
+            AlertThresholds::default(),
+        );
+
+        manager
+            .add_alert(sample_alert(), AlertSeverity::Critical)
+            .expect("file logging must succeed when a valid path is configured");
+
+        let written = std::fs::read_to_string(&log_path).expect("log file must have been created");
+        assert!(
+            written.contains("Critical") && written.contains("PerformanceDegradation"),
+            "log file must contain a real record of the alert, got: {written:?}"
+        );
+
+        let _ = std::fs::remove_file(&log_path);
+    }
+
+    /// Regression: `file_logging: true` with `log_file_path: None` used to
+    /// silently do nothing and return `Ok(())`. A caller that opted into
+    /// file logging but forgot to configure a path deserves a configuration
+    /// error, not silent success.
+    #[test]
+    fn test_file_logging_without_a_path_is_a_configuration_error() {
+        let mut settings = NotificationSettings::default();
+        settings.console_notifications = false;
+        settings.file_logging = true;
+        settings.log_file_path = None;
+
+        let mut manager = AlertManager::with_config(
+            AlertConfig {
+                notification_settings: settings,
+                ..AlertConfig::default()
+            },
+            AlertThresholds::default(),
+        );
+
+        let err = manager
+            .add_alert(sample_alert(), AlertSeverity::Warning)
+            .expect_err("file_logging without a configured path must not silently succeed");
+        assert!(err.to_string().contains("log_file_path"));
+    }
+
+    /// Regression: `webhook_notifications: true` used to silently discard
+    /// `webhook_url` (`let _ = webhook_url;`) and return `Ok(())` without
+    /// attempting any delivery. Without the `http-integrations` feature this
+    /// crate has no HTTP client at all, so the honest outcome is an error
+    /// naming the feature, not a false "delivered" signal.
+    #[cfg(not(feature = "http-integrations"))]
+    #[test]
+    fn test_webhook_without_the_http_feature_is_an_honest_error() {
+        let mut settings = NotificationSettings::default();
+        settings.console_notifications = false;
+        settings.webhook_notifications = true;
+        settings.webhook_url = Some("http://127.0.0.1:1/webhook".to_string());
+
+        let mut manager = AlertManager::with_config(
+            AlertConfig {
+                notification_settings: settings,
+                ..AlertConfig::default()
+            },
+            AlertThresholds::default(),
+        );
+
+        let err = manager
+            .add_alert(sample_alert(), AlertSeverity::Emergency)
+            .expect_err("webhook delivery must not silently pretend to have sent anything");
+        assert!(err.to_string().contains("http-integrations"));
+    }
+
+    /// Regression: `webhook_notifications: true` with `webhook_url: None`
+    /// used to silently do nothing and return `Ok(())`.
+    #[test]
+    fn test_webhook_without_a_url_is_a_configuration_error() {
+        let mut settings = NotificationSettings::default();
+        settings.console_notifications = false;
+        settings.webhook_notifications = true;
+        settings.webhook_url = None;
+
+        let mut manager = AlertManager::with_config(
+            AlertConfig {
+                notification_settings: settings,
+                ..AlertConfig::default()
+            },
+            AlertThresholds::default(),
+        );
+
+        let err = manager
+            .add_alert(sample_alert(), AlertSeverity::Warning)
+            .expect_err("webhook_notifications without a configured URL must not silently succeed");
+        assert!(err.to_string().contains("webhook_url"));
     }
 }

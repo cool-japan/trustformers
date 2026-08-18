@@ -5,13 +5,10 @@ This comprehensive guide will help you migrate from HuggingFace Tokenizers to Tr
 ## Why Migrate from HuggingFace Tokenizers?
 
 ### Performance Benefits
-| Metric | HuggingFace Tokenizers | TrustformeRS Tokenizers | Improvement |
-|--------|------------------------|-------------------------|-------------|
-| **Tokenization Speed** | 800K tokens/sec | 1.2M tokens/sec | **50% faster** |
-| **Memory Usage** | 80MB baseline | 50MB baseline | **37% less memory** |
-| **Binary Size** | 25MB | 15MB | **40% smaller** |
-| **Cold Start Time** | 200ms | 80ms | **60% faster startup** |
-| **Batch Processing** | 2.5M tokens/sec | 4.2M tokens/sec | **68% faster batching** |
+
+> **Note (2026-08-18):** this section previously carried a table of specific tokens/sec, memory, binary-size, and startup-time figures presented as a measured comparison against HuggingFace Tokenizers. No benchmark harness in this repository produced those numbers, and the "TrustformeRS Tokenizers" figure quoted for the identical code path is different in every one of this crate's migration guides (1.2M tokens/sec here, 1.1M in the tiktoken guide, 1.3M in the Fairseq guide, and so on) — real measurements of the same binary don't vary by which competitor they're being compared against. The table has been removed rather than left in place or re-guessed. To get real numbers, run this crate's own Criterion benchmark (`trustformers-tokenizers/benches/tokenizer_performance.rs`) against a real `tokenizers`-crate installation on your own hardware.
+
+Real, verified behavior worth knowing before you migrate: both `WordPieceTokenizer::from_pretrained` and `SentencePieceTokenizer::from_pretrained` probe a fixed list of local vocab-file paths and return a hard `Err` naming every path they probed if none resolve — neither fabricates a placeholder vocabulary as a fallback. If a checkpoint's tokenizer file isn't already on disk at one of the probed paths, load it explicitly via `from_vocab_file`/`from_model_file`, or fetch it yourself first (this crate does not auto-download from the Hub the way `transformers.AutoTokenizer` does in the examples below unless you route through `AutoTokenizer::from_pretrained_with_revision`, which does perform a real download).
 
 ### Feature Advantages
 - **Zero-copy operations** for memory efficiency

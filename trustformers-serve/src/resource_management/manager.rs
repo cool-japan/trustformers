@@ -21,11 +21,23 @@ use super::gpu_manager::GpuResourceManager;
 use super::port_management::NetworkPortManager;
 use super::types::*;
 
-/// Comprehensive resource management system
+/// Comprehensive resource management system.
+///
+/// ## Removed in 0.2.1: components that were held but never consulted
+///
+/// `ResourceManagementSystem` used to also own a `config`, a
+/// [`ResourceMonitor`], a `CleanupManager` and a `SystemStatistics`. All four
+/// were constructed in `new`, stored, and never read again by any code path in
+/// this crate — the system never sampled the monitor, never ran the cleanup
+/// manager, and never published the statistics. Holding them made the struct
+/// read as if it monitored and cleaned up; it did not.
+///
+/// They were removed rather than wired up, because wiring them means deciding
+/// what a monitoring cadence and a cleanup policy should be, and that decision
+/// belongs to whoever needs the behaviour — at which point the components can
+/// come back as fields that something actually reads. What remains is the set
+/// of managers the allocation path really calls.
 pub struct ResourceManagementSystem {
-    /// Configuration
-    config: Arc<RwLock<ResourceManagementConfig>>,
-
     /// Network port manager
     port_manager: Arc<NetworkPortManager>,
 
@@ -41,9 +53,6 @@ pub struct ResourceManagementSystem {
     /// Custom resource manager
     custom_resource_manager: Arc<CustomResourceManager>,
 
-    /// Resource monitor
-    resource_monitor: Arc<ResourceMonitor>,
-
     /// Conflict detector
     conflict_detector: Arc<ConflictDetector>,
 
@@ -53,12 +62,6 @@ pub struct ResourceManagementSystem {
     /// Live claims, shared with the allocator and the conflict detector
     allocation_ledger: Arc<AllocationLedger>,
 
-    /// Cleanup manager
-    cleanup_manager: Arc<CleanupManager>,
-
-    /// System statistics
-    system_stats: Arc<SystemStatistics>,
-
     /// Background tasks
     background_tasks: Vec<JoinHandle<()>>,
 
@@ -67,12 +70,7 @@ pub struct ResourceManagementSystem {
 }
 
 /// Resource monitor for system health
-pub struct ResourceMonitor {
-    /// Health checker
-    health_checker: HealthChecker,
-    /// Alert system
-    alert_system: AlertSystem,
-}
+pub struct ResourceMonitor {}
 
 /// A live claim on the resources one test holds between allocation and
 /// deallocation.
@@ -296,12 +294,6 @@ impl ResourceManagementSystem {
                 .context("Failed to create custom resource manager")?,
         );
 
-        let resource_monitor = Arc::new(
-            ResourceMonitor::new(config.resource_monitoring.clone())
-                .await
-                .context("Failed to create resource monitor")?,
-        );
-
         // One ledger, shared: the allocator writes the claims the detector reads.
         // Handing each component its own copy would make every conflict check
         // look at an empty table and answer "no conflict" forever.
@@ -314,27 +306,17 @@ impl ResourceManagementSystem {
 
         let resource_allocator = Arc::new(ResourceAllocator::new(Arc::clone(&allocation_ledger)));
 
-        let cleanup_manager = Arc::new(
-            CleanupManager::new(config.resource_cleanup.clone())
-                .await
-                .context("Failed to create cleanup manager")?,
-        );
-
         info!("Initialized resource management system");
 
         Ok(Self {
-            config: Arc::new(RwLock::new(config)),
             port_manager,
             temp_dir_manager,
             gpu_manager,
             database_manager,
             custom_resource_manager,
-            resource_monitor,
             conflict_detector,
             resource_allocator,
             allocation_ledger,
-            cleanup_manager,
-            system_stats: Arc::new(SystemStatistics::new()),
             background_tasks: Vec::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
         })
@@ -710,14 +692,7 @@ impl ResourceManagementSystem {
     }
 }
 
-impl ResourceMonitor {
-    async fn new(_config: ResourceMonitoringConfig) -> Result<Self> {
-        Ok(Self {
-            health_checker: HealthChecker::new(),
-            alert_system: AlertSystem::new(),
-        })
-    }
-}
+impl ResourceMonitor {}
 
 impl ConflictDetector {
     /// Build a detector sharing `ledger` with the system's [`ResourceAllocator`].
@@ -798,29 +773,13 @@ impl ResourceAllocator {
     }
 }
 
-impl CleanupManager {
-    async fn new(_config: ResourceCleanupConfig) -> Result<Self> {
-        Ok(Self)
-    }
-}
+impl CleanupManager {}
 
-impl SystemStatistics {
-    fn new() -> Self {
-        Self
-    }
-}
+impl SystemStatistics {}
 
-impl HealthChecker {
-    fn new() -> Self {
-        Self
-    }
-}
+impl HealthChecker {}
 
-impl AlertSystem {
-    fn new() -> Self {
-        Self
-    }
-}
+impl AlertSystem {}
 
 #[cfg(test)]
 mod tests {

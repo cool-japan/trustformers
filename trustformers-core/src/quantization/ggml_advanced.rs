@@ -158,8 +158,6 @@ pub fn quantize_q5_0(tensor: &Tensor) -> Result<Vec<BlockQ5_0>> {
         Tensor::Sparse(_) => {
             return Err(anyhow!("Sparse tensors not yet supported for quantization").into())
         },
-        #[cfg(feature = "candle")]
-        Tensor::Candle(_) => return Err(anyhow!("Candle tensors not yet supported").into()),
         #[cfg(all(target_os = "macos", feature = "metal"))]
         Tensor::Metal(_) => {
             return Err(anyhow!("Metal tensors not yet supported for quantization").into())
@@ -287,8 +285,6 @@ pub fn quantize_q5_1(tensor: &Tensor) -> Result<Vec<BlockQ5_1>> {
         Tensor::Sparse(_) => {
             return Err(anyhow!("Sparse tensors not yet supported for quantization").into())
         },
-        #[cfg(feature = "candle")]
-        Tensor::Candle(_) => return Err(anyhow!("Candle tensors not yet supported").into()),
         #[cfg(all(target_os = "macos", feature = "metal"))]
         Tensor::Metal(_) => {
             return Err(anyhow!("Metal tensors not yet supported for quantization").into())
@@ -395,8 +391,6 @@ pub fn quantize_q6_k(tensor: &Tensor) -> Result<Vec<BlockQ6K>> {
         Tensor::Sparse(_) => {
             return Err(anyhow!("Sparse tensors not yet supported for quantization").into())
         },
-        #[cfg(feature = "candle")]
-        Tensor::Candle(_) => return Err(anyhow!("Candle tensors not yet supported").into()),
         #[cfg(all(target_os = "macos", feature = "metal"))]
         Tensor::Metal(_) => {
             return Err(anyhow!("Metal tensors not yet supported for quantization").into())

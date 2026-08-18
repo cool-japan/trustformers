@@ -746,7 +746,7 @@ impl PostQuantumCryptography {
     ///
     /// # Errors
     /// Returns [`UnsupportedOperation`](trustformers_core::errors::ErrorKind::UnsupportedOperation)
-    /// for an algorithm with no vetted pure-Rust implementation.
+    /// for an algorithm that is not implemented here.
     pub fn new(config: PostQuantumConfig) -> Result<Self> {
         let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
         Self::new_with_rng(config, &mut rng)

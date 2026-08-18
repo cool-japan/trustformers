@@ -340,10 +340,8 @@ pub use cleanup::{
 };
 
 // Re-export common cleanup handlers
-pub use cleanup::handlers::{
-    BufferCompactionHandler, CacheEvictionHandler, GarbageCollectionHandler, ModelUnloadingHandler,
-    RequestRejectionHandler,
-};
+pub use cleanup::handlers::{CacheEvictionHandler, ModelUnloadingHandler, RequestRejectionHandler};
+pub use cleanup::ModelRegistry;
 
 // Re-export cache management
 pub use cleanup::cache::{

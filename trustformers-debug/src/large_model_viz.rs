@@ -465,19 +465,20 @@ impl LargeModelVisualizer {
                 self.generate_interactive_html(&sampled_layers)?
             },
             VisualizationFormat::StaticPng => {
-                // PNG output requires the `video` or `gif` feature which gates the `image` crate.
-                // To enable: rebuild with `--features video` (or `--features gif`).
-                // Without that feature, fall back to a descriptive error so callers can
-                // switch to SVG/HTML output which works without any extra features.
-                #[cfg(feature = "video")]
+                // PNG output needs the `image` crate, which is optional. Enable it
+                // with `--features image` (or `--features gif`, which turns it on
+                // too). Without that feature, fall back to a descriptive error so
+                // callers can switch to SVG/HTML output, which works without any
+                // extra features.
+                #[cfg(feature = "image")]
                 {
                     self.generate_png(&sampled_layers)?
                 }
-                #[cfg(not(feature = "video"))]
+                #[cfg(not(feature = "image"))]
                 {
                     return Err(anyhow::anyhow!(
-                        "PNG generation requires the `video` feature. \
-                         Rebuild with `--features video`, or use \
+                        "PNG generation requires the `image` feature. \
+                         Rebuild with `--features image` (or `--features gif`), or use \
                          VisualizationFormat::StaticSvg / InteractiveHtml instead."
                     ));
                 }
@@ -868,8 +869,9 @@ Type: {} | Parameters: {:.1}M | Memory: {:.2} MB | Compute: {:.1} GFLOPS
     /// `param_count` and whose colour encodes `memory_mb` (blue → red gradient).
     /// The resulting image is PNG-encoded and returned as a raw byte vector.
     ///
-    /// Requires the `video` feature (which enables the `image` crate).
-    #[cfg(feature = "video")]
+    /// Requires the optional `image` dependency (`--features image`, or
+    /// `--features gif`, which enables it as well).
+    #[cfg(feature = "image")]
     fn generate_png(&self, sampled_layers: &[usize]) -> Result<(Vec<u8>, usize)> {
         use image::{ImageBuffer, Rgb};
         use std::io::Cursor;
@@ -1045,7 +1047,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "video")]
+    #[cfg(feature = "image")]
     #[test]
     fn test_png_visualization() -> Result<()> {
         let config = LargeModelVisualizerConfig {

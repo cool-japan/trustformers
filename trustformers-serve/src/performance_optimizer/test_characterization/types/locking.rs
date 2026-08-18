@@ -18,8 +18,12 @@ use super::quality::{RiskFactor, RiskLevel};
 // Re-export types for use by other modules (these are available from super::locking)
 pub use super::resources::{ResourceAccessPattern, ResourceConflict};
 
-// Helper functions for serde default values
-fn instant_now() -> Instant {
+// Helper for serde default values. Nothing in this module names it any more —
+// the `#[serde(default = ...)]` attributes that did were removed — so it is
+// kept only for `locking_tests`, and gated accordingly rather than left as an
+// item the lint has to be silenced about.
+#[cfg(test)]
+pub(crate) fn instant_now() -> Instant {
     Instant::now()
 }
 

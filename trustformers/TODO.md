@@ -76,15 +76,11 @@ Two workspace-wide tracks touch this umbrella crate in 0.2.0: the **OxiCUDA GPU 
 
 ### PyTorch (tch) dependency removal
 
-- [ ] **[P0]** Remove the `torch` forwarder feature from the umbrella crate
-  - Delete `torch = ["trustformers-core/torch", "trustformers-training/torch"]` (Cargo.toml:81-82) and update the `full` comment about excluding torch (:92-93). Zero code in `trustformers/src` is gated on the feature (verified: no `cfg(feature = "torch")` hits), so this is manifest-only. Must land in the same change as the trustformers-core torch removal — a forwarder referencing a deleted core feature fails Cargo feature resolution. Verify: `cargo check -p trustformers --features full` green.
-  - Evidence: trustformers/Cargo.toml:81-82,92-93
+- [x] **[P0]** Remove the `torch` forwarder feature from the umbrella crate — **done, verified stale 2026-08-18**: `rg 'torch|tch' trustformers/Cargo.toml trustformers-training/Cargo.toml trustformers-core/Cargo.toml Cargo.toml` returns zero matches. This had been sitting open with the box unchecked even though the removal landed and is recorded as done in root `TODO.md`, `trustformers-core/TODO.md`, and `trustformers-training/TODO.md` — it was the only open `[P0]` left in any crate's TODO and it was a phantom.
 
 ### OxiCUDA GPU migration (scirs2-core gpu → OxiCUDA)
 
-- [ ] **[P1]** Add a `metal` forwarding feature to the umbrella crate
-  - The umbrella crate forwards cuda (`cuda = ["trustformers-models/cuda"]`, Cargo.toml:84) but has no metal forwarder, so users of the top-level trustformers crate cannot enable the oxicuda-metal path without depending on sub-crates directly. Add `metal = ["trustformers-models/metal"]` (models already forwards to trustformers-core/metal at trustformers-models/Cargo.toml:101, which pulls oxicuda-metal + oxicuda-backend). Verify: `cargo check -p trustformers --features metal` on macOS resolves and compiles the Metal backend.
-  - Evidence: trustformers/Cargo.toml:84; trustformers-models/Cargo.toml:101; trustformers-core/Cargo.toml:121,149-161
+- [x] **[P1]** Add a `metal` forwarding feature to the umbrella crate — **done, verified 2026-08-18**: `trustformers/Cargo.toml:112` is `metal = ["trustformers-core/metal"]` (forwards through core directly rather than via `trustformers-models/metal` as originally proposed; equivalent effect — `cargo check -p trustformers --features metal` resolves the Metal backend on macOS).
 
 ### Post-0.2.0 (0.3.x)
 

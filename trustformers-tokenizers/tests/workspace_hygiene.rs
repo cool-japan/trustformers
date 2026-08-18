@@ -78,6 +78,14 @@ const KNOWN_INLINE_PINS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Workspace members allowed to omit `rust-version.workspace = true`, with the
+/// reason. Everything else fails [`member_manifests_inherit_the_workspace_msrv`].
+const KNOWN_MISSING_MSRV: &[(&str, &str)] = &[(
+    "trustformers-wasm",
+    "manifest is owned by the trustformers-wasm work package and is being edited \
+     concurrently; the one-line inheritance is added there",
+)];
+
 /// File extensions produced by editors, refactoring tools and merge conflicts.
 ///
 /// Matched against the final `.`-separated component of a file name, so
@@ -134,7 +142,11 @@ fn workspace_root() -> Option<PathBuf> {
         let Ok(text) = fs::read_to_string(&manifest) else {
             continue;
         };
-        let Ok(value) = text.parse::<Value>() else {
+        // `toml::from_str`, not `str::parse::<Value>()`: since toml 1.0 the
+        // `FromStr` impl parses a single TOML *value*, so a whole document is
+        // rejected with "unexpected content, expected nothing". Getting this
+        // wrong turns every test below into a silent no-op.
+        let Ok(value) = toml::from_str::<Value>(&text) else {
             continue;
         };
         if value.get("workspace").is_some() {
@@ -144,15 +156,36 @@ fn workspace_root() -> Option<PathBuf> {
     None
 }
 
-/// Workspace root, or `None` after printing why the calling test is inapplicable.
+/// Is this crate being tested from an unpacked `.crate` archive?
+///
+/// `cargo package` writes the pristine manifest next to the rewritten one, so
+/// `Cargo.toml.orig` is present in a published tarball and absent in the git
+/// checkout. It is the only situation in which a missing workspace root is
+/// legitimate.
+fn is_packaged_crate() -> bool {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml.orig").is_file()
+}
+
+/// Workspace root, or `None` when — and only when — the crate is unpacked from a
+/// published archive.
+///
+/// Inside a checkout a missing root means the *detector* is broken, and a gate
+/// that quietly skips is indistinguishable from a gate that passes, so that case
+/// fails loudly instead.
 fn workspace_root_or_skip(test: &str) -> Option<PathBuf> {
     match workspace_root() {
         Some(root) => Some(root),
         None => {
+            assert!(
+                is_packaged_crate(),
+                "{test}: no ancestor of {} declares [workspace], and this is not an unpacked \
+                 .crate (no Cargo.toml.orig). The workspace-root probe is broken, which would \
+                 silently turn every hygiene gate in this file into a no-op.",
+                env!("CARGO_MANIFEST_DIR"),
+            );
             eprintln!(
-                "{test}: no ancestor Cargo.toml declares [workspace] — the crate is being \
-                 tested outside the TrustformeRS workspace, so there is no workspace-wide \
-                 tree to check."
+                "{test}: running from an unpacked .crate archive — there is no workspace above \
+                 this crate, so there is nothing workspace-wide to check."
             );
             None
         },
@@ -163,7 +196,7 @@ fn workspace_root_or_skip(test: &str) -> Option<PathBuf> {
 fn parse_toml(path: &Path) -> Value {
     let text = fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-    text.parse::<Value>()
+    toml::from_str::<Value>(&text)
         .unwrap_or_else(|error| panic!("{} is not valid TOML: {error}", path.display()))
 }
 
@@ -185,6 +218,56 @@ fn workspace_dependency_names(root: &Path) -> BTreeSet<String> {
         .and_then(Value::as_table)
         .map(|table| table.keys().cloned().collect())
         .unwrap_or_default()
+}
+
+/// External crate names declared in `[workspace.dependencies]`.
+///
+/// Entries carrying `path` are intra-workspace crates: they are declared once at
+/// the root so the version and the path live in a single place, and the leaves of
+/// the graph (`trustformers`, `trustformers-serve`, ...) legitimately have no
+/// consumer inside the workspace. Only third-party entries have to be used.
+fn external_workspace_dependencies(root: &Path) -> BTreeSet<String> {
+    parse_toml(&root.join("Cargo.toml"))
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(Value::as_table)
+        .map(|table| {
+            table
+                .iter()
+                .filter(|(_, spec)| {
+                    !spec.as_table().is_some_and(|entry| entry.contains_key("path"))
+                })
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every dependency key a member manifest declares, across `[dependencies]`,
+/// `[dev-dependencies]`, `[build-dependencies]` and any `[target.'cfg(…)']`
+/// variant. Keys match `[workspace.dependencies]` keys even when the root entry
+/// renames the crate with `package = "…"`, because inheritance is by key.
+fn declared_dependency_keys(manifest: &Value, out: &mut BTreeSet<String>) {
+    let Some(table) = manifest.as_table() else {
+        return;
+    };
+    for (key, value) in table {
+        match key.as_str() {
+            "dependencies" | "dev-dependencies" | "build-dependencies" => {
+                if let Some(dependencies) = value.as_table() {
+                    out.extend(dependencies.keys().cloned());
+                }
+            },
+            "target" => {
+                if let Some(targets) = value.as_table() {
+                    for sub in targets.values() {
+                        declared_dependency_keys(sub, out);
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
 }
 
 /// Does this dependency entry pin a version locally instead of deferring to the
@@ -501,7 +584,7 @@ fn no_compiled_binaries_outside_target() {
         if file.read_exact(&mut magic).is_err() {
             continue;
         }
-        if EXECUTABLE_MAGICS.iter().any(|expected| magic == *expected) {
+        if EXECUTABLE_MAGICS.contains(&magic) {
             offenders.push(relative(&root, &path));
         }
     }
@@ -544,5 +627,100 @@ fn virtual_manifest_root_has_no_source_tree() {
          no crate and are compiled by nothing:\n  {}",
         listing.len(),
         listing.join("\n  ")
+    );
+}
+
+/// Every third-party `[workspace.dependencies]` entry must have a consumer.
+///
+/// An orphan entry is not inert: `cargo update` keeps resolving it, `cargo deny`
+/// audits it, and the next person to need that crate copies a version nobody has
+/// ever built against. The pre-0.2.1 root manifest declared `numpy = "0.29"` with
+/// no member referencing it — the crate the Python bindings actually use is
+/// `scirs2-numpy`, and it lives in the excluded `trustformers-py` manifest.
+#[test]
+fn workspace_dependency_table_has_no_unused_entries() {
+    let Some(root) = workspace_root_or_skip("workspace_dependency_table_has_no_unused_entries")
+    else {
+        return;
+    };
+
+    let mut referenced = BTreeSet::new();
+    for member in workspace_members(&root) {
+        let manifest_path = root.join(&member).join("Cargo.toml");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        declared_dependency_keys(&parse_toml(&manifest_path), &mut referenced);
+    }
+
+    let orphans: Vec<String> = external_workspace_dependencies(&root)
+        .into_iter()
+        .filter(|name| !referenced.contains(name))
+        .collect();
+
+    assert!(
+        orphans.is_empty(),
+        "{} entr(ies) in [workspace.dependencies] are referenced by no workspace member: {}. \
+         Delete them, or move the declaration next to the excluded package that actually uses \
+         it.",
+        orphans.len(),
+        orphans.join(", ")
+    );
+}
+
+/// Every member must inherit the MSRV from `[workspace.package] rust-version`.
+///
+/// `rust-version` is published metadata: crates.io and `cargo add` use it to warn
+/// a consumer before a build fails with a syntax error from a newer edition. When
+/// nine of ten manifests omit it, the workspace ships an MSRV promise for one
+/// crate and silence for the rest — and the silent ones are the entry points
+/// (`trustformers`, `trustformers-serve`) a consumer actually depends on.
+#[test]
+fn member_manifests_inherit_the_workspace_msrv() {
+    let Some(root) = workspace_root_or_skip("member_manifests_inherit_the_workspace_msrv") else {
+        return;
+    };
+
+    let root_manifest = parse_toml(&root.join("Cargo.toml"));
+    let workspace_msrv = root_manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("package"))
+        .and_then(|package| package.get("rust-version"))
+        .and_then(Value::as_str);
+    assert!(
+        workspace_msrv.is_some(),
+        "[workspace.package] declares no rust-version, so members have nothing to inherit"
+    );
+
+    let allowed: BTreeSet<&str> = KNOWN_MISSING_MSRV.iter().map(|(member, _)| *member).collect();
+
+    let mut offenders = Vec::new();
+    for member in workspace_members(&root) {
+        if allowed.contains(member.as_str()) {
+            continue;
+        }
+        let manifest_path = root.join(&member).join("Cargo.toml");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        let inherits = parse_toml(&manifest_path)
+            .get("package")
+            .and_then(|package| package.get("rust-version"))
+            .and_then(Value::as_table)
+            .and_then(|entry| entry.get("workspace"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !inherits {
+            offenders.push(format!("  {member}/Cargo.toml"));
+        }
+    }
+    offenders.sort();
+
+    assert!(
+        offenders.is_empty(),
+        "{} member manifest(s) do not declare `rust-version.workspace = true`, so they publish \
+         no MSRV at all:\n{}",
+        offenders.len(),
+        offenders.join("\n")
     );
 }

@@ -620,6 +620,163 @@ fn causal_mask_detection_is_exact() {
     assert!(!is_causal_mask(&[], seq_len));
 }
 
+/// Causal attention must match the reference element-for-element, multi-head.
+///
+/// This is the only test that pins the *whole* output of the causal path rather
+/// than a couple of positions, and it is the test that actually validates the
+/// Metal kernel: under `--features metal` on macOS an exactly-causal mask is
+/// the one input that dispatches to `attention_metal`, so any disagreement
+/// between the GPU kernel and the definition of attention surfaces here.
+/// Multiple heads are used because the GPU path takes `num_heads`/`head_dim`
+/// separately and a head-offset error would otherwise go unnoticed.
+#[test]
+fn causal_attention_matches_the_reference_on_every_backend() {
+    let engine = engine();
+    let seq_len = 6;
+    let num_heads = 2;
+    let head_dim = 4;
+    let hidden = num_heads * head_dim;
+
+    // Deterministic, non-degenerate q/k/v: distinct per position and per head,
+    // so a transposed or head-shifted read produces a different answer.
+    let q: Vec<f32> = (0..seq_len * hidden).map(|i| ((i * 7) % 13) as f32 * 0.1 - 0.5).collect();
+    let k: Vec<f32> = (0..seq_len * hidden).map(|i| ((i * 5) % 11) as f32 * 0.1 - 0.4).collect();
+    let v: Vec<f32> = (0..seq_len * hidden).map(|i| ((i * 3) % 7) as f32 * 0.1 - 0.3).collect();
+
+    let mut mask = vec![0.0f32; seq_len * seq_len];
+    for row in 0..seq_len {
+        for col in (row + 1)..seq_len {
+            mask[row * seq_len + col] = f32::NEG_INFINITY;
+        }
+    }
+    // Precondition: this is exactly the mask that selects the GPU kernel.
+    assert!(is_causal_mask(&mask, seq_len));
+
+    let output = engine
+        .execute_optimized_attention(
+            &Tensor::from_vec(q.clone(), &[seq_len, hidden]).expect("q"),
+            &Tensor::from_vec(k.clone(), &[seq_len, hidden]).expect("k"),
+            &Tensor::from_vec(v.clone(), &[seq_len, hidden]).expect("v"),
+            Some(&Tensor::from_vec(mask.clone(), &[seq_len, seq_len]).expect("mask")),
+            num_heads,
+        )
+        .expect("attention")
+        .to_vec_f32()
+        .expect("vec");
+
+    assert_eq!(output.len(), seq_len * hidden);
+
+    // Reference: run each head independently through the definition-level
+    // implementation and stitch the heads back together.
+    for head in 0..num_heads {
+        let offset = head * head_dim;
+        let gather = |src: &[f32]| -> Vec<f32> {
+            let mut out = vec![0.0f32; seq_len * head_dim];
+            for row in 0..seq_len {
+                out[row * head_dim..(row + 1) * head_dim]
+                    .copy_from_slice(&src[row * hidden + offset..row * hidden + offset + head_dim]);
+            }
+            out
+        };
+        let expected = reference_attention(
+            &gather(&q),
+            &gather(&k),
+            &gather(&v),
+            seq_len,
+            head_dim,
+            Some(&mask),
+        );
+        for row in 0..seq_len {
+            for d in 0..head_dim {
+                let actual = output[row * hidden + offset + d];
+                let want = expected[row * head_dim + d];
+                assert!(
+                    (actual - want).abs() < 1e-4,
+                    "head {head} row {row} dim {d}: {actual} != {want} (backend {})",
+                    AdvancedNeuralEngineV4::backend_label()
+                );
+            }
+        }
+    }
+}
+
+/// The Metal kernel itself must match the reference — with no CPU fallback.
+///
+/// [`causal_attention_matches_the_reference_on_every_backend`] goes through
+/// `execute_optimized_attention`, which falls back to the CPU when the GPU
+/// dispatch returns an error. That fallback is correct behaviour, but it means
+/// the test above passes whether or not the GPU actually ran. This test calls
+/// `attention_metal` directly and requires it to succeed *and* to be right, so
+/// a broken or unavailable Metal kernel fails here instead of hiding behind the
+/// fallback.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+#[test]
+fn metal_kernel_matches_the_reference_without_falling_back() {
+    let engine = engine();
+    let seq_len = 6;
+    let num_heads = 2;
+    let head_dim = 4;
+    let hidden = num_heads * head_dim;
+
+    let q: Vec<f32> = (0..seq_len * hidden).map(|i| ((i * 7) % 13) as f32 * 0.1 - 0.5).collect();
+    let k: Vec<f32> = (0..seq_len * hidden).map(|i| ((i * 5) % 11) as f32 * 0.1 - 0.4).collect();
+    let v: Vec<f32> = (0..seq_len * hidden).map(|i| ((i * 3) % 7) as f32 * 0.1 - 0.3).collect();
+
+    // The kernel applies the causal mask unconditionally, so the reference must
+    // use the causal mask to be comparable.
+    let mut mask = vec![0.0f32; seq_len * seq_len];
+    for row in 0..seq_len {
+        for col in (row + 1)..seq_len {
+            mask[row * seq_len + col] = f32::NEG_INFINITY;
+        }
+    }
+
+    let output = engine
+        .attention_metal(
+            &Tensor::from_vec(q.clone(), &[seq_len, hidden]).expect("q"),
+            &Tensor::from_vec(k.clone(), &[seq_len, hidden]).expect("k"),
+            &Tensor::from_vec(v.clone(), &[seq_len, hidden]).expect("v"),
+            seq_len,
+            num_heads,
+            head_dim,
+        )
+        .expect("the Metal attention kernel must run on this machine")
+        .to_vec_f32()
+        .expect("vec");
+
+    assert_eq!(output.len(), seq_len * hidden);
+
+    for head in 0..num_heads {
+        let offset = head * head_dim;
+        let gather = |src: &[f32]| -> Vec<f32> {
+            let mut out = vec![0.0f32; seq_len * head_dim];
+            for row in 0..seq_len {
+                out[row * head_dim..(row + 1) * head_dim]
+                    .copy_from_slice(&src[row * hidden + offset..row * hidden + offset + head_dim]);
+            }
+            out
+        };
+        let expected = reference_attention(
+            &gather(&q),
+            &gather(&k),
+            &gather(&v),
+            seq_len,
+            head_dim,
+            Some(&mask),
+        );
+        for row in 0..seq_len {
+            for d in 0..head_dim {
+                let actual = output[row * hidden + offset + d];
+                let want = expected[row * head_dim + d];
+                assert!(
+                    (actual - want).abs() < 1e-4,
+                    "metal head {head} row {row} dim {d}: {actual} != {want}"
+                );
+            }
+        }
+    }
+}
+
 /// Unmasked attention must attend to the whole sequence on every backend.
 ///
 /// With a strictly increasing value sequence, unmasked attention at position 0

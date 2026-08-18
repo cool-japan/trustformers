@@ -438,7 +438,28 @@ impl MobileOptimizationEngine {
         // Quantize weights
         for (name, weight) in &mut model.weights {
             let quantized = self.quantizer.quantize_tensor(weight)?;
-            *weight = quantized;
+            // `quantize_tensor` may return a tensor in a genuinely
+            // different (compact) dtype now that `FP16Quantizer` stores a
+            // real `Tensor::F16` -- see its doc comment -- rather than
+            // rounding through `f16` and immediately widening back to
+            // `f32`. This pipeline's consumers need F32-computable weights
+            // (e.g. `MobileInferenceEngine::load_model` calls this via
+            // `optimize_model_weights` and hands the result straight to
+            // `process_layer`'s real matmul/bias-add, neither of which --
+            // nor `Tensor::add`/`Tensor::matmul` in general -- support
+            // mixed- or non-F32 dtypes today), so dequantize back to F32
+            // whenever quantization changed the dtype. For quantizers whose
+            // `quantize_tensor` already returns F32 (Int4/Int8: rounding is
+            // simulated in place, "fake quantization" for accuracy
+            // evaluation, not a dtype change), this is a no-op passthrough
+            // -- `dequantize_tensor` is only invoked when there is an
+            // actual non-F32 dtype to convert back.
+            let compute_ready = if quantized.dtype() == trustformers_core::DType::F32 {
+                quantized
+            } else {
+                self.quantizer.dequantize_tensor(&quantized)?
+            };
+            *weight = compute_ready;
             self.stats.tensors_quantized += 1;
         }
 
@@ -981,5 +1002,44 @@ mod tests {
         let summary = report.summary();
         assert!(summary.contains("75.0%"));
         assert!(summary.contains("100 MB → 25 MB"));
+    }
+
+    /// Regression test for a defect this session's `FP16Quantizer` fix
+    /// (real `Tensor::F16` storage, see `optimization::quantization`)
+    /// would otherwise have introduced: `MobileConfig::default()` selects
+    /// `FP16Quantizer` as the *default* quantizer (see `new`'s `else {
+    /// Arc::new(FP16Quantizer::new()) // Default to FP16 }` above), and
+    /// `optimize_model_weights` is what `MobileInferenceEngine::load_model`
+    /// calls before handing weights to `process_layer`'s real matmul/
+    /// bias-add. If `apply_quantization` stored the raw (now genuinely
+    /// non-F32) quantizer output instead of dequantizing it back, every
+    /// default-config model load would produce `Tensor::F16` weights that
+    /// `Tensor::add`/`Tensor::matmul` cannot operate on -- this must not
+    /// happen: weights returned here must remain directly F32-computable.
+    #[test]
+    fn test_optimize_model_weights_returns_f32_computable_tensors_by_default() {
+        let config = MobileConfig::default();
+        let mut engine = MobileOptimizationEngine::new(config).expect("engine creation failed");
+
+        let mut weights = HashMap::new();
+        weights.insert(
+            "layer.weight".to_string(),
+            Tensor::from_vec(vec![1.5, -2.25, 3.75, 4.0], &[2, 2]).expect("tensor"),
+        );
+
+        let optimized = engine.optimize_model_weights(&weights).expect("optimization failed");
+        let weight = optimized.get("layer.weight").expect("weight present");
+        assert!(
+            matches!(weight, Tensor::F32(_)),
+            "default-config optimized weights must remain F32-computable, got {:?}",
+            weight.dtype()
+        );
+
+        // And the result must be directly usable in real tensor ops (the
+        // actual failure mode this regression test guards against: the old
+        // buggy version would error here with "Addition not supported for
+        // these tensor types" when `weight` was `Tensor::F16`).
+        let bias = Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0], &[2, 2]).expect("bias");
+        assert!(weight.add(&bias).is_ok());
     }
 }

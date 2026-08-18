@@ -45,6 +45,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use trustformers_core::errors::Result;
+use trustformers_core::performance::LatencyMetrics;
 
 /// Number of coarse content buckets [`InputAnalysis::attention_patterns`] is
 /// reported in. This is an honest, content-derived summary (see
@@ -342,6 +343,15 @@ pub struct PerformanceTracker {
     energy_snapshots: Vec<f32>,
     quality_scores: Vec<f32>,
     throughput_history: Vec<f32>,
+    /// Real per-call total-computation-time history, oldest first, capped at
+    /// [`PerformanceTracker::MAX_LATENCY_SAMPLES`] entries (the same
+    /// bounded-history convention `early_exit::EarlyExitPredictor::exit_history`
+    /// uses). [`AdaptiveInferenceEngine::calculate_performance_metrics`]
+    /// feeds this -- plus the call currently in flight -- through
+    /// [`LatencyMetrics::from_durations`] to compute real p50/p90/p99
+    /// percentiles, rather than the fixed `time_ms * 1.2`/`* 1.5` multipliers
+    /// of a single sample the old code used.
+    latency_samples: Vec<Duration>,
 }
 
 /// Real, deterministic complexity estimate in `[0, 1]`: half from average
@@ -673,7 +683,7 @@ where
         }];
         self.adaptation_history.extend(adaptation_decisions.iter().cloned());
 
-        Ok(AdaptiveInferenceResult {
+        let result = AdaptiveInferenceResult {
             prediction,
             early_exit_result: Some(early_exit_result),
             precision_used: self.precision_controller.current_precision.clone(),
@@ -689,7 +699,16 @@ where
             latency_vs_quality_tradeoff,
             adaptation_decisions,
             performance_metrics,
-        })
+        };
+        // Regression fix: unlike `Self::adaptive_inference`, this method
+        // used to return without ever calling `update_final_metrics`, so a
+        // caller using only the layerwise path saw
+        // `performance_tracker.{latency_samples,quality_scores,
+        // throughput_history,memory_snapshots,energy_snapshots}` stay
+        // permanently empty -- in particular starving
+        // `real_latency_percentiles`'s history on this path entirely.
+        self.performance_tracker.update_final_metrics(&result);
+        Ok(result)
     }
 
     fn make_global_adaptations(&mut self, input_analysis: &InputAnalysis) -> Result<()> {
@@ -1192,6 +1211,29 @@ where
         Ok(quality_normalized / (latency_normalized + 1.0))
     }
 
+    /// Real p50/p90/p99 latency percentiles computed from this engine's
+    /// actual call-time history (`self.performance_tracker.latency_samples`,
+    /// populated by [`PerformanceTracker::update_final_metrics`] after every
+    /// prior call) plus `current_time_ms`, the call in progress right now
+    /// (not yet recorded into that history, since `update_final_metrics`
+    /// runs after this method returns -- see [`Self::adaptive_inference`]).
+    ///
+    /// With only one sample in scope (a fresh engine's first call), every
+    /// percentile of a one-point distribution is honestly that one point --
+    /// unlike the old code, which reported `p90`/`p99` as `time_ms * 1.2`/
+    /// `* 1.5`, fixed multipliers with no relationship to any real spread.
+    fn real_latency_percentiles(&self, current_time_ms: u64) -> HashMap<String, f64> {
+        let mut durations = self.performance_tracker.latency_samples.clone();
+        durations.push(Duration::from_millis(current_time_ms));
+        let metrics = LatencyMetrics::from_durations(&durations);
+
+        let mut latency_percentiles = HashMap::with_capacity(3);
+        latency_percentiles.insert("p50".to_string(), metrics.p50_ms);
+        latency_percentiles.insert("p90".to_string(), metrics.p90_ms);
+        latency_percentiles.insert("p99".to_string(), metrics.p99_ms);
+        latency_percentiles
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn calculate_performance_metrics(
         &self,
@@ -1203,10 +1245,7 @@ where
         prediction: &PipelineOutput,
         early_exit_confidence: Option<f32>,
     ) -> Result<PerformanceMetrics> {
-        let mut latency_percentiles = HashMap::new();
-        latency_percentiles.insert("p50".to_string(), time_ms as f64);
-        latency_percentiles.insert("p90".to_string(), time_ms as f64 * 1.2);
-        latency_percentiles.insert("p99".to_string(), time_ms as f64 * 1.5);
+        let latency_percentiles = self.real_latency_percentiles(time_ms);
 
         // Guard against a division by zero producing `Infinity`: a single
         // call has no real latency distribution to sample percentiles
@@ -1294,6 +1333,14 @@ impl ConditionalController {
 }
 
 impl PerformanceTracker {
+    /// Bound on [`PerformanceTracker::latency_samples`]'s length -- keeps a
+    /// long-running engine from growing this vector unboundedly while still
+    /// giving `calculate_performance_metrics` a real, sizeable distribution
+    /// to compute percentiles from. Mirrors the cap
+    /// `early_exit::EarlyExitPredictor::exit_history` already uses for the
+    /// same reason.
+    const MAX_LATENCY_SAMPLES: usize = 1000;
+
     fn new() -> Self {
         Self {
             start_time: Instant::now(),
@@ -1301,6 +1348,7 @@ impl PerformanceTracker {
             energy_snapshots: Vec::new(),
             quality_scores: Vec::new(),
             throughput_history: Vec::new(),
+            latency_samples: Vec::new(),
         }
     }
 
@@ -1310,6 +1358,11 @@ impl PerformanceTracker {
             .push(result.performance_metrics.throughput_tokens_per_second);
         self.memory_snapshots.push(result.memory_peak_mb);
         self.energy_snapshots.push(result.energy_consumed_watts);
+        self.latency_samples
+            .push(Duration::from_millis(result.total_computation_time_ms));
+        if self.latency_samples.len() > Self::MAX_LATENCY_SAMPLES {
+            self.latency_samples.remove(0);
+        }
     }
 }
 

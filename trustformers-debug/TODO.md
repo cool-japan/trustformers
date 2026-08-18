@@ -19,7 +19,7 @@ The `trustformers-debug` crate provides debugging and visualization tools for mo
 - Interactive, guided, and tutorial-based debugging interfaces
 - Export to various visualization and data formats (TensorBoard, Netron, Excel, JSON, ...)
 
-**Feature Flags:** `visual`, `video`, `gif`, `wasm`, `atomics`, `headless`, `cuda`, `rocm`, `tpu` (the last three are reserved placeholders for future GPU/TPU backends; see README's Feature Flags section for what they do today)
+**Feature Flags:** `visual`, `image`, `gif`, `wasm`, `atomics`, `headless`, `cuda`, `rocm`, `tpu` (the last three are reserved placeholders for future GPU/TPU backends; see README's Feature Flags section for what they do today)
 
 ---
 
@@ -39,7 +39,7 @@ The `trustformers-debug` crate provides debugging and visualization tools for mo
 
 ### Feature Coverage
 - **Profiling:** CPU, memory (deadlock-safe), latency analysis, flame graphs
-- **Visualization:** Plotters (`visual`), Ratatui TUI (`headless`), TensorBoard, GIF (`gif`), video (`video`)
+- **Visualization:** Plotters (`visual`), Ratatui TUI (`headless`), TensorBoard, GIF (`gif`), PNG heatmaps (`image`)
 - **Analysis:** Gradient flow, weight distribution, NaN/Inf detection, dead neurons, numerical stability
 - **Interpretability:** SHAP, LIME, 13 feature-attribution methods (Integrated Gradients, Grad-CAM, etc.), counterfactual generation, attention-pattern analysis
 - **Simulation & Robustness:** What-if analysis, perturbation/robustness testing, adversarial probing, edge-case discovery

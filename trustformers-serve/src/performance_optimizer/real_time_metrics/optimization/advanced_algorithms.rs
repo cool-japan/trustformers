@@ -3,11 +3,8 @@
 //! Additional and enhanced optimization algorithms for specialized scenarios
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
-use std::{
-    collections::{HashMap, VecDeque},
-    time::Duration,
-};
+use chrono::Utc;
+use std::{collections::HashMap, time::Duration};
 
 use super::super::types::*;
 
@@ -16,16 +13,6 @@ use super::super::types::*;
 /// Batching optimization algorithm for improving throughput
 pub struct BatchingOptimizationAlgorithm {
     stats: AlgorithmStatistics,
-    batch_history: VecDeque<BatchMetrics>,
-}
-
-#[derive(Debug, Clone)]
-struct BatchMetrics {
-    timestamp: DateTime<Utc>,
-    batch_size: usize,
-    throughput: f64,
-    latency: Duration,
-    efficiency: f32,
 }
 
 impl Default for BatchingOptimizationAlgorithm {
@@ -38,7 +25,6 @@ impl BatchingOptimizationAlgorithm {
     pub fn new() -> Self {
         Self {
             stats: AlgorithmStatistics::default(),
-            batch_history: VecDeque::new(),
         }
     }
 
@@ -164,22 +150,6 @@ impl LiveOptimizationAlgorithm for BatchingOptimizationAlgorithm {
                 self.stats.positive_feedback as f32 / self.stats.feedback_count as f32;
         }
 
-        // For batching specifically: track recent batch metrics so we can steer the
-        // optimal batch size estimate in a future optimize() call.  Here we record
-        // an efficiency signal derived from the feedback value.
-        let efficiency = feedback.value as f32;
-        self.batch_history.push_back(BatchMetrics {
-            timestamp: chrono::Utc::now(),
-            batch_size: 0, // unknown at feedback time
-            throughput: feedback.value,
-            latency: std::time::Duration::from_millis(0),
-            efficiency,
-        });
-        // Keep history bounded.
-        while self.batch_history.len() > 100 {
-            self.batch_history.pop_front();
-        }
-
         Ok(())
     }
 
@@ -191,16 +161,6 @@ impl LiveOptimizationAlgorithm for BatchingOptimizationAlgorithm {
 /// Performance tuning algorithm for general optimizations
 pub struct PerformanceTuningAlgorithm {
     stats: AlgorithmStatistics,
-    tuning_history: VecDeque<TuningRecord>,
-}
-
-#[derive(Debug, Clone)]
-struct TuningRecord {
-    timestamp: DateTime<Utc>,
-    parameter: String,
-    old_value: String,
-    new_value: String,
-    performance_delta: f32,
 }
 
 impl Default for PerformanceTuningAlgorithm {
@@ -213,7 +173,6 @@ impl PerformanceTuningAlgorithm {
     pub fn new() -> Self {
         Self {
             stats: AlgorithmStatistics::default(),
-            tuning_history: VecDeque::new(),
         }
     }
 
@@ -319,20 +278,6 @@ impl LiveOptimizationAlgorithm for PerformanceTuningAlgorithm {
                 self.stats.positive_feedback as f32 / self.stats.feedback_count as f32;
         }
 
-        // Record the tuning outcome in history so that future optimize() calls can
-        // avoid recently-rejected parameter choices.
-        let performance_delta = (feedback.value as f32) - 0.5;
-        self.tuning_history.push_back(TuningRecord {
-            timestamp: chrono::Utc::now(),
-            parameter: format!("{:?}", feedback.feedback_type),
-            old_value: String::new(),
-            new_value: String::new(),
-            performance_delta,
-        });
-        while self.tuning_history.len() > 100 {
-            self.tuning_history.pop_front();
-        }
-
         Ok(())
     }
 
@@ -348,16 +293,6 @@ impl LiveOptimizationAlgorithm for PerformanceTuningAlgorithm {
 /// Memory optimization algorithm for advanced memory management
 pub struct MemoryOptimizationAlgorithm {
     stats: AlgorithmStatistics,
-    memory_patterns: VecDeque<MemoryPattern>,
-}
-
-#[derive(Debug, Clone)]
-struct MemoryPattern {
-    timestamp: DateTime<Utc>,
-    allocation_rate: f64,
-    deallocation_rate: f64,
-    fragmentation_level: f32,
-    gc_pressure: f32,
 }
 
 impl Default for MemoryOptimizationAlgorithm {
@@ -370,7 +305,6 @@ impl MemoryOptimizationAlgorithm {
     pub fn new() -> Self {
         Self {
             stats: AlgorithmStatistics::default(),
-            memory_patterns: VecDeque::new(),
         }
     }
 }
@@ -458,20 +392,6 @@ impl LiveOptimizationAlgorithm for MemoryOptimizationAlgorithm {
                 self.stats.positive_feedback as f32 / self.stats.feedback_count as f32;
         }
 
-        // Record a memory pattern derived from the feedback signal; negative feedback
-        // suggests that GC pressure is still elevated after the recommendation was applied.
-        let gc_pressure = if feedback.value < 0.5 { 1.0 - feedback.value as f32 } else { 0.0 };
-        self.memory_patterns.push_back(MemoryPattern {
-            timestamp: chrono::Utc::now(),
-            allocation_rate: 0.0,
-            deallocation_rate: 0.0,
-            fragmentation_level: 0.0,
-            gc_pressure,
-        });
-        while self.memory_patterns.len() > 100 {
-            self.memory_patterns.pop_front();
-        }
-
         Ok(())
     }
 
@@ -483,16 +403,6 @@ impl LiveOptimizationAlgorithm for MemoryOptimizationAlgorithm {
 /// I/O optimization algorithm for async operations
 pub struct IOOptimizationAlgorithm {
     stats: AlgorithmStatistics,
-    io_patterns: VecDeque<IOPattern>,
-}
-
-#[derive(Debug, Clone)]
-struct IOPattern {
-    timestamp: DateTime<Utc>,
-    read_ops_per_sec: f64,
-    write_ops_per_sec: f64,
-    avg_latency: Duration,
-    queue_depth: usize,
 }
 
 impl Default for IOOptimizationAlgorithm {
@@ -505,7 +415,6 @@ impl IOOptimizationAlgorithm {
     pub fn new() -> Self {
         Self {
             stats: AlgorithmStatistics::default(),
-            io_patterns: VecDeque::new(),
         }
     }
 }
@@ -595,21 +504,6 @@ impl LiveOptimizationAlgorithm for IOOptimizationAlgorithm {
 
         // Record an I/O pattern from the feedback.  Negative feedback implies that
         // latency is still elevated; encode this as a longer average latency observation.
-        let avg_latency = if feedback.value < 0.5 {
-            std::time::Duration::from_millis(((1.0 - feedback.value) * 2000.0) as u64)
-        } else {
-            std::time::Duration::from_millis((feedback.value * 100.0) as u64)
-        };
-        self.io_patterns.push_back(IOPattern {
-            timestamp: chrono::Utc::now(),
-            read_ops_per_sec: 0.0,
-            write_ops_per_sec: 0.0,
-            avg_latency,
-            queue_depth: 0,
-        });
-        while self.io_patterns.len() > 100 {
-            self.io_patterns.pop_front();
-        }
 
         Ok(())
     }
@@ -622,16 +516,6 @@ impl LiveOptimizationAlgorithm for IOOptimizationAlgorithm {
 /// Network optimization algorithm
 pub struct NetworkOptimizationAlgorithm {
     stats: AlgorithmStatistics,
-    network_patterns: VecDeque<NetworkPattern>,
-}
-
-#[derive(Debug, Clone)]
-struct NetworkPattern {
-    timestamp: DateTime<Utc>,
-    bandwidth_utilization: f32,
-    connection_count: usize,
-    packet_loss: f32,
-    round_trip_time: Duration,
 }
 
 impl Default for NetworkOptimizationAlgorithm {
@@ -644,7 +528,6 @@ impl NetworkOptimizationAlgorithm {
     pub fn new() -> Self {
         Self {
             stats: AlgorithmStatistics::default(),
-            network_patterns: VecDeque::new(),
         }
     }
 }
@@ -745,21 +628,6 @@ impl LiveOptimizationAlgorithm for NetworkOptimizationAlgorithm {
 
         // Record a network pattern derived from the feedback value.
         // Low feedback value implies continued high bandwidth utilization.
-        let bandwidth_utilization = if feedback.value < 0.5 {
-            0.8 + (0.5 - feedback.value) as f32 * 0.4
-        } else {
-            (1.0 - feedback.value) as f32 * 0.5
-        };
-        self.network_patterns.push_back(NetworkPattern {
-            timestamp: chrono::Utc::now(),
-            bandwidth_utilization,
-            connection_count: 0,
-            packet_loss: 0.0,
-            round_trip_time: std::time::Duration::from_millis(0),
-        });
-        while self.network_patterns.len() > 100 {
-            self.network_patterns.pop_front();
-        }
 
         Ok(())
     }
@@ -772,16 +640,6 @@ impl LiveOptimizationAlgorithm for NetworkOptimizationAlgorithm {
 /// Thread pool optimization algorithm
 pub struct ThreadPoolOptimizationAlgorithm {
     stats: AlgorithmStatistics,
-    thread_patterns: VecDeque<ThreadPattern>,
-}
-
-#[derive(Debug, Clone)]
-struct ThreadPattern {
-    timestamp: DateTime<Utc>,
-    active_threads: usize,
-    idle_threads: usize,
-    queue_length: usize,
-    avg_task_duration: Duration,
 }
 
 impl Default for ThreadPoolOptimizationAlgorithm {
@@ -794,7 +652,6 @@ impl ThreadPoolOptimizationAlgorithm {
     pub fn new() -> Self {
         Self {
             stats: AlgorithmStatistics::default(),
-            thread_patterns: VecDeque::new(),
         }
     }
 }
@@ -894,17 +751,6 @@ impl LiveOptimizationAlgorithm for ThreadPoolOptimizationAlgorithm {
         // Encode feedback as a thread pattern observation.
         // Negative feedback suggests thread starvation or over-subscription;
         // use the feedback value to estimate the number of idle threads.
-        let idle_estimate = if feedback.value < 0.5 { 0_usize } else { 2 };
-        self.thread_patterns.push_back(ThreadPattern {
-            timestamp: chrono::Utc::now(),
-            active_threads: 0,
-            idle_threads: idle_estimate,
-            queue_length: 0,
-            avg_task_duration: std::time::Duration::from_millis(0),
-        });
-        while self.thread_patterns.len() > 100 {
-            self.thread_patterns.pop_front();
-        }
 
         Ok(())
     }

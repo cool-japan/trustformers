@@ -5,13 +5,8 @@ This guide will help you migrate from Facebook's Fairseq tokenization system to 
 ## Why Migrate from Fairseq?
 
 ### Performance Benefits
-| Metric | Fairseq | TrustformeRS Tokenizers | Improvement |
-|--------|---------|-------------------------|-------------|
-| **Tokenization Speed** | 200K tokens/sec | 1.3M tokens/sec | **550% faster** |
-| **Memory Usage** | 180MB baseline | 70MB baseline | **61% less memory** |
-| **Binary Size** | 45MB | 20MB | **56% smaller** |
-| **Dictionary Loading** | 250ms | 85ms | **66% faster loading** |
-| **Batch Processing** | 600K tokens/sec | 4.2M tokens/sec | **600% faster batching** |
+
+> **Note (2026-08-18):** this section previously carried a table of specific tokens/sec, memory, binary-size, and loading-time figures presented as a measured comparison against Fairseq. No benchmark harness in this repository produced those numbers, and the "TrustformeRS Tokenizers" figure quoted for the identical code path is different in every one of this crate's migration guides (1.3M tokens/sec here, 1.1M in the tiktoken guide, 1.2M in the HuggingFace guide, and so on) — real measurements of the same binary don't vary by which competitor they're being compared against. The table has been removed rather than left in place or re-guessed. To get real numbers, run this crate's own Criterion benchmark (`trustformers-tokenizers/benches/tokenizer_performance.rs`) against a real Fairseq installation on your own hardware.
 
 ### Feature Advantages
 - **Native Fairseq compatibility** with enhanced performance

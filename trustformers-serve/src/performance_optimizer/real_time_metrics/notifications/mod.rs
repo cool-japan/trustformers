@@ -98,6 +98,8 @@
 // Module declarations
 pub mod audit;
 pub mod channels;
+#[cfg(test)]
+mod channels_tests;
 pub mod delivery;
 pub mod escalation;
 pub mod formatters;
@@ -123,9 +125,9 @@ pub use processors::{
 };
 
 pub use channels::{
-    EmailNotificationChannel, LogNotificationChannel, NotificationChannel,
-    PagerDutyNotificationChannel, SlackNotificationChannel, SmsNotificationChannel,
-    WebhookNotificationChannel,
+    ChannelCounters, ChannelError, EmailNotificationChannel, HttpChannelConfig,
+    LogNotificationChannel, NotificationChannel, PagerDutyNotificationChannel,
+    SlackNotificationChannel, SmsNotificationChannel, WebhookNotificationChannel,
 };
 
 pub use formatters::{

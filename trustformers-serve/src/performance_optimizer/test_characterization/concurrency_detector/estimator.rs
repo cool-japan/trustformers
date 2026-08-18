@@ -6,7 +6,7 @@
 use super::super::types::*;
 use anyhow::Result;
 use chrono::Utc;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -22,9 +22,6 @@ pub struct SafeConcurrencyEstimator {
 
     /// Estimation history for learning
     estimation_history: Arc<Mutex<Vec<EstimationRecord>>>,
-
-    /// Safety constraints
-    safety_constraints: Arc<RwLock<EstimationSafetyConstraints>>,
 
     /// Configuration
     config: EstimationConfig,
@@ -47,7 +44,6 @@ impl SafeConcurrencyEstimator {
             algorithms: Arc::new(Mutex::new(algorithms)),
             algorithm_performance: Arc::new(Mutex::new(HashMap::new())),
             estimation_history: Arc::new(Mutex::new(Vec::new())),
-            safety_constraints: Arc::new(RwLock::new(EstimationSafetyConstraints::default())),
             config,
         })
     }
@@ -254,24 +250,6 @@ impl SafeConcurrencyEstimator {
 
         // Higher consensus (lower variation) = higher factor
         (1.0 - coefficient_of_variation.min(1.0)).max(0.1)
-    }
-
-    /// Generates timeout requirements based on estimations
-    fn generate_timeout_requirements(
-        &self,
-        estimations: &[EstimationResult],
-    ) -> TimeoutRequirements {
-        let max_duration = estimations
-            .iter()
-            .map(|e| e.duration)
-            .max()
-            .unwrap_or(Duration::from_millis(100));
-
-        TimeoutRequirements {
-            estimation_timeout: max_duration * 2,
-            execution_timeout: max_duration * 10,
-            cleanup_timeout: max_duration,
-        }
     }
 
     /// Updates algorithm performance metrics

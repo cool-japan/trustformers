@@ -6,7 +6,7 @@
 use super::super::types::*;
 use anyhow::Result;
 use chrono::Utc;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -15,15 +15,6 @@ use std::{
 pub struct ConcurrencyPatternDetector {
     /// Pattern detection algorithms
     detection_algorithms: Arc<Mutex<Vec<Box<dyn PatternDetectionAlgorithm + Send + Sync>>>>,
-
-    /// Known pattern library
-    pattern_library: Arc<RwLock<ConcurrencyPatternLibrary>>,
-
-    /// Pattern performance database
-    performance_db: Arc<RwLock<PatternPerformanceDatabase>>,
-
-    /// Configuration
-    config: PatternDetectionConfig,
 }
 
 /// Builds a ConcurrencyPattern from a pattern type string with real computed values
@@ -105,7 +96,7 @@ fn pattern_type_from_str(s: &str) -> ConcurrencyPatternType {
 
 impl ConcurrencyPatternDetector {
     /// Creates a new concurrency pattern detector
-    pub async fn new(config: PatternDetectionConfig) -> Result<Self> {
+    pub async fn new(_config: PatternDetectionConfig) -> Result<Self> {
         let mut detection_algorithms: Vec<Box<dyn PatternDetectionAlgorithm + Send + Sync>> =
             Vec::new();
 
@@ -115,14 +106,8 @@ impl ConcurrencyPatternDetector {
         detection_algorithms.push(Box::new(PipelineDetection::new()));
         detection_algorithms.push(Box::new(ForkJoinDetection::new()));
 
-        let pattern_library = ConcurrencyPatternLibrary::new();
-        let performance_db = PatternPerformanceDatabase::new();
-
         Ok(Self {
             detection_algorithms: Arc::new(Mutex::new(detection_algorithms)),
-            pattern_library: Arc::new(RwLock::new(pattern_library)),
-            performance_db: Arc::new(RwLock::new(performance_db)),
-            config,
         })
     }
 
@@ -543,17 +528,6 @@ impl ConcurrencyPatternDetector {
         scalability_patterns
     }
 
-    /// Calculates scaling factor
-    fn calculate_scaling_factor(&self, pattern: &ConcurrencyPattern) -> f32 {
-        match pattern.pattern_type.as_str() {
-            "ProducerConsumer" => 0.8,
-            "MasterWorker" => 0.9,
-            "Pipeline" => 0.85,
-            "ForkJoin" => 0.75,
-            _ => 0.6, // Custom or unknown
-        }
-    }
-
     /// Estimates optimal thread count
     fn estimate_optimal_threads(&self, pattern: &ConcurrencyPattern) -> usize {
         match pattern.pattern_type.as_str() {
@@ -601,20 +575,6 @@ impl ConcurrencyPatternDetector {
             curve_type: "Logarithmic".to_string(),
             peak_efficiency: 1.0,
             optimal_point: (optimal_threads, 1.0),
-        }
-    }
-
-    /// Generates efficiency function
-    fn generate_efficiency_function(&self, pattern: &ConcurrencyPattern) -> EfficiencyFunction {
-        EfficiencyFunction {
-            function_type: "Logarithmic".to_string(),
-            parameters: vec![
-                self.calculate_scaling_factor(pattern) as f64,
-                self.estimate_optimal_threads(pattern) as f64,
-                self.estimate_saturation_point(pattern) as f64,
-            ],
-            domain: (1.0, 128.0), // Thread count domain (1 to 128 threads)
-            range: (0.0, 1.0),    // Efficiency range (0% to 100%)
         }
     }
 

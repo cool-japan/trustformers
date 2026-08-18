@@ -39,10 +39,27 @@
 //! `mod_imports_fix.txt` scratch note. They were not Rust modules but they sat
 //! under `src/`, so `cargo package` shipped them to crates.io as if they were
 //! part of the crate.
-
-// Allow dead code for this module as it contains extensive infrastructure that is being
-// incrementally implemented and integrated
-#![allow(dead_code)]
+//!
+//! ## Removed in 0.2.1: the module-wide `#![allow(dead_code)]`
+//!
+//! This module carried a blanket `#![allow(dead_code)]` justified as
+//! "infrastructure that is being incrementally implemented". It was hiding 184
+//! warnings, almost all of them private struct fields that were assigned in a
+//! constructor and never read again: caches nothing looked in, `config` handles
+//! nothing consulted, `*_history` deques that were pushed to and never
+//! examined, sub-analysers that were built and never called.
+//!
+//! Those fields have been removed, along with the constructor arguments and
+//! `let` bindings that fed them and the handful of private methods that nothing
+//! called. Nothing that any code path reads was touched, and the crate's test
+//! count did not fall. Where a removal made a whole type or capability vanish,
+//! the site carries its own note explaining what went and why — see
+//! `real_time_metrics::optimization::advanced_algorithms` for the write-only
+//! feedback histories and `manager` for the component managers that held no
+//! state.
+//!
+//! The lint is on now, so a field that stops being read will be caught the next
+//! time somebody builds this crate rather than accumulating behind an allow.
 
 pub mod adaptive_parallelism;
 pub mod feedback_systems;

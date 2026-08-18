@@ -9,8 +9,8 @@ Advanced debugging and analysis tools for TrustformeRS machine learning models.
 | Feature | Description |
 |---------|-------------|
 | `visual` | Enable graphical plot output via Plotters (opt-in — see note below) |
-| `video` | Enable video frame export for training animations |
-| `gif` | Enable animated GIF export for visualization sequences |
+| `image` | Enable PNG raster output (large-model layer heatmaps) |
+| `gif` | Enable animated GIF export for visualization sequences (implies `image`) |
 | `wasm` | Enable WebAssembly-compatible debugging (no filesystem I/O) |
 | `atomics` | Enable atomic counters for lock-free profiling in multi-threaded contexts |
 | `headless` | Enable terminal/ASCII visualization for server environments (Ratatui) |
@@ -60,7 +60,11 @@ Multiple backends depending on enabled features:
 - **Ratatui** (`headless` feature): Terminal-based TUI dashboards and ASCII plots for headless server environments
 - **TensorBoard**: Event file export compatible with TensorBoard scalar/histogram/graph viewers
 - **GIF export** (`gif` feature): Animated training progress visualizations
-- **Video export** (`video` feature): MP4-compatible frame sequences for training recordings
+- **PNG export** (`image` feature): Layer heatmaps from `LargeModelVisualizer`
+
+There is no video/MP4 export. A `video` feature used to be advertised here; it
+enabled an `ffmpeg-next` dependency that no code in the crate ever called, so it
+was removed rather than left as a promise nothing could keep.
 
 ### Large-Model Visualization
 

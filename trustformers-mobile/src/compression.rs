@@ -471,8 +471,8 @@ impl MobileCompressionEngine {
                 total_elements += element_count;
                 total_zeros += (sparsity * element_count as f32).round() as usize;
             }
-            self.compression_stats.layer_sparsity = layer_sparsity;
-            self.compression_stats.overall_sparsity = if total_elements > 0 {
+            self.compression_stats.pruning_stats.layer_sparsity = layer_sparsity;
+            self.compression_stats.pruning_stats.overall_sparsity = if total_elements > 0 {
                 total_zeros as f32 / total_elements as f32
             } else {
                 0.0
@@ -1282,12 +1282,78 @@ impl MobilePruner {
         Ok(pruned)
     }
 
+    /// Real block-structured pruning: unlike [`Self::prune_by_magnitude`]
+    /// (which zeros individual elements wherever they happen to fall),
+    /// this zeros entire contiguous [`Self::HARDWARE_BLOCK_SIZE`]-element
+    /// blocks -- the actual meaning of "hardware-aware" here, since most
+    /// real mobile CPU/NPU kernels can only skip work at block/tile
+    /// granularity (a SIMD lane group, a cache line's worth of elements),
+    /// not at arbitrary individual-element granularity. Element-wise
+    /// sparsity from magnitude pruning alone rarely converts into a real
+    /// speedup for exactly this reason. Previously this ignored `weights`
+    /// entirely and returned `weights.clone()` -- no pruning at all, block-
+    /// or element-wise.
     fn apply_hardware_aware_pruning(
         &mut self,
         weights: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
-        // Hardware-aware pruning implementation
-        Ok(weights.clone()) // Placeholder
+        let mut pruned = HashMap::with_capacity(weights.len());
+        for (name, tensor) in weights {
+            let sparsity = self.determine_layer_sparsity(name);
+            pruned.insert(
+                name.clone(),
+                Self::prune_by_block_magnitude(tensor, sparsity)?,
+            );
+        }
+        Ok(pruned)
+    }
+
+    /// Block size [`Self::apply_hardware_aware_pruning`] groups elements
+    /// into before ranking them -- a common real SIMD lane width (4 `f32`
+    /// lanes for NEON, matching [`crate::optimization::simd_optimizer`]'s
+    /// own 128-bit/`f32` vector width) small enough to still allow a
+    /// meaningful sparsity level in modestly-sized layers.
+    const HARDWARE_BLOCK_SIZE: usize = 4;
+
+    /// Zero out the `sparsity` fraction of [`Self::HARDWARE_BLOCK_SIZE`]-
+    /// element blocks with the smallest aggregate (L2 norm) magnitude --
+    /// every element in a chosen block is zeroed together, never a subset
+    /// of one. A trailing partial block (when `tensor`'s element count is
+    /// not a multiple of the block size) is scored and pruned the same
+    /// way, over however many elements it actually has.
+    fn prune_by_block_magnitude(tensor: &Tensor, sparsity: f32) -> Result<Tensor> {
+        let sparsity = sparsity.clamp(0.0, 1.0);
+        let shape = tensor.shape();
+        let mut data = tensor.data()?;
+
+        if data.is_empty() || sparsity <= 0.0 {
+            return Ok(Tensor::from_vec(data, &shape)?);
+        }
+
+        let num_blocks = data.len().div_ceil(Self::HARDWARE_BLOCK_SIZE);
+        let mut block_scores: Vec<(usize, f32)> = (0..num_blocks)
+            .map(|b| {
+                let start = b * Self::HARDWARE_BLOCK_SIZE;
+                let end = (start + Self::HARDWARE_BLOCK_SIZE).min(data.len());
+                let l2: f32 = data[start..end].iter().map(|x| x * x).sum::<f32>().sqrt();
+                (b, l2)
+            })
+            .collect();
+        // Deterministic: ties broken by ascending block index via a stable
+        // sort, same reasoning as `prune_by_magnitude`.
+        block_scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let prune_block_count = ((num_blocks as f32) * sparsity).round() as usize;
+        let prune_block_count = prune_block_count.min(num_blocks);
+        for &(block, _) in block_scores.iter().take(prune_block_count) {
+            let start = block * Self::HARDWARE_BLOCK_SIZE;
+            let end = (start + Self::HARDWARE_BLOCK_SIZE).min(data.len());
+            for value in &mut data[start..end] {
+                *value = 0.0;
+            }
+        }
+
+        Ok(Tensor::from_vec(data, &shape)?)
     }
 
     /// Zero out the `sparsity` fraction (`0.0..=1.0`) of `tensor`'s
@@ -1307,7 +1373,7 @@ impl MobilePruner {
         let mut data = tensor.data()?;
 
         if data.is_empty() || sparsity <= 0.0 {
-            return Tensor::from_vec(data, &shape);
+            return Ok(Tensor::from_vec(data, &shape)?);
         }
 
         let prune_count = ((data.len() as f32) * sparsity).round() as usize;
@@ -1325,7 +1391,7 @@ impl MobilePruner {
             data[idx] = 0.0;
         }
 
-        Tensor::from_vec(data, &shape)
+        Ok(Tensor::from_vec(data, &shape)?)
     }
 
     /// Real, measured zero-fraction of `tensor` -- used to report *actually
@@ -1361,12 +1427,42 @@ impl KnowledgeDistiller {
         })
     }
 
+    /// Real knowledge distillation (soft-target training against
+    /// [`Self::teacher_model`]) needs a training dataset to run the
+    /// teacher/student forward passes and a real backward pass over --
+    /// none of which this function receives (its only input is the
+    /// student's *already-compressed* `weights`, with no training batch in
+    /// sight). The previous implementation silently accepted that and
+    /// returned `weights.clone()`, so `MobileModelCompressor::compress_model`
+    /// reported "Applied knowledge distillation" and a compression ratio
+    /// computed *as if* distillation had run, for every caller that
+    /// enabled it -- weights that were never touched.
+    ///
+    /// Refusing here (mirroring `OnDeviceTrainer::forward_with_loss`'s
+    /// identical refusal for `FineTuningMethod::Full`/`PrefixTuning` in
+    /// `training.rs`, for the same reason: real training needs data this
+    /// call site does not have) is the honest alternative to a fabricated
+    /// "success". `DistillationConfig::enable_distillation` defaults to
+    /// `false`, so this only surfaces for a caller that explicitly opted
+    /// in.
+    ///
+    /// # Errors
+    ///
+    /// Always: this operation is not implemented without training data.
     fn apply_distillation(
         &mut self,
-        weights: &HashMap<String, Tensor>,
+        _weights: &HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
-        // Knowledge distillation implementation
-        Ok(weights.clone()) // Placeholder
+        Err(TrustformersError::runtime_error(
+            "knowledge distillation is not supported by this on-device compression pipeline: \
+             computing real distilled weights requires running the teacher/student forward and \
+             backward passes over a training dataset, which MobileModelCompressor::compress_model \
+             does not have access to (only the weight tensors themselves). Disable \
+             CompressionConfig::enable_distillation, or perform distillation training offline \
+             and load the already-distilled checkpoint instead."
+                .to_string(),
+        )
+        .into())
     }
 }
 
@@ -1619,6 +1715,78 @@ mod tests {
         );
     }
 
+    /// Regression test for the previous `apply_hardware_aware_pruning`,
+    /// which returned `weights.clone()` unchanged -- `PruningStrategy::HardwareAware`
+    /// pruned nothing at all. A block containing only large-magnitude
+    /// values must survive, and requesting 100% sparsity on an
+    /// exact-multiple-of-the-block-size tensor must zero every element (in
+    /// whole blocks).
+    #[test]
+    fn test_hardware_aware_pruning_zeros_whole_low_importance_blocks() {
+        // Two 4-element blocks (matching `HARDWARE_BLOCK_SIZE`): block 0 is
+        // uniformly small-magnitude, block 1 uniformly large. At 50%
+        // layer-level sparsity (an "other" layer name, so
+        // `determine_layer_sparsity` picks 0.6 -- still enough to prune the
+        // one low-importance block), block 0 must be entirely zeroed and
+        // block 1 must survive untouched.
+        let low = vec![0.1f32, -0.1, 0.1, -0.1];
+        let high = vec![9.0f32, -9.0, 9.0, -9.0];
+        let mut values = low.clone();
+        values.extend_from_slice(&high);
+        let tensor = Tensor::from_vec(values, &[8]).expect("tensor construction");
+
+        let mut pruner = MobilePruner::new();
+        let mut weights = HashMap::new();
+        weights.insert("layer_x.weight".to_string(), tensor);
+        let pruned = pruner.apply_hardware_aware_pruning(&weights).expect("pruning failed");
+        let pruned_data = pruned["layer_x.weight"].data().expect("tensor data");
+
+        assert_eq!(
+            &pruned_data[0..4],
+            &[0.0, 0.0, 0.0, 0.0],
+            "low-magnitude block must be zeroed \
+                                                                 entirely, not just some of it"
+        );
+        assert_eq!(
+            &pruned_data[4..8],
+            high.as_slice(),
+            "high-magnitude block must survive \
+                                                            untouched"
+        );
+    }
+
+    #[test]
+    fn test_hardware_aware_pruning_at_full_sparsity_zeros_every_block() {
+        let tensor =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[8]).expect("tensor");
+        let pruned = MobilePruner::prune_by_block_magnitude(&tensor, 1.0).expect("pruning");
+        assert_eq!(pruned.data().expect("data"), vec![0.0; 8]);
+    }
+
+    /// Regression test for the previous `apply_distillation`, which
+    /// returned `weights.clone()` while `compress_model` logged "Applied
+    /// knowledge distillation" -- a fabricated success for an operation
+    /// that never touched a single weight (no teacher/student training
+    /// ever ran, since this call site has no training dataset). It must
+    /// now refuse honestly rather than silently pass weights through
+    /// unchanged under a claim of having distilled them.
+    #[test]
+    fn test_apply_distillation_refuses_rather_than_fake_success() {
+        let mut distiller = KnowledgeDistiller::new(DistillationConfig::default())
+            .expect("KnowledgeDistiller::new");
+        let mut weights = HashMap::new();
+        weights.insert(
+            "layer.weight".to_string(),
+            Tensor::from_vec(vec![1.0, 2.0], &[2]).expect("tensor construction"),
+        );
+
+        let result = distiller.apply_distillation(&weights);
+        assert!(
+            result.is_err(),
+            "must not report success for distillation that never actually ran"
+        );
+    }
+
     /// Regression test for `CompressionStats::overall_sparsity`/
     /// `layer_sparsity`, which were previously never populated by pruning
     /// (they stayed at the `CompressionStats::new()` initial `0.0` /
@@ -1643,10 +1811,10 @@ mod tests {
         engine.compress_model(&weights).expect("compression failed");
 
         assert!(
-            (engine.get_stats().overall_sparsity - 0.5).abs() < 1e-6,
+            (engine.get_stats().pruning_stats.overall_sparsity - 0.5).abs() < 1e-6,
             "expected ~50% measured sparsity, got {}",
-            engine.get_stats().overall_sparsity
+            engine.get_stats().pruning_stats.overall_sparsity
         );
-        assert!(engine.get_stats().layer_sparsity.contains_key("layer.weight"));
+        assert!(engine.get_stats().pruning_stats.layer_sparsity.contains_key("layer.weight"));
     }
 }

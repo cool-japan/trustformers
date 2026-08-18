@@ -627,15 +627,33 @@ impl BatchAggregator {
     }
 
     /// Get aggregator statistics
+    /// A snapshot of the aggregator's state.
+    ///
+    /// `queue_depth` and `total_batches_formed` come from the metrics collector,
+    /// which counts real batch formations and completions.
+    ///
+    /// `pending_requests` is the number of requests that have been accepted and
+    /// whose caller is still holding a response channel — i.e. genuinely
+    /// outstanding work. It used to be hardcoded to `0` with the note that it
+    /// "would need async access", which reported an idle aggregator no matter
+    /// how much was in flight. The lock is only ever held briefly by
+    /// [`Self::add_request`] and the dispatch path, so a blocking acquisition
+    /// here is cheap; when it is momentarily contended this reports the depth
+    /// it can see rather than blocking a synchronous stats call.
     pub fn get_stats(&self) -> AggregatorStats {
-        // Get metrics summary from the metrics collector
         let summary = self.metrics.get_summary();
 
-        // Note: queue_depth and pending_requests require async access to locks
-        // For now, we return the key metrics from the summary
+        let pending_requests = self
+            .response_channels
+            .try_lock()
+            .map(|channels| channels.len())
+            // Contended for the instant we looked: fall back to the collector's
+            // in-flight count, which is measured rather than assumed.
+            .unwrap_or(summary.queue_depth);
+
         AggregatorStats {
             queue_depth: summary.queue_depth,
-            pending_requests: 0, // Would need async access to get current pending requests
+            pending_requests,
             total_batches_formed: summary.total_batches,
             avg_batch_size: summary.avg_batch_size,
         }
@@ -675,7 +693,6 @@ pub struct AdaptiveBatchingStrategy {
     config: AdaptiveConfig,
     load_tracker: Arc<Mutex<LoadTracker>>,
     performance_history: Arc<Mutex<VecDeque<PerformanceMetric>>>,
-    last_adjustment: Arc<Mutex<Instant>>,
 }
 
 impl AdaptiveBatchingStrategy {
@@ -684,7 +701,6 @@ impl AdaptiveBatchingStrategy {
             config,
             load_tracker: Arc::new(Mutex::new(LoadTracker::new())),
             performance_history: Arc::new(Mutex::new(VecDeque::new())),
-            last_adjustment: Arc::new(Mutex::new(Instant::now())),
         }
     }
 
@@ -709,54 +725,6 @@ impl AdaptiveBatchingStrategy {
                 break;
             }
         }
-    }
-
-    /// Calculate optimal batch size based on current conditions
-    async fn calculate_optimal_batch_size(&self, config: &BatchingConfig) -> usize {
-        let load = self.load_tracker.lock().await.current_load();
-        let mut optimal_size = config.max_batch_size;
-
-        // Adjust based on load
-        if load < self.config.low_load_threshold {
-            // Low load: prefer latency, use smaller batches
-            optimal_size = (config.max_batch_size as f32 * 0.5) as usize;
-        } else if load > self.config.high_load_threshold {
-            // High load: prefer throughput, use larger batches
-            optimal_size = self.config.high_load_batch_size.min(config.max_batch_size);
-        }
-
-        // Adjust based on recent performance if prediction is enabled
-        if self.config.enable_prediction {
-            if let Some(predicted_size) = self.predict_optimal_size().await {
-                // Weighted average of load-based and prediction-based size
-                optimal_size =
-                    ((optimal_size as f32 * 0.7) + (predicted_size as f32 * 0.3)) as usize;
-            }
-        }
-
-        optimal_size.clamp(config.min_batch_size, config.max_batch_size)
-    }
-
-    /// Predict optimal batch size based on historical performance
-    async fn predict_optimal_size(&self) -> Option<usize> {
-        let history = self.performance_history.lock().await;
-        if history.len() < 3 {
-            return None;
-        }
-
-        // Find batch size with best throughput/latency ratio
-        let mut best_ratio = 0.0;
-        let mut best_size = 0;
-
-        for metric in history.iter() {
-            let ratio = metric.throughput / metric.latency.as_secs_f32();
-            if ratio > best_ratio {
-                best_ratio = ratio;
-                best_size = metric.batch_size;
-            }
-        }
-
-        Some(best_size)
     }
 }
 
@@ -842,14 +810,12 @@ impl BatchingStrategy for AdaptiveBatchingStrategy {
 /// Load-aware batching strategy
 pub struct LoadAwareBatchingStrategy {
     load_tracker: Arc<Mutex<LoadTracker>>,
-    base_config: BatchingConfig,
 }
 
 impl LoadAwareBatchingStrategy {
-    pub fn new(base_config: BatchingConfig) -> Self {
+    pub fn new(_base_config: BatchingConfig) -> Self {
         Self {
             load_tracker: Arc::new(Mutex::new(LoadTracker::new())),
-            base_config,
         }
     }
 
@@ -919,7 +885,6 @@ impl BatchingStrategy for LoadAwareBatchingStrategy {
 /// Predictive batching strategy using machine learning concepts
 pub struct PredictiveBatchingStrategy {
     predictor: Arc<Mutex<SimplePredictor>>,
-    performance_history: Arc<Mutex<VecDeque<PerformanceMetric>>>,
 }
 
 impl Default for PredictiveBatchingStrategy {
@@ -932,7 +897,6 @@ impl PredictiveBatchingStrategy {
     pub fn new() -> Self {
         Self {
             predictor: Arc::new(Mutex::new(SimplePredictor::new())),
-            performance_history: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -1362,5 +1326,47 @@ mod tests {
         assert_eq!(stats.queue_depth, 5);
         assert_eq!(stats.total_batches_formed, 100);
         assert!((stats.avg_batch_size - 8.5).abs() < 1e-5);
+    }
+
+    /// Regression: `get_stats` reported `pending_requests: 0` unconditionally
+    /// and `total_batches_formed` from a `get_summary` that returned hardcoded
+    /// zeros, so a busy aggregator was indistinguishable from an idle one on
+    /// `/admin/stats`. Both must now track reality.
+    #[tokio::test]
+    async fn stats_report_real_pending_requests_and_batch_counts() {
+        // A batch size above the number of requests submitted keeps them
+        // outstanding, which is exactly the state the old code misreported.
+        let config = BatchingConfig {
+            max_batch_size: 64,
+            ..BatchingConfig::default()
+        };
+        let metrics = Arc::new(MetricsCollector::new());
+        let mut aggregator = BatchAggregator::new(config, Arc::clone(&metrics));
+
+        let idle = aggregator.get_stats();
+        assert_eq!(idle.pending_requests, 0, "nothing submitted yet");
+        assert_eq!(idle.total_batches_formed, 0);
+
+        let mut receivers = Vec::new();
+        for i in 0..3 {
+            let request = Request {
+                id: RequestId::new(),
+                input: RequestInput::Text {
+                    text: format!("request {i}"),
+                    max_length: Some(4),
+                },
+                priority: Priority::Normal,
+                submitted_at: Instant::now(),
+                deadline: None,
+                metadata: HashMap::new(),
+            };
+            receivers.push(aggregator.add_request(request).await.expect("request accepted"));
+        }
+
+        let busy = aggregator.get_stats();
+        assert_eq!(
+            busy.pending_requests, 3,
+            "three requests are outstanding; the old code always said 0"
+        );
     }
 }

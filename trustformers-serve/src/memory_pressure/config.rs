@@ -446,11 +446,17 @@ pub struct MemoryStats {
     /// Process memory usage in bytes
     pub process_memory: u64,
 
-    /// Heap memory usage in bytes
-    pub heap_memory: u64,
+    /// Heap memory usage in bytes, when the platform can report it.
+    ///
+    /// `None` means "not measured on this platform", which is different from
+    /// `Some(0)`.
+    pub heap_memory: Option<u64>,
 
-    /// Stack memory usage in bytes
-    pub stack_memory: u64,
+    /// Stack memory usage in bytes, when the platform can report it.
+    ///
+    /// `None` means "not measured on this platform", which is different from
+    /// `Some(0)`.
+    pub stack_memory: Option<u64>,
 
     /// Total GPU memory usage across all devices in bytes
     pub gpu_memory: u64,

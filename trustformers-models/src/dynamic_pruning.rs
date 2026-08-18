@@ -1284,26 +1284,48 @@ impl PruningStatistics {
         }
     }
 
-    /// Print comprehensive pruning report
-    pub fn print_report(&self) {
-        println!("=== Dynamic Token Pruning Report ===");
-        println!(
-            "Average Compression Ratio: {:.3}",
+    /// Render this report as the human-readable text [`Self::print_report`]
+    /// and [`Self::log_report`] both emit.
+    fn report_string(&self) -> String {
+        let mut report = String::new();
+        report.push_str("=== Dynamic Token Pruning Report ===\n");
+        report.push_str(&format!(
+            "Average Compression Ratio: {:.3}\n",
             self.avg_compression_ratio
-        );
-        println!(
-            "Computational Savings: {:.1}%",
+        ));
+        report.push_str(&format!(
+            "Computational Savings: {:.1}%\n",
             self.computational_savings * 100.0
-        );
-        println!("Memory Savings: {:.1}%", self.memory_savings * 100.0);
-        println!("\nLayer-wise Compression:");
+        ));
+        report.push_str(&format!(
+            "Memory Savings: {:.1}%\n",
+            self.memory_savings * 100.0
+        ));
+        report.push_str("\nLayer-wise Compression:\n");
         for (i, ratio) in self.layer_compression_ratios.iter().enumerate() {
-            println!("  Layer {}: {:.3}", i, ratio);
+            report.push_str(&format!("  Layer {}: {:.3}\n", i, ratio));
         }
-        println!("\nPruning Reason Distribution:");
+        report.push_str("\nPruning Reason Distribution:");
         for (reason, count) in &self.pruning_reason_distribution {
-            println!("  {:?}: {}", reason, count);
+            report.push_str(&format!("\n  {:?}: {}", reason, count));
         }
+        report
+    }
+
+    /// Write [`Self::report_string`] to stdout.
+    ///
+    /// This is an explicit, caller-initiated escape hatch for binaries and
+    /// examples; nothing on the pruning path writes to stdout on its own.
+    /// Library callers should prefer [`Self::log_report`], which routes the
+    /// same report through `tracing` so the host application controls the
+    /// sink.
+    pub fn print_report(&self) {
+        println!("{}", self.report_string());
+    }
+
+    /// Emit [`Self::report_string`] at `info` level through `tracing`.
+    pub fn log_report(&self) {
+        tracing::info!("{}", self.report_string());
     }
 
     /// Get efficiency metrics

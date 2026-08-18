@@ -167,6 +167,15 @@ pub struct MemoryPressureHandler {
 
     /// Last pressure level for change detection
     last_pressure_level: Arc<RwLock<MemoryPressureLevel>>,
+
+    /// Registry that owns resident models, when the embedder supplied one.
+    ///
+    /// [`CleanupStrategy::ModelUnloading`] can only be honoured against a real
+    /// registry: without one there is nothing to unload and nothing to report.
+    model_registry: Option<Arc<dyn super::cleanup::ModelRegistry>>,
+
+    /// Cache manager that owns evictable cache data, when supplied.
+    cache_manager: Option<Arc<dyn super::cleanup::CacheManager>>,
 }
 
 impl MemoryPressureHandler {
@@ -188,8 +197,8 @@ impl MemoryPressureHandler {
             used_memory: 0,
             utilization: 0.0,
             process_memory: 0,
-            heap_memory: 0,
-            stack_memory: 0,
+            heap_memory: None,
+            stack_memory: None,
             gpu_memory: 0,
             gpu_stats: HashMap::new(),
             swap_usage: 0,
@@ -208,7 +217,29 @@ impl MemoryPressureHandler {
             task_handles: Arc::new(Mutex::new(Vec::new())),
             shutdown_notify: Arc::new(Notify::new()),
             last_pressure_level: Arc::new(RwLock::new(MemoryPressureLevel::Normal)),
+            model_registry: None,
+            cache_manager: None,
         }
+    }
+
+    /// Attach the registry that owns resident models.
+    ///
+    /// [`CleanupStrategy::ModelUnloading`] is skipped unless this is set,
+    /// because unloading is only real against something that holds the models.
+    pub fn with_model_registry(mut self, registry: Arc<dyn super::cleanup::ModelRegistry>) -> Self {
+        self.model_registry = Some(registry);
+        self
+    }
+
+    /// Attach the cache manager that owns evictable cache data.
+    ///
+    /// [`CleanupStrategy::CacheEviction`] is skipped unless this is set.
+    pub fn with_cache_manager(
+        mut self,
+        cache_manager: Arc<dyn super::cleanup::CacheManager>,
+    ) -> Self {
+        self.cache_manager = Some(cache_manager);
+        self
     }
 
     /// Start memory pressure monitoring
@@ -572,20 +603,34 @@ impl MemoryPressureHandler {
         use super::cleanup::handlers::*;
         use std::sync::Arc;
 
-        // Register standard cleanup handlers based on configuration
+        // Register standard cleanup handlers based on configuration.
+        //
+        // A strategy whose handler needs an owner of the memory — a cache, a
+        // model registry — is only registered when that owner was supplied.
+        // Registering it anyway would put a handler in the engine that can
+        // report bytes it never released.
         for strategy in &self.config.cleanup_strategies {
             match strategy {
-                CleanupStrategy::GarbageCollection => {
-                    let handler = Arc::new(GarbageCollectionHandler::new());
-                    self.cleanup_engine.register_handler(strategy.clone(), handler).await;
+                CleanupStrategy::CacheEviction => match &self.cache_manager {
+                    Some(cache_manager) => {
+                        let handler =
+                            Arc::new(CacheEvictionHandler::new(Arc::clone(cache_manager)));
+                        self.cleanup_engine.register_handler(strategy.clone(), handler).await;
+                    },
+                    None => debug!(
+                        "CacheEviction cleanup strategy skipped: no cache manager was attached \
+                         with MemoryPressureHandler::with_cache_manager"
+                    ),
                 },
-                CleanupStrategy::BufferCompaction => {
-                    let handler = Arc::new(BufferCompactionHandler::new());
-                    self.cleanup_engine.register_handler(strategy.clone(), handler).await;
-                },
-                CleanupStrategy::ModelUnloading => {
-                    let handler = Arc::new(ModelUnloadingHandler::new());
-                    self.cleanup_engine.register_handler(strategy.clone(), handler).await;
+                CleanupStrategy::ModelUnloading => match &self.model_registry {
+                    Some(registry) => {
+                        let handler = Arc::new(ModelUnloadingHandler::new(Arc::clone(registry)));
+                        self.cleanup_engine.register_handler(strategy.clone(), handler).await;
+                    },
+                    None => debug!(
+                        "ModelUnloading cleanup strategy skipped: no model registry was attached \
+                         with MemoryPressureHandler::with_model_registry"
+                    ),
                 },
                 CleanupStrategy::RequestRejection => {
                     let handler = Arc::new(RequestRejectionHandler::new());
@@ -856,6 +901,8 @@ impl Clone for MemoryPressureHandler {
             task_handles: self.task_handles.clone(),
             shutdown_notify: self.shutdown_notify.clone(),
             last_pressure_level: self.last_pressure_level.clone(),
+            model_registry: self.model_registry.clone(),
+            cache_manager: self.cache_manager.clone(),
         }
     }
 }

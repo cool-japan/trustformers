@@ -4,17 +4,15 @@
 //! and enhanced profile types with the main PerformanceProfiler.
 
 use super::super::types::{
-    BenchmarkSuiteDefinition, BenchmarkSuiteResults, CacheAnalysisState, CacheCoherencyAnalysis,
-    CacheDetectionEngine, CacheModelingEngine, CacheOptimizationAnalyzer, CachePerformanceTester,
-    ComprehensiveCacheAnalysis, ComputeUtilizationAnalysis, ConnectionOverheadAnalysis,
-    CpuCacheAnalysis, CpuProfile, GpuCapabilityInfo, GpuComputeBenchmarks, GpuComputePerformance,
-    GpuKernelAnalysis, GpuKernelAnalyzer, GpuMemoryPerformance, GpuMemoryTester, GpuProfile,
-    GpuProfilingState, GpuThermalAnalysis, GpuVendor, GpuVendorOptimizations, IoProfile,
-    IoProfilingState, MemoryProfile, MtuOptimizer, NetworkBandwidthAnalysis,
-    NetworkLatencyAnalysis, NetworkProfilingState, OptimizationRecommendations,
-    PacketLossCharacteristics, PerformanceAnalysisReport, PerformanceProfileResults,
-    PrefetcherAnalysis, ProtocolPerformanceAnalysis, ProtocolPerformanceMetrics,
-    QualityAssessmentReport,
+    BenchmarkSuiteDefinition, BenchmarkSuiteResults, CacheCoherencyAnalysis, CacheDetectionEngine,
+    CachePerformanceTester, ComprehensiveCacheAnalysis, ComputeUtilizationAnalysis,
+    ConnectionOverheadAnalysis, CpuCacheAnalysis, CpuProfile, GpuCapabilityInfo,
+    GpuComputeBenchmarks, GpuComputePerformance, GpuKernelAnalysis, GpuKernelAnalyzer,
+    GpuMemoryPerformance, GpuMemoryTester, GpuProfile, GpuThermalAnalysis, GpuVendor,
+    GpuVendorOptimizations, IoProfile, MemoryProfile, MtuOptimizer, NetworkBandwidthAnalysis,
+    NetworkLatencyAnalysis, OptimizationRecommendations, PacketLossCharacteristics,
+    PerformanceAnalysisReport, PerformanceProfileResults, PrefetcherAnalysis,
+    ProtocolPerformanceAnalysis, ProtocolPerformanceMetrics, QualityAssessmentReport,
 };
 use super::*;
 use anyhow::Result;
@@ -43,25 +41,13 @@ pub struct CacheAnalyzer {
     detection_engine: CacheDetectionEngine,
     /// Cache performance tester
     performance_tester: CachePerformanceTester,
-    /// Cache optimization analyzer
-    optimization_analyzer: CacheOptimizationAnalyzer,
-    /// Cache modeling engine
-    modeling_engine: CacheModelingEngine,
-    /// Cache analysis configuration
-    config: CacheAnalysisConfig,
-    /// Analysis state
-    state: Arc<Mutex<CacheAnalysisState>>,
 }
 impl CacheAnalyzer {
     /// Create a new cache analyzer
-    pub async fn new(config: CacheAnalysisConfig) -> Result<Self> {
+    pub async fn new(_config: CacheAnalysisConfig) -> Result<Self> {
         Ok(Self {
             detection_engine: CacheDetectionEngine::new(),
             performance_tester: CachePerformanceTester::new(),
-            optimization_analyzer: CacheOptimizationAnalyzer::new(),
-            modeling_engine: CacheModelingEngine::new(),
-            config,
-            state: Arc::new(Mutex::new(CacheAnalysisState::new())),
         })
     }
     /// Analyze comprehensive cache performance
@@ -294,21 +280,15 @@ pub struct GpuProfiler {
     memory_tester: GpuMemoryTester,
     /// Kernel execution analyzer
     kernel_analyzer: GpuKernelAnalyzer,
-    /// GPU profiling configuration
-    config: GpuProfilingConfig,
-    /// Profiling state
-    state: Arc<Mutex<GpuProfilingState>>,
 }
 impl GpuProfiler {
     /// Create a new GPU profiler
-    pub async fn new(config: GpuProfilingConfig) -> Result<Self> {
+    pub async fn new(_config: GpuProfilingConfig) -> Result<Self> {
         Ok(Self {
             vendor_detector: GpuVendorDetector::new(),
             compute_benchmarks: GpuComputeBenchmarks::new(),
             memory_tester: GpuMemoryTester::new(),
             kernel_analyzer: GpuKernelAnalyzer::new(),
-            config,
-            state: Arc::new(Mutex::new(GpuProfilingState::default())),
         })
     }
     /// Profile comprehensive GPU performance
@@ -561,21 +541,15 @@ pub struct IoProfiler {
     queue_optimizer: QueueDepthOptimizer,
     /// I/O latency analyzer
     latency_analyzer: IoLatencyAnalyzer,
-    /// I/O profiling configuration
-    config: IoProfilingConfig,
-    /// Profiling state
-    state: Arc<Mutex<IoProfilingState>>,
 }
 impl IoProfiler {
     /// Create a new I/O profiler
-    pub async fn new(config: IoProfilingConfig) -> Result<Self> {
+    pub async fn new(_config: IoProfilingConfig) -> Result<Self> {
         Ok(Self {
             storage_analyzer: StorageDeviceAnalyzer::new(),
             pattern_analyzer: IoPatternAnalyzer::new(),
             queue_optimizer: QueueDepthOptimizer::new(),
             latency_analyzer: IoLatencyAnalyzer::new(),
-            config,
-            state: Arc::new(Mutex::new(IoProfilingState::default())),
         })
     }
     /// Profile comprehensive I/O performance
@@ -751,21 +725,15 @@ pub struct NetworkProfiler {
     latency_tester: NetworkLatencyTester,
     /// MTU optimization engine
     mtu_optimizer: MtuOptimizer,
-    /// Network profiling configuration
-    config: NetworkProfilingConfig,
-    /// Profiling state
-    state: Arc<Mutex<NetworkProfilingState>>,
 }
 impl NetworkProfiler {
     /// Create a new network profiler
-    pub async fn new(config: NetworkProfilingConfig) -> Result<Self> {
+    pub async fn new(_config: NetworkProfilingConfig) -> Result<Self> {
         Ok(Self {
             interface_analyzer: NetworkInterfaceAnalyzer::new(),
             bandwidth_tester: NetworkBandwidthTester::new(),
             latency_tester: NetworkLatencyTester::new(),
             mtu_optimizer: MtuOptimizer::new(),
-            config,
-            state: Arc::new(Mutex::new(NetworkProfilingState::default())),
         })
     }
     /// Profile comprehensive network performance

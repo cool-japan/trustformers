@@ -327,15 +327,10 @@ pub struct StatisticsSummary {
 }
 /// Default system resource monitor implementation
 #[derive(Debug)]
-pub struct DefaultSystemResourceMonitor {
-    /// Process ID for monitoring
-    pid: u32,
-}
+pub struct DefaultSystemResourceMonitor {}
 impl DefaultSystemResourceMonitor {
     pub async fn new() -> Result<Self> {
-        Ok(Self {
-            pid: std::process::id(),
-        })
+        Ok(Self {})
     }
 }
 impl DefaultSystemResourceMonitor {

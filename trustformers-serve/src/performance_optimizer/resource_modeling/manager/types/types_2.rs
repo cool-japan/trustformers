@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::{sync::Semaphore, time::interval};
+use tokio::time::interval;
 
 use super::definitions::{
     AnalysisQuality, AnalysisResultData, AnalysisTaskType, ConfigurationManager, CostImpact,
@@ -38,21 +38,15 @@ pub struct ComponentCoordinator {
     utilization_tracker: Arc<ResourceUtilizationTracker>,
     /// Hardware detection engine
     hardware_detector: Arc<HardwareDetector>,
-    /// Cache coordinator reference
-    cache_coordinator: Arc<CacheCoordinator>,
-    /// Error recovery manager reference
-    error_recovery_manager: Arc<ErrorRecoveryManager>,
     /// Component health status
     component_health: Arc<RwLock<HashMap<String, ComponentHealth>>>,
-    /// Configuration
-    config: ResourceModelingConfig,
 }
 impl ComponentCoordinator {
     /// Create a new component coordinator
     pub async fn new(
-        config: ResourceModelingConfig,
-        cache_coordinator: Arc<CacheCoordinator>,
-        error_recovery_manager: Arc<ErrorRecoveryManager>,
+        _config: ResourceModelingConfig,
+        _cache_coordinator: Arc<CacheCoordinator>,
+        _error_recovery_manager: Arc<ErrorRecoveryManager>,
     ) -> Result<Self> {
         let performance_profiler = Arc::new(PerformanceProfiler::new(ProfilingConfig::default()));
         let temperature_monitor =
@@ -69,10 +63,7 @@ impl ComponentCoordinator {
             topology_analyzer,
             utilization_tracker,
             hardware_detector,
-            cache_coordinator,
-            error_recovery_manager,
             component_health,
-            config,
         })
     }
     /// Start all components
@@ -288,19 +279,13 @@ impl ComponentCoordinator {
     }
 }
 /// Reporting coordinator for comprehensive reporting
-pub struct ReportingCoordinator {
-    reporting_interval: Duration,
-    results_synthesizer: Arc<ResultsSynthesizer>,
-}
+pub struct ReportingCoordinator {}
 impl ReportingCoordinator {
     pub async fn new(
-        reporting_interval: Duration,
-        results_synthesizer: Arc<ResultsSynthesizer>,
+        _reporting_interval: Duration,
+        _results_synthesizer: Arc<ResultsSynthesizer>,
     ) -> Result<Self> {
-        Ok(Self {
-            reporting_interval,
-            results_synthesizer,
-        })
+        Ok(Self {})
     }
     pub async fn start(&self) -> Result<()> {
         Ok(())
@@ -504,19 +489,13 @@ pub struct AnalysisTaskResult {
     pub resource_usage: TaskResourceUsage,
 }
 /// Results synthesizer for integrating analysis results
-pub struct ResultsSynthesizer {
-    cache_coordinator: Arc<CacheCoordinator>,
-    configuration_manager: Arc<ConfigurationManager>,
-}
+pub struct ResultsSynthesizer {}
 impl ResultsSynthesizer {
     pub async fn new(
-        cache_coordinator: Arc<CacheCoordinator>,
-        configuration_manager: Arc<ConfigurationManager>,
+        _cache_coordinator: Arc<CacheCoordinator>,
+        _configuration_manager: Arc<ConfigurationManager>,
     ) -> Result<Self> {
-        Ok(Self {
-            cache_coordinator,
-            configuration_manager,
-        })
+        Ok(Self {})
     }
     pub async fn generate_health_status(&self) -> Result<SystemHealthStatus> {
         Ok(SystemHealthStatus {
@@ -577,18 +556,10 @@ pub struct OptimizationRecommendation {
     pub required_actions: Vec<String>,
 }
 /// Analysis scheduler for task prioritization
-pub struct AnalysisScheduler {
-    max_concurrent_tasks: usize,
-    task_timeout: Duration,
-    semaphore: Arc<Semaphore>,
-}
+pub struct AnalysisScheduler {}
 impl AnalysisScheduler {
-    pub async fn new(max_concurrent_tasks: usize, task_timeout: Duration) -> Result<Self> {
-        Ok(Self {
-            max_concurrent_tasks,
-            task_timeout,
-            semaphore: Arc::new(Semaphore::new(max_concurrent_tasks)),
-        })
+    pub async fn new(_max_concurrent_tasks: usize, _task_timeout: Duration) -> Result<Self> {
+        Ok(Self {})
     }
     pub async fn start(&self) -> Result<()> {
         Ok(())
@@ -758,14 +729,10 @@ pub struct ReportSubsection {
     pub data: serde_json::Value,
 }
 /// Cache coordinator for intelligent caching
-pub struct CacheCoordinator {
-    cache_size_limit_mb: usize,
-}
+pub struct CacheCoordinator {}
 impl CacheCoordinator {
-    pub async fn new(cache_size_limit_mb: usize) -> Result<Self> {
-        Ok(Self {
-            cache_size_limit_mb,
-        })
+    pub async fn new(_cache_size_limit_mb: usize) -> Result<Self> {
+        Ok(Self {})
     }
     pub async fn invalidate_related_cache(&self, _key: &str) -> Result<()> {
         Ok(())

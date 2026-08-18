@@ -32,8 +32,6 @@ pub struct CleanupManager {
     lifecycle_tracker: Arc<LifecycleTracker>,
     /// Garbage collector
     garbage_collector: Arc<GarbageCollector>,
-    /// Background cleanup scheduler
-    cleanup_scheduler: Arc<CleanupScheduler>,
 }
 
 /// Resource lifecycle tracking system
@@ -46,16 +44,12 @@ pub struct LifecycleTracker {
 
 /// Garbage collection system
 pub struct GarbageCollector {
-    /// Configuration
-    config: GarbageCollectionConfig,
     /// Collection statistics
     collection_stats: Arc<Mutex<GarbageCollectionStatistics>>,
 }
 
 /// Cleanup task scheduler
 pub struct CleanupScheduler {
-    /// Configuration
-    config: CleanupSchedulerConfig,
     /// Active schedules
     active_schedules: Arc<Mutex<HashMap<String, CleanupSchedule>>>,
 }
@@ -177,12 +171,6 @@ impl CleanupManager {
             max_batch_size: 100,
             force_collection_threshold: 1000,
         }));
-        let cleanup_scheduler = Arc::new(CleanupScheduler::new(CleanupSchedulerConfig {
-            scheduler_interval: Duration::from_secs(60), // 1 minute
-            max_concurrent_cleanups: 10,
-            cleanup_timeout: Duration::from_secs(300), // 5 minutes
-            retry_attempts: 3,
-        }));
 
         info!("Initialized cleanup manager");
 
@@ -193,7 +181,6 @@ impl CleanupManager {
             cleanup_history: Arc::new(Mutex::new(Vec::new())),
             lifecycle_tracker,
             garbage_collector,
-            cleanup_scheduler,
         })
     }
 
@@ -547,9 +534,8 @@ impl LifecycleTracker {
 
 impl GarbageCollector {
     /// Create new garbage collector
-    pub fn new(config: GarbageCollectionConfig) -> Self {
+    pub fn new(_config: GarbageCollectionConfig) -> Self {
         Self {
-            config,
             collection_stats: Arc::new(Mutex::new(GarbageCollectionStatistics::default())),
         }
     }
@@ -592,9 +578,8 @@ impl GarbageCollector {
 
 impl CleanupScheduler {
     /// Create new cleanup scheduler
-    pub fn new(config: CleanupSchedulerConfig) -> Self {
+    pub fn new(_config: CleanupSchedulerConfig) -> Self {
         Self {
-            config,
             active_schedules: Arc::new(Mutex::new(HashMap::new())),
         }
     }

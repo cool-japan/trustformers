@@ -58,8 +58,6 @@ pub struct TestCharacterizationEngine {
     analysis_orchestrator: Arc<AnalysisOrchestrator>,
     /// Component manager for lifecycle control
     component_manager: Arc<ComponentManager>,
-    /// Results synthesizer for result integration
-    results_synthesizer: Arc<ResultsSynthesizer>,
     /// Cache coordinator for coordinated caching
     cache_coordinator: Arc<CacheCoordinator>,
     /// Configuration manager for centralized configuration
@@ -265,7 +263,6 @@ impl TestCharacterizationEngine {
         let engine = Self {
             analysis_orchestrator,
             component_manager,
-            results_synthesizer,
             cache_coordinator,
             configuration_manager,
             analysis_scheduler,

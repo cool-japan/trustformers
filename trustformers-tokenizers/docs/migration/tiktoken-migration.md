@@ -5,13 +5,10 @@ This guide helps you migrate from OpenAI's tiktoken library to TrustformeRS Toke
 ## Why Migrate from tiktoken?
 
 ### Performance Benefits
-| Metric | tiktoken | TrustformeRS Tokenizers | Improvement |
-|--------|----------|-------------------------|-------------|
-| **Tokenization Speed** | 600K tokens/sec | 1.1M tokens/sec | **83% faster** |
-| **Memory Usage** | 60MB baseline | 45MB baseline | **25% less memory** |
-| **Binary Size** | 20MB | 15MB | **25% smaller** |
-| **Cold Start Time** | 150ms | 75ms | **50% faster startup** |
-| **Batch Processing** | 1.8M tokens/sec | 3.5M tokens/sec | **94% faster batching** |
+
+> **Note (2026-08-18):** this section previously carried a table of specific tokens/sec, memory, binary-size, and startup-time figures presented as a measured comparison against tiktoken. No benchmark harness in this repository produced those numbers, and the "TrustformeRS Tokenizers" figure quoted for the identical code path is different in every one of this crate's migration guides (1.1M tokens/sec here, 1.2M in the HuggingFace guide, 1.3M in the Fairseq guide, and so on) — real measurements of the same binary don't vary by which competitor they're being compared against. The table has been removed rather than left in place or re-guessed. To get real numbers, run this crate's own Criterion benchmark (`trustformers-tokenizers/benches/tokenizer_performance.rs`) against a real tiktoken installation on your own hardware.
+
+Real, verified behavior worth knowing before you migrate: this crate never ships or fabricates OpenAI's BPE rank tables. `TiktokenTokenizer::cl100k_base()`/`p50k_base()`/`r50k_base()` load a `.tiktoken` rank file from disk (a set of well-known local paths, or the directory named by an environment variable — see `trustformers-tokenizers/src/tiktoken/ranks.rs`), and return a hard `Err` naming exactly which paths were probed if the file isn't there. Unlike the Python `tiktoken` package, this crate does not download the file for you; you obtain it yourself (for example from the `openaipublic` tiktoken bucket) before calling these constructors, or load it explicitly with `TiktokenTokenizer::from_file`.
 
 ### Feature Advantages
 - **Full tiktoken compatibility** with enhanced performance

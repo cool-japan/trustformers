@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use super::config::{ConsistencyLevel, DistributedConfig};
 
@@ -272,36 +272,37 @@ impl DistributedCache {
         }
     }
 
-    /// Check health of a cache node
+    /// Timeout for one node liveness probe.
+    const HEALTH_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// Check health of a cache node by opening a TCP connection to it.
+    ///
+    /// A node is healthy when its `host:port` resolves and accepts a connection
+    /// within [`DistributedCache::HEALTH_PROBE_TIMEOUT`]. Anything else — an
+    /// unparseable address, a DNS failure, a refused connection, a timeout — is
+    /// unhealthy, which is the only reading the probe can honestly produce.
+    ///
+    /// Before 0.2.1 this function never touched the network: it reported every
+    /// loopback address as healthy unconditionally, and for every other address
+    /// hashed the address together with the current second and called the node
+    /// healthy when `hash % 100 > 5`. A down node was reported up 95% of the
+    /// time, and the cluster's `healthy_nodes` count was noise.
     async fn check_node_health(address: &str) -> bool {
-        // Simple health check implementation
-        // In a real distributed system, this would make an HTTP request or TCP connection
-        // to the actual node to verify it's responsive
+        use tokio::net::TcpStream;
 
-        // For simulation purposes, we'll use a simple heuristic:
-        // - Consider localhost addresses as always healthy
-        // - For other addresses, simulate occasional failures (5% failure rate)
-
-        if address.starts_with("127.0.0.1") || address.starts_with("localhost") {
-            // Localhost nodes are considered always healthy
-            true
-        } else {
-            // Simulate network health checks with occasional failures
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-
-            let mut hasher = DefaultHasher::new();
-            address.hash(&mut hasher);
-            let current_time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            current_time.hash(&mut hasher);
-
-            // Use hash to create pseudo-random health status
-            // This simulates real network conditions where nodes might occasionally be unhealthy
-            let health_score = hasher.finish() % 100;
-            health_score > 5 // 95% chance of being healthy
+        match tokio::time::timeout(Self::HEALTH_PROBE_TIMEOUT, TcpStream::connect(address)).await {
+            Ok(Ok(_stream)) => true,
+            Ok(Err(error)) => {
+                debug!("Health probe for {address} failed: {error}");
+                false
+            },
+            Err(_) => {
+                debug!(
+                    "Health probe for {address} timed out after {:?}",
+                    Self::HEALTH_PROBE_TIMEOUT
+                );
+                false
+            },
         }
     }
 
@@ -330,11 +331,7 @@ impl DistributedCache {
                         .as_secs();
 
                     for node in &mut cluster.nodes {
-                        // Simple health check - in a real implementation this would
-                        // ping the actual node endpoints
                         let was_healthy = node.is_healthy;
-
-                        // Simulate health check (in production this would be an actual HTTP/TCP check)
                         node.is_healthy = Self::check_node_health(&node.address).await;
                         node.last_health_check = current_time;
 
@@ -671,5 +668,42 @@ mod tests {
         let h1 = hash_key("key_a");
         let h2 = hash_key("key_b");
         assert_ne!(h1, h2);
+    }
+
+    #[tokio::test]
+    async fn health_probe_reports_a_listening_node_as_healthy() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            // Accept one connection so the probe completes.
+            let _ = listener.accept().await;
+        });
+
+        assert!(
+            DistributedCache::check_node_health(&addr.to_string()).await,
+            "a socket that accepts a connection is healthy"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_probe_reports_a_dead_loopback_node_as_unhealthy() {
+        // Bind then drop, so the port is almost certainly free and refusing.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+
+        assert!(
+            !DistributedCache::check_node_health(&addr.to_string()).await,
+            "a loopback address with nothing listening must be reported unhealthy; \
+             the old probe short-circuited every 127.0.0.1 address to healthy"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_probe_reports_an_unparseable_address_as_unhealthy() {
+        assert!(
+            !DistributedCache::check_node_health("not a socket address").await,
+            "an address that cannot even be resolved is not a healthy node"
+        );
     }
 }

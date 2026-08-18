@@ -25,6 +25,7 @@ sync.enable_auto_sync(true)?;
 */
 
 use crate::MobileConfig;
+use trustformers_core::errors::model_not_found;
 use trustformers_core::TrustformersError;
 
 // Type aliases for compatibility
@@ -33,12 +34,27 @@ pub type MobileResult<T> = Result<T, TrustformersError>;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_uint, c_ulonglong, c_void};
+use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+// Real cryptographic primitives for `encrypt_data`/`decrypt_data` (AES-256-GCM,
+// an AEAD -- confidentiality *and* tamper detection, unlike the repeating-key
+// XOR this module used to call "AES-256") and `derive_key_from_password`
+// (PBKDF2-HMAC-SHA256, a real key-stretching KDF). `aead::Generate` sources the
+// GCM nonce from the operating system CSPRNG (the `getrandom` cargo feature of
+// `aes-gcm`, already enabled -- see `Cargo.toml`), not from a clock-seeded LCG.
+use aes_gcm::aead::{Aead, Generate, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
+use pbkdf2::pbkdf2_hmac;
+use sha2::Sha256;
+
 /// Configuration for iCloud model synchronization
+// `iCloud*` (lowercase `i`) deliberately mirrors Apple's own `iCloud`/`iOS`
+// capitalization convention rather than Rust's `UpperCamelCase` type-name
+// style; this is intentional public API naming, not an oversight.
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct iCloudSyncConfig {
     /// Enable automatic synchronization
@@ -198,6 +214,7 @@ pub enum ConflictResolution {
 }
 
 /// Main iCloud model synchronization manager
+#[allow(non_camel_case_types)] // see `iCloudSyncConfig`'s naming note above
 pub struct iCloudModelSync {
     config: iCloudSyncConfig,
     cloud_manager: Arc<Mutex<CloudKitManager>>,
@@ -246,8 +263,7 @@ impl iCloudModelSync {
             return Err(TrustformersError::io_error(format!(
                 "File not found: {}",
                 model_path.to_string_lossy()
-            ))
-            .into());
+            )));
         }
 
         // Calculate checksum
@@ -258,17 +274,14 @@ impl iCloudModelSync {
         updated_metadata.local_path = Some(model_path.to_path_buf());
         updated_metadata.checksum = checksum;
         updated_metadata.size_bytes = std::fs::metadata(model_path)
-            .map_err(|e| TrustformersError::io_error(e.to_string()).into())?
+            .map_err(|e| TrustformersError::io_error(e.to_string()))?
             .len();
         updated_metadata.sync_status = SyncStatus::NotSynced;
 
         // Store in local registry
         {
             let mut local_models = self.local_models.lock().unwrap_or_else(|p| p.into_inner());
-            local_models.insert(
-                updated_metadata.model_id.clone(),
-                updated_metadata.clone().into(),
-            );
+            local_models.insert(updated_metadata.model_id.clone(), updated_metadata.clone());
         }
 
         // Queue for sync if auto-sync is enabled
@@ -292,7 +305,7 @@ impl iCloudModelSync {
             local_models
                 .get(model_id)
                 .cloned()
-                .ok_or_else(|| TrustformersError::ModelNotFound(model_id.to_string()))?
+                .ok_or_else(|| model_not_found(model_id.to_string()))?
         };
 
         self.perform_model_sync(&metadata)
@@ -389,21 +402,28 @@ impl iCloudModelSync {
             local_models
                 .get(model_id)
                 .cloned()
-                .ok_or_else(|| TrustformersError::ModelNotFound(model_id.to_string()))?
+                .ok_or_else(|| model_not_found(model_id.to_string()))?
         };
 
         if metadata.sync_status != SyncStatus::Conflict {
             return Err(TrustformersError::invalid_operation(
                 "Model is not in conflict state".to_string(),
-            )
-            .into());
+            ));
         }
 
         match resolution {
             ConflictResolution::UseNewest => {
-                // Compare timestamps and use the newer version
-                let cloud_manager = self.cloud_manager.lock().unwrap_or_else(|p| p.into_inner());
-                let remote_metadata = cloud_manager.fetch_model_metadata(model_id)?;
+                // Compare timestamps and use the newer version. The
+                // `cloud_manager` lock is dropped (end of this inner block)
+                // *before* `self.download_model`/`self.upload_model` below,
+                // each of which acquires `self.cloud_manager` itself --
+                // same non-reentrant-`Mutex` deadlock hazard documented on
+                // `perform_model_sync`.
+                let remote_metadata = {
+                    let cloud_manager =
+                        self.cloud_manager.lock().unwrap_or_else(|p| p.into_inner());
+                    cloud_manager.fetch_model_metadata(model_id)?
+                };
 
                 if remote_metadata.last_modified > metadata.last_modified {
                     self.download_model(model_id)?;
@@ -486,16 +506,43 @@ impl iCloudModelSync {
     }
 
     /// Private helper methods
+    ///
+    /// # Locking
+    ///
+    /// The `cloud_manager` lock is deliberately scoped to just the
+    /// existence/metadata check below, *before* any call to
+    /// `self.handle_conflict` / `self.upload_model` -- each of which
+    /// acquires `self.cloud_manager` itself. `std::sync::Mutex` is not
+    /// reentrant, so a previous revision that held the guard across those
+    /// calls deadlocked the calling thread forever on the very first sync
+    /// of any model that either does not exist remotely yet (the common
+    /// case: `remote_exists` is `false`, so the `else` branch's
+    /// `self.upload_model(...)` ran while `cloud_manager` was still locked)
+    /// or has diverged from the remote copy.
     fn perform_model_sync(&mut self, metadata: &ModelMetadata) -> MobileResult<ModelSyncResult> {
         let start_time = std::time::Instant::now();
 
-        // Check if model exists remotely
-        let cloud_manager = self.cloud_manager.lock().unwrap_or_else(|p| p.into_inner());
-        let remote_exists = cloud_manager.model_exists(&metadata.model_id)?;
+        let (remote_exists, remote_metadata) = {
+            let cloud_manager = self.cloud_manager.lock().unwrap_or_else(|p| p.into_inner());
+            let remote_exists = cloud_manager.model_exists(&metadata.model_id)?;
+            let remote_metadata = if remote_exists {
+                Some(cloud_manager.fetch_model_metadata(&metadata.model_id)?)
+            } else {
+                None
+            };
+            (remote_exists, remote_metadata)
+            // `cloud_manager` (the `MutexGuard`) is dropped here, at the end
+            // of this block -- before any nested `self.*` call below can
+            // try to re-acquire it.
+        };
 
         let operation = if remote_exists {
-            // Check for conflicts
-            let remote_metadata = cloud_manager.fetch_model_metadata(&metadata.model_id)?;
+            let remote_metadata = remote_metadata.ok_or_else(|| {
+                TrustformersError::runtime_error(
+                    "internal error: remote_exists was true but no remote metadata was fetched"
+                        .to_string(),
+                )
+            })?;
 
             if remote_metadata.last_modified > metadata.last_modified
                 && metadata.last_modified > UNIX_EPOCH + Duration::from_secs(1)
@@ -542,10 +589,13 @@ impl iCloudModelSync {
             local_models
                 .get(model_id)
                 .cloned()
-                .ok_or_else(|| TrustformersError::ModelNotFound(model_id.to_string()))?
+                .ok_or_else(|| model_not_found(model_id.to_string()))?
         };
 
-        let local_path = metadata.local_path.ok_or_else(|| {
+        // `.clone()` rather than moving `metadata.local_path` out: `metadata`
+        // as a whole is still needed below, to pass to
+        // `cloud_manager.upload_model`.
+        let local_path = metadata.local_path.clone().ok_or_else(|| {
             TrustformersError::invalid_state("Model has no local path".to_string())
         })?;
 
@@ -693,188 +743,158 @@ impl iCloudModelSync {
         Ok(processed)
     }
 
+    /// Real zstd compression via `oxiarc-zstd` (this workspace's pure-Rust
+    /// replacement for `flate2`/`zstd`-the-C-binding, per the COOLJAPAN
+    /// dependency policy -- the same crate and call pattern already proven
+    /// in `trustformers_core::cache::inference_cache`).
+    ///
+    /// The previous implementation hand-rolled run-length encoding and, when
+    /// RLE did not shrink the input, silently fell back to returning the
+    /// *raw* bytes with no marker distinguishing that case from a real RLE
+    /// stream -- `decompress_data` could not tell them apart and corrupted
+    /// every such payload (see that function's doc comment). A real codec
+    /// with its own self-describing frame header has no equivalent failure
+    /// mode: the output of [`Self::compress_data`] is always a zstd frame,
+    /// unconditionally, and [`Self::decompress_data`] always decodes one.
     fn compress_data(&self, data: &[u8]) -> MobileResult<Vec<u8>> {
-        // Implement data compression using a simple run-length encoding
-        // In production, use a library like flate2 for better compression
-        let mut compressed = Vec::new();
+        use std::io::Write;
 
         if data.is_empty() {
-            return Ok(compressed);
+            // A zero-byte payload compresses fine through the real encoder
+            // too, but short-circuiting avoids emitting a frame for
+            // literally nothing to decode later.
+            return Ok(Vec::new());
         }
 
-        let mut i = 0;
-        while i < data.len() {
-            let current_byte = data[i];
-            let mut count = 1u8;
-
-            // Count consecutive identical bytes
-            while i + (count as usize) < data.len()
-                && data[i + (count as usize)] == current_byte
-                && count < 255
-            {
-                count += 1;
-            }
-
-            // Store count and byte
-            compressed.push(count);
-            compressed.push(current_byte);
-
-            i += count as usize;
-        }
-
-        // Only return compressed data if it's actually smaller
-        if compressed.len() < data.len() {
-            Ok(compressed)
-        } else {
-            Ok(data.to_vec())
-        }
+        let mut encoder = oxiarc_zstd::ZstdStreamEncoder::new(Vec::new(), 3);
+        encoder.write_all(data).map_err(|e| {
+            TrustformersError::runtime_error(format!("zstd compression failed: {e}"))
+        })?;
+        encoder
+            .finish()
+            .map_err(|e| TrustformersError::runtime_error(format!("zstd compression failed: {e}")))
     }
 
+    /// Real zstd decompression matching [`Self::compress_data`]. See that
+    /// method's doc comment for the corruption bug this replaces: the old
+    /// RLE decoder guessed "compressed vs. raw" from parity of the byte
+    /// length alone, which silently mis-decoded any incompressible
+    /// even-length payload (the common case for raw `f32` weight buffers).
     fn decompress_data(&self, data: &[u8]) -> MobileResult<Vec<u8>> {
-        // Implement data decompression for run-length encoding
-        let mut decompressed = Vec::new();
-
         if data.is_empty() {
-            return Ok(decompressed);
+            return Ok(Vec::new());
         }
 
-        // Check if data was actually compressed (pairs of count/byte)
-        if data.len() % 2 != 0 {
-            // Data wasn't compressed, return as-is
-            return Ok(data.to_vec().into());
-        }
-
-        let mut i = 0;
-        while i < data.len() {
-            if i + 1 >= data.len() {
-                break;
-            }
-
-            let count = data[i];
-            let byte_value = data[i + 1];
-
-            // Expand the run-length encoded data
-            for _ in 0..count {
-                decompressed.push(byte_value);
-            }
-
-            i += 2;
-        }
-
-        Ok(decompressed)
+        oxiarc_zstd::decode_all(data).map_err(|e| {
+            TrustformersError::runtime_error(format!("zstd decompression failed: {e}"))
+        })
     }
 
+    /// Real AES-256-GCM sealing (RustCrypto's `aes-gcm`, already a workspace
+    /// dependency). Output layout is `nonce (12 bytes) || ciphertext+tag
+    /// (plaintext.len() + 16 bytes)`, self-describing enough for
+    /// [`Self::decrypt_data`] to split back apart with no separate IV
+    /// channel needed.
+    ///
+    /// This replaces a repeating-32-byte-XOR-keystream cipher that was
+    /// documented `// Implement AES-256 encryption` while doing nothing of
+    /// the sort -- trivially broken by know-plaintext XOR recovery, and
+    /// with an IV from a `wrapping_mul` LCG seeded off the wall clock
+    /// rather than a CSPRNG. GCM is a real AEAD: tampering with the
+    /// ciphertext (or using the wrong key) makes [`Self::decrypt_data`]
+    /// fail authentication rather than silently returning garbage
+    /// plaintext, which the old XOR scheme could never detect at all.
     fn encrypt_data(&self, data: &[u8], key: &[u8]) -> MobileResult<Vec<u8>> {
-        // Implement AES-256 encryption
-        // This is a simplified implementation - in production use a proper crypto library
-
         if key.len() != 32 {
             return Err(TrustformersError::invalid_argument(
                 "Encryption key must be 32 bytes for AES-256".to_string(),
-            )
-            .into());
+            ));
         }
 
-        let mut encrypted = Vec::new();
+        let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| {
+            TrustformersError::runtime_error(format!(
+                "failed to initialise AES-256-GCM cipher: {e}"
+            ))
+        })?;
+        // Sourced from the OS CSPRNG via `aes-gcm`'s `getrandom` feature
+        // (see the `Generate` import above) -- never a seeded PRNG.
+        let nonce = Nonce::generate();
+        let ciphertext = cipher.encrypt(&nonce, data).map_err(|e| {
+            TrustformersError::runtime_error(format!("AES-256-GCM encryption failed: {e}"))
+        })?;
 
-        // Generate a random IV (16 bytes for AES)
-        let iv = self.generate_random_iv();
-        encrypted.extend_from_slice(&iv);
-
-        // Simple XOR encryption with key expansion (NOT secure for production)
-        // In production, use proper AES implementation like `aes` crate
-        let mut expanded_key = Vec::new();
-        for i in 0..data.len() {
-            expanded_key.push(key[i % key.len()] ^ iv[i % iv.len()]);
-        }
-
-        for (i, &byte) in data.iter().enumerate() {
-            encrypted.push(byte ^ expanded_key[i]);
-        }
-
+        let mut encrypted = Vec::with_capacity(nonce.len() + ciphertext.len());
+        encrypted.extend_from_slice(nonce.as_slice());
+        encrypted.extend_from_slice(&ciphertext);
         Ok(encrypted)
     }
 
+    /// Real AES-256-GCM opening matching [`Self::encrypt_data`]'s output
+    /// layout. Returns an error -- rather than corrupted plaintext -- when
+    /// `key` is wrong or `data` has been tampered with, since GCM
+    /// authenticates the ciphertext as part of decryption.
     fn decrypt_data(&self, data: &[u8], key: &[u8]) -> MobileResult<Vec<u8>> {
-        // Implement AES-256 decryption
-        // This is a simplified implementation - in production use a proper crypto library
+        const NONCE_LEN: usize = 12;
 
         if key.len() != 32 {
             return Err(TrustformersError::invalid_argument(
                 "Decryption key must be 32 bytes for AES-256".to_string(),
+            ));
+        }
+        if data.len() < NONCE_LEN {
+            return Err(TrustformersError::invalid_argument(format!(
+                "Encrypted data must be at least {NONCE_LEN} bytes (GCM nonce size), got {}",
+                data.len()
+            )));
+        }
+
+        let (nonce_bytes, ciphertext) = data.split_at(NONCE_LEN);
+        let nonce = Nonce::try_from(nonce_bytes)
+            .map_err(|_| TrustformersError::invalid_argument("malformed GCM nonce".to_string()))?;
+
+        let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| {
+            TrustformersError::runtime_error(format!(
+                "failed to initialise AES-256-GCM cipher: {e}"
+            ))
+        })?;
+        cipher.decrypt(&nonce, ciphertext).map_err(|_| {
+            TrustformersError::runtime_error(
+                "AES-256-GCM authentication failed: wrong key, or the ciphertext was corrupted \
+                 or tampered with"
+                    .to_string(),
             )
-            .into());
-        }
-
-        if data.len() < 16 {
-            return Err(TrustformersError::invalid_argument(
-                "Encrypted data must be at least 16 bytes (IV size)".to_string(),
-            )
-            .into());
-        }
-
-        // Extract IV from the beginning of the data
-        let iv = &data[0..16];
-        let encrypted_data = &data[16..];
-
-        // Recreate the expanded key used for encryption
-        let mut expanded_key = Vec::new();
-        for i in 0..encrypted_data.len() {
-            expanded_key.push(key[i % key.len()] ^ iv[i % iv.len()]);
-        }
-
-        // Decrypt by XORing with the same key
-        let mut decrypted = Vec::new();
-        for (i, &byte) in encrypted_data.iter().enumerate() {
-            decrypted.push(byte ^ expanded_key[i]);
-        }
-
-        Ok(decrypted)
+        })
     }
 
-    fn generate_random_iv(&self) -> [u8; 16] {
-        // Generate a random IV for AES encryption
-        // In production, use a proper CSPRNG like `rand` crate
-        let mut iv = [0u8; 16];
-
-        // Simple pseudo-random generation (NOT secure for production)
-        // Use proper cryptographic random number generation in production
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let seed =
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
-
-        let mut rng_state = seed;
-        for i in 0..16 {
-            rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
-            iv[i] = (rng_state >> 16) as u8;
-        }
-
-        iv
-    }
-
-    fn derive_key_from_password(&self, password: &str, salt: &[u8]) -> MobileResult<Vec<u8>> {
-        // Derive encryption key from password using PBKDF2-like function
-        // This is a simplified implementation - use proper PBKDF2 in production
-        let mut key = Vec::new();
-        let password_bytes = password.as_bytes();
-
-        // Simple key derivation (NOT secure for production)
-        for i in 0..32 {
-            let mut hash_input = Vec::new();
-            hash_input.extend_from_slice(password_bytes);
-            hash_input.extend_from_slice(salt);
-            hash_input.push(i as u8);
-
-            // Simple hash function (use proper hash function in production)
-            let mut hash = 0u8;
-            for &byte in &hash_input {
-                hash = hash.wrapping_mul(31).wrapping_add(byte);
-            }
-
-            key.push(hash);
-        }
-
-        Ok(key)
+    /// Derive a 32-byte AES-256 key from a user password via real
+    /// PBKDF2-HMAC-SHA256 (RustCrypto's `pbkdf2`, already a workspace
+    /// dependency), for callers that want to populate
+    /// [`iCloudSyncConfig::encryption_key`] from a passphrase rather than a
+    /// raw key.
+    ///
+    /// The previous implementation ran a 32-bit multiplicative rolling hash
+    /// (`hash.wrapping_mul(31).wrapping_add(byte)`) once per output byte --
+    /// about 2^8 bits of effective search space per byte, invertible with a
+    /// pocket calculator, and documented `// This is a simplified
+    /// implementation - use proper PBKDF2 in production`. `rounds` should
+    /// be at least `100_000` for a genuinely slow-to-brute-force key
+    /// (`iCloudSyncConfig` does not currently carry a stored iteration
+    /// count, so callers choose and remember their own).
+    ///
+    /// # Errors
+    ///
+    /// Never fails today (PBKDF2-HMAC-SHA256 has no fallible inputs for any
+    /// `salt`/`rounds` this signature can express); returns `Result` so a
+    /// future minimum-iteration-count check can be added without breaking
+    /// callers.
+    pub fn derive_key_from_password(
+        password: &str,
+        salt: &[u8],
+        rounds: u32,
+    ) -> MobileResult<Vec<u8>> {
+        let mut key = [0u8; 32];
+        pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, rounds, &mut key);
+        Ok(key.to_vec())
     }
 
     fn secure_delete(&self, path: &Path) -> MobileResult<()> {
@@ -941,165 +961,277 @@ impl iCloudModelSync {
         Ok(())
     }
 
+    /// Local on-device path a synced model's bytes are written to /read
+    /// from. Previously a hardcoded absolute path
+    /// (`/var/mobile/Containers/Data/Application/Documents/models/...`) --
+    /// real on a real iOS device's app sandbox, but not a directory that
+    /// exists (or should ever be hardcoded into a library) on any other
+    /// platform this crate now compiles and tests on. `std::env::temp_dir()`
+    /// gives every platform a real, writable, per-user directory without
+    /// hardcoding a platform-specific absolute path.
     fn get_local_model_path(&self, model_id: &str) -> PathBuf {
-        // Return path in app's Documents directory
-        PathBuf::from(format!(
-            "/var/mobile/Containers/Data/Application/Documents/models/{}.bin",
-            model_id
-        ))
+        std::env::temp_dir()
+            .join("trustformers_icloud_models")
+            .join(format!("{}.bin", sanitize_for_filename(model_id)))
     }
 }
 
-/// CloudKit manager for handling iCloud operations
+/// Map an arbitrary model id to a safe path component: alphanumerics,
+/// `-` and `_` pass through unchanged, everything else (path separators,
+/// `..`, NUL, etc.) becomes `_`. Shared by [`iCloudModelSync`]'s local
+/// staging path and [`CloudKitManager`]'s local store so a model id can
+/// never be used to escape either directory.
+fn sanitize_for_filename(id: &str) -> String {
+    id.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// Stand-in for Apple CloudKit: a real, working, on-disk store for synced
+/// models.
+///
+/// Reaching Apple's actual CloudKit service requires linking
+/// `CloudKit.framework` through Objective-C/Swift interop; this pure-Rust
+/// crate carries no such native glue code (and, per this workspace's
+/// pure-Rust-by-default policy, should not by default), and this build
+/// environment has no Apple SDK to link against regardless. A previous
+/// revision of this type pretended otherwise: its `#[cfg(target_os =
+/// "ios")]` branch declared and called an `extern "C"`
+/// `CKContainer`/`CKDatabase`/`CKRecord`/`CKAsset` API that no object file
+/// in this workspace ever defines -- a real iOS build exercising those
+/// functions would fail to link -- while every actual data operation
+/// (`upload_model`, `download_model`, `model_exists`, `delete_model`,
+/// `fetch_model_metadata`) never touched those handles at all and returned
+/// fabricated data instead: 1 KB of zeros (or a literal `b"Mock
+/// TrustformersModel Data..."` string) from "download", a silent `Ok(())`
+/// from an "upload" that stored nothing, `false` from every existence
+/// check, an invented `"1.0.0"` / `"mock_checksum"` from every metadata
+/// fetch.
+///
+/// What this type provides instead is real: every model
+/// [`Self::upload_model`] is given is actually written under
+/// [`Self::store_root`], [`Self::download_model`] reads back exactly those
+/// bytes, [`Self::model_exists`] / [`Self::fetch_model_metadata`] /
+/// [`Self::fetch_available_models`] reflect real on-disk state, and
+/// [`Self::delete_model`] actually removes the file. That makes
+/// `iCloudModelSync`'s conflict detection, checksum comparison and
+/// statistics exercise real persisted data end to end -- and two
+/// `CloudKitManager`s constructed from configs sharing a `container_id`
+/// (simulating two devices signed into the same iCloud account) genuinely
+/// observe each other's uploads, which a fabricated response never could.
+///
+/// This is honestly *not* Apple CloudKit -- [`Self::is_real_cloudkit`]
+/// reports that plainly rather than letting a caller assume otherwise from
+/// the type's name alone.
 struct CloudKitManager {
     config: iCloudSyncConfig,
-    #[cfg(target_os = "ios")]
-    container: *mut c_void,
-    #[cfg(target_os = "ios")]
-    database: *mut c_void,
+    /// Local directory standing in for the CloudKit database. Every byte
+    /// written here is a byte an actual caller uploaded; nothing under this
+    /// path is fabricated.
+    store_root: PathBuf,
 }
 
 impl CloudKitManager {
     fn new(config: &iCloudSyncConfig) -> MobileResult<Self> {
-        #[cfg(target_os = "ios")]
-        {
-            let container = unsafe {
-                let container_id = CString::new(config.container_id.clone()).unwrap_or_default();
-                CKContainer_containerWithIdentifier(container_id.as_ptr())
-            };
+        let store_root = Self::store_root_for(&config.container_id, config.database_scope);
+        std::fs::create_dir_all(&store_root).map_err(|e| {
+            TrustformersError::io_error(format!(
+                "failed to create local iCloud-sync store directory {}: {e}",
+                store_root.display()
+            ))
+        })?;
 
-            let database = unsafe {
-                match config.database_scope {
-                    DatabaseScope::Private => CKContainer_privateCloudDatabase(container),
-                    DatabaseScope::Public => CKContainer_publicCloudDatabase(container),
-                    DatabaseScope::Shared => CKContainer_sharedCloudDatabase(container),
-                }
-            };
-
-            Ok(Self {
-                config: config.clone(),
-                container,
-                database,
-            })
-        }
-        #[cfg(not(target_os = "ios"))]
-        {
-            Ok(Self {
-                config: config.clone(),
-            })
-        }
+        Ok(Self {
+            config: config.clone(),
+            store_root,
+        })
     }
 
+    /// Whether this manager reaches Apple's real CloudKit service. Always
+    /// `false`: no Objective-C/Swift CloudKit binding is compiled into this
+    /// crate, on iOS or otherwise, so every sync operation on this manager
+    /// targets [`Self::store_root`] instead -- see the type-level doc
+    /// comment. Exposed so a caller that specifically needs genuine
+    /// cross-Apple-account CloudKit sync (rather than this crate's local
+    /// staging store) gets an explicit, honest answer instead of silently
+    /// assuming the name `CloudKitManager` implies real network sync.
+    #[allow(dead_code)] // part of this type's honest public contract, not yet wired to a caller
+    fn is_real_cloudkit(&self) -> bool {
+        false
+    }
+
+    /// The local directory a given `container_id`/`database_scope` pair
+    /// stores its models under. Deterministic (so repeated
+    /// `CloudKitManager::new` calls for the same config, or two configs
+    /// simulating two devices sharing an iCloud account, observe the same
+    /// store) and namespaced by both the container id and the database
+    /// scope (private/public/shared), matching CloudKit's own real
+    /// partitioning of records into separate databases per scope.
+    fn store_root_for(container_id: &str, scope: DatabaseScope) -> PathBuf {
+        let scope_dir = match scope {
+            DatabaseScope::Private => "private",
+            DatabaseScope::Public => "public",
+            DatabaseScope::Shared => "shared",
+        };
+        std::env::temp_dir()
+            .join("trustformers_icloud_cloudkit_store")
+            .join(sanitize_for_filename(container_id))
+            .join(scope_dir)
+    }
+
+    fn payload_path(&self, model_id: &str) -> PathBuf {
+        self.store_root.join(format!("{}.bin", sanitize_for_filename(model_id)))
+    }
+
+    fn metadata_path(&self, model_id: &str) -> PathBuf {
+        self.store_root.join(format!("{}.meta.json", sanitize_for_filename(model_id)))
+    }
+
+    /// Real listing of every model actually stored under
+    /// [`Self::store_root`] -- reconstructed from each model's own
+    /// persisted metadata sidecar file, not fabricated.
     fn fetch_available_models(&self) -> MobileResult<Vec<ModelMetadata>> {
-        // Placeholder implementation
-        // In a real implementation, this would query CloudKit for available models
-        Ok(Vec::new())
+        let mut models = Vec::new();
+
+        let entries = match std::fs::read_dir(&self.store_root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(models),
+            Err(e) => {
+                return Err(TrustformersError::io_error(format!(
+                    "failed to list iCloud store {}: {e}",
+                    self.store_root.display()
+                )));
+            },
+        };
+
+        for entry in entries {
+            let entry = entry.map_err(|e| TrustformersError::io_error(e.to_string()))?;
+            let path = entry.path();
+            let is_metadata_sidecar = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".meta.json"));
+            if !is_metadata_sidecar {
+                continue;
+            }
+
+            let bytes = std::fs::read(&path).map_err(|e| {
+                TrustformersError::io_error(format!("failed to read {}: {e}", path.display()))
+            })?;
+            let metadata: ModelMetadata = serde_json::from_slice(&bytes).map_err(|e| {
+                TrustformersError::io_error(format!("corrupt metadata at {}: {e}", path.display()))
+            })?;
+            models.push(metadata);
+        }
+
+        Ok(models)
     }
 
     fn fetch_model_list(&self) -> MobileResult<Vec<ModelMetadata>> {
         self.fetch_available_models()
     }
 
+    /// Real metadata for a specific model, read back from the sidecar file
+    /// [`Self::upload_model`] wrote -- not an invented `"1.0.0"` /
+    /// `"mock_checksum"` record.
     fn fetch_model_metadata(&self, model_id: &str) -> MobileResult<ModelMetadata> {
-        #[cfg(target_os = "ios")]
-        {
-            use std::ffi::CString;
-
-            // Create record ID for the model
-            let record_type = CString::new("TrustformersModel").unwrap_or_default();
-            let record_id_str = CString::new(model_id).unwrap_or_default();
-
-            // This is a simplified implementation
-            // In a real CloudKit implementation, you would:
-            // 1. Create a CKRecordID with the model_id
-            // 2. Perform an async fetch operation
-            // 3. Parse the returned CKRecord
-            // 4. Extract model metadata from the record fields
-
-            // For now, return a placeholder metadata that would be typical
-            // of what you'd get from CloudKit
-            let metadata = ModelMetadata {
-                model_id: model_id.to_string(),
-                model_name: format!("Model {}", model_id),
-                version: "1.0.0".to_string(),
-                size_bytes: 0, // Would be fetched from CloudKit
-                last_modified: SystemTime::now(),
-                checksum: String::new(), // Would be fetched from CloudKit
-                last_modified_device: "Unknown".to_string(),
-                custom_metadata: std::collections::HashMap::new(),
-                sync_status: SyncStatus::NotSynced,
-                local_path: None,
-                cloud_record_id: Some(model_id.to_string()),
-            };
-
-            Ok(metadata)
-        }
-        #[cfg(not(target_os = "ios"))]
-        {
-            // On non-iOS platforms, simulate CloudKit behavior
-            let metadata = ModelMetadata {
-                model_id: model_id.to_string(),
-                model_name: format!("Model {}", model_id),
-                version: "1.0.0".to_string(),
-                size_bytes: 1024 * 1024, // 1MB placeholder
-                last_modified: SystemTime::now(),
-                checksum: "mock_checksum".to_string(),
-                last_modified_device: "Simulator".to_string(),
-                custom_metadata: std::collections::HashMap::new(),
-                sync_status: SyncStatus::NotSynced,
-                local_path: None,
-                cloud_record_id: Some(model_id.to_string()),
-            };
-
-            Ok(metadata)
-        }
+        let path = self.metadata_path(model_id);
+        let bytes = std::fs::read(&path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                model_not_found(model_id.to_string())
+            } else {
+                TrustformersError::io_error(format!(
+                    "failed to read metadata for '{model_id}': {e}"
+                ))
+            }
+        })?;
+        serde_json::from_slice(&bytes).map_err(|e| {
+            TrustformersError::io_error(format!("corrupt metadata for '{model_id}': {e}"))
+        })
     }
 
-    fn model_exists(&self, _model_id: &str) -> MobileResult<bool> {
-        // Placeholder implementation
-        Ok(false)
+    fn model_exists(&self, model_id: &str) -> MobileResult<bool> {
+        Ok(self.payload_path(model_id).is_file() && self.metadata_path(model_id).is_file())
     }
 
-    fn upload_model(&self, _metadata: &ModelMetadata, _data: &[u8]) -> MobileResult<()> {
-        // Placeholder implementation
+    /// Real upload: `data` is written to [`Self::payload_path`] and
+    /// `metadata` to [`Self::metadata_path`] before this returns `Ok(())`.
+    /// The previous implementation was `// Placeholder implementation` +
+    /// `Ok(())` with both parameters unused (`_metadata`, `_data`) -- every
+    /// caller's model was silently discarded while the call reported
+    /// success.
+    fn upload_model(&self, metadata: &ModelMetadata, data: &[u8]) -> MobileResult<()> {
+        let payload_path = self.payload_path(&metadata.model_id);
+        std::fs::write(&payload_path, data).map_err(|e| {
+            TrustformersError::io_error(format!(
+                "failed to upload model '{}': {e}",
+                metadata.model_id
+            ))
+        })?;
+
+        let metadata_bytes = serde_json::to_vec(metadata).map_err(|e| {
+            TrustformersError::io_error(format!(
+                "failed to serialize metadata for '{}': {e}",
+                metadata.model_id
+            ))
+        })?;
+        if let Err(e) = std::fs::write(self.metadata_path(&metadata.model_id), metadata_bytes) {
+            // Do not leave an orphaned payload with no matching metadata
+            // record -- roll the payload write back rather than report a
+            // half-completed upload as `Ok`.
+            let _ = std::fs::remove_file(&payload_path);
+            return Err(TrustformersError::io_error(format!(
+                "failed to write metadata for '{}': {e}",
+                metadata.model_id
+            )));
+        }
+
         Ok(())
     }
 
+    /// Real download: the exact bytes and metadata a prior
+    /// [`Self::upload_model`] call (from this manager or another one
+    /// sharing the same `container_id`/`database_scope`) wrote. The
+    /// previous implementation returned `vec![0u8; 1024]` (iOS) or a
+    /// literal mock-data string (elsewhere) regardless of `model_id`.
     fn download_model(&self, model_id: &str) -> MobileResult<(ModelMetadata, Vec<u8>)> {
-        #[cfg(target_os = "ios")]
-        {
-            use std::ffi::CString;
-
-            // First fetch the model metadata
-            let metadata = self.fetch_model_metadata(model_id)?;
-
-            // In a real CloudKit implementation, you would:
-            // 1. Create a CKRecordID with the model_id
-            // 2. Fetch the record from CloudKit
-            // 3. Get the CKAsset from the record
-            // 4. Download the asset data from the CKAsset file URL
-            // 5. Return the metadata and the downloaded data
-
-            // For now, return mock data that simulates a downloaded model
-            // In production, this would be the actual model file data from CloudKit
-            let mock_model_data = vec![0u8; 1024]; // 1KB of mock data
-
-            Ok((metadata, mock_model_data))
-        }
-        #[cfg(not(target_os = "ios"))]
-        {
-            // On non-iOS platforms, simulate CloudKit download behavior
-            let metadata = self.fetch_model_metadata(model_id)?;
-
-            // Generate some mock model data for testing/simulation
-            let mock_model_data = b"Mock TrustformersModel Data - This would be actual model weights and parameters in production".to_vec();
-
-            Ok((metadata, mock_model_data))
-        }
+        let metadata = self.fetch_model_metadata(model_id)?;
+        let data = std::fs::read(self.payload_path(model_id)).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                model_not_found(model_id.to_string())
+            } else {
+                TrustformersError::io_error(format!("failed to download model '{model_id}': {e}"))
+            }
+        })?;
+        Ok((metadata, data))
     }
 
-    fn delete_model(&self, _model_id: &str) -> MobileResult<()> {
-        // Placeholder implementation
+    /// Real deletion of both the payload and metadata sidecar. The previous
+    /// implementation was `// Placeholder implementation` + `Ok(())` with
+    /// no filesystem access at all -- `remove_model(_, delete_remote: true)`
+    /// reported success while leaving the "remote" copy (and, per
+    /// `model_exists`'s equally fake `Ok(false)`, every copy) untouched.
+    fn delete_model(&self, model_id: &str) -> MobileResult<()> {
+        let payload_path = self.payload_path(model_id);
+        let metadata_path = self.metadata_path(model_id);
+
+        let mut found = false;
+        for path in [&payload_path, &metadata_path] {
+            match std::fs::remove_file(path) {
+                Ok(()) => found = true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+                Err(e) => {
+                    return Err(TrustformersError::io_error(format!(
+                        "failed to delete {}: {e}",
+                        path.display()
+                    )));
+                },
+            }
+        }
+
+        if !found {
+            return Err(model_not_found(model_id.to_string()));
+        }
         Ok(())
     }
 }
@@ -1149,42 +1281,16 @@ impl SyncStatistics {
     }
 }
 
-// CloudKit C API bindings (iOS only)
-#[cfg(target_os = "ios")]
-extern "C" {
-    // Container operations
-    fn CKContainer_containerWithIdentifier(identifier: *const c_char) -> *mut c_void;
-    fn CKContainer_privateCloudDatabase(container: *mut c_void) -> *mut c_void;
-    fn CKContainer_publicCloudDatabase(container: *mut c_void) -> *mut c_void;
-    fn CKContainer_sharedCloudDatabase(container: *mut c_void) -> *mut c_void;
+// Real CloudKit (`CKContainer`/`CKDatabase`/`CKRecord`/`CKAsset`) network
+// access previously had an `extern "C"` declaration here, gated
+// `#[cfg(target_os = "ios")]`. No object file anywhere in this workspace
+// ever defined those symbols -- a real iOS build calling them would fail to
+// link -- and nothing in this module called them even when the cfg was
+// active; every actual data operation went through fabricated data instead
+// (see `CloudKitManager`'s doc comment). Removed rather than kept as
+// unlinkable, uncalled scaffolding.
 
-    // Database operations
-    fn CKDatabase_saveRecord(database: *mut c_void, record: *mut c_void, completion: *mut c_void);
-    fn CKDatabase_fetchRecordWithID(
-        database: *mut c_void,
-        record_id: *mut c_void,
-        completion: *mut c_void,
-    );
-    fn CKDatabase_deleteRecordWithID(
-        database: *mut c_void,
-        record_id: *mut c_void,
-        completion: *mut c_void,
-    );
-
-    // Record operations
-    fn CKRecord_initWithRecordType(record_type: *const c_char) -> *mut c_void;
-    fn CKRecord_setObjectForKey(record: *mut c_void, object: *mut c_void, key: *const c_char);
-    fn CKRecord_objectForKey(record: *mut c_void, key: *const c_char) -> *mut c_void;
-
-    // Asset operations
-    fn CKAsset_initWithFileURL(file_url: *mut c_void) -> *mut c_void;
-    fn CKAsset_fileURL(asset: *mut c_void) -> *mut c_void;
-}
-
-// Import necessary crypto libraries
-use sha2::{Digest, Sha256};
-
-// SHA256 implementation using the sha2 crate is imported above
+use sha2::Digest;
 
 // Convenience functions for creating common configurations
 impl iCloudSyncConfig {
@@ -1360,5 +1466,360 @@ mod tests {
         let dev_config = iCloudSyncConfig::development();
         assert!(!dev_config.auto_sync_enabled);
         assert!(dev_config.verbose_logging);
+    }
+
+    /// Regression test for the P0 finding: RLE `compress_data` silently fell
+    /// back to returning raw bytes (no marker) whenever RLE did not shrink
+    /// the input, and `decompress_data` could not tell that apart from a
+    /// real RLE stream once the raw payload happened to have an even
+    /// length -- corrupting it on "decompression". High-entropy
+    /// (incompressible) data of an even length is exactly the failure case;
+    /// real `f32` weight buffers land here constantly.
+    #[test]
+    fn test_compress_roundtrip_survives_incompressible_even_length_data() {
+        let sync = iCloudModelSync::new(iCloudSyncConfig::default()).expect("sync manager");
+
+        // Deterministic "incompressible" bytes (no repeated runs for RLE to
+        // exploit), even length.
+        let data: Vec<u8> =
+            (0u32..2048).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+        assert_eq!(data.len() % 2, 0, "test fixture must be even-length");
+
+        let compressed = sync.compress_data(&data).expect("compress");
+        let decompressed = sync.decompress_data(&compressed).expect("decompress");
+
+        assert_eq!(
+            decompressed, data,
+            "round-trip through a real codec must reproduce incompressible even-length data \
+             exactly -- the old RLE fallback corrupted this case"
+        );
+    }
+
+    #[test]
+    fn test_compress_roundtrip_empty_and_highly_compressible_data() {
+        let sync = iCloudModelSync::new(iCloudSyncConfig::default()).expect("sync manager");
+
+        for data in [
+            Vec::new(),
+            vec![0u8; 4096],
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec(),
+        ] {
+            let compressed = sync.compress_data(&data).expect("compress");
+            let decompressed = sync.decompress_data(&compressed).expect("decompress");
+            assert_eq!(decompressed, data);
+        }
+    }
+
+    /// Regression test for the P0 finding: `encrypt_data`/`decrypt_data`
+    /// were a repeating-key XOR keystream, not AES. A real AEAD round-trips
+    /// arbitrary data exactly.
+    #[test]
+    fn test_encrypt_decrypt_roundtrip() {
+        let sync = iCloudModelSync::new(iCloudSyncConfig::default()).expect("sync manager");
+        let key = vec![0x42u8; 32];
+        let plaintext =
+            b"a transformer checkpoint's worth of bytes, not that it matters here".to_vec();
+
+        let encrypted = sync.encrypt_data(&plaintext, &key).expect("encrypt");
+        assert_ne!(
+            encrypted, plaintext,
+            "ciphertext must not equal the plaintext"
+        );
+
+        let decrypted = sync.decrypt_data(&encrypted, &key).expect("decrypt");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    /// Two encryptions of the same plaintext must not produce the same
+    /// ciphertext -- the nonce must be freshly random each call. The old
+    /// implementation's IV came from an LCG seeded by the wall-clock
+    /// nanosecond, which is highly likely to repeat under rapid successive
+    /// calls (and trivially predictable regardless).
+    #[test]
+    fn test_encrypt_uses_a_fresh_nonce_each_call() {
+        let sync = iCloudModelSync::new(iCloudSyncConfig::default()).expect("sync manager");
+        let key = vec![0x11u8; 32];
+        let plaintext = b"same plaintext, encrypted twice".to_vec();
+
+        let a = sync.encrypt_data(&plaintext, &key).expect("encrypt a");
+        let b = sync.encrypt_data(&plaintext, &key).expect("encrypt b");
+        assert_ne!(a, b, "each encryption must use a fresh random nonce");
+    }
+
+    /// A real AEAD detects tampering; the old XOR cipher had no
+    /// authentication at all and would "decrypt" a corrupted ciphertext into
+    /// silently wrong plaintext.
+    #[test]
+    fn test_decrypt_rejects_tampered_ciphertext() {
+        let sync = iCloudModelSync::new(iCloudSyncConfig::default()).expect("sync manager");
+        let key = vec![0x77u8; 32];
+        let mut encrypted = sync.encrypt_data(b"trust, but verify", &key).expect("encrypt");
+
+        // Flip a bit well inside the ciphertext (past the 12-byte nonce).
+        let last = encrypted.len() - 1;
+        encrypted[last] ^= 0x01;
+
+        let result = sync.decrypt_data(&encrypted, &key);
+        assert!(
+            result.is_err(),
+            "tampered ciphertext must fail authentication, not decrypt"
+        );
+    }
+
+    #[test]
+    fn test_decrypt_rejects_wrong_key() {
+        let sync = iCloudModelSync::new(iCloudSyncConfig::default()).expect("sync manager");
+        let encrypted = sync.encrypt_data(b"secret model weights", &[0xAAu8; 32]).expect("encrypt");
+        let result = sync.decrypt_data(&encrypted, &[0xBBu8; 32]);
+        assert!(
+            result.is_err(),
+            "decrypting with the wrong key must fail, not return garbage"
+        );
+    }
+
+    #[test]
+    fn test_encrypt_rejects_non_256_bit_key() {
+        let sync = iCloudModelSync::new(iCloudSyncConfig::default()).expect("sync manager");
+        assert!(sync.encrypt_data(b"data", &[0u8; 16]).is_err());
+        assert!(sync.encrypt_data(b"data", &[0u8; 24]).is_err());
+    }
+
+    /// Regression test for the "PBKDF2" that was one 32-bit rolling hash per
+    /// output byte: same password/salt must reproduce the same key
+    /// (determinism), and it must be exactly 32 bytes for AES-256.
+    #[test]
+    fn test_derive_key_from_password_is_deterministic_and_correct_length() {
+        let key_a = iCloudModelSync::derive_key_from_password(
+            "correct horse battery staple",
+            b"salt123",
+            1000,
+        )
+        .expect("derive a");
+        let key_b = iCloudModelSync::derive_key_from_password(
+            "correct horse battery staple",
+            b"salt123",
+            1000,
+        )
+        .expect("derive b");
+        assert_eq!(
+            key_a, key_b,
+            "same password+salt+rounds must derive the same key"
+        );
+        assert_eq!(key_a.len(), 32, "AES-256 needs a 32-byte key");
+
+        let key_different_password =
+            iCloudModelSync::derive_key_from_password("a different password", b"salt123", 1000)
+                .expect("derive c");
+        assert_ne!(key_a, key_different_password);
+
+        let key_different_salt = iCloudModelSync::derive_key_from_password(
+            "correct horse battery staple",
+            b"other-salt",
+            1000,
+        )
+        .expect("derive d");
+        assert_ne!(key_a, key_different_salt);
+    }
+
+    /// Regression test for the P0 finding: `get_local_model_path` must not
+    /// hardcode an iOS-only absolute path (`/var/mobile/...`), which does
+    /// not exist on any platform this crate now compiles and tests on.
+    #[test]
+    fn test_local_model_path_is_not_a_hardcoded_ios_path() {
+        let sync = iCloudModelSync::new(iCloudSyncConfig::default()).expect("sync manager");
+        let path = sync.get_local_model_path("some-model");
+        assert!(
+            !path.to_string_lossy().starts_with("/var/mobile"),
+            "must not hardcode an iOS device sandbox path: {path:?}"
+        );
+    }
+
+    /// Regression test for a self-deadlock in `perform_model_sync`
+    /// (`sync_model`'s implementation): it used to hold the
+    /// `self.cloud_manager` lock across a nested call to
+    /// `self.upload_model`, which acquires that same (non-reentrant)
+    /// `std::sync::Mutex` itself -- hanging the calling thread forever on
+    /// the very first sync of any model that does not already exist
+    /// remotely (i.e. every model's first sync, ever). Run on a background
+    /// thread with a bounded wait so a regression fails the test loudly
+    /// instead of hanging the whole test binary.
+    #[test]
+    fn test_sync_model_does_not_deadlock_on_first_upload() {
+        let config = iCloudSyncConfig {
+            container_id: format!(
+                "iCloud.test.deadlock_check.{}.{}",
+                std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+            ),
+            auto_sync_enabled: false,
+            ..Default::default()
+        };
+
+        let model_path = std::env::temp_dir().join(format!(
+            "trustformers_icloud_deadlock_test_{}_{}.bin",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        std::fs::write(&model_path, b"deadlock regression fixture").expect("write test model file");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path_for_thread = model_path.clone();
+        std::thread::spawn(move || {
+            let mut sync = iCloudModelSync::new(config).expect("sync manager");
+            let metadata = ModelMetadata {
+                model_id: "deadlock-check-model".to_string(),
+                model_name: "Deadlock Check".to_string(),
+                version: "1.0.0".to_string(),
+                size_bytes: 0,
+                last_modified: SystemTime::now(),
+                checksum: String::new(),
+                last_modified_device: "test".to_string(),
+                custom_metadata: HashMap::new(),
+                sync_status: SyncStatus::NotSynced,
+                local_path: None,
+                cloud_record_id: None,
+            };
+            sync.register_model(&path_for_thread, metadata).expect("register");
+            let result = sync.sync_model("deadlock-check-model");
+            let _ = tx.send(result.map(|r| r.success));
+        });
+
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(10));
+        let _ = std::fs::remove_file(&model_path);
+
+        match outcome {
+            Ok(Ok(success)) => assert!(success, "sync_model must report success on a clean upload"),
+            Ok(Err(e)) => {
+                panic!("sync_model returned an error (not a deadlock, but still wrong): {e}")
+            },
+            Err(_) => panic!(
+                "sync_model did not return within 10 seconds -- this is the self-deadlock \
+                 regression (perform_model_sync holding the cloud_manager lock across a nested \
+                 self.upload_model call)"
+            ),
+        }
+    }
+
+    /// End-to-end regression test for the P0 finding: `CloudKitManager`
+    /// used to return mock/zeroed data from `download_model` and silently
+    /// drop `upload_model`'s payload. This exercises the full path a real
+    /// two-device sync would take: device A registers and uploads a real
+    /// model file, device B (a second `iCloudModelSync` whose config shares
+    /// the same `container_id`, simulating the same iCloud account) downloads
+    /// it and must get back the exact original bytes.
+    #[test]
+    fn test_two_devices_share_uploaded_model_via_local_cloudkit_store() {
+        let shared_container = format!(
+            "iCloud.test.two_device_sync.{}.{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        );
+        let config = iCloudSyncConfig {
+            container_id: shared_container,
+            auto_sync_enabled: false,
+            // Compression is exercised separately by the
+            // `test_compress_roundtrip_*` tests; disabling it here isolates
+            // this test to what it actually asserts -- that the *stored*
+            // bytes are the real upload, not mock data -- rather than also
+            // depending on `process_downloaded_model`'s decompression step.
+            compression_enabled: false,
+            ..Default::default()
+        };
+
+        // "Device A": register a real local file and upload it.
+        let model_bytes = b"these are definitely not zero bytes and not a mock string".to_vec();
+        let model_path = std::env::temp_dir().join(format!(
+            "trustformers_icloud_e2e_test_{}_{}.bin",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        std::fs::write(&model_path, &model_bytes).expect("write test model file");
+
+        let mut device_a = iCloudModelSync::new(config.clone()).expect("device A");
+        let metadata = ModelMetadata {
+            model_id: "shared-model".to_string(),
+            model_name: "Shared Model".to_string(),
+            version: "1.0.0".to_string(),
+            size_bytes: 0,
+            last_modified: SystemTime::now(),
+            checksum: String::new(),
+            last_modified_device: "device-a".to_string(),
+            custom_metadata: HashMap::new(),
+            sync_status: SyncStatus::NotSynced,
+            local_path: None,
+            cloud_record_id: None,
+        };
+        device_a.register_model(&model_path, metadata).expect("register on device A");
+        let sync_result = device_a.sync_model("shared-model").expect("sync (upload) from device A");
+        assert!(sync_result.success);
+        let _ = std::fs::remove_file(&model_path);
+
+        // "Device B": a fresh manager, same iCloud container -- must see and
+        // be able to download what device A uploaded.
+        let mut device_b = iCloudModelSync::new(config).expect("device B");
+        let available = device_b.download_available_models().expect("list available models");
+        assert!(
+            available.iter().any(|m| m.model_id == "shared-model"),
+            "device B must see the model device A uploaded, got: {available:?}"
+        );
+
+        let downloaded = {
+            let cloud_manager = device_b.cloud_manager.lock().expect("lock cloud manager");
+            cloud_manager.download_model("shared-model").expect("download on device B")
+        };
+        assert_eq!(
+            downloaded.1, model_bytes,
+            "device B must receive the exact bytes device A uploaded, not mock/zeroed data"
+        );
+
+        // Clean up the shared local store so repeated test runs don't
+        // accumulate files.
+        let cloud_manager = device_b.cloud_manager.lock().expect("lock cloud manager");
+        let _ = cloud_manager.delete_model("shared-model");
+    }
+
+    #[test]
+    fn test_cloudkit_manager_reports_it_is_not_real_cloudkit() {
+        let config = iCloudSyncConfig::development();
+        let manager = CloudKitManager::new(&config).expect("cloud manager");
+        assert!(!manager.is_real_cloudkit());
+    }
+
+    #[test]
+    fn test_cloudkit_manager_model_exists_and_delete_reflect_real_state() {
+        let config = iCloudSyncConfig {
+            container_id: format!(
+                "iCloud.test.exists_delete.{}.{}",
+                std::process::id(),
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()
+            ),
+            ..Default::default()
+        };
+        let manager = CloudKitManager::new(&config).expect("cloud manager");
+
+        assert!(!manager.model_exists("ghost-model").expect("exists check"));
+        assert!(
+            manager.delete_model("ghost-model").is_err(),
+            "deleting a nonexistent model must error"
+        );
+
+        let metadata = ModelMetadata {
+            model_id: "real-model".to_string(),
+            model_name: "Real Model".to_string(),
+            version: "1.0.0".to_string(),
+            size_bytes: 3,
+            last_modified: SystemTime::now(),
+            checksum: String::new(),
+            last_modified_device: "test".to_string(),
+            custom_metadata: HashMap::new(),
+            sync_status: SyncStatus::NotSynced,
+            local_path: None,
+            cloud_record_id: None,
+        };
+        manager.upload_model(&metadata, b"abc").expect("upload");
+        assert!(manager.model_exists("real-model").expect("exists check"));
+
+        manager.delete_model("real-model").expect("delete");
+        assert!(!manager.model_exists("real-model").expect("exists check after delete"));
     }
 }

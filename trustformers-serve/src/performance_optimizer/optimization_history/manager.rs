@@ -23,9 +23,8 @@ use super::{
     statistics::AdvancedStatisticsComputer, trend_analysis::EnhancedTrendAnalysisEngine, types::*,
 };
 use crate::performance_optimizer::types::{
-    OptimizationEvent as OptEvent, OptimizationEventType,
-    OptimizationHistory as OptimizationHistoryType, PerformanceDataPoint, PerformanceMeasurement,
-    SystemState, TestCharacteristics,
+    OptimizationEvent as OptEvent, OptimizationEventType, PerformanceDataPoint,
+    PerformanceMeasurement, SystemState, TestCharacteristics,
 };
 
 // =============================================================================
@@ -37,8 +36,6 @@ use crate::performance_optimizer::types::{
 /// Manages optimization events, trends, effectiveness analysis, and provides
 /// advanced pattern recognition, anomaly detection, and prediction capabilities.
 pub struct AdvancedOptimizationHistoryManager {
-    /// Core optimization history
-    history: Arc<RwLock<OptimizationHistoryType>>,
     /// Event ID counter for unique identification
     event_id_counter: Arc<AtomicU64>,
     /// Enhanced trend analysis engine
@@ -72,7 +69,6 @@ impl AdvancedOptimizationHistoryManager {
         let predictor = PredictiveAnalyticsEngine::new();
 
         let manager = Self {
-            history: Arc::new(RwLock::new(OptimizationHistoryType::default())),
             event_id_counter: Arc::new(AtomicU64::new(1)),
             trend_analyzer,
             pattern_recognizer,
@@ -111,7 +107,6 @@ impl AdvancedOptimizationHistoryManager {
         let predictor = PredictiveAnalyticsEngine::with_config(predictive_config);
 
         let manager = Self {
-            history: Arc::new(RwLock::new(OptimizationHistoryType::default())),
             event_id_counter: Arc::new(AtomicU64::new(1)),
             trend_analyzer,
             pattern_recognizer,

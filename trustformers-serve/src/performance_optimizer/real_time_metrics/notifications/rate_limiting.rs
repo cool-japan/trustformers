@@ -6,7 +6,7 @@ use super::types::*;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
@@ -50,14 +50,8 @@ pub struct RateLimiter {
 #[derive(Debug)]
 
 pub struct ChannelRateLimiter {
-    /// Channel name
-    channel_name: String,
-
     /// Token bucket for rate limiting
     token_bucket: Arc<Mutex<TokenBucket>>,
-
-    /// Channel configuration
-    config: ChannelConfig,
 
     /// Channel statistics
     stats: Arc<ChannelRateLimitStats>,
@@ -91,9 +85,6 @@ pub struct TokenBucket {
 
     /// Last refill timestamp
     last_refill: DateTime<Utc>,
-
-    /// Bucket metadata
-    metadata: HashMap<String, String>,
 }
 
 /// Priority queue for managing throttled notifications
@@ -136,12 +127,6 @@ pub struct ThrottledNotification {
 #[derive(Debug)]
 
 pub struct AdaptiveRateController {
-    /// Current load metrics
-    load_metrics: Arc<RwLock<LoadMetrics>>,
-
-    /// Rate adjustment history
-    adjustment_history: Arc<Mutex<VecDeque<RateAdjustment>>>,
-
     /// Controller configuration
     config: AdaptiveRateConfig,
 }
@@ -654,7 +639,7 @@ impl RateLimiter {
 }
 
 impl ChannelRateLimiter {
-    pub async fn new(channel_name: String, config: ChannelConfig) -> Result<Self> {
+    pub async fn new(_channel_name: String, config: ChannelConfig) -> Result<Self> {
         let rate_limit = config.rate_limit.unwrap_or(60) as f64; // Default to 60 per minute
         let capacity = rate_limit;
         let refill_rate = rate_limit / 60.0; // Convert to tokens per second
@@ -664,13 +649,10 @@ impl ChannelRateLimiter {
             capacity,
             refill_rate,
             last_refill: Utc::now(),
-            metadata: HashMap::new(),
         };
 
         Ok(Self {
-            channel_name,
             token_bucket: Arc::new(Mutex::new(token_bucket)),
-            config,
             stats: Arc::new(ChannelRateLimitStats::default()),
         })
     }
@@ -737,7 +719,6 @@ impl GlobalRateLimiter {
             capacity,
             refill_rate,
             last_refill: Utc::now(),
-            metadata: HashMap::new(),
         };
 
         Ok(Self {
@@ -807,8 +788,6 @@ impl PriorityQueue {
 impl AdaptiveRateController {
     pub async fn new() -> Result<Self> {
         Ok(Self {
-            load_metrics: Arc::new(RwLock::new(LoadMetrics::default())),
-            adjustment_history: Arc::new(Mutex::new(VecDeque::new())),
             config: AdaptiveRateConfig {
                 enabled: true,
                 min_rate: 10.0,

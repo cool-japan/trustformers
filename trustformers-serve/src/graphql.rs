@@ -13,7 +13,8 @@ use crate::{
         config::Priority,
     },
     health::HealthStatus,
-    server::SystemHealthInfo,
+    model_management::ModelStatus,
+    server::{StreamState, SystemHealthInfo},
     TrustformerServer,
 };
 
@@ -43,13 +44,63 @@ pub struct DetailedHealthInfo {
     pub services: ServiceHealthInfo,
 }
 
-/// Service health information for GraphQL
+/// Per-subsystem health, each field derived from that subsystem's own state.
+///
+/// None of these are constants. Every value is computed by
+/// [`service_health`] from a live reading, and a subsystem that cannot serve
+/// says so rather than reporting `"healthy"`.
 #[derive(SimpleObject, Debug, Serialize)]
 pub struct ServiceHealthInfo {
+    /// `"healthy"` when a model is wired into the batching executor and no
+    /// batch has failed, `"degraded"` when batches have failed, `"no_model"`
+    /// when no executor is installed and inference cannot be served at all.
     pub batching: String,
+    /// `"healthy"` when the caching service returns its statistics,
+    /// `"unhealthy"` when collecting them fails.
     pub caching: String,
+    /// `"healthy"` when no streaming request has failed, `"degraded"` when at
+    /// least one recorded stream ended in the failed state.
     pub streaming: String,
+    /// The high-availability service's own verdict on system health.
     pub failover: String,
+}
+
+/// Read the live state of each subsystem and label it.
+///
+/// Kept as a free function so the labelling rules are testable without an
+/// executing GraphQL schema.
+async fn service_health(server: &TrustformerServer, ha_status: HealthStatus) -> ServiceHealthInfo {
+    let batching = if !server.batching_service().has_model() {
+        "no_model"
+    } else if server.batching_service().get_stats().await.processor_stats.failed_batches > 0 {
+        "degraded"
+    } else {
+        "healthy"
+    };
+
+    let caching = match server.caching_service().get_stats().await {
+        Ok(_) => "healthy",
+        Err(_) => "unhealthy",
+    };
+
+    let streaming = if server.stream_store().count_in_state(StreamState::Failed) > 0 {
+        "degraded"
+    } else {
+        "healthy"
+    };
+
+    let failover = match ha_status {
+        HealthStatus::Healthy => "healthy",
+        HealthStatus::Degraded => "degraded",
+        HealthStatus::Unhealthy => "unhealthy",
+    };
+
+    ServiceHealthInfo {
+        batching: batching.to_string(),
+        caching: caching.to_string(),
+        streaming: streaming.to_string(),
+        failover: failover.to_string(),
+    }
 }
 
 /// Inference request input
@@ -93,14 +144,54 @@ pub struct StatsInfo {
     pub ha_stats: String,
 }
 
-/// Model information
+/// One model that is genuinely resident in this process.
+///
+/// Every field is read from the [`ModelManager`](crate::model_management::ModelManager)'s
+/// record of what was actually loaded; a deployment with nothing loaded reports
+/// an empty list rather than a stand-in entry.
 #[derive(SimpleObject, Debug, Serialize)]
 pub struct ModelInfo {
+    /// Registered model name.
     pub name: String,
+    /// Registered model version.
     pub version: String,
+    /// Lifecycle state recorded for the model (`loading`, `active`, `standby`,
+    /// `draining`, `unloaded`, or `failed: <error>`).
     pub status: String,
+    /// Wall-clock load time in RFC 3339, reconstructed from the monotonic clock
+    /// the load was timed against. `"unknown"` only if that reconstruction
+    /// overflows, which cannot happen for any realistic uptime.
     pub loaded_at: String,
+    /// Measured resident size of the model's weights, **in bytes**, summed over
+    /// the tensors actually parsed out of the checkpoint. Never an estimate.
     pub memory_usage: f64,
+}
+
+/// Render a [`ModelStatus`] as the string the GraphQL surface reports.
+fn model_status_label(status: &ModelStatus) -> String {
+    match status {
+        ModelStatus::Loading => "loading".to_string(),
+        ModelStatus::Active => "active".to_string(),
+        ModelStatus::Standby => "standby".to_string(),
+        ModelStatus::Draining => "draining".to_string(),
+        ModelStatus::Unloaded => "unloaded".to_string(),
+        ModelStatus::Failed { error } => format!("failed: {error}"),
+    }
+}
+
+/// Reconstruct the wall-clock instant a model was loaded from the monotonic
+/// duration since that load.
+///
+/// The manager times loads against [`std::time::Instant`], which carries no
+/// calendar information; subtracting the measured elapsed time from the current
+/// wall clock recovers the load time to within the clock's own drift. Nothing
+/// is invented: if the conversion cannot be represented the caller is told so.
+fn loaded_at_rfc3339(elapsed: std::time::Duration) -> String {
+    chrono::Duration::from_std(elapsed)
+        .ok()
+        .and_then(|delta| chrono::Utc::now().checked_sub_signed(delta))
+        .map(|when| when.to_rfc3339())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// GraphQL Query root
@@ -144,12 +235,7 @@ impl QueryRoot {
             version: crate::VERSION.to_string(),
             uptime_seconds: ctx.data::<GraphQLContext>()?.server.uptime_seconds(),
             system_health: context.server.get_system_metrics(),
-            services: ServiceHealthInfo {
-                batching: "healthy".to_string(),
-                caching: "healthy".to_string(),
-                streaming: "healthy".to_string(),
-                failover: "healthy".to_string(),
-            },
+            services: service_health(&context.server, system_health.status.clone()).await,
         })
     }
 
@@ -174,24 +260,36 @@ impl QueryRoot {
         })
     }
 
-    /// Get model information
+    /// The models that are genuinely resident in this process.
+    ///
+    /// Enumerated from the live [`ModelManager`](crate::model_management::ModelManager);
+    /// an empty list is the truthful answer for a server that has loaded
+    /// nothing, and is returned instead of a stand-in entry. The lookup does not
+    /// refresh the models' LRU stamps, so reporting state cannot change
+    /// unloading decisions.
     async fn models(&self, ctx: &Context<'_>) -> Result<Vec<ModelInfo>> {
-        let _context = ctx.data::<GraphQLContext>()?;
-
-        // Get model information - stubbed implementation since model_service is not available
-        tracing::debug!("Retrieving model information for GraphQL query");
+        let context = ctx.data::<GraphQLContext>()?;
+        let manager = context.server.model_manager();
 
         let mut model_infos = Vec::new();
+        for model_id in manager.list_loaded_models() {
+            // A model unloaded between the listing and the lookup is simply no
+            // longer resident; reporting the stale entry would be a lie.
+            let Some(loaded) = manager.peek_loaded_model(&model_id) else {
+                continue;
+            };
+            model_infos.push(ModelInfo {
+                name: loaded.metadata.name.clone(),
+                version: loaded.metadata.version.clone(),
+                status: model_status_label(&loaded.metadata.status),
+                loaded_at: loaded_at_rfc3339(loaded.loaded_at.elapsed()),
+                memory_usage: loaded.memory_usage as f64,
+            });
+        }
 
-        // Add a default model entry as stub
-        model_infos.push(ModelInfo {
-            name: "default".to_string(),
-            version: "1.0.0".to_string(),
-            status: "active".to_string(),
-            loaded_at: chrono::Utc::now().to_rfc3339(),
-            memory_usage: 1024.0, // 1GB placeholder
-        });
-
+        // Stable ordering: the manager's map iteration order is arbitrary, and a
+        // status query that reshuffles between calls is needlessly confusing.
+        model_infos.sort_by(|a, b| (&a.name, &a.version).cmp(&(&b.name, &b.version)));
         Ok(model_infos)
     }
 }
@@ -348,32 +446,33 @@ impl MutationRoot {
         })
     }
 
-    /// Force failover to another node
+    /// Fail over to `target_node`.
+    ///
+    /// Delegates to the real failover manager behind the high-availability
+    /// service — the same path `POST /admin/failover` uses. An unregistered or
+    /// unhealthy target is reported as a GraphQL error carrying the manager's
+    /// reason; `true` is returned only when the switch actually happened.
     async fn force_failover(&self, ctx: &Context<'_>, target_node: String) -> Result<bool> {
         let context = ctx.data::<GraphQLContext>()?;
 
-        // Implement actual failover logic using HA service
-        tracing::info!("Force failover requested to node: {}", target_node);
+        let target = target_node.trim();
+        if target.is_empty() {
+            return Err(Error::new("target_node must not be empty"));
+        }
 
-        let _ha_service = context.server.ha_service();
-
-        // Attempt to trigger failover to the specified node
-        // Note: Simplified implementation as force_failover is not available in current API
-        tracing::info!("Failover requested to target node: {}", target_node);
-
-        // For now, return success as a stub implementation
-        // In a real implementation, this would integrate with the HA service
-        match target_node.as_str() {
-            "" | "invalid" => {
-                tracing::error!(
-                    "Invalid target node specified for failover: {}",
-                    target_node
+        match context.server.ha_service().trigger_failover(target).await {
+            Ok(outcome) => {
+                tracing::info!(
+                    "failover to {} completed: previous={:?} active={:?}",
+                    target,
+                    outcome.previous_node,
+                    outcome.active_node
                 );
-                Ok(false)
-            },
-            _ => {
-                tracing::info!("Successfully initiated failover to node: {}", target_node);
                 Ok(true)
+            },
+            Err(e) => {
+                tracing::error!("failover to {} failed: {}", target, e);
+                Err(Error::new(format!("failover to {target} failed: {e}")))
             },
         }
     }
@@ -598,5 +697,222 @@ mod tests {
             uptime_seconds: 0.0,
         };
         assert!((info.uptime_seconds - 0.0).abs() < 1e-9);
+    }
+
+    // ── Regression tests: the resolvers below used to answer with invented data ──
+
+    use crate::ServerConfig;
+
+    fn bare_server() -> Arc<TrustformerServer> {
+        Arc::new(TrustformerServer::new(ServerConfig::default()))
+    }
+
+    async fn run_query(server: Arc<TrustformerServer>, query: &str) -> async_graphql::Response {
+        create_schema()
+            .execute(async_graphql::Request::new(query).data(create_context(server)))
+            .await
+    }
+
+    /// Regression: the `models` resolver pushed a hardcoded `default` / `1.0.0`
+    /// / `active` entry claiming 1 GB of memory, no matter what was loaded. A
+    /// server that has loaded nothing must report an empty list.
+    #[tokio::test]
+    async fn models_query_reports_no_model_when_none_is_resident() {
+        let server = bare_server();
+        assert!(
+            server.model_manager().list_loaded_models().is_empty(),
+            "precondition: nothing is loaded"
+        );
+
+        let response = run_query(server, "{ models { name version status memoryUsage } }").await;
+        assert!(
+            response.errors.is_empty(),
+            "query failed: {:?}",
+            response.errors
+        );
+
+        let json = response.data.into_json().expect("response is JSON");
+        let models = json["models"].as_array().expect("models is a list");
+        assert!(
+            models.is_empty(),
+            "a server with no resident model must report none, got {models:?}"
+        );
+    }
+
+    /// Regression: `ServiceHealthInfo` was four hardcoded `"healthy"` strings,
+    /// so a server with no inference executor at all still reported the batching
+    /// subsystem as healthy.
+    #[tokio::test]
+    async fn service_health_reports_no_model_rather_than_healthy() {
+        let server = TrustformerServer::new(ServerConfig::default());
+        assert!(
+            !server.has_model(),
+            "precondition: no executor is installed"
+        );
+
+        let health = service_health(&server, HealthStatus::Healthy).await;
+        assert_eq!(health.batching, "no_model");
+        assert_eq!(health.caching, "healthy");
+        assert_eq!(health.streaming, "healthy");
+        assert_eq!(health.failover, "healthy");
+    }
+
+    /// The failover label tracks the high-availability service's own verdict
+    /// instead of being pinned to `"healthy"`.
+    #[tokio::test]
+    async fn service_health_failover_tracks_the_ha_verdict() {
+        let server = TrustformerServer::new(ServerConfig::default());
+
+        let degraded = service_health(&server, HealthStatus::Degraded).await;
+        assert_eq!(degraded.failover, "degraded");
+
+        let unhealthy = service_health(&server, HealthStatus::Unhealthy).await;
+        assert_eq!(unhealthy.failover, "unhealthy");
+    }
+
+    /// Regression: `forceFailover` returned `true` for every target that was
+    /// not the literal string `""` or `"invalid"`, without touching the
+    /// failover manager. An unregistered node must be an error.
+    #[tokio::test]
+    async fn force_failover_to_an_unregistered_node_is_an_error() {
+        let server = bare_server();
+        let response = run_query(
+            server,
+            r#"mutation { forceFailover(targetNode: "node-a") }"#,
+        )
+        .await;
+
+        assert!(
+            !response.errors.is_empty(),
+            "failing over to a node that was never registered must not report success"
+        );
+        assert!(
+            response.errors[0].message.contains("node-a"),
+            "the error must name the target: {}",
+            response.errors[0].message
+        );
+    }
+
+    /// And a genuinely registered, healthy node really does become primary.
+    #[tokio::test]
+    async fn force_failover_to_a_registered_node_switches_the_primary() {
+        let server = bare_server();
+        server
+            .ha_service()
+            .register_node("node-a".to_string(), "http://127.0.0.1:1".to_string())
+            .await
+            .expect("registration succeeds");
+        server
+            .ha_service()
+            .register_node("node-b".to_string(), "http://127.0.0.1:2".to_string())
+            .await
+            .expect("registration succeeds");
+        assert_eq!(
+            server.ha_service().primary_node().await.as_deref(),
+            Some("node-a")
+        );
+
+        let response = run_query(
+            Arc::clone(&server),
+            r#"mutation { forceFailover(targetNode: "node-b") }"#,
+        )
+        .await;
+        assert!(
+            response.errors.is_empty(),
+            "mutation failed: {:?}",
+            response.errors
+        );
+
+        let json = response.data.into_json().expect("response is JSON");
+        assert_eq!(json["forceFailover"], serde_json::json!(true));
+        assert_eq!(
+            server.ha_service().primary_node().await.as_deref(),
+            Some("node-b"),
+            "the mutation must have moved the real primary, not just returned true"
+        );
+    }
+
+    /// An empty target is rejected outright rather than silently accepted.
+    #[tokio::test]
+    async fn force_failover_rejects_an_empty_target() {
+        let response = run_query(
+            bare_server(),
+            r#"mutation { forceFailover(targetNode: "  ") }"#,
+        )
+        .await;
+        assert!(!response.errors.is_empty());
+        assert!(response.errors[0].message.contains("must not be empty"));
+    }
+
+    /// The fixed resolvers must be reachable over the real HTTP route, not just
+    /// through a schema built in a test. `/graphql` is mounted in the server's
+    /// single route table, and a query through it must see the same honest
+    /// answers.
+    #[tokio::test]
+    async fn graphql_route_serves_the_real_resolvers() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let router = TrustformerServer::new(ServerConfig::default()).create_test_router().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/graphql")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"query":"{ models { name } detailedHealth { services { batching } } }"}"#,
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router answers");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body readable");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert!(body["errors"].is_null(), "query errored: {}", body);
+        assert_eq!(
+            body["data"]["models"],
+            serde_json::json!([]),
+            "a server with nothing loaded must not report a stand-in model"
+        );
+        assert_eq!(
+            body["data"]["detailedHealth"]["services"]["batching"],
+            serde_json::json!("no_model"),
+            "a server with no executor must not claim its batching stack is healthy"
+        );
+    }
+
+    #[test]
+    fn model_status_labels_are_distinct_and_carry_the_failure_reason() {
+        assert_eq!(model_status_label(&ModelStatus::Active), "active");
+        assert_eq!(model_status_label(&ModelStatus::Unloaded), "unloaded");
+        assert_eq!(
+            model_status_label(&ModelStatus::Failed {
+                error: "bad header".to_string()
+            }),
+            "failed: bad header"
+        );
+    }
+
+    #[test]
+    fn loaded_at_is_reconstructed_from_the_measured_elapsed_time() {
+        let before = chrono::Utc::now();
+        let rendered = loaded_at_rfc3339(std::time::Duration::from_secs(60));
+        let parsed = chrono::DateTime::parse_from_rfc3339(&rendered)
+            .expect("a real RFC 3339 timestamp")
+            .with_timezone(&chrono::Utc);
+
+        // Loaded a minute ago: the reconstructed instant must sit about 60s in
+        // the past, not at "now" as the old hardcoded `Utc::now()` reported.
+        let age = before - parsed;
+        assert!(
+            age.num_seconds() >= 59 && age.num_seconds() <= 62,
+            "reconstructed load time is {age:?} behind now"
+        );
     }
 }

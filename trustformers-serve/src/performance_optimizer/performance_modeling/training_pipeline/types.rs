@@ -208,7 +208,6 @@ impl HyperparameterTuner {
 pub(crate) struct ResourceUsage {
     pub(crate) cpu_usage: f32,
     pub(crate) memory_usage_mb: f32,
-    pub(crate) elapsed_time: Duration,
 }
 /// Missing value strategies
 #[derive(Debug, Clone)]
@@ -261,7 +260,6 @@ impl TrainingMonitor {
                 peak_resource_usage: ResourceUsage {
                     cpu_usage: 0.0,
                     memory_usage_mb: 0.0,
-                    elapsed_time: Duration::from_secs(0),
                 },
             },
         }
@@ -269,15 +267,7 @@ impl TrainingMonitor {
     /// Start monitoring a pipeline run
     pub fn start_pipeline_run(&mut self, run_id: &str) {
         let monitoring_info = RunMonitoringInfo {
-            run_id: run_id.to_string(),
             start_time: Utc::now(),
-            current_stage: "initialization".to_string(),
-            progress_percentage: 0.0,
-            resource_usage: ResourceUsage {
-                cpu_usage: 0.0,
-                memory_usage_mb: 0.0,
-                elapsed_time: Duration::from_secs(0),
-            },
         };
         self.active_runs.insert(run_id.to_string(), monitoring_info);
         self.statistics.active_runs = self.active_runs.len();
@@ -388,8 +378,6 @@ pub struct TrainingPipelineOrchestrator {
     feature_engineer: Arc<FeatureEngineeringOrchestrator>,
     /// Model validation orchestrator
     model_validator: Arc<ModelValidationOrchestrator>,
-    /// Hyperparameter tuner
-    hyperparameter_tuner: Arc<HyperparameterTuner>,
     /// Training monitor
     training_monitor: Arc<Mutex<TrainingMonitor>>,
     /// Pipeline history
@@ -402,16 +390,12 @@ impl TrainingPipelineOrchestrator {
             config.feature_engineering.clone(),
         ));
         let model_validator = Arc::new(ModelValidationOrchestrator::new(config.validation.clone()));
-        let hyperparameter_tuner = Arc::new(HyperparameterTuner::new(
-            config.hyperparameter_tuning.clone(),
-        )?);
         let training_monitor =
             Arc::new(Mutex::new(TrainingMonitor::new(config.monitoring.clone())));
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
             feature_engineer,
             model_validator,
-            hyperparameter_tuner,
             training_monitor,
             pipeline_history: Arc::new(RwLock::new(Vec::new())),
         })
@@ -1070,11 +1054,7 @@ pub struct PipelineMonitoringConfig {
 }
 #[derive(Debug, Clone)]
 struct RunMonitoringInfo {
-    run_id: String,
     start_time: DateTime<Utc>,
-    current_stage: String,
-    progress_percentage: f32,
-    resource_usage: ResourceUsage,
 }
 /// Tuning iteration information
 #[derive(Debug, Clone)]

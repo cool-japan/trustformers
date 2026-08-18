@@ -20,7 +20,7 @@
 [graph]
 # Resolve every feature of every workspace member. The policy is about what a
 # consumer *can* pull in, not only what `default` happens to enable, so the
-# opt-in backends (candle, swagger-ui, lambda, visual, video, cuda, metal, ...)
+# opt-in backends (swagger-ui, lambda, visual, gif, cuda, metal, ...)
 # are all part of the graph that the ban list is evaluated against.
 all-features = true
 # `targets = []` (the default) keeps every platform in the graph, so the
@@ -80,16 +80,6 @@ confidence-threshold = 0.8
 
 # Per-crate exceptions. Each one names a permissive license that is fine for this
 # specific dependency but is deliberately NOT added to the global allow list.
-[[licenses.exceptions]]
-# ffmpeg-next / ffmpeg-sys-next: WTFPL (public-domain-equivalent). Optional
-# `video` feature of trustformers-debug only; excluded from every default build.
-crate = "ffmpeg-next"
-allow = ["WTFPL"]
-
-[[licenses.exceptions]]
-crate = "ffmpeg-sys-next"
-allow = ["WTFPL"]
-
 [[licenses.exceptions]]
 # libfuzzer-sys: "(MIT OR Apache-2.0) AND NCSA" — NCSA is the permissive
 # University of Illinois/NCSA license covering the bundled libFuzzer sources.
@@ -173,9 +163,6 @@ deny = [
         "utoipa-swagger-ui", # build-dependency that unpacks the bundled Swagger UI
                              # assets; reachable only via the opt-in `swagger-ui`
                              # feature of trustformers-serve.
-        "candle-core",       # optional `candle` backend of trustformers-core
-                             # (opt-in `candle` feature) unpacks PyTorch .zip
-                             # checkpoints.
     ], reason = "COOLJAPAN uses oxiarc-archive for ZIP containers" },
     { crate = "zstd", use-instead = "oxiarc-zstd", reason = "wraps the zstd C library" },
     { crate = "zstd-sys", use-instead = "oxiarc-zstd", reason = "builds/links the zstd C library" },
@@ -197,15 +184,54 @@ deny = [
 ]
 
 # KNOWN OPEN VIOLATION (do not silence with a wrapper):
-#   flate2 <- compression-codecs <- async-compression <- tower-http 0.6
-#          <- reqwest (features "gzip"/"deflate" turned on by typespec_client_core)
-#          <- azure_core <- azure_mgmt_machinelearningservices / azure_mgmt_web
-#          <- trustformers-serve
-# The Azure SDK crates (`azure_core`, `azure_identity`, `azure_mgmt_*`) have zero
-# references in trustformers-serve/src. Dropping those unused dependencies removes
-# the last unwrapped `flate2` parent and makes `cargo deny check bans` pass with no
-# errors. Owned by trustformers-serve, tracked as the "unused cloud SDK deps"
-# finding; it is deliberately NOT whitelisted here so the gate keeps reporting it.
+#
+# `cargo deny check bans` reports exactly one `error[banned]` today:
+#
+#   flate2 <- compression-codecs <- async-compression <- tower-http 0.6.11
+#
+# Read the `[graph]` caveat above and then ignore it for THIS finding: the four
+# Azure crates are non-optional dependencies of trustformers-serve, so this edge
+# is present in a plain `cargo build -p trustformers-serve` with no features at
+# all. Confirm with `cargo tree -p trustformers-serve -i flate2` (no
+# `--all-features`), which prints the same `compression-codecs` chain. It is a
+# real default-build violation, not an artefact of the widened audit graph.
+#
+# `compression-codecs` is the ONLY unwrapped parent of `flate2`; every other
+# parent (`png`, `tiff`, `zip`, `aws-sdk-cloudwatch`, `aws-smithy-compression`)
+# is listed as a wrapper above. Verify with:
+#
+#   cargo tree -i flate2 --all-features --depth 1
+#
+# `tower-http` only depends on `async-compression` when one of its
+# `compression-*` / `decompression-*` features is on, so the edge is created by a
+# FEATURE, not by a plain dependency. The exact feature chain, from
+# `cargo tree -e features -i async-compression --all-features`, is:
+#
+#   tower-http feature "decompression-gzip"    <- reqwest feature "gzip"
+#   tower-http feature "decompression-deflate" <- reqwest feature "deflate"
+#     <- typespec_client_core features "reqwest_gzip" / "reqwest_deflate"
+#       <- azure_core 1.1.0 feature "default"
+#         <- trustformers-serve (direct `azure_core` dependency)
+#         <- azure_identity 1.0.0 feature "default" <- trustformers-serve
+#
+# Nothing else turns those reqwest features on: `google-cloud-*`,
+# `opentelemetry-*` and trustformers-serve's own `reqwest` use pull in the
+# `tower-http` PACKAGE (via "follow-redirect") but never its decompression
+# features, and `azure_mgmt_machinelearningservices` / `azure_mgmt_web` reach
+# only azure_core 0.21 -> reqwest 0.12.28, which has neither feature. Because
+# both reqwest majors share one `tower-http 0.6.11` build, the features unify
+# onto it and `flate2` enters the graph.
+#
+# All four Azure crates (`azure_core`, `azure_identity`,
+# `azure_mgmt_machinelearningservices`, `azure_mgmt_web`) have ZERO references in
+# trustformers-serve/src — verify with
+# `grep -rn 'azure_core\|azure_identity\|azure_mgmt' trustformers-serve/src`.
+# Dropping `azure_core` + `azure_identity` removes the feature chain above and so
+# removes the last unwrapped `flate2` parent; dropping the two `azure_mgmt_*`
+# crates as well removes the duplicate reqwest 0.12 / azure_core 0.21 stacks that
+# the `multiple-versions` lint warns about. Owned by trustformers-serve, tracked
+# as the "unused cloud SDK deps" finding; it is deliberately NOT whitelisted here
+# so the gate keeps reporting it.
 
 # Crates allowed to appear at multiple versions (the `multiple-versions` lint is
 # only a warning today; add entries here with a justification when a duplicate

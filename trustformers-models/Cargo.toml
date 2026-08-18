@@ -2,6 +2,7 @@
 name = "trustformers-models"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -47,6 +48,14 @@ approx.workspace = true
 pretty_assertions.workspace = true
 proptest.workspace = true
 tokio-test.workspace = true
+
+# The end-to-end export proof builds one model of each of the five families, so
+# it needs all five architecture features. Declaring them here makes cargo skip
+# the target when they are off; without it the target still builds (its contents
+# are `#![cfg]`-gated) and reports "0 tests run", which reads like a pass.
+[[test]]
+name = "export_round_trip"
+required-features = ["gpt2", "bert", "llama", "mistral", "t5"]
 
 [features]
 default = ["bert"]

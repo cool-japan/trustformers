@@ -7,10 +7,51 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use proptest::prelude::*;
+use std::sync::{Arc, Mutex};
 use trustformers_serve::memory_pressure::{
-    BufferCompactionHandler, CleanupHandler, GarbageCollectionHandler, GpuCleanupStrategy,
-    MemoryPressureConfig, MemoryPressureHandler, MemoryPressureLevel, PressureSnapshot,
+    CleanupHandler, GpuCleanupStrategy, MemoryPressureConfig, MemoryPressureHandler,
+    MemoryPressureLevel, ModelRegistry, ModelUnloadingHandler, PressureSnapshot,
 };
+
+/// Registry whose resident set shrinks only when a model is really unloaded.
+///
+/// The property below checks that the handler never reports more memory than
+/// the registry released, which is the invariant the old fabricated handlers
+/// violated: they returned hard-coded byte counts without touching anything.
+#[derive(Debug)]
+struct TrackingRegistry {
+    resident: Mutex<Vec<(String, u64)>>,
+    released: Mutex<u64>,
+}
+
+impl TrackingRegistry {
+    fn new(models: Vec<(String, u64)>) -> Arc<Self> {
+        Arc::new(Self {
+            resident: Mutex::new(models),
+            released: Mutex::new(0),
+        })
+    }
+
+    fn released(&self) -> u64 {
+        *self.released.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+impl ModelRegistry for TrackingRegistry {
+    fn resident_models(&self) -> Vec<(String, u64)> {
+        self.resident.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn unload_model(&self, model_name: &str) -> anyhow::Result<u64> {
+        let mut resident = self.resident.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(position) = resident.iter().position(|(n, _)| n == model_name) else {
+            return Ok(0);
+        };
+        let (_, size) = resident.remove(position);
+        *self.released.lock().unwrap_or_else(|p| p.into_inner()) += size;
+        Ok(size)
+    }
+}
 
 /// Custom strategy to generate valid memory pressure configurations
 fn memory_pressure_config_strategy() -> impl Strategy<Value = MemoryPressureConfig> {
@@ -177,9 +218,13 @@ proptest! {
         });
     }
 
-    /// Property: Cleanup strategies effectiveness
+    /// Property: a cleanup handler never reports more memory than was released
+    ///
+    /// Every byte `cleanup` returns must correspond to a byte the registry
+    /// actually gave up. Repeated cleanups must stay consistent with the
+    /// registry's shrinking resident set, and must reach zero once it is empty.
     #[test]
-    fn prop_cleanup_effectiveness(
+    fn prop_cleanup_reports_only_released_memory(
         pressure_level in prop::sample::select(vec![
             MemoryPressureLevel::Low,
             MemoryPressureLevel::Medium,
@@ -187,37 +232,42 @@ proptest! {
             MemoryPressureLevel::Critical,
             MemoryPressureLevel::Emergency,
         ]),
+        model_sizes in prop::collection::vec(101u64..2048u64, 0..6),
         iterations in 1usize..5usize
     ) {
-        let gc_handler = GarbageCollectionHandler::new();
-        let buffer_handler = BufferCompactionHandler::new();
+        let models: Vec<(String, u64)> = model_sizes
+            .iter()
+            .enumerate()
+            .map(|(i, mb)| (format!("model_{i}"), mb * 1024 * 1024))
+            .collect();
+        let resident_total: u64 = models.iter().map(|(_, size)| *size).sum();
 
-        let mut total_gc_freed = 0u64;
-        let mut total_buffer_freed = 0u64;
+        let registry = TrackingRegistry::new(models);
+        let handler =
+            ModelUnloadingHandler::new(Arc::clone(&registry) as Arc<dyn ModelRegistry>);
 
-        // Property: Multiple cleanup calls should be safe and effective
+        let mut reported = 0u64;
         for _ in 0..iterations {
-            let gc_freed = gc_handler.cleanup(pressure_level).expect("operation failed in test");
-            let buffer_freed = buffer_handler.cleanup(pressure_level).expect("operation failed in test");
+            reported += handler.cleanup(pressure_level).expect("cleanup should succeed");
 
-            total_gc_freed += gc_freed;
-            total_buffer_freed += buffer_freed;
+            // Property: the handler never claims more than the registry gave up.
+            prop_assert_eq!(reported, registry.released());
 
-            // Property: Each cleanup should free some memory
-            prop_assert!(gc_freed > 0);
-            prop_assert!(buffer_freed > 0);
+            // Property: nothing can be released that was never resident.
+            prop_assert!(reported <= resident_total);
         }
 
-        // Property: Total freed memory should be reasonable
-        prop_assert!(total_gc_freed >= iterations as u64 * 1024 * 1024); // At least 1MB per iteration
-        prop_assert!(total_buffer_freed >= iterations as u64 * 1024 * 1024);
+        // Property: below Medium pressure nothing is unloaded at all.
+        if pressure_level < MemoryPressureLevel::Medium {
+            prop_assert_eq!(reported, 0);
+        }
 
-        // Property: Estimates should be in reasonable range of actual
-        let gc_estimate = gc_handler.estimate_memory_freed();
-        let buffer_estimate = buffer_handler.estimate_memory_freed();
-
-        prop_assert!(gc_estimate > 0);
-        prop_assert!(buffer_estimate > 0);
+        // Property: the estimate is drawn from what is still resident, so an
+        // exhausted registry estimates zero.
+        if registry.resident_models().is_empty() {
+            prop_assert_eq!(handler.estimate_memory_freed(), 0);
+            prop_assert!(!handler.should_execute(MemoryPressureLevel::Emergency));
+        }
     }
 
     /// Property: GPU cleanup strategy robustness

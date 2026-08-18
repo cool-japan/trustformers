@@ -9,9 +9,7 @@ use parking_lot::Mutex;
 use std::{collections::HashMap, sync::Arc};
 use tracing::{debug, info};
 
-use super::types::{
-    AllocationEvent, DistributionEvent, ExecutionPerformanceMetrics, ExecutionState,
-};
+use super::types::{AllocationEvent, ExecutionState};
 use crate::test_parallelization::ResourceAllocation;
 
 // Re-export types needed by other modules
@@ -33,18 +31,12 @@ pub struct WorkerPool {
     workers: Arc<Mutex<HashMap<String, Worker>>>,
     /// Load metrics
     load_metrics: Arc<Mutex<LoadMetrics>>,
-    /// Distribution events
-    distribution_events: Arc<Mutex<Vec<DistributionEvent>>>,
 }
 
 /// Individual worker
 struct Worker {
-    /// Worker ID
-    worker_id: String,
     /// Current state
     state: ExecutionState,
-    /// Performance metrics
-    performance_metrics: ExecutionPerformanceMetrics,
 }
 
 impl ResourceAllocator {
@@ -145,7 +137,6 @@ impl WorkerPool {
                 queue_length: 0,
                 timestamp: Utc::now(),
             })),
-            distribution_events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -155,7 +146,6 @@ impl WorkerPool {
 
         let worker_start_time = chrono::Utc::now();
         let worker = Worker {
-            worker_id: worker_id.to_string(),
             state: ExecutionState {
                 status: super::types::ExecutionStatus::Running,
                 start_time: worker_start_time,
@@ -168,7 +158,6 @@ impl WorkerPool {
                 state_since: worker_start_time,
                 last_heartbeat: worker_start_time,
             },
-            performance_metrics: ExecutionPerformanceMetrics::default(),
         };
 
         workers.insert(worker_id.to_string(), worker);

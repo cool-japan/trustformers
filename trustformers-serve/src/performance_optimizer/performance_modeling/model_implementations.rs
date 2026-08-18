@@ -32,6 +32,9 @@ pub struct LinearRegressionModel {
     metadata: ModelMetadata,
     /// Training statistics
     training_stats: TrainingStatistics,
+    /// Feature normalisation captured during training, applied again at
+    /// prediction time. `None` when the model was trained on raw features.
+    normalization: Option<NormalizationParams>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,7 +43,6 @@ struct ModelMetadata {
     trained_at: DateTime<Utc>,
     training_samples: usize,
     feature_count: usize,
-    version: String,
 }
 
 #[derive(Debug, Clone)]
@@ -48,8 +50,6 @@ struct TrainingStatistics {
     r_squared: f32,
     mean_squared_error: f32,
     mean_absolute_error: f32,
-    training_time: Duration,
-    convergence_iterations: usize,
 }
 
 impl LinearRegressionModel {
@@ -64,15 +64,13 @@ impl LinearRegressionModel {
                 trained_at: Utc::now(),
                 training_samples: 0,
                 feature_count: 0,
-                version: "1.0.0".to_string(),
             },
             training_stats: TrainingStatistics {
                 r_squared: 0.0,
                 mean_squared_error: f32::INFINITY,
                 mean_absolute_error: f32::INFINITY,
-                training_time: Duration::from_secs(0),
-                convergence_iterations: 0,
             },
+            normalization: None,
         }
     }
 
@@ -93,12 +91,14 @@ impl LinearRegressionModel {
             return Err(anyhow!("No training data provided"));
         }
 
-        // Normalize features if requested
-        let (normalized_features, _normalization_params) = if config.normalize_features {
+        // Normalize features if requested, keeping the parameters so the same
+        // transform can be applied to every later prediction.
+        let (normalized_features, normalization_params) = if config.normalize_features {
             self.normalize_features(features)?
         } else {
             (features.to_vec(), None)
         };
+        self.normalization = normalization_params;
 
         // Perform ordinary least squares regression
         let (coefficients, intercept) =
@@ -153,13 +153,28 @@ impl LinearRegressionModel {
         Ok((coefficients, intercept))
     }
 
-    /// Predict using raw features
+    /// Predict from features expressed in the model's own coordinate system.
+    ///
+    /// Callers inside `train` pass already-normalised rows; external callers go
+    /// through [`LinearRegressionModel::predict_features`], which applies the
+    /// training-time normalisation first.
     fn predict_raw(&self, features: &[f64]) -> f64 {
         let mut prediction = self.intercept;
         for (coef, &feature) in self.coefficients.iter().zip(features.iter()) {
             prediction += coef * feature;
         }
         prediction
+    }
+
+    /// Predict from features in their original units.
+    ///
+    /// Applies the normalisation captured during training, so a model trained
+    /// with `normalize_features` predicts on the same scale it learned on.
+    fn predict_features(&self, features: &[f64]) -> f64 {
+        match &self.normalization {
+            Some(params) => self.predict_raw(&params.apply(features)),
+            None => self.predict_raw(features),
+        }
     }
 
     /// Normalize features using z-score normalization
@@ -210,8 +225,10 @@ impl LinearRegressionModel {
             })
             .collect();
 
-        let params = NormalizationParams { means, stds };
-        Ok((normalized_features, Some(params)))
+        Ok((
+            normalized_features,
+            Some(NormalizationParams { means, stds }),
+        ))
     }
 
     /// Matrix operations
@@ -343,7 +360,7 @@ impl LinearRegressionModel {
         &self,
         targets: &[f64],
         predictions: &[f64],
-        training_time: Duration,
+        _training_time: Duration,
     ) -> TrainingStatistics {
         let n = targets.len() as f64;
 
@@ -372,16 +389,38 @@ impl LinearRegressionModel {
             r_squared: r_squared as f32,
             mean_squared_error: mse as f32,
             mean_absolute_error: mae as f32,
-            training_time,
-            convergence_iterations: 1, // Linear regression converges in one step
         }
     }
 }
 
+/// Per-feature z-score parameters captured during training.
+///
+/// These are applied again at prediction time; before 0.2.1 they were computed,
+/// returned, bound to `_normalization_params` and dropped, so a model trained
+/// with `normalize_features` enabled was queried with raw, unnormalised
+/// features and its predictions were systematically wrong.
 #[derive(Debug, Clone)]
 struct NormalizationParams {
     means: Vec<f64>,
     stds: Vec<f64>,
+}
+
+impl NormalizationParams {
+    /// Apply the training-time z-score transform to one feature vector.
+    ///
+    /// Features beyond the ones seen during training are passed through
+    /// unchanged rather than dropped, so a dimension mismatch cannot silently
+    /// truncate the input.
+    fn apply(&self, features: &[f64]) -> Vec<f64> {
+        features
+            .iter()
+            .enumerate()
+            .map(|(j, &value)| match (self.means.get(j), self.stds.get(j)) {
+                (Some(mean), Some(std)) if *std != 0.0 => (value - mean) / std,
+                _ => value,
+            })
+            .collect()
+    }
 }
 
 impl PerformancePredictor for LinearRegressionModel {
@@ -401,7 +440,7 @@ impl PerformancePredictor for LinearRegressionModel {
         )?;
 
         // Make prediction
-        let throughput = self.predict_raw(&features);
+        let throughput = self.predict_features(&features);
 
         // Calculate uncertainty bounds (simplified)
         let uncertainty = self.calculate_prediction_uncertainty(&features)?;
@@ -524,20 +563,16 @@ pub struct PolynomialRegressionModel {
     linear_model: LinearRegressionModel,
     /// Polynomial degree
     degree: usize,
-    /// Original feature count
-    original_feature_count: usize,
 }
 
 impl PolynomialRegressionModel {
     /// Create new polynomial regression model
     pub fn new(feature_names: Vec<String>, degree: usize) -> Self {
-        let original_feature_count = feature_names.len();
         let poly_feature_names = Self::generate_polynomial_feature_names(&feature_names, degree);
 
         Self {
             linear_model: LinearRegressionModel::new(poly_feature_names),
             degree,
-            original_feature_count,
         }
     }
 
@@ -658,7 +693,7 @@ impl PerformancePredictor for PolynomialRegressionModel {
         let poly_features = self.generate_polynomial_features(&features)?;
 
         // Create a modified request with polynomial features
-        let throughput = self.linear_model.predict_raw(&poly_features);
+        let throughput = self.linear_model.predict_features(&poly_features);
         let uncertainty = self.linear_model.calculate_prediction_uncertainty(&poly_features)?;
         let confidence = (1.0 - uncertainty).clamp(0.1, 1.0);
 
@@ -733,14 +768,11 @@ impl ExponentialModel {
                 trained_at: Utc::now(),
                 training_samples: 0,
                 feature_count: 0,
-                version: "1.0.0".to_string(),
             },
             training_stats: TrainingStatistics {
                 r_squared: 0.0,
                 mean_squared_error: f32::INFINITY,
                 mean_absolute_error: f32::INFINITY,
-                training_time: Duration::from_secs(0),
-                convergence_iterations: 0,
             },
         }
     }
@@ -803,7 +835,7 @@ impl ExponentialModel {
         &self,
         targets: &[f64],
         predictions: &[f64],
-        training_time: Duration,
+        _training_time: Duration,
     ) -> TrainingStatistics {
         let n = targets.len() as f64;
 
@@ -830,8 +862,6 @@ impl ExponentialModel {
             r_squared: r_squared as f32,
             mean_squared_error: mse as f32,
             mean_absolute_error: mae as f32,
-            training_time,
-            convergence_iterations: 1,
         }
     }
 }

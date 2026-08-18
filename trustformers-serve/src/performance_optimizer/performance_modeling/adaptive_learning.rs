@@ -542,7 +542,6 @@ struct OnlineLearningStats {
     total_updates: u64,
     cumulative_loss: f64,
     last_gradient_norm: f64,
-    convergence_indicator: f64,
 }
 
 impl OnlineGradientDescentLearner {
@@ -558,7 +557,6 @@ impl OnlineGradientDescentLearner {
                 total_updates: 0,
                 cumulative_loss: 0.0,
                 last_gradient_norm: 0.0,
-                convergence_indicator: 1.0,
             },
         }
     }
@@ -707,7 +705,6 @@ pub struct ActiveLearningController {
 struct ActiveLearningQuery {
     data_point: PerformanceDataPoint,
     uncertainty_score: f32,
-    queried_at: DateTime<Utc>,
     response_received: bool,
 }
 
@@ -776,7 +773,6 @@ impl ActiveLearningController {
             self.query_history.push_back(ActiveLearningQuery {
                 data_point: data_point.clone(),
                 uncertainty_score: uncertainty,
-                queried_at: Utc::now(),
                 response_received: false,
             });
 

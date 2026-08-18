@@ -20,10 +20,17 @@
 //! signatures are real ML-DSA / SLH-DSA signatures that fail verification when
 //! the message, the key, or the signature is altered.
 //!
-//! Classic McEliece and Falcon have no vetted pure-Rust implementation on
-//! crates.io, so the engine reports them through a structured
+//! Classic McEliece and Falcon (FN-DSA, FIPS 206) are **not implemented here**.
+//! Pure-Rust crates for both do exist on crates.io — `classic-mceliece-rust`
+//! and the FN-DSA/`falcon-rust` family — but none is a RustCrypto-maintained
+//! implementation of a finalized FIPS standard on the footing of the three
+//! above (FIPS 206 was still draft at the time of writing, and the McEliece
+//! crate is a single-maintainer port), so this crate does not take on the
+//! security responsibility of shipping them under an `encrypt`/`sign` API.
+//! Selecting one yields a structured
 //! [`UnsupportedOperation`](trustformers_core::errors::ErrorKind::UnsupportedOperation)
-//! error naming the algorithms that are real, rather than pretending.
+//! error naming the algorithms that are real, rather than pretending. Adding
+//! them is a deliberate future decision, not an impossibility.
 
 use chacha20poly1305::aead::{Aead, KeyInit as AeadKeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key as AeadKey, Nonce};
@@ -53,17 +60,14 @@ pub const SUPPORTED_ALGORITHMS: &str =
 /// Nonce length of ChaCha20-Poly1305, in bytes.
 const AEAD_NONCE_LEN: usize = 12;
 
-/// Structured error for an algorithm that has no real pure-Rust implementation.
+/// Structured error for a post-quantum algorithm this crate does not implement.
 ///
 /// Used instead of a placeholder so that a caller asking for Classic McEliece
 /// or Falcon learns immediately that it is not available and what is.
 pub fn unsupported(algorithm: &str) -> TrustformersError {
     unsupported_operation(
         format!("post-quantum algorithm {algorithm}"),
-        format!(
-            "trustformers-mobile (no vetted pure-Rust implementation exists); supported: \
-             {SUPPORTED_ALGORITHMS}"
-        ),
+        format!("trustformers-mobile (not implemented here); supported: {SUPPORTED_ALGORITHMS}"),
     )
 }
 

@@ -1,3 +1,4 @@
+mod losses;
 mod weights;
 
 use crate::config_utils::{
@@ -31,40 +32,6 @@ use trustformers_models::{
     rwkv::{RwkvConfig, RwkvModel},
     t5::{T5Config, T5Model},
 };
-
-/// Compute cross-entropy loss for classification tasks
-fn compute_cross_entropy_loss(logits: &Tensor, _labels: &Tensor) -> Result<f32, TrustformersError> {
-    // Apply softmax to logits to get probabilities
-    let probs = logits.softmax(-1)?;
-
-    // Calculate negative log-likelihood
-    // For simplicity, we'll compute a basic cross-entropy loss
-    // In practice, this would handle different shapes and batch dimensions properly
-    let log_probs = probs.log()?;
-
-    // For each sample, gather the log probability of the correct class
-    // This is a simplified implementation - in practice would need proper indexing
-    let loss_per_sample = log_probs.mean()?;
-    let loss_scalar = loss_per_sample.to_scalar()?;
-
-    Ok(-loss_scalar) // Negative log-likelihood
-}
-
-/// Compute language modeling loss for next token prediction
-fn compute_language_modeling_loss(logits: &Tensor, _labels: &Tensor) -> Result<f32, TrustformersError> {
-    // For language modeling, we typically shift labels by one position
-    // and compute cross-entropy loss for next token prediction
-
-    // Apply softmax to get probabilities
-    let probs = logits.softmax(-1)?;
-    let log_probs = probs.log()?;
-
-    // Compute average negative log-likelihood across sequence
-    let loss_per_token = log_probs.mean()?;
-    let loss_scalar = loss_per_token.to_scalar()?;
-
-    Ok(-loss_scalar) // Negative log-likelihood
-}
 
 /// Base class for all models
 #[pyclass(name = "PreTrainedModel", module = "trustformers", subclass)]
@@ -1337,42 +1304,82 @@ fn config_to_dict<'py>(
 // Task-specific models using composition pattern
 
 /// BERT for Sequence Classification
+///
+/// Wraps the real [`trustformers_models::bert::BertForSequenceClassification`]:
+/// a BERT encoder, its pooler, and a `hidden_size -> num_labels` linear head,
+/// all of which are bound from a checkpoint by `Model::load_pretrained` and all
+/// of which run in `forward`.
+///
+/// The previous implementation held a bare `BertModel` plus a `classifier`
+/// field that was literally `py.None()` ("Create classifier as placeholder"),
+/// and its `forward` returned the pooled/`[CLS]` hidden state relabelled as
+/// `logits` -- a `hidden_size`-wide vector that had never passed through any
+/// classification head, so the "logits" had neither `num_labels` entries nor
+/// any relation to the labels.
 #[pyclass(name = "BertForSequenceClassification", module = "trustformers")]
-// Fields retain the owned Python classifier head and config for API completeness.
-#[allow(dead_code)]
 pub struct PyBertForSequenceClassification {
-    bert: BertModel,
-    classifier: PyObject, // Linear layer for classification
-    config: BertConfig,
+    inner: BertForSequenceClassification,
     num_labels: usize,
+    /// Label names by class index, from the checkpoint's `id2label` when it has
+    /// one and `LABEL_0..LABEL_n` otherwise (HuggingFace's own fallback).
+    labels: Vec<String>,
+}
+
+impl PyBertForSequenceClassification {
+    /// The wrapped Rust model, for the classification pipeline.
+    pub(crate) fn model(&self) -> &BertForSequenceClassification {
+        &self.inner
+    }
+
+    /// The class labels, indexed by class id.
+    pub(crate) fn labels(&self) -> &[String] {
+        &self.labels
+    }
+}
+
+/// HuggingFace's fallback label names for a head with no `id2label`.
+pub(crate) fn default_label_names(num_labels: usize) -> Vec<String> {
+    (0..num_labels).map(|index| format!("LABEL_{index}")).collect()
+}
+
+/// Read `id2label` out of a parsed `config.json`, falling back to
+/// `LABEL_0..LABEL_n` for every class the mapping does not name.
+fn label_names_from_config(config_value: &Value, num_labels: usize) -> Vec<String> {
+    let mut labels = default_label_names(num_labels);
+    if let Some(map) = config_value.get("id2label").and_then(|v| v.as_object()) {
+        for (key, value) in map {
+            if let (Ok(index), Some(name)) = (key.parse::<usize>(), value.as_str()) {
+                if let Some(slot) = labels.get_mut(index) {
+                    *slot = name.to_string();
+                }
+            }
+        }
+    }
+    labels
 }
 
 #[pymethods]
 impl PyBertForSequenceClassification {
     #[new]
     #[pyo3(signature = (config=None, num_labels=2))]
-    pub fn new(
-        py: Python<'_>,
-        config: Option<&Bound<'_, PyAny>>,
-        num_labels: usize,
-    ) -> PyResult<Self> {
+    pub fn new(config: Option<&Bound<'_, PyAny>>, num_labels: usize) -> PyResult<Self> {
         let bert_config = if let Some(cfg) = config {
             parse_bert_config(cfg)?
         } else {
             BertConfig::default()
         };
 
-        let bert = BertModel::new(bert_config.clone())
-            .map_err(|e| PyValueError::new_err(format!("Failed to create BERT model: {}", e)))?;
-
-        // Create classifier as placeholder (would be actual linear layer in full implementation)
-        let classifier = py.None();
+        let inner = BertForSequenceClassification::new(bert_config, num_labels).map_err(|e| {
+            PyValueError::new_err(format!(
+                "Failed to create BERT sequence-classification model: {}",
+                e
+            ))
+        })?;
 
         Ok(PyBertForSequenceClassification {
-            bert,
-            classifier,
-            config: bert_config,
+            inner,
             num_labels,
+            labels: default_label_names(num_labels),
         })
     }
 
@@ -1404,11 +1411,25 @@ impl PyBertForSequenceClassification {
             config.num_attention_heads = num_heads as usize;
         }
 
-        // Extract number of labels from config
-        let num_labels =
-            config_value.get("num_labels").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+        // Extract number of labels from config: `num_labels` when the config
+        // states one, otherwise the size of the `id2label` map that a
+        // fine-tuned classifier checkpoint always carries.
+        let num_labels = config_value
+            .get("num_labels")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .or_else(|| {
+                config_value.get("id2label").and_then(|v| v.as_object()).map(|map| map.len())
+            })
+            .unwrap_or(2);
+        let labels = label_names_from_config(&config_value, num_labels);
 
-        let mut model = BertModel::new(config.clone())
+        // The whole task model is created and loaded, not just the encoder:
+        // `BertForSequenceClassification::load_pretrained` binds the encoder
+        // under `bert.` *and* the `classifier.{weight,bias}` head, so a
+        // fine-tuned checkpoint's head reaches the model instead of being
+        // dropped on the floor.
+        let mut model = BertForSequenceClassification::new(config, num_labels)
             .map_err(|e| PyValueError::new_err(format!("Failed to create model: {}", e)))?;
 
         report_weight_loading(
@@ -1419,10 +1440,9 @@ impl PyBertForSequenceClassification {
         Py::new(
             py,
             PyBertForSequenceClassification {
-                bert: model,
-                classifier: py.None(),
-                config,
+                inner: model,
                 num_labels,
+                labels,
             },
         )
     }
@@ -1436,61 +1456,28 @@ impl PyBertForSequenceClassification {
         labels: Option<&PyTensor>,
     ) -> PyResult<PyObject> {
         Python::attach(|py| {
-            use trustformers_core::traits::TokenizedInput;
+            let tokenized_input =
+                tokenized_input_from_tensors(input_ids, attention_mask, token_type_ids)?;
 
-            let tokenized_input = TokenizedInput {
-                input_ids: input_ids
-                    .inner
-                    .to_vec_f32()
-                    .map_err(trustformers_error_to_py_err)?
-                    .iter()
-                    .map(|&x| x as u32)
-                    .collect(),
-                attention_mask: attention_mask.map_or_else(
-                    || vec![1u8; input_ids.inner.shape()[0]],
-                    |mask| {
-                        mask.inner
-                            .to_vec_f32()
-                            .unwrap_or_default()
-                            .iter()
-                            .map(|&x| x as u8)
-                            .collect()
-                    },
-                ),
-                token_type_ids: token_type_ids.map(|t| {
-                    t.inner.to_vec_f32().unwrap_or_default().iter().map(|&x| x as u32).collect()
-                }),
-                special_tokens_mask: None,
-                offset_mapping: None,
-                overflowing_tokens: None,
-            };
-
-            let bert_outputs = self
-                .bert
-                .forward(tokenized_input)
-                .map_err(|e| PyValueError::new_err(format!("BERT forward pass failed: {}", e)))?;
-
-            // Use pooler output or [CLS] token for classification
-            let logits = if let Some(pooler) = bert_outputs.pooler_output {
-                pooler // Already pooled representation
-            } else {
-                // Use [CLS] token (first token) from last hidden state
-                bert_outputs
-                    .last_hidden_state
-                    .slice(0, 0, 1)
-                    .map_err(|e| PyValueError::new_err(format!("Failed to slice tensor: {}", e)))?
-            };
+            // Real `[1, num_labels]` logits: pooled `[CLS]` representation ->
+            // the loaded linear classification head.
+            let outputs = self.inner.forward(tokenized_input).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "BERT sequence-classification forward pass failed: {}",
+                    e
+                ))
+            })?;
+            let logits = outputs.logits;
 
             let dict = pyo3::types::PyDict::new(py);
             dict.set_item("logits", PyTensor::from_tensor(logits.clone()))?;
 
             // Calculate loss if labels provided
             if let Some(labels_tensor) = labels {
-                // Compute cross-entropy loss for classification
-                let loss_value = compute_cross_entropy_loss(&logits, &labels_tensor.inner)
-                    .map_err(|e| {
-                        PyValueError::new_err(format!("Loss calculation failed: {}", e))
-                    })?;
+                let loss_value =
+                    losses::classification_cross_entropy(&logits, &labels_tensor.inner).map_err(
+                        |e| PyValueError::new_err(format!("Loss calculation failed: {}", e)),
+                    )?;
 
                 let loss = PyTensor::from_tensor(Tensor::scalar(loss_value).map_err(|e| {
                     PyValueError::new_err(format!("Failed to create loss tensor: {}", e))
@@ -1515,12 +1502,33 @@ impl PyBertForSequenceClassification {
 
     /// Save this model's config and parameters to `save_directory`.
     ///
-    /// Only the BERT encoder is exportable this way today: the classification
-    /// head (`classifier`) is a placeholder (`py.None()`, tracked separately
-    /// from the fakes fixed here -- see trustformers-py/TODO.md) with no
-    /// real weights to include.
+    /// Exports the *whole* task model -- the encoder under `bert.…` plus the
+    /// `classifier.{weight,bias}` head -- because the head is now a real
+    /// `Linear` published by
+    /// [`trustformers_models::bert::BertForSequenceClassification`]'s
+    /// `named_tensors()`. While the head was a `py.None()` placeholder this
+    /// could only write the encoder.
     pub fn save_pretrained(&self, save_directory: &str) -> PyResult<()> {
-        save_pretrained_for_model(&self.bert, save_directory, "BertForSequenceClassification")
+        save_pretrained_for_model(&self.inner, save_directory, "BertForSequenceClassification")
+    }
+
+    /// Number of classification labels this head predicts.
+    #[getter]
+    pub fn num_labels(&self) -> usize {
+        self.num_labels
+    }
+
+    /// Class labels by index (`id2label` from the checkpoint config, or
+    /// `LABEL_0..LABEL_n`).
+    #[getter]
+    pub fn id2label(&self) -> Vec<String> {
+        self.labels.clone()
+    }
+
+    /// Get model configuration.
+    #[getter]
+    pub fn config(&self, py: Python<'_>) -> PyResult<PyObject> {
+        Ok(config_to_dict(py, self.inner.get_config())?.into())
     }
 }
 

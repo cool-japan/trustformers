@@ -105,8 +105,6 @@ impl Tensor {
             Tensor::CF16(a) => a.shape().to_vec(),
             Tensor::CBF16(a) => a.shape().to_vec(),
             Tensor::Sparse(s) => s.shape().to_vec(),
-            #[cfg(feature = "candle")]
-            Tensor::Candle(t) => t.shape().dims().to_vec(),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => data.shape.clone(),
             #[cfg(feature = "cuda")]
@@ -131,8 +129,6 @@ impl Tensor {
             Tensor::CF16(a) => a.len(),
             Tensor::CBF16(a) => a.len(),
             Tensor::Sparse(s) => s.nnz(), // Non-zero elements for sparse tensors
-            #[cfg(feature = "candle")]
-            Tensor::Candle(t) => t.elem_count(),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => data.shape.iter().product(),
             #[cfg(feature = "cuda")]
@@ -175,8 +171,6 @@ impl Tensor {
             Tensor::CF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::f16>>(),
             Tensor::CBF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::bf16>>(),
             Tensor::Sparse(s) => s.nnz() * std::mem::size_of::<f32>(), // Simplified estimate
-            #[cfg(feature = "candle")]
-            Tensor::Candle(t) => t.elem_count() * std::mem::size_of::<f32>(), // Simplified
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => {
                 let num_elements: usize = data.shape.iter().product();
@@ -890,8 +884,6 @@ impl Tensor {
             | Tensor::CF16(_)
             | Tensor::CBF16(_) => "cpu".to_string(),
             Tensor::Sparse(_) => "cpu".to_string(),
-            #[cfg(feature = "candle")]
-            Tensor::Candle(t) => format!("{:?}", t.device()),
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(_) => "metal".to_string(),
             #[cfg(feature = "cuda")]
@@ -925,8 +917,6 @@ impl Tensor {
             Tensor::CF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::f16>>(),
             Tensor::CBF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::bf16>>(),
             Tensor::Sparse(s) => s.memory_usage(),
-            #[cfg(feature = "candle")]
-            Tensor::Candle(t) => t.elem_count() * 4, // Approximate
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(m) => m.shape.iter().product::<usize>() * 4, // Approximate as f32
             #[cfg(feature = "cuda")]
@@ -951,8 +941,6 @@ impl Tensor {
             Tensor::CF16(_) => DType::CF16,
             Tensor::CBF16(_) => DType::CBF16,
             Tensor::Sparse(_) => DType::F32, // Sparse tensors use f32 by default
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => DType::F32, // Default assumption
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => data.dtype,
             #[cfg(feature = "cuda")]

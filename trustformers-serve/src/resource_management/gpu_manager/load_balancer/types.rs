@@ -195,8 +195,6 @@ pub struct GpuLoadBalancer {
     round_robin_counter: Arc<AtomicU64>,
     /// Load balancing analytics
     analytics: Arc<RwLock<LoadBalancingAnalytics>>,
-    /// Strategy performance metrics for adaptive strategy selection
-    strategy_performance: Arc<RwLock<HashMap<LoadBalancingStrategy, f32>>>,
     /// Load balancing configuration
     config: Arc<RwLock<LoadBalancerConfig>>,
     /// Device weights for weighted load balancing
@@ -207,7 +205,6 @@ pub struct GpuLoadBalancer {
     rebalancing_suggestions: Arc<RwLock<VecDeque<RebalancingSuggestion>>>,
     /// Event channel for load balancing events
     event_sender: mpsc::UnboundedSender<LoadBalancingEvent>,
-    event_receiver: Arc<RwLock<Option<mpsc::UnboundedReceiver<LoadBalancingEvent>>>>,
 }
 impl GpuLoadBalancer {
     /// Create a new GPU load balancer with default configuration
@@ -230,19 +227,17 @@ impl GpuLoadBalancer {
     /// A new load balancer instance with the specified configuration
     #[instrument(skip(config))]
     pub fn with_config(config: LoadBalancerConfig) -> Self {
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
+        let (event_sender, _event_receiver) = mpsc::unbounded_channel();
         Self {
             strategy: Arc::new(RwLock::new(LoadBalancingStrategy::LeastLoaded)),
             device_loads: Arc::new(RwLock::new(HashMap::new())),
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             analytics: Arc::new(RwLock::new(LoadBalancingAnalytics::default())),
-            strategy_performance: Arc::new(RwLock::new(HashMap::new())),
             config: Arc::new(RwLock::new(config)),
             device_weights: Arc::new(RwLock::new(HashMap::new())),
             load_history: Arc::new(RwLock::new(VecDeque::new())),
             rebalancing_suggestions: Arc::new(RwLock::new(VecDeque::new())),
             event_sender,
-            event_receiver: Arc::new(RwLock::new(Some(event_receiver))),
         }
     }
     /// Set the load balancing strategy

@@ -1700,13 +1700,22 @@ impl MetalBackend {
         }
         self.commit_async(command_buffer);
         let output_heads_id = BufferId::new();
-        let mut cache = self.buffer_cache.lock().map_err(|_| {
-            TrustformersError::hardware_error(
-                "Failed to lock buffer cache",
-                "attention_gpu_to_gpu_optimized",
-            )
-        })?;
-        cache.insert(output_heads_id, output_heads_buffer);
+        // Scope the `buffer_cache` guard to this block and drop it before calling
+        // `reshape_from_heads_gpu` below: that call takes the same `std::sync::Mutex`
+        // to register *its own* output buffer, and `Mutex` is not reentrant. Holding
+        // the guard across the call (as the previous version of this function did)
+        // deadlocks the calling thread unconditionally, every time this function is
+        // invoked -- see `reshape_from_heads_gpu`'s own `self.buffer_cache.lock()`
+        // near its end.
+        {
+            let mut cache = self.buffer_cache.lock().map_err(|_| {
+                TrustformersError::hardware_error(
+                    "Failed to lock buffer cache",
+                    "attention_gpu_to_gpu_optimized",
+                )
+            })?;
+            cache.insert(output_heads_id, output_heads_buffer);
+        }
         let final_output =
             self.reshape_from_heads_gpu(&output_heads_id, seq_len, num_heads, head_dim)?;
         Ok(final_output)
@@ -1875,6 +1884,64 @@ mod tests {
         println!(
             "mps_oxicuda_matmul_parity PASS (unscaled + scaled, shape {m}x{k}x{n}, alpha={alpha})"
         );
+        Ok(())
+    }
+
+    /// Regression: `attention_gpu_to_gpu_optimized` used to hold its
+    /// `buffer_cache` lock (from registering `output_heads_buffer`) across the
+    /// call to `reshape_from_heads_gpu`, which takes the very same
+    /// `std::sync::Mutex` to register its own output. `Mutex` is not
+    /// reentrant, so every call unconditionally deadlocked the calling thread
+    /// -- this test would simply hang forever (never reach the `assert`s
+    /// below) against the old code, rather than fail cleanly.
+    ///
+    /// `seq_len = 1` makes the expected output analytically exact rather than
+    /// needing a full multi-head causal-attention CPU reference: softmax over
+    /// a single position is always exactly `1.0` regardless of the Q·K score
+    /// (nothing to mask, nothing to compare against), so
+    /// `Attention(Q, K, V) = 1.0 * V = V`. The `[seq_len, hidden] <->
+    /// [heads, seq_len, head_dim]` reshape is likewise a flat-index identity
+    /// when `seq_len == 1` (both sides are one contiguous `heads * head_dim`
+    /// block), so the head-split/merge round trip changes nothing either.
+    /// `num_heads = 3 > 1` still exercises the reshape kernels non-trivially.
+    #[test]
+    fn attention_gpu_to_gpu_optimized_does_not_deadlock_and_is_identity_at_seq_len_one(
+    ) -> Result<()> {
+        let backend = MetalBackend::new()?;
+
+        let num_heads = 3usize;
+        let head_dim = 4usize;
+        let hidden_size = num_heads * head_dim;
+        let seq_len = 1usize;
+
+        // Distinct values per position so an accidental permutation (rather
+        // than an outright hang) would also be caught.
+        let q: Vec<f32> = (0..hidden_size).map(|i| (i as f32) * 0.37 - 1.1).collect();
+        let k: Vec<f32> = (0..hidden_size).map(|i| (i as f32) * -0.21 + 0.6).collect();
+        let v: Vec<f32> = (0..hidden_size).map(|i| (i as f32) * 0.5 + 1.0).collect();
+
+        let q_id = backend.create_persistent_buffer(&q)?;
+        let k_id = backend.create_persistent_buffer(&k)?;
+        let v_id = backend.create_persistent_buffer(&v)?;
+
+        // Before the fix, this call never returns.
+        let out_id = backend
+            .attention_gpu_to_gpu_optimized(&q_id, &k_id, &v_id, 1, seq_len, num_heads, head_dim)?;
+        let got = backend.download_buffer_to_vec(&out_id)?;
+
+        assert_eq!(
+            got.len(),
+            hidden_size,
+            "output length must match hidden_size"
+        );
+        for i in 0..hidden_size {
+            assert!(
+                (got[i] - v[i]).abs() < 1e-3,
+                "at seq_len=1, attention output must equal V exactly (index {i}): got {} want {}",
+                got[i],
+                v[i]
+            );
+        }
         Ok(())
     }
 }

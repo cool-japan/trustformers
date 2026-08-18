@@ -599,8 +599,6 @@ pub struct SystemLoadMonitor {
     cpu_usage: f64,
     memory_usage: f64,
     gpu_usage: f64,
-    queue_depths: HashMap<AdvancedPriority, usize>,
-    throughput_history: VecDeque<(Instant, f64)>,
     last_update: Instant,
 }
 
@@ -616,8 +614,6 @@ impl SystemLoadMonitor {
             cpu_usage: 0.0,
             memory_usage: 0.0,
             gpu_usage: 0.0,
-            queue_depths: HashMap::new(),
-            throughput_history: VecDeque::new(),
             last_update: Instant::now(),
         }
     }

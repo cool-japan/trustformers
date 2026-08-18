@@ -118,34 +118,55 @@ impl ValidationReport {
         !self.infos.is_empty()
     }
 
-    pub fn print_summary(&self) {
-        println!("🔍 Validation Report");
-        println!(
-            "   Status: {}",
+    /// Render this report as the human-readable text [`Self::print_summary`]
+    /// and [`Self::log_summary`] both emit.
+    fn summary_report(&self) -> String {
+        let mut report = String::new();
+        report.push_str("🔍 Validation Report\n");
+        report.push_str(&format!(
+            "   Status: {}\n",
             if self.is_valid { "✅ Valid" } else { "❌ Invalid" }
-        );
-        println!("   Rules Applied: {}", self.rules_applied);
+        ));
+        report.push_str(&format!("   Rules Applied: {}", self.rules_applied));
 
         if !self.errors.is_empty() {
-            println!("   ❌ Errors: {}", self.errors.len());
+            report.push_str(&format!("\n   ❌ Errors: {}", self.errors.len()));
             for error in &self.errors {
-                println!("      {}", error);
+                report.push_str(&format!("\n      {}", error));
             }
         }
 
         if !self.warnings.is_empty() {
-            println!("   ⚠️  Warnings: {}", self.warnings.len());
+            report.push_str(&format!("\n   ⚠️  Warnings: {}", self.warnings.len()));
             for warning in &self.warnings {
-                println!("      {}", warning);
+                report.push_str(&format!("\n      {}", warning));
             }
         }
 
         if !self.infos.is_empty() {
-            println!("   ℹ️  Infos: {}", self.infos.len());
+            report.push_str(&format!("\n   ℹ️  Infos: {}", self.infos.len()));
             for info in &self.infos {
-                println!("      {}", info);
+                report.push_str(&format!("\n      {}", info));
             }
         }
+
+        report
+    }
+
+    /// Write [`Self::summary_report`] to stdout.
+    ///
+    /// This is an explicit, caller-initiated escape hatch for binaries and
+    /// examples; nothing on the validation path writes to stdout on its own.
+    /// Library callers should prefer [`Self::log_summary`], which routes the
+    /// same report through `tracing` so the host application controls the
+    /// sink.
+    pub fn print_summary(&self) {
+        println!("{}", self.summary_report());
+    }
+
+    /// Emit [`Self::summary_report`] at `info` level through `tracing`.
+    pub fn log_summary(&self) {
+        tracing::info!("{}", self.summary_report());
     }
 }
 

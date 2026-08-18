@@ -57,6 +57,22 @@ use std::ptr;
 // Memory Monitoring Infrastructure
 // =============================================================================
 
+/// Errors raised while reading GPU memory statistics.
+#[derive(Debug, thiserror::Error)]
+pub enum GpuMonitoringError {
+    /// No GPU management binding is compiled into this build.
+    ///
+    /// Enumerating devices and reading their VRAM usage, temperature and power
+    /// draw requires a vendor management library — NVML, ROCm SMI, or Metal's
+    /// device interface. `trustformers-serve` links none of them, so a GPU
+    /// reading cannot be produced at all.
+    #[error(
+        "GPU memory monitoring is unavailable: trustformers-serve links no GPU management binding \
+         (NVML, ROCm SMI or Metal), so GPU devices cannot be enumerated"
+    )]
+    Unavailable,
+}
+
 /// Memory monitoring and prediction engine
 ///
 /// Central component for memory monitoring that provides real-time system
@@ -110,9 +126,17 @@ impl MemoryMonitor {
         let utilization =
             if total_memory > 0 { used_memory as f32 / total_memory as f32 } else { 0.0 };
 
-        // Get GPU statistics if enabled
+        // Get GPU statistics if enabled. A monitoring backend that cannot read
+        // the GPU says so once per sample rather than contributing zeroes that
+        // read like a measurement.
         let gpu_stats = if self.gpu_monitoring_enabled {
-            self.update_gpu_memory_stats().await.unwrap_or_default()
+            match self.update_gpu_memory_stats().await {
+                Ok(stats) => stats,
+                Err(error) => {
+                    tracing::debug!("GPU memory statistics unavailable: {error}");
+                    HashMap::new()
+                },
+            }
         } else {
             HashMap::new()
         };
@@ -126,8 +150,8 @@ impl MemoryMonitor {
             used_memory,
             utilization,
             process_memory: self.get_process_memory(&system),
-            heap_memory: self.estimate_heap_memory(),
-            stack_memory: self.estimate_stack_memory(),
+            heap_memory: self.measure_heap_memory(),
+            stack_memory: self.measure_stack_memory(),
             gpu_memory,
             gpu_stats,
             swap_usage: system.used_swap(),
@@ -342,136 +366,36 @@ impl MemoryMonitor {
     // GPU Memory Monitoring
     // =============================================================================
 
-    /// Update GPU memory statistics for all devices
+    /// Update GPU memory statistics according to the configured device
+    /// strategy.
+    ///
+    /// Reading per-device VRAM usage, temperature and power requires a vendor
+    /// management binding — NVML for NVIDIA, ROCm SMI for AMD, Metal's device
+    /// interface for Apple silicon. `trustformers-serve` compiles none of them,
+    /// so every strategy resolves to [`GpuMonitoringError::Unavailable`]
+    /// instead of returning numbers nobody measured.
     pub async fn update_gpu_memory_stats(&self) -> Result<HashMap<u32, GpuMemoryStats>> {
-        let mut gpu_stats = HashMap::new();
-
-        match &self.config.gpu_device_strategy {
-            GpuDeviceStrategy::All => {
-                // Monitor all available GPU devices
-                for device_id in 0..self.get_gpu_device_count() {
-                    if let Ok(stats) = self.get_gpu_device_stats(device_id).await {
-                        gpu_stats.insert(device_id, stats);
-                    }
-                }
-            },
-            GpuDeviceStrategy::Primary => {
-                // Monitor only primary GPU (device 0)
-                if let Ok(stats) = self.get_gpu_device_stats(0).await {
-                    gpu_stats.insert(0, stats);
-                }
-            },
-            GpuDeviceStrategy::Specific(device_ids) => {
-                // Monitor specific GPU devices
-                for &device_id in device_ids {
-                    if let Ok(stats) = self.get_gpu_device_stats(device_id).await {
-                        gpu_stats.insert(device_id, stats);
-                    }
-                }
-            },
-            GpuDeviceStrategy::HighestMemory => {
-                // Find and monitor GPU with highest memory
-                if let Some(device_id) = self.find_highest_memory_gpu().await {
-                    if let Ok(stats) = self.get_gpu_device_stats(device_id).await {
-                        gpu_stats.insert(device_id, stats);
-                    }
-                }
-            },
-            GpuDeviceStrategy::HighestUtilization => {
-                // Find and monitor GPU with highest utilization
-                if let Some(device_id) = self.find_highest_utilization_gpu().await {
-                    if let Ok(stats) = self.get_gpu_device_stats(device_id).await {
-                        gpu_stats.insert(device_id, stats);
-                    }
-                }
-            },
-            GpuDeviceStrategy::LoadBalanced => {
-                // Monitor GPUs in a load-balanced manner
-                let device_count = self.get_gpu_device_count();
-                let current_time = chrono::Utc::now().timestamp() as u32;
-                let selected_device = current_time % device_count;
-
-                if let Ok(stats) = self.get_gpu_device_stats(selected_device).await {
-                    gpu_stats.insert(selected_device, stats);
-                }
-            },
-        }
-
-        Ok(gpu_stats)
+        // Every strategy needs device enumeration first, and enumeration is the
+        // capability that is missing, so the strategy never gets to matter.
+        let _ = &self.config.gpu_device_strategy;
+        Err(GpuMonitoringError::Unavailable.into())
     }
 
-    /// Get statistics for a specific GPU device
-    async fn get_gpu_device_stats(&self, device_id: u32) -> Result<GpuMemoryStats> {
-        // In a real implementation, this would use GPU monitoring APIs like:
-        // - NVIDIA ML (NVML) for NVIDIA GPUs
-        // - ROCm SMI for AMD GPUs
-        // - Intel GPU utilities for Intel GPUs
-        // For now, we'll provide a mock implementation
-
-        // Mock GPU statistics
-        let total_memory = 8 * 1024 * 1024 * 1024; // 8GB
-        let used_memory = (total_memory as f32 * (0.3 + (device_id as f32 * 0.1))) as u64;
-        let available_memory = total_memory - used_memory;
-        let utilization = used_memory as f32 / total_memory as f32;
-
-        // Calculate pressure level based on GPU-specific thresholds
-        let pressure_level = if utilization >= self.config.gpu_pressure_thresholds.critical {
-            MemoryPressureLevel::Critical
-        } else if utilization >= self.config.gpu_pressure_thresholds.high {
-            MemoryPressureLevel::High
-        } else if utilization >= self.config.gpu_pressure_thresholds.medium {
-            MemoryPressureLevel::Medium
-        } else if utilization >= self.config.gpu_pressure_thresholds.low {
-            MemoryPressureLevel::Low
-        } else {
-            MemoryPressureLevel::Normal
-        };
-
-        let mut allocated_by_type = HashMap::new();
-        allocated_by_type.insert("model".to_string(), used_memory / 2);
-        allocated_by_type.insert("cache".to_string(), used_memory / 4);
-        allocated_by_type.insert("buffer".to_string(), used_memory / 4);
-
-        Ok(GpuMemoryStats {
-            device_id,
-            device_name: format!("GPU Device {}", device_id),
-            total_memory,
-            available_memory,
-            used_memory,
-            utilization,
-            compute_utilization: utilization * 0.8, // Mock compute utilization
-            bandwidth_utilization: utilization * 0.6, // Mock bandwidth utilization
-            temperature: 65.0 + utilization * 20.0, // Mock temperature
-            power_consumption: 150.0 + utilization * 100.0, // Mock power consumption
-            fragmentation_level: utilization * 0.1, // Mock fragmentation
-            pressure_level,
-            active_contexts: (utilization * 10.0) as u32,
-            active_streams: (utilization * 5.0) as u32,
-            allocated_by_type,
-            pressure_events: 0, // Would be tracked in real implementation
-            last_cleanup: None,
-        })
+    /// Statistics for a specific GPU device.
+    ///
+    /// See [`MemoryMonitor::update_gpu_memory_stats`]: there is no GPU
+    /// management binding to read them from.
+    pub async fn get_gpu_device_stats(&self, _device_id: u32) -> Result<GpuMemoryStats> {
+        Err(GpuMonitoringError::Unavailable.into())
     }
 
-    /// Get the number of available GPU devices
-    fn get_gpu_device_count(&self) -> u32 {
-        // In a real implementation, this would query the GPU system
-        // For now, return a mock count
-        2
-    }
-
-    /// Find GPU device with highest memory capacity
-    async fn find_highest_memory_gpu(&self) -> Option<u32> {
-        // In a real implementation, this would query all GPUs and find the one with most memory
-        // For now, return device 0 as a mock
-        Some(0)
-    }
-
-    /// Find GPU device with highest current utilization
-    async fn find_highest_utilization_gpu(&self) -> Option<u32> {
-        // In a real implementation, this would query all GPUs and find the most utilized
-        // For now, return device 1 as a mock
-        Some(1)
+    /// Number of GPU devices this process can enumerate.
+    ///
+    /// Always zero: device enumeration needs a vendor management binding that
+    /// is not compiled in. Callers that divide by this value must guard against
+    /// zero.
+    pub fn get_gpu_device_count(&self) -> u32 {
+        0
     }
 
     // =============================================================================
@@ -669,18 +593,59 @@ impl MemoryMonitor {
         }
     }
 
-    /// Estimate heap memory usage
-    fn estimate_heap_memory(&self) -> u64 {
-        // In a real implementation, this would use more sophisticated heap tracking
-        // For now, provide a reasonable estimate
-        64 * 1024 * 1024 // 64MB estimate
+    /// Heap memory usage of this process, when it can be measured.
+    ///
+    /// Rust exposes no allocator statistics through the standard library, and
+    /// this crate installs no instrumented `#[global_allocator]`, so there is
+    /// nothing to read: the answer is always `None`. It used to be a hard-coded
+    /// 64 MiB, which turned an unmeasured quantity into a plausible-looking
+    /// gauge reading.
+    fn measure_heap_memory(&self) -> Option<u64> {
+        None
     }
 
-    /// Estimate stack memory usage
-    fn estimate_stack_memory(&self) -> u64 {
-        // In a real implementation, this would track actual stack usage
-        // For now, provide a reasonable estimate
-        8 * 1024 * 1024 // 8MB estimate
+    /// Stack memory usage of this process, when the OS reports it.
+    ///
+    /// Linux publishes it as `VmStk` in `/proc/self/status`. No other supported
+    /// platform exposes a process-wide stack figure without linking a
+    /// platform-specific C API, so they answer `None`.
+    fn measure_stack_memory(&self) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            let status = std::fs::read_to_string("/proc/self/status").ok()?;
+            Self::parse_proc_status_kib(&status, "VmStk")
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    /// Parse a `key:  <value> kB` line out of `/proc/<pid>/status`, returning
+    /// bytes.
+    ///
+    /// Compiled on Linux, where `measure_stack_memory` calls it, and under
+    /// `cfg(test)` everywhere else so the parser stays under test on developer
+    /// machines that are not Linux.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn parse_proc_status_kib(status: &str, key: &str) -> Option<u64> {
+        for line in status.lines() {
+            let Some(rest) = line.strip_prefix(key) else {
+                continue;
+            };
+            let Some(rest) = rest.strip_prefix(':') else {
+                continue;
+            };
+            let mut fields = rest.split_whitespace();
+            let value: u64 = fields.next()?.parse().ok()?;
+            // The kernel always reports these in kB; refuse anything else
+            // rather than silently scaling by the wrong factor.
+            if fields.next()? != "kB" {
+                return None;
+            }
+            return Some(value * 1024);
+        }
+        None
     }
 
     /// Get current adaptive thresholds
@@ -752,12 +717,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gpu_device_count() {
+    async fn test_gpu_monitoring_reports_its_absence() {
         let config = MemoryPressureConfig::default();
         let monitor = MemoryMonitor::new(config);
 
-        let count = monitor.get_gpu_device_count();
-        assert!(count > 0);
+        assert_eq!(
+            monitor.get_gpu_device_count(),
+            0,
+            "no GPU management binding is linked, so no device can be enumerated"
+        );
+
+        let error = monitor
+            .update_gpu_memory_stats()
+            .await
+            .expect_err("GPU statistics must be an error, not invented numbers");
+        assert!(
+            error.to_string().contains("GPU memory monitoring is unavailable"),
+            "unexpected error: {error}"
+        );
+
+        let error = monitor
+            .get_gpu_device_stats(0)
+            .await
+            .expect_err("per-device GPU statistics must be an error too");
+        assert!(
+            error.to_string().contains("GPU memory monitoring is unavailable"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_system_memory_info_omits_unmeasured_quantities() {
+        let config = MemoryPressureConfig::default();
+        let monitor = MemoryMonitor::new(config);
+
+        let stats = monitor
+            .get_system_memory_info()
+            .await
+            .expect("system memory is readable through sysinfo");
+
+        // Real measurements.
+        assert!(stats.total_memory > 0);
+        assert!(stats.process_memory > 0);
+
+        // Unmeasured quantities must be absent, not plausible constants.
+        assert_eq!(
+            stats.heap_memory, None,
+            "no instrumented allocator is installed, so heap usage is unknown"
+        );
+        assert!(
+            stats.gpu_stats.is_empty(),
+            "no GPU binding is linked, so there are no per-device statistics"
+        );
+        assert_eq!(stats.gpu_memory, 0);
+
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(
+            stats.stack_memory, None,
+            "only Linux publishes a process-wide stack figure"
+        );
+    }
+
+    #[test]
+    fn test_parse_proc_status_kib() {
+        let status = "Name:\tserve\nVmStk:\t     132 kB\nVmRSS:\t   45678 kB\n";
+
+        assert_eq!(
+            MemoryMonitor::parse_proc_status_kib(status, "VmStk"),
+            Some(132 * 1024)
+        );
+        assert_eq!(
+            MemoryMonitor::parse_proc_status_kib(status, "VmRSS"),
+            Some(45678 * 1024)
+        );
+        assert_eq!(MemoryMonitor::parse_proc_status_kib(status, "VmHWM"), None);
+        // A unit the kernel does not use must not be silently accepted.
+        assert_eq!(
+            MemoryMonitor::parse_proc_status_kib("VmStk:\t 132 MB\n", "VmStk"),
+            None
+        );
     }
 
     #[tokio::test]

@@ -35,7 +35,6 @@ pub struct ImpactAssessor {
 #[derive(Debug, Clone)]
 struct ImpactAssessmentRecord {
     recommendation_id: String,
-    timestamp: DateTime<Utc>,
     predicted_impact: ImpactAssessment,
     actual_impact: Option<ImpactAssessment>,
     accuracy_score: Option<f32>,
@@ -44,8 +43,6 @@ struct ImpactAssessmentRecord {
 /// Impact prediction model using machine learning
 pub struct ImpactPredictionModel {
     feature_weights: HashMap<String, f32>,
-    historical_accuracy: f32,
-    model_version: String,
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +92,6 @@ impl ImpactAssessor {
         // Store assessment record
         let record = ImpactAssessmentRecord {
             recommendation_id: recommendation.id.clone(),
-            timestamp: Utc::now(),
             predicted_impact: predicted_impact.clone(),
             actual_impact: None,
             accuracy_score: None,
@@ -218,11 +214,7 @@ impl ImpactPredictionModel {
         feature_weights.insert("risk_level".to_string(), -0.2);
         feature_weights.insert("action_count".to_string(), 0.1);
 
-        Ok(Self {
-            feature_weights,
-            historical_accuracy: 0.75,
-            model_version: "v1.0".to_string(),
-        })
+        Ok(Self { feature_weights })
     }
 
     pub async fn predict_impact(
@@ -289,12 +281,7 @@ struct StrategyPerformance {
 }
 
 #[derive(Debug, Clone)]
-struct SelectionRecord {
-    timestamp: DateTime<Utc>,
-    context_hash: String,
-    selected_algorithms: Vec<String>,
-    outcome_success: Option<bool>,
-}
+struct SelectionRecord {}
 
 #[derive(Debug, Clone)]
 pub struct StrategySelectorConfig {
@@ -335,7 +322,6 @@ impl StrategySelector {
 
     /// Select optimal algorithms for given optimization context
     pub async fn select_algorithms(&self, context: &OptimizationContext) -> Result<Vec<String>> {
-        let context_hash = self.calculate_context_hash(context);
         let performance_map = self.algorithm_performance.lock();
         let config = self.config.read();
 
@@ -359,12 +345,7 @@ impl StrategySelector {
             .collect();
 
         // Record selection
-        let record = SelectionRecord {
-            timestamp: Utc::now(),
-            context_hash,
-            selected_algorithms: selected.clone(),
-            outcome_success: None,
-        };
+        let record = SelectionRecord {};
 
         let mut history = self.selection_history.lock();
         history.push_back(record);
@@ -420,16 +401,6 @@ impl StrategySelector {
         }
 
         Ok(())
-    }
-
-    fn calculate_context_hash(&self, context: &OptimizationContext) -> String {
-        // Simple hash based on context characteristics
-        format!(
-            "cores_{}_objectives_{}_constraints_{}",
-            context.system_state.available_cores,
-            context.objectives.len(),
-            context.constraints.len()
-        )
     }
 
     fn calculate_algorithm_score(
@@ -497,9 +468,6 @@ struct LearningModel {
 #[derive(Debug, Clone)]
 struct ModelPerformanceMetrics {
     accuracy: f32,
-    precision: f32,
-    recall: f32,
-    f1_score: f32,
     last_updated: DateTime<Utc>,
 }
 
@@ -536,9 +504,6 @@ impl AdaptiveLearner {
 
         let performance_metrics = ModelPerformanceMetrics {
             accuracy: 0.5,
-            precision: 0.5,
-            recall: 0.5,
-            f1_score: 0.5,
             last_updated: Utc::now(),
         };
 

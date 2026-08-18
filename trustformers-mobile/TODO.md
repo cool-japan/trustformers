@@ -223,7 +223,7 @@ let model_path = manager.get_model_path("gpt2-medium");
   - `FederatedLearningClient::new/train_local_model/apply_global_update/get_fl_stats`
   - Differential privacy (`DifferentialPrivacyConfig { epsilon, delta, clipping_norm, noise_mechanism, per_layer_budget }`)
   - `SecureAggregator` (threshold-based share aggregation)
-  - ⚠️ Homomorphic encryption, zero-knowledge proofs, and post-quantum KEMs referenced elsewhere in the crate live in `advanced_security.rs` as **simplified/mock implementations** (e.g. literal comments "Placeholder Kyber encryption", "Placeholder McEliece encryption", "Simplified reconstruction (placeholder)") — not audited cryptography
+  - ✅ **Updated 2026-08-18, verified stale**: the note this line used to carry ("simplified/mock implementations", "Placeholder Kyber encryption") no longer describes `advanced_security.rs`. It now implements real algorithms: Paillier (additively homomorphic, `paillier.rs`), Shamir secret sharing over GF(2^8) (`shamir.rs`), a Schnorr sigma protocol with Fiat-Shamir (`zkp.rs`), and ML-KEM-768/ML-DSA-65/SLH-DSA-SHAKE-128f — FIPS 203/204/205 — (`pqc.rs`), each covered by regression tests. Genuinely unimplemented pieces (full FHE, Classic McEliece, Falcon, circuit proof systems, garbled circuits/BGW/GMW) return a structured `UnsupportedOperation` error instead of a placeholder. Real caveats remain, per the module's own doc comment: the RustCrypto PQC crates state they are not independently audited, and the Paillier/Schnorr implementations use `num-bigint`'s non-constant-time `modpow`, so neither is hardened against a local timing attacker.
 
 - ✅ **Incremental Learning** (`training.rs`)
   - On-device training loop (`OnDeviceTrainer`, `OnDeviceTrainingConfig`)
@@ -462,7 +462,7 @@ let recommendations = battery_mgr.get_optimization_recommendations();
 - Federated learning requires network connectivity
 - ARKit requires iPhone XS or newer
 - Some features iOS 16+/Android 12+ only
-- ⚠️ `advanced_security.rs` implements post-quantum KEM (Kyber/McEliece stand-ins), homomorphic encryption, and secure multi-party computation as simplified/mock reference code, not audited cryptography
+- ⚠️ **Updated 2026-08-18**: `advanced_security.rs` implements real post-quantum KEM/signatures (ML-KEM-768/ML-DSA-65/SLH-DSA-SHAKE-128f, FIPS 203/204/205, via `ml-kem`/`ml-dsa`/`slh-dsa`), real Paillier homomorphic encryption, and real Shamir secret sharing — not mock reference code. The remaining caveat is narrower than before: the underlying RustCrypto PQC crates state they haven't been independently audited, and the Paillier/Schnorr code's `num-bigint`-based `modpow` isn't constant-time (a local-timing-attacker concern, not a correctness one).
 - ⚠️ `react-native-plugin/` ships an example only — no installable npm package source is present in this repository
 - ⚠️ Flutter/Unity/iOS/Android sub-packages version independently at `1.0.0` and do not track the workspace `0.2.1` release
 - ⚠️ **Newly found 2026-07-09**: `tflite_nnapi_delegate.rs` is fully written (real `#[cfg(feature = "tflite-nnapi")]` gates internally) but has no `pub mod` declaration in `lib.rs` — the `tflite-nnapi` Cargo feature currently gates nothing. Not yet triaged; see [Future Enhancements](#future-enhancements).

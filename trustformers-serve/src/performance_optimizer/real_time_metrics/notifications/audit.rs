@@ -9,13 +9,11 @@ use tracing::debug;
 /// Audit system for tracking notifications
 #[derive(Debug)]
 
-pub struct AuditSystem {
-    config: NotificationConfig,
-}
+pub struct AuditSystem {}
 
 impl AuditSystem {
-    pub async fn new(config: NotificationConfig) -> Result<Self> {
-        Ok(Self { config })
+    pub async fn new(_config: NotificationConfig) -> Result<Self> {
+        Ok(Self {})
     }
 
     pub async fn start(&self) -> Result<()> {

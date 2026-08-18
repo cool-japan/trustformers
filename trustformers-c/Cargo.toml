@@ -41,7 +41,6 @@ training = ["trustformers-training"]
 gpu = ["cuda"]
 cuda = ["trustformers-core/cuda", "cudarc", "half"]
 rocm = ["trustformers-core/rocm"]
-candle = ["trustformers-core/candle"]
 # Cross-platform optimizations
 arm64 = []
 apple-silicon = ["arm64"]

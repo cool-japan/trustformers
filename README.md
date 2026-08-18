@@ -6,7 +6,7 @@
 
 A high-performance, memory-safe Rust implementation of Hugging Face Transformers. TrustformeRS brings the power of transformer models to the Rust ecosystem with zero-cost abstractions, fearless concurrency, and deployment flexibility from edge to cloud.
 
-> **Project Status (alpha)**: TrustformeRS 0.2.1 (in development, last verified 2026-07-09) is a large Pure-Rust transformer stack — 2,970 Rust files, ~1.41M lines (~1.17M lines of code, via `tokei`) across 10 crates and 49+ transformer architectures — together with multi-platform packaging (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, and RLHF/DPO training scaffolding).
+> **Project Status (alpha)**: TrustformeRS 0.2.1 (in development, last verified 2026-08-18) is a large Pure-Rust transformer stack — 3,029 Rust files, ~1.53M lines (~1.28M lines of code, via `tokei`) across 10 crates and 49+ transformer architectures — together with multi-platform packaging (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, and RLHF/DPO training scaffolding).
 >
 > **Honest maturity note**: today's compute path is primarily **CPU and `f32`**. F16/BF16 are supported as a storage/serialization format but are upcast to `f32` for arithmetic (native low-precision kernels are on the roadmap). GPU acceleration is **real** (CUDA via the Pure-Rust `oxicuda` backend, Metal via `objc2`/`oxicuda-metal`, WebGPU via `wgpu`) but is currently wired end-to-end **only for GPT-2 and RetNet** (0.2.0 added a GPU-resident CUDA attention path for GPT-NeoX too, but it is **prefill-only** — no KV-cached decode, since its `Layer` trait carries no cache); the remaining backends (ROCm, Vulkan, OpenCL) are feature-gated and experimental, and **TPU is a placeholder, not implemented**. Several newer architectures are still being completed. See [Development Status](#-development-status) for the precise maturity of each area.
 
@@ -38,19 +38,19 @@ TrustformeRS follows a modular workspace structure inspired by Hugging Face Tran
 
 ```
 trustformers/
-├── trustformers-core/      # Core traits and tensor abstractions  (192,853 SLoC, Stable)
-├── trustformers-models/    # 49+ model implementations           (184,613 SLoC, Alpha)
-├── trustformers-tokenizers/# BPE, WordPiece, SentencePiece       ( 48,834 SLoC, Stable)
-├── trustformers-optim/     # 20+ optimizers and LR schedulers    ( 74,579 SLoC, Stable)
-├── trustformers-training/  # Distributed training, RLHF/DPO      ( 87,064 SLoC, Stable)
-├── trustformers-serve/     # REST/gRPC/GraphQL serving           (331,210 SLoC, Stable)
-├── trustformers-wasm/      # WebAssembly + WebGPU deployment     ( 53,687 SLoC, Stable)
-├── trustformers-mobile/    # iOS/Android deployment              (121,376 SLoC, Alpha)
-├── trustformers-debug/     # Profilers, visualizers, TensorBoard (100,417 SLoC, Alpha)
-└── trustformers/           # High-level integration crate        (132,507 SLoC, Alpha)
+├── trustformers-core/      # Core traits and tensor abstractions  (177,666 SLoC, Stable)
+├── trustformers-models/    # 49+ model implementations           (187,233 SLoC, Alpha)
+├── trustformers-tokenizers/# BPE, WordPiece, SentencePiece       ( 45,325 SLoC, Stable)
+├── trustformers-optim/     # 20+ optimizers and LR schedulers    ( 65,983 SLoC, Stable)
+├── trustformers-training/  # Distributed training, RLHF/DPO      ( 83,254 SLoC, Stable)
+├── trustformers-serve/     # REST/gRPC/GraphQL serving           (278,397 SLoC, Stable)
+├── trustformers-wasm/      # WebAssembly + WebGPU deployment     ( 48,359 SLoC, Stable)
+├── trustformers-mobile/    # iOS/Android deployment              (110,744 SLoC, Alpha)
+├── trustformers-debug/     # Profilers, visualizers, TensorBoard ( 88,450 SLoC, Alpha)
+└── trustformers/           # High-level integration crate        (121,709 SLoC, Alpha)
 ```
 
-**Total**: ~1.33M SLoC across these 10 crates; **2,970 Rust files, ~1.41M lines total (~1.17M lines of code)** across the full repository including bindings/examples/tooling (via `tokei`, 2026-07-09). 100% Pure Rust source (COOLJAPAN Policy) — default-feature builds are C/C++-free for every crate except `trustformers-serve` (accepted exception: rustls/aws-lc-rs TLS for the HTTP server).
+**Total**: ~1.21M SLoC across these 10 crates; **3,029 Rust files, ~1.53M lines total (~1.28M lines of code)** across the full repository including bindings/examples/tooling (via `tokei`, 2026-08-18). Both figures moved since the last count (2026-07-09): several crates shrank from deleting orphaned/dead code (an unsound, never-mounted auth module cluster in `trustformers-serve`; an orphaned `performance_optimizer/core` subtree; assorted dead duplicate files), while `trustformers-models` and `trustformers-training` grew from real implementation work. 100% Pure Rust source (COOLJAPAN Policy) — default-feature builds are C/C++-free for every crate except `trustformers-serve` (accepted exception: rustls/aws-lc-rs TLS for the HTTP server).
 
 ### Design Principles
 
@@ -351,6 +351,9 @@ let outputs = model.forward(inputs)?;
 </table>
 
 ## 🎯 Development Status
+
+### In Progress (0.2.1, unreleased)
+A production-grade honesty and correctness pass across the workspace: fabricated/placeholder logic replaced with real implementations or structured errors (model checkpoint loading, OpenAI-compatible serving, cloud-provider integrations, mobile post-quantum crypto now real FIPS 203/204/205, and more), an unsound RS256 auth-bypass module deleted, five deadlock-class bugs fixed, and dependency hygiene tightened (`cargo deny check bans`/`check licenses` now pass). See [`CHANGELOG.md`](CHANGELOG.md#021---unreleased) for the full list and [`TODO.md`](TODO.md) for what is verified still open — including one currently-failing hygiene test and 7 open `cargo deny check advisories` findings that this cycle's own dependency cleanup introduced.
 
 ### Completed Features (v0.2.0 - 2026-07-09)
 - [x] **CUDA gains a GPU-resident attention pipeline**: a new `gpu_ops::cuda::oxicuda::attention` module (QKV head-gather, RoPE, causal softmax, prefill/decode attention, KV-cache concat, residual add) gives CUDA the same fully device-resident chain the Metal backend already had. GPT-2 (`Gpt2Attention::cuda_resident_attention`) uses it for zero-host-round-trip prefill **and** incremental KV-cached decode; GPT-NeoX (`GPTNeoXAttention::cuda_resident_forward`) uses it for prefill only, since its `Layer` trait carries no KV cache.

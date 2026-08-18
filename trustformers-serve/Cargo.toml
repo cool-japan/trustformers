@@ -2,6 +2,7 @@
 name = "trustformers-serve"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "High-performance inference server for TrustformeRS models"
@@ -130,13 +131,18 @@ aws-sdk-cloudwatch.workspace = true
 # Optional: gated behind the `lambda` feature. Pulls the banned `brotli` crate,
 # so it is excluded from the default Pure-Rust dependency tree.
 lambda-web = { workspace = true, optional = true }
-lambda_runtime.workspace = true
-google-cloud-gax.workspace = true
-google-cloud-functions-v2.workspace = true
-azure_core.workspace = true
-azure_identity.workspace = true
-azure_mgmt_machinelearningservices.workspace = true
-azure_mgmt_web.workspace = true
+#
+# Deliberately NOT declared here: `lambda_runtime`, `google-cloud-gax`,
+# `google-cloud-functions-v2`, `azure_core`, `azure_identity`,
+# `azure_mgmt_machinelearningservices` and `azure_mgmt_web`. Each was a
+# non-optional dependency with zero references anywhere in `src/` — verify with
+# `grep -rn 'lambda_runtime\|google_cloud\|azure_core\|azure_identity\|azure_mgmt' src/`.
+# The Azure and Google serverless providers in `src/serverless/` return
+# `ServerlessError::NotImplemented` rather than calling any SDK, so nothing was
+# lost by removing them. The AWS SDKs below are kept: they have real call sites
+# (CloudWatch alone has 29). Dropping `azure_core`/`azure_identity` also removed
+# the last unwrapped `flate2` parent from the dependency graph — see the
+# compression section of the workspace `deny.toml`.
 
 # Internal dependencies
 trustformers-core.workspace = true

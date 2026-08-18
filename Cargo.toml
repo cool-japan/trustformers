@@ -54,10 +54,14 @@ thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
+# Maintained drop-in fork of the archived `serde_yaml` (RUSTSEC-2024-0320).
+# Crates are migrated one at a time; both entries coexist until the last
+# `serde_yaml` consumer is gone.
+serde_yaml_ng = "0.10.0"
 semver = { version = "1.0.28", features = ["serde"] }
 tokio = { version = "1.52.3", features = ["full"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 log = "0.4.33"
 lazy_static = "1.5.0"
 reqwest = { version = "0.13.4", features = ["json", "stream", "blocking", "form", "query"] }
@@ -132,7 +136,6 @@ regex-automata = { version = "0.4.18", default-features = false, features = ["st
 minijinja = "2.24.0"
 
 # Optional dependencies for different backends
-candle-core = "0.11.0"
 safetensors = "0.8"
 
 # Web/Server dependencies  
@@ -157,6 +160,13 @@ tonic-prost-build = "0.14.6"
 wasm-bindgen = { version = "0.2.126", features = ["serde-serialize"] }
 wasm-bindgen-futures = "0.4.76"
 js-sys = "0.3.103"
+# `serde` <-> `JsValue` bridge, the pure-Rust allocator used for `wasm32`
+# builds, and the `wasm-bindgen` test harness. Declared here so the versions
+# live in one place, exactly like every other shared dependency; the members
+# add only `optional` / extra `features`.
+serde-wasm-bindgen = "0.6.5"
+dlmalloc = "0.2.14"
+wasm-bindgen-test = "0.3.77"
 web-sys = { version = "0.3.103", features = [
     "console",
     "Navigator",
@@ -319,7 +329,6 @@ crossterm = "0.29"
 ratatui = "0.30"
 gif = "0.14"
 image = "0.25.10"
-ffmpeg-next = "8.1"
 statrs = "0.18"
 md5 = "0.8"
 

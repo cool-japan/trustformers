@@ -603,24 +603,48 @@ impl MobileQuantizer for FP16Quantizer {
         Ok(()) // No calibration needed
     }
 
+    /// Quantize to a genuinely `Tensor::F16`-backed tensor (2 bytes/element
+    /// in `half::f16`'s own `ArrayD`, via `trustformers_core::Tensor`'s
+    /// real `F16` variant) rather than rounding through `f16` for numerical
+    /// fidelity and then storing the result as `f32` again. The previous
+    /// implementation did exactly that round-trip-then-widen, so the
+    /// "quantized" tensor it returned occupied the same 4 bytes/element as
+    /// the original input -- `QuantizationScheme::FP16` was reported but
+    /// delivered 0% of the ~2x memory reduction FP16 quantization is
+    /// supposed to provide.
     fn quantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
         let tensor_data = tensor.data()?;
+        let shape = tensor.shape();
 
-        // Convert to FP16
         let fp16_data: Vec<f16> = tensor_data.iter().map(|&x| f16::from_f32(x)).collect();
+        let array = ArrayD::from_shape_vec(IxDyn(&shape), fp16_data).map_err(|e| {
+            tensor_op_error(
+                "FP16Quantizer::quantize_tensor",
+                format!("shape {shape:?} incompatible with element count: {e}"),
+            )
+        })?;
 
-        // Convert back to f32 for storage (temporary - in real implementation would store as f16)
-        let quantized_data: Vec<f32> = fp16_data.iter().map(|&x| f32::from(x)).collect();
-
-        let quantized_tensor = Tensor::from_vec(quantized_data, &tensor.shape())?;
-        // Note: Quantization parameters stored separately (tensor doesn't support metadata)
-
-        Ok(quantized_tensor)
+        Ok(Tensor::F16(array))
     }
 
+    /// Convert a real `Tensor::F16` back to `Tensor::F32` for compute.
+    /// `trustformers_core::Tensor::to_f32`/`to_dtype` do not (yet) cover
+    /// `F16` as a source dtype, so the widening is done directly here
+    /// against the `Tensor::F16` variant's own public `ArrayD<half::f16>`
+    /// payload -- still real per-element conversion, just performed in
+    /// this crate rather than delegated to core.
     fn dequantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        // FP16 quantization is lossless within range, so just return clone
-        Ok(tensor.clone())
+        match tensor {
+            Tensor::F16(array) => Ok(Tensor::F32(array.mapv(f32::from))),
+            Tensor::F32(_) => Ok(tensor.clone()),
+            other => Err(tensor_op_error(
+                "FP16Quantizer::dequantize_tensor",
+                format!(
+                    "expected an F16 (or already-F32) tensor, got {:?}",
+                    other.dtype()
+                ),
+            )),
+        }
     }
 }
 
@@ -933,6 +957,58 @@ mod tests {
         let error = QuantizationUtils::compute_error(&tensor, &dequantized)
             .expect("Error computation failed");
         assert!(error < 0.001);
+    }
+
+    /// Regression test for the previous `FP16Quantizer::quantize_tensor`,
+    /// which rounded values through `f16` and then immediately converted
+    /// them back to `f32` for storage -- the returned tensor was always
+    /// `Tensor::F32` (4 bytes/element), identical memory footprint to the
+    /// unquantized input, despite `get_scheme()` reporting
+    /// `QuantizationScheme::FP16`. A real fix must return a genuine
+    /// `Tensor::F16` (2 bytes/element via `half::f16`), and
+    /// `dequantize_tensor` must convert it back to `Tensor::F32` for
+    /// compute.
+    #[test]
+    fn test_fp16_quantize_tensor_stores_real_f16_not_widened_f32() {
+        let quantizer = FP16Quantizer::new();
+        let tensor = Tensor::from_vec(vec![1.5, -2.25, 3.75, 4.0], &[2, 2]).expect("tensor");
+
+        let quantized = quantizer.quantize_tensor(&tensor).expect("quantize failed");
+        assert!(
+            matches!(quantized, Tensor::F16(_)),
+            "quantize_tensor must return a real Tensor::F16, not a widened Tensor::F32"
+        );
+        assert_eq!(quantized.shape(), tensor.shape());
+
+        // Round-tripping back through dequantize must recover values that
+        // are close (fp16 has ~3 decimal digits of precision) to the
+        // originals, and the dequantized tensor must be directly usable as
+        // f32 again (`.data()` must succeed).
+        let dequantized = quantizer.dequantize_tensor(&quantized).expect("dequantize failed");
+        assert!(matches!(dequantized, Tensor::F32(_)));
+        let recovered = dequantized.data().expect("dequantized data");
+        for (original, got) in [1.5, -2.25, 3.75, 4.0].iter().zip(recovered.iter()) {
+            assert!(
+                (original - got).abs() < 0.01,
+                "expected ~{original}, got {got}"
+            );
+        }
+    }
+
+    /// `dequantize_tensor` must not silently pass through non-F16 tensors
+    /// as if they were already-dequantized data; an unexpected dtype should
+    /// be a structured error, not a fabricated success.
+    #[test]
+    fn test_fp16_dequantize_rejects_unexpected_dtype() {
+        let quantizer = FP16Quantizer::new();
+        let int_tensor = Tensor::I64(
+            scirs2_core::ndarray::ArrayD::from_shape_vec(
+                scirs2_core::ndarray::IxDyn(&[2]),
+                vec![1i64, 2i64],
+            )
+            .expect("array"),
+        );
+        assert!(quantizer.dequantize_tensor(&int_tensor).is_err());
     }
 
     #[test]

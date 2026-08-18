@@ -344,6 +344,354 @@ fn gpt2_published_names_load_back_through_load_pretrained() {
     );
 }
 
+/// Write a real `model.safetensors` into `directory` and return the directory.
+///
+/// The HuggingFace loader (`auto_create_loader`) discovers a bare
+/// `model.safetensors` in a directory with no index file, which is exactly the
+/// layout a single-shard HuggingFace repository has — so LLaMA's and Mistral's
+/// real `load_from_path` runs unmodified against it.
+fn write_checkpoint_directory(
+    directory: &std::path::Path,
+    tensors: &[(String, Vec<usize>, Vec<f32>)],
+) {
+    std::fs::create_dir_all(directory).expect("checkpoint directory must be creatable");
+    std::fs::write(
+        directory.join("model.safetensors"),
+        build_safetensors(tensors),
+    )
+    .expect("checkpoint must be writable");
+}
+
+/// The `(name, shape, values)` triples of a model's published parameters, in the
+/// form [`build_safetensors`] and [`write_checkpoint_directory`] want.
+fn checkpoint_entries(
+    snapshot: &HashMap<String, (Vec<usize>, Vec<f32>)>,
+) -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    snapshot
+        .iter()
+        .map(|(name, (shape, values))| (name.clone(), shape.clone(), values.clone()))
+        .collect()
+}
+
+/// The same claim as the GPT-2 test, for BERT: a checkpoint keyed by exactly the
+/// names `named_tensors` publishes must load through the real
+/// `Model::load_pretrained`, which goes through `Checkpoint`/`WeightBinder` and
+/// the `BertLayerNames::bert()` table.
+///
+/// # Why this is stronger than the GGUF round trip
+///
+/// `bert_and_llama_round_trip_through_gguf` compares `named_tensors` → file →
+/// `named_tensors`: both sides come from the same name table, so a table that
+/// disagreed with the *loader* would still pass. Here the file is consumed by the
+/// loader's own name map, so any divergence — a renamed sub-module, a missing
+/// `LayerNorm`, a `gamma`/`weight` spelling drift — fails the load or leaves a
+/// value behind.
+#[test]
+fn bert_published_names_load_back_through_load_pretrained() {
+    let config = BertConfig {
+        vocab_size: 12,
+        hidden_size: 8,
+        num_hidden_layers: 2,
+        num_attention_heads: 2,
+        intermediate_size: 16,
+        max_position_embeddings: 8,
+        type_vocab_size: 2,
+        hidden_dropout_prob: 0.0,
+        attention_probs_dropout_prob: 0.0,
+        ..BertConfig::default()
+    };
+
+    let mut source = BertModel::new(config.clone()).expect("tiny BERT must build");
+    install_known_weights(&mut source, 2.5);
+    let expected = snapshot(&source);
+
+    let bytes = build_safetensors(&checkpoint_entries(&expected));
+
+    let mut loaded = BertModel::new(config).expect("tiny BERT must build");
+    assert_ne!(
+        snapshot(&loaded),
+        expected,
+        "the fresh model must start out different, or the test proves nothing"
+    );
+
+    let mut cursor = std::io::Cursor::new(bytes);
+    loaded
+        .load_pretrained(&mut cursor)
+        .expect("a checkpoint keyed by BERT's own published names must load");
+
+    assert_eq!(
+        snapshot(&loaded),
+        expected,
+        "every published BERT name must round-trip through the real loader"
+    );
+}
+
+/// LLaMA's loader is path-based (`load_from_path`), so the checkpoint is written
+/// to a real directory and read back by the real HuggingFace loader.
+///
+/// # Why the assertion is on values, not on `Ok(())`
+///
+/// `LlamaModel::load_from_path_with_config` fetches each tensor with
+/// `if let Ok(..) = loader.load_tensor(name)`, so a name the file does not carry
+/// is skipped silently and the load still returns `Ok(())`. Comparing the whole
+/// snapshot afterwards is therefore the only assertion that actually detects a
+/// divergence between the published names and the names the loader looks up: a
+/// skipped tensor keeps its random initialisation and the comparison fails.
+#[test]
+fn llama_published_names_load_back_through_the_real_loader() {
+    let scratch = ScratchDir::new("loader_llama");
+    let directory = scratch.join("checkpoint");
+
+    let config = LlamaConfig {
+        vocab_size: 12,
+        hidden_size: 8,
+        intermediate_size: 16,
+        num_hidden_layers: 2,
+        num_attention_heads: 2,
+        num_key_value_heads: None,
+        max_position_embeddings: 8,
+        ..LlamaConfig::default()
+    };
+
+    let mut source = LlamaForCausalLM::new(config.clone()).expect("tiny LLaMA must build");
+    install_known_weights(&mut source, 5.5);
+    let expected = snapshot(&source);
+
+    write_checkpoint_directory(&directory, &checkpoint_entries(&expected));
+
+    let mut loaded = LlamaForCausalLM::new(config).expect("tiny LLaMA must build");
+    assert_ne!(
+        snapshot(&loaded),
+        expected,
+        "the fresh model must start out different, or the test proves nothing"
+    );
+
+    loaded
+        .load_from_path(&directory)
+        .expect("LLaMA must load its own published names");
+
+    assert_eq!(
+        snapshot(&loaded),
+        expected,
+        "every published LLaMA name must be a name `load_from_path` looks up"
+    );
+}
+
+/// Pin the LLaMA/Mistral loader's **silent-skip** behaviour, so the tests above
+/// cannot be misread as proving something they do not.
+///
+/// `LlamaModel::load_from_path_with_config` (and Mistral's copy of it) wraps
+/// every fetch in `if let Ok(..) = loader.load_tensor(name)`. An empty
+/// checkpoint therefore loads successfully and changes nothing: no error, no
+/// report, no signal that a caller pointed at the wrong directory.
+///
+/// This is not an assertion that the behaviour is *good* — it is the opposite of
+/// what BERT's strict `WeightBinder`-based loader does, and a caller that wants
+/// to know whether weights arrived cannot find out from the return value. It is
+/// asserted here so that (a) the value-equality assertions in the tests above
+/// are understood to be load-bearing rather than decorative, and (b) tightening
+/// the loader later shows up as a deliberate change to this test rather than as
+/// a surprise.
+#[test]
+fn llama_loader_silently_ignores_a_checkpoint_with_no_matching_names() {
+    let scratch = ScratchDir::new("loader_llama_silent_skip");
+    let directory = scratch.join("checkpoint");
+
+    let config = LlamaConfig {
+        vocab_size: 12,
+        hidden_size: 8,
+        intermediate_size: 16,
+        num_hidden_layers: 1,
+        num_attention_heads: 2,
+        num_key_value_heads: None,
+        max_position_embeddings: 8,
+        ..LlamaConfig::default()
+    };
+
+    let mut model = LlamaForCausalLM::new(config).expect("tiny LLaMA must build");
+    install_known_weights(&mut model, 9.0);
+    let before = snapshot(&model);
+
+    // A real, parseable safetensors file whose single tensor matches no name the
+    // loader ever asks for.
+    write_checkpoint_directory(
+        &directory,
+        &[(
+            "not.a.llama.parameter".to_string(),
+            vec![2, 2],
+            vec![1.0, 2.0, 3.0, 4.0],
+        )],
+    );
+
+    model
+        .load_from_path(&directory)
+        .expect("the loader tolerates a checkpoint with no recognised names");
+
+    assert_eq!(
+        snapshot(&model),
+        before,
+        "nothing matched, so nothing may have changed — the load is a silent no-op"
+    );
+}
+
+/// Mistral repeats the LLaMA claim under grouped-query attention, where `k_proj`
+/// and `v_proj` are genuinely narrower than `q_proj` — a shape a loader that
+/// guessed from `hidden_size` would get wrong, and which `set_weight` would then
+/// reject.
+#[test]
+fn mistral_published_names_load_back_through_the_real_loader() {
+    let scratch = ScratchDir::new("loader_mistral");
+    let directory = scratch.join("checkpoint");
+
+    let config = MistralConfig {
+        vocab_size: 12,
+        hidden_size: 8,
+        intermediate_size: 16,
+        num_hidden_layers: 2,
+        num_attention_heads: 4,
+        num_key_value_heads: 2,
+        max_position_embeddings: 16,
+        sliding_window: None,
+        attention_dropout: 0.0,
+        ..MistralConfig::default()
+    };
+
+    let mut source = MistralForCausalLM::new(config.clone()).expect("tiny Mistral must build");
+    install_known_weights(&mut source, 13.5);
+    let expected = snapshot(&source);
+
+    write_checkpoint_directory(&directory, &checkpoint_entries(&expected));
+
+    let mut loaded = MistralForCausalLM::new(config).expect("tiny Mistral must build");
+    assert_ne!(
+        snapshot(&loaded),
+        expected,
+        "the fresh model must start out different, or the test proves nothing"
+    );
+
+    loaded
+        .load_from_path(&directory)
+        .expect("Mistral must load its own published names");
+
+    assert_eq!(
+        snapshot(&loaded),
+        expected,
+        "every published Mistral name must be a name `load_from_path` looks up"
+    );
+}
+
+/// T5's loader takes a [`trustformers_core::traits::WeightReader`], so the
+/// checkpoint bytes are parsed by the real `Checkpoint` and handed over through
+/// `CheckpointReader` — the same adapter a downloaded file goes through.
+///
+/// T5's reader is strict: `read_tensor` returns an error for an unknown name, so
+/// a single divergence between `named_tensors` and `T5Stack::load_weights` fails
+/// the call outright rather than being papered over.
+#[test]
+fn t5_published_names_load_back_through_the_real_reader() {
+    use trustformers_models::weight_loading::CheckpointReader;
+
+    let config = T5Config {
+        vocab_size: 10,
+        d_model: 4,
+        d_kv: 2,
+        d_ff: 8,
+        num_layers: 2,
+        num_decoder_layers: Some(2),
+        num_heads: 2,
+        relative_attention_num_buckets: 4,
+        dropout_rate: 0.0,
+        ..T5Config::default()
+    };
+
+    let mut source = T5Model::new(config.clone()).expect("tiny T5 must build");
+    install_known_weights(&mut source, 11.5);
+    let expected = snapshot(&source);
+
+    let bytes = build_safetensors(&checkpoint_entries(&expected));
+
+    let mut loaded = T5Model::new(config).expect("tiny T5 must build");
+    assert_ne!(
+        snapshot(&loaded),
+        expected,
+        "the fresh model must start out different, or the test proves nothing"
+    );
+
+    let mut cursor = std::io::Cursor::new(bytes);
+    let mut reader = CheckpointReader::from_reader(&mut cursor).expect("checkpoint must parse");
+    loaded
+        .load_weights_from_reader(&mut reader)
+        .expect("a checkpoint keyed by T5's own published names must load");
+
+    assert_eq!(
+        snapshot(&loaded),
+        expected,
+        "every published T5 name must round-trip through the real reader"
+    );
+}
+
+/// The one deliberate asymmetry in the five families, pinned so it cannot drift
+/// into a silent bug: `T5ForConditionalGeneration` *publishes* `lm_head.weight`
+/// (it owns a distinct tensor, and the trait forbids listing `shared.weight`
+/// twice), but `load_weights_from_reader` never reads an `lm_head.weight` key —
+/// it re-ties the head by copying `shared.weight`, which is what HuggingFace's
+/// `tie_word_embeddings` means for T5.
+///
+/// So a checkpoint written from `named_tensors` round-trips everywhere *except*
+/// the head, which comes back tied. Asserting the tie (rather than equality with
+/// the source head) states the real behaviour instead of hiding it.
+#[test]
+fn t5_conditional_generation_reader_ties_the_lm_head_to_shared() {
+    use trustformers_models::weight_loading::CheckpointReader;
+
+    let config = T5Config {
+        vocab_size: 10,
+        d_model: 4,
+        d_kv: 2,
+        d_ff: 8,
+        num_layers: 1,
+        num_decoder_layers: Some(1),
+        num_heads: 2,
+        relative_attention_num_buckets: 4,
+        dropout_rate: 0.0,
+        ..T5Config::default()
+    };
+
+    let mut source =
+        T5ForConditionalGeneration::new(config.clone()).expect("tiny T5 LM must build");
+    install_known_weights(&mut source, 17.5);
+    let expected = snapshot(&source);
+
+    let shared = expected.get("shared.weight").cloned().expect("shared table is published");
+    let source_head = expected.get("lm_head.weight").cloned().expect("head is published");
+    assert_ne!(
+        source_head, shared,
+        "the fixture must start with an untied head, or the tie proves nothing"
+    );
+
+    let bytes = build_safetensors(&checkpoint_entries(&expected));
+
+    let mut loaded = T5ForConditionalGeneration::new(config).expect("tiny T5 LM must build");
+    let mut cursor = std::io::Cursor::new(bytes);
+    let mut reader = CheckpointReader::from_reader(&mut cursor).expect("checkpoint must parse");
+    loaded
+        .load_weights_from_reader(&mut reader)
+        .expect("T5 LM must load its published names");
+
+    let after = snapshot(&loaded);
+    for (name, value) in &expected {
+        if name == "lm_head.weight" {
+            continue;
+        }
+        assert_eq!(after.get(name), Some(value), "'{name}' must round-trip");
+    }
+    assert_eq!(
+        after.get("lm_head.weight"),
+        Some(&shared),
+        "the reader ties the head to `shared.weight` rather than reading `lm_head.weight`"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GGUF round trip
 // ---------------------------------------------------------------------------
@@ -847,6 +1195,89 @@ fn gpt2_parameters_round_trip_through_the_real_onnx_exporter() {
             (actual - expected).abs() <= 1e-4 * expected.abs().max(1.0),
             "output[{index}] = {actual}, expected {expected}"
         );
+    }
+}
+
+/// The breadth companion to the test above: **every** parameter GPT-2 publishes
+/// survives the real ONNX encoder and decoder, not just the one the Gemm node
+/// happens to consume.
+///
+/// The previous test proves the pipeline works end to end for a single tensor
+/// (it also *executes* the graph); it cannot catch a per-tensor encoding bug —
+/// an odd rank mishandled in the `dims` varint packing, a name with a `.` in it
+/// truncated, a length-prefix that only happens to be right for a [8, 4] tensor.
+/// Feeding all 30 of the tiny model's parameters through as initializers turns
+/// each of those into a failing assertion.
+///
+/// Unreferenced initializers are valid ONNX (they are just constants no node
+/// reads), so the graph stays the same one-node graph; only the decode side is
+/// checked here, since executing it would exercise nothing new.
+#[test]
+fn every_gpt2_parameter_survives_the_onnx_encoder() {
+    let scratch = ScratchDir::new("onnx_all_parameters");
+    let path = scratch.join("tiny_gpt2_all.onnx");
+
+    let mut model = Gpt2Model::new(tiny_gpt2_config()).expect("tiny GPT-2 must build");
+    install_known_weights(&mut model, 4.75);
+    let expected = snapshot(&model);
+    assert!(
+        expected.len() > 20,
+        "the fixture must carry enough tensors to be a breadth check, got {}",
+        expected.len()
+    );
+
+    let named = model.named_tensors();
+    let initializers: Vec<ONNXTensor> = named
+        .iter()
+        .map(|(name, tensor)| initializer_from_parameter(name, tensor))
+        .collect();
+
+    // One trivial node so the graph is structurally well-formed; the parameters
+    // ride along as constants.
+    let graph = ONNXGraph {
+        name: "gpt2_all_parameters".to_string(),
+        nodes: vec![ONNXNode {
+            op_type: "Identity".to_string(),
+            inputs: vec!["hidden".to_string()],
+            outputs: vec!["passthrough".to_string()],
+            attributes: HashMap::new(),
+            name: "identity".to_string(),
+        }],
+        inputs: vec![float_value_info("hidden", vec![1, 4])],
+        outputs: vec![float_value_info("passthrough", vec![1, 4])],
+        initializers,
+    };
+
+    let exporter = ONNXExporter::new();
+    let onnx_model = exporter.wrap_graph(graph, &ExportConfig::default());
+    exporter.export_graph(&onnx_model, &path).expect("ONNX export must succeed");
+
+    let bytes = std::fs::read(&path).expect("read back");
+    let decoded = decode_model(&bytes).expect("the real decoder must parse our own output");
+    assert_eq!(
+        decoded.graph.initializers.len(),
+        expected.len(),
+        "every published parameter must appear in the file exactly once"
+    );
+
+    for (name, (shape, values)) in &expected {
+        let initializer = decoded
+            .graph
+            .initializers
+            .iter()
+            .find(|tensor| &tensor.name == name)
+            .unwrap_or_else(|| panic!("initializer '{name}' missing from the decoded file"));
+
+        let decoded_shape: Vec<usize> =
+            initializer.dims.iter().map(|&dimension| dimension as usize).collect();
+        assert_eq!(&decoded_shape, shape, "shape of '{name}'");
+
+        let round_tripped: Vec<f32> = initializer
+            .raw_data
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        assert_eq!(&round_tripped, values, "values of '{name}'");
     }
 }
 

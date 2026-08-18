@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use prometheus::core::{Atomic, AtomicF64};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::info;
 
@@ -398,8 +398,6 @@ pub struct AnalyticsEngine {
     pattern_analyzer: Arc<PatternAnalyzer>,
     /// Performance analyzer
     performance_analyzer: Arc<PerformanceAnalyzer>,
-    /// Analytics configuration
-    config: Arc<RwLock<AnalyticsConfig>>,
     /// Engine statistics
     stats: Arc<AnalyticsStats>,
     /// Shutdown flag
@@ -422,7 +420,6 @@ impl AnalyticsEngine {
             quality_analyzer: Arc::new(QualityAnalyzer::new().await?),
             pattern_analyzer: Arc::new(PatternAnalyzer::new().await?),
             performance_analyzer: Arc::new(PerformanceAnalyzer::new().await?),
-            config: Arc::new(RwLock::new(config)),
             stats: Arc::new(AnalyticsStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };

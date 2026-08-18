@@ -380,3 +380,36 @@ async fn test_quality_score_instant_delivery_bounded() {
         "responsiveness must be in [0.0, 1.0] for instant delivery"
     );
 }
+
+/// Regression: `calculate_advanced_metrics` used to hold its `metrics_window`
+/// read guard (and its `historical_metrics` guard) across the call to
+/// `calculate_performance_benchmarks`, which independently takes
+/// `self.metrics_window.read().await` again -- unconditionally, before it
+/// even checks whether baseline/historical data exist. `tokio::sync::RwLock`
+/// does not support reentrant same-task reads: a concurrent writer queued in
+/// between (e.g. another task's `analyze_chunk_quality`, which takes
+/// `metrics_window.write().await`) can deadlock the reentrant read forever.
+/// Wrapped in a timeout so a reintroduced regression fails fast with a clear
+/// panic instead of hanging the whole test binary.
+#[tokio::test]
+async fn calculate_advanced_metrics_does_not_deadlock() {
+    let analyzer = QualityAnalyzer::new();
+    let chunk = make_chunk("Regression coverage for calculate_advanced_metrics.", 0.5);
+    for i in 0..5u64 {
+        let delivery_time = Duration::from_millis(50 + i * 10);
+        analyzer.analyze_chunk_quality(&chunk, delivery_time).await;
+    }
+
+    let metrics = tokio::time::timeout(
+        Duration::from_secs(5),
+        analyzer.calculate_advanced_metrics(),
+    )
+    .await
+    .expect("calculate_advanced_metrics must not deadlock");
+
+    assert!(
+        (0.0..=1.0).contains(&metrics.perceptual_quality.fluency),
+        "the metrics must actually be computed from real data, not left uninitialized: {:?}",
+        metrics.perceptual_quality
+    );
+}

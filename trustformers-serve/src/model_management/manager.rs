@@ -471,6 +471,17 @@ impl ModelManager {
         loaded_model
     }
 
+    /// Look at a loaded model without marking it as used.
+    ///
+    /// [`Self::get_loaded_model`] refreshes the LRU stamp, which is right for a
+    /// caller that is about to run inference and wrong for one that is merely
+    /// reporting state: a status query that touched every model would make the
+    /// LRU unloading strategy believe the whole set is hot. Read-only reporting
+    /// paths use this instead.
+    pub fn peek_loaded_model(&self, model_id: &str) -> Option<Arc<LoadedModel>> {
+        self.loaded_models.read().ok()?.get(model_id).cloned()
+    }
+
     /// List all loaded models
     pub fn list_loaded_models(&self) -> Vec<String> {
         self.loaded_models

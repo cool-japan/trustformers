@@ -8,6 +8,162 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::Duration};
 
+/// Read the host's CPU cache hierarchy as `(levels, total bytes)`.
+///
+/// Linux: every cache visible to CPU 0 is published under
+/// `/sys/devices/system/cpu/cpu0/cache/index*/`, with `level` and a `size`
+/// written as e.g. `32K` or `8192K`. Distinct levels are counted once, and the
+/// sizes are summed.
+///
+/// macOS: `sysctl` reports `hw.l1dcachesize`, `hw.l2cachesize` and
+/// `hw.l3cachesize` in bytes; a level is present when its size is non-zero.
+///
+/// Anything else gets [`MeasurementUnavailable`] rather than a guess.
+fn detect_host_cache_hierarchy() -> anyhow::Result<(u8, usize)> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::collections::BTreeSet;
+
+        let base = std::path::Path::new("/sys/devices/system/cpu/cpu0/cache");
+        let entries = std::fs::read_dir(base).map_err(|error| {
+            MeasurementUnavailable::raise(
+                "the CPU cache hierarchy",
+                "the kernel does not publish /sys/devices/system/cpu/cpu0/cache",
+            )
+            .context(error.to_string())
+        })?;
+
+        let mut levels = BTreeSet::new();
+        let mut total = 0usize;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(level) = std::fs::read_to_string(path.join("level")) else {
+                continue;
+            };
+            let Ok(level) = level.trim().parse::<u8>() else {
+                continue;
+            };
+            let Ok(size) = std::fs::read_to_string(path.join("size")) else {
+                continue;
+            };
+            let Some(bytes) = parse_sysfs_cache_size(size.trim()) else {
+                continue;
+            };
+            levels.insert(level);
+            total += bytes;
+        }
+
+        if levels.is_empty() {
+            return Err(MeasurementUnavailable::raise(
+                "the CPU cache hierarchy",
+                "the kernel published no readable cache index for CPU 0",
+            ));
+        }
+        return Ok((levels.len() as u8, total));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut levels = 0u8;
+        let mut total = 0usize;
+        for key in ["hw.l1dcachesize", "hw.l2cachesize", "hw.l3cachesize"] {
+            let output = std::process::Command::new("sysctl").args(["-n", key]).output();
+            let Ok(output) = output else { continue };
+            if !output.status.success() {
+                continue;
+            }
+            let Ok(text) = String::from_utf8(output.stdout) else {
+                continue;
+            };
+            let Ok(bytes) = text.trim().parse::<usize>() else {
+                continue;
+            };
+            if bytes > 0 {
+                levels += 1;
+                total += bytes;
+            }
+        }
+
+        if levels == 0 {
+            return Err(MeasurementUnavailable::raise(
+                "the CPU cache hierarchy",
+                "sysctl reported no non-zero hw.l*cachesize value",
+            ));
+        }
+        return Ok((levels, total));
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(MeasurementUnavailable::raise(
+            "the CPU cache hierarchy",
+            "this platform exposes no cache-topology interface known to this crate",
+        ))
+    }
+}
+
+/// Parse a Linux sysfs cache `size` value such as `32K`, `1M` or `512` into
+/// bytes.
+///
+/// Compiled on Linux, where the detector calls it, and under `cfg(test)`
+/// everywhere else so the parser stays under test on other platforms.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn parse_sysfs_cache_size(value: &str) -> Option<usize> {
+    let value = value.trim();
+    let (digits, multiplier) = match value.chars().last()? {
+        'K' | 'k' => (&value[..value.len() - 1], 1024),
+        'M' | 'm' => (&value[..value.len() - 1], 1024 * 1024),
+        'G' | 'g' => (&value[..value.len() - 1], 1024 * 1024 * 1024),
+        _ => (value, 1),
+    };
+    digits.trim().parse::<usize>().ok().map(|n| n * multiplier)
+}
+
+/// Median of `values`, or `0.0` for an empty slice.
+pub(crate) fn median_of(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
+}
+
+/// Raised when a measurement has no backend on this build.
+///
+/// Several analyses in this module describe hardware behaviour — cache latency,
+/// synthetic benchmark scores, workload characterisation — that cannot be
+/// obtained without either a platform-specific counter API or an actual
+/// benchmark harness. `trustformers-serve` carries neither. Each such analysis
+/// returns this error rather than the constant it used to return.
+#[derive(Debug, thiserror::Error)]
+#[error("{measurement} cannot be measured on this build: {reason}")]
+pub struct MeasurementUnavailable {
+    /// What was asked for.
+    pub measurement: &'static str,
+    /// Why no value can be produced.
+    pub reason: &'static str,
+}
+
+impl MeasurementUnavailable {
+    /// Build the boxed error for `measurement`.
+    ///
+    /// Returns `anyhow::Error` rather than `Self` because every caller
+    /// immediately wraps it in `Err(..)`; naming it `new` would suggest a
+    /// constructor, so it is `raise`.
+    fn raise(measurement: &'static str, reason: &'static str) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            measurement,
+            reason,
+        })
+    }
+}
+
 // ============================================================================
 // Benchmark Suite Types
 // ============================================================================
@@ -47,13 +203,13 @@ impl SyntheticBenchmarkSuite {
         &self,
         _config: &HashMap<String, String>,
     ) -> anyhow::Result<HashMap<String, f64>> {
-        // Placeholder implementation - would execute actual synthetic benchmarks
-        let mut results = HashMap::new();
-        results.insert("cpu_score".to_string(), 100.0);
-        results.insert("memory_bandwidth".to_string(), self.memory_bandwidth);
-        results.insert("storage_iops".to_string(), self.storage_iops as f64);
-        results.insert("network_bandwidth".to_string(), self.network_bandwidth);
-        Ok(results)
+        // The scores this used to return — a constant 100.0 CPU score plus the
+        // struct's own default-initialised fields echoed back — were never
+        // produced by running anything.
+        Err(MeasurementUnavailable::raise(
+            "the synthetic benchmark suite",
+            "no benchmark harness is linked into trustformers-serve",
+        ))
     }
 }
 
@@ -81,13 +237,12 @@ impl RealWorkloadAnalyzer {
         &mut self,
         _config: &HashMap<String, String>,
     ) -> anyhow::Result<HashMap<String, f64>> {
-        // Placeholder implementation - would analyze actual workload patterns
-        self.patterns_analyzed += 1;
-        let mut results = HashMap::new();
-        results.insert("patterns_found".to_string(), self.patterns_analyzed as f64);
-        results.insert("accuracy".to_string(), self.accuracy);
-        results.insert("workload_efficiency".to_string(), 85.0);
-        Ok(results)
+        // `workload_efficiency` was the literal 85.0 and `patterns_found` was
+        // a count of how many times this method had been called.
+        Err(MeasurementUnavailable::raise(
+            "workload pattern analysis",
+            "no workload tracing source is wired into this analyzer",
+        ))
     }
 }
 
@@ -230,12 +385,20 @@ impl CacheDetectionEngine {
         Self::default()
     }
 
-    /// Detect cache hierarchy
+    /// Detect the CPU cache hierarchy, returning `(levels, total bytes)`.
+    ///
+    /// Read from the operating system: Linux publishes every cache index under
+    /// `/sys/devices/system/cpu/cpu0/cache/`, and macOS answers
+    /// `hw.l1dcachesize` / `hw.l2cachesize` / `hw.l3cachesize` through `sysctl`.
+    /// Platforms that expose neither get [`MeasurementUnavailable`].
+    ///
+    /// Before 0.2.1 this assigned `3` levels and `8 MiB` unconditionally and
+    /// reported them as a detection result.
     pub fn detect_cache_hierarchy(&mut self) -> anyhow::Result<(u8, usize)> {
-        // Placeholder - would detect actual cache hierarchy
-        self.cache_levels = 3; // L1, L2, L3
-        self.total_cache_size = 8 * 1024 * 1024; // 8MB
-        Ok((self.cache_levels, self.total_cache_size))
+        let (levels, total) = detect_host_cache_hierarchy()?;
+        self.cache_levels = levels;
+        self.total_cache_size = total;
+        Ok((levels, total))
     }
 }
 
@@ -256,31 +419,40 @@ impl CachePerformanceTester {
 
     /// Test all cache levels
     pub fn test_all_cache_levels(&mut self) -> anyhow::Result<(f64, f64)> {
-        // Placeholder - would test actual cache levels
-        self.hit_rate = 95.0;
-        self.miss_penalty = 100.0;
-        Ok((self.hit_rate, self.miss_penalty))
+        // A 95% hit rate and a 100-cycle miss penalty were written here by
+        // hand; nothing sampled a performance counter.
+        Err(MeasurementUnavailable::raise(
+            "cache hit rate and miss penalty",
+            "reading them needs hardware performance counters (perf_event / \
+             kperf), which this crate does not open",
+        ))
     }
 
     /// Test L1 cache performance
     pub async fn test_l1_cache_performance(&mut self) -> anyhow::Result<f64> {
-        // Placeholder - would test L1 cache performance
-        let l1_latency = 1.0; // ~1 cycle
-        Ok(l1_latency)
+        Err(MeasurementUnavailable::raise(
+            "L1 cache latency",
+            "measuring it needs a pointer-chase benchmark sized to the cache, \
+             which this crate does not run",
+        ))
     }
 
     /// Test L2 cache performance
     pub async fn test_l2_cache_performance(&mut self) -> anyhow::Result<f64> {
-        // Placeholder - would test L2 cache performance
-        let l2_latency = 4.0; // ~4 cycles
-        Ok(l2_latency)
+        Err(MeasurementUnavailable::raise(
+            "L2 cache latency",
+            "measuring it needs a pointer-chase benchmark sized to the cache, \
+             which this crate does not run",
+        ))
     }
 
     /// Test L3 cache performance
     pub async fn test_l3_cache_performance(&mut self) -> anyhow::Result<f64> {
-        // Placeholder - would test L3 cache performance
-        let l3_latency = 40.0; // ~40 cycles
-        Ok(l3_latency)
+        Err(MeasurementUnavailable::raise(
+            "L3 cache latency",
+            "measuring it needs a pointer-chase benchmark sized to the cache, \
+             which this crate does not run",
+        ))
     }
 }
 
@@ -301,10 +473,11 @@ impl CacheOptimizationAnalyzer {
 
     /// Analyze optimization opportunities
     pub fn analyze_optimization_opportunities(&mut self) -> anyhow::Result<(u32, f64)> {
-        // Placeholder - would analyze actual optimization opportunities
-        self.opportunities = 5;
-        self.estimated_improvement = 15.0;
-        Ok((self.opportunities, self.estimated_improvement))
+        // "5 opportunities, 15% improvement" was written here as a literal.
+        Err(MeasurementUnavailable::raise(
+            "cache optimization opportunities",
+            "there is no cache access trace to analyse",
+        ))
     }
 }
 
@@ -325,10 +498,11 @@ impl CacheModelingEngine {
 
     /// Model cache behavior
     pub fn model_cache_behavior(&mut self) -> anyhow::Result<(f64, f64)> {
-        // Placeholder - would model actual cache behavior
-        self.accuracy = 92.5;
-        self.confidence = 88.0;
-        Ok((self.accuracy, self.confidence))
+        // 92.5% accuracy and 88% confidence for a model that was never fitted.
+        Err(MeasurementUnavailable::raise(
+            "cache behaviour modelling",
+            "no cache model is fitted, so it has no accuracy to report",
+        ))
     }
 }
 
@@ -606,16 +780,59 @@ impl OutlierDetector {
         Self::default()
     }
 
-    /// Detect outliers in data
+    /// Detect outliers in `data` with a modified z-score test.
     pub async fn detect_outliers(&mut self, _data: &[f64]) -> anyhow::Result<OutlierResults> {
-        // Placeholder implementation - would detect actual outliers using statistical methods
-        self.outliers_detected += 1;
+        // Modified z-score against the median absolute deviation: robust to the
+        // outliers it is looking for, unlike a mean/stddev rule. A point is an
+        // outlier when its score exceeds `sensitivity` (default 3.5, the
+        // conventional Iglewicz-Hoaglin cutoff).
+        //
+        // This used to increment a counter and return "0 outliers" regardless of
+        // the data, so a run of wild samples reported a clean data set.
+        if _data.is_empty() {
+            return Ok(OutlierResults::default());
+        }
+
+        let threshold = if self.sensitivity > 0.0 { self.sensitivity } else { 3.5 };
+        let median = median_of(_data);
+        let deviations: Vec<f64> = _data.iter().map(|x| (x - median).abs()).collect();
+        let mad = median_of(&deviations);
+
+        // With a zero MAD every deviation is either exactly zero or an outlier
+        // by any robust measure; fall back to a strict equality test.
+        let scores: Vec<f64> = _data
+            .iter()
+            .map(|x| {
+                if mad > 0.0 {
+                    0.6745 * (x - median).abs() / mad
+                } else if (x - median).abs() > 0.0 {
+                    f64::INFINITY
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+
+        let outlier_indices: Vec<usize> = scores
+            .iter()
+            .enumerate()
+            .filter(|(_, score)| **score > threshold)
+            .map(|(index, _)| index)
+            .collect();
+
+        self.outliers_detected = outlier_indices.len() as u32;
+
+        let mut outlier_metrics = HashMap::new();
+        outlier_metrics.insert("median".to_string(), median);
+        outlier_metrics.insert("median_absolute_deviation".to_string(), mad);
+        outlier_metrics.insert("threshold".to_string(), threshold);
+
         Ok(OutlierResults {
-            outliers_detected: 0,
-            outlier_indices: Vec::new(),
-            outlier_scores: Vec::new(),
-            outlier_percentage: 0.0,
-            outlier_metrics: HashMap::new(),
+            outliers_detected: outlier_indices.len() as u64,
+            outlier_percentage: outlier_indices.len() as f64 / _data.len() as f64 * 100.0,
+            outlier_indices,
+            outlier_scores: scores,
+            outlier_metrics,
         })
     }
 }
@@ -1319,6 +1536,108 @@ impl Default for RandomIoResult {
             read_iops: 0.0,
             write_iops: 0.0,
             mixed_workload_iops: 0.0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod measurement_tests {
+    use super::*;
+
+    #[test]
+    fn sysfs_cache_sizes_parse_with_their_units() {
+        assert_eq!(parse_sysfs_cache_size("32K"), Some(32 * 1024));
+        assert_eq!(parse_sysfs_cache_size("8192K"), Some(8192 * 1024));
+        assert_eq!(parse_sysfs_cache_size("1M"), Some(1024 * 1024));
+        assert_eq!(parse_sysfs_cache_size("512"), Some(512));
+        assert_eq!(parse_sysfs_cache_size(""), None);
+        assert_eq!(parse_sysfs_cache_size("wat"), None);
+    }
+
+    #[test]
+    fn median_handles_both_parities_and_the_empty_case() {
+        assert_eq!(median_of(&[]), 0.0);
+        assert_eq!(median_of(&[5.0]), 5.0);
+        assert_eq!(median_of(&[1.0, 3.0, 2.0]), 2.0);
+        assert_eq!(median_of(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+    }
+
+    #[tokio::test]
+    async fn outlier_detection_finds_the_outlier_it_is_given() {
+        let mut detector = OutlierDetector::default();
+        // Nine tightly clustered samples and one far away.
+        let data = [10.0, 10.2, 9.8, 10.1, 9.9, 10.3, 9.7, 10.0, 10.1, 250.0];
+
+        let results = detector.detect_outliers(&data).await.expect("detect");
+
+        assert_eq!(
+            results.outliers_detected, 1,
+            "the sample at 250.0 is an outlier among values near 10"
+        );
+        assert_eq!(results.outlier_indices, vec![9]);
+        assert!(results.outlier_percentage > 9.0 && results.outlier_percentage < 11.0);
+        assert_eq!(results.outlier_scores.len(), data.len());
+    }
+
+    #[tokio::test]
+    async fn outlier_detection_reports_none_for_clean_data() {
+        let mut detector = OutlierDetector::default();
+        let data = [10.0, 10.2, 9.8, 10.1, 9.9, 10.3, 9.7, 10.0];
+
+        let results = detector.detect_outliers(&data).await.expect("detect");
+
+        assert_eq!(results.outliers_detected, 0);
+        assert!(results.outlier_indices.is_empty());
+        assert_eq!(results.outlier_percentage, 0.0);
+    }
+
+    #[tokio::test]
+    async fn cache_latency_probes_report_their_absence() {
+        let mut tester = CachePerformanceTester::default();
+
+        let error = tester
+            .test_l1_cache_performance()
+            .await
+            .expect_err("no counter API is open, so no latency can be reported");
+        assert!(
+            error.to_string().contains("cannot be measured"),
+            "unexpected error: {error}"
+        );
+
+        let error = tester
+            .test_all_cache_levels()
+            .expect_err("hit rate and miss penalty need performance counters");
+        assert!(
+            error.to_string().contains("cannot be measured"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn synthetic_benchmarks_report_their_absence() {
+        let suite = SyntheticBenchmarkSuite::default();
+        let error = suite
+            .execute_suite(&HashMap::new())
+            .await
+            .expect_err("no benchmark harness is linked, so there are no scores");
+        assert!(
+            error.to_string().contains("cannot be measured"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn cache_hierarchy_detection_is_read_from_the_host_or_refused() {
+        let mut engine = CacheDetectionEngine::default();
+        match engine.detect_cache_hierarchy() {
+            Ok((levels, total)) => {
+                assert!(levels >= 1, "a detected hierarchy has at least one level");
+                assert!(total > 0, "a detected hierarchy has a non-zero size");
+            },
+            Err(error) => assert!(
+                error.to_string().contains("cannot be measured"),
+                "a failure must say why, not fall back to a constant: {error}"
+            ),
         }
     }
 }

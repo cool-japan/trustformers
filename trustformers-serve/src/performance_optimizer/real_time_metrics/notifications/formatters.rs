@@ -20,9 +20,6 @@ use std::{
 #[derive(Debug)]
 
 pub struct MessageFormatter {
-    /// Configuration
-    config: NotificationConfig,
-
     /// Template cache for performance
     template_cache: Arc<DashMap<String, CompiledTemplate>>,
 
@@ -110,13 +107,12 @@ pub struct FormattingStats {
 }
 
 impl MessageFormatter {
-    pub async fn new(config: NotificationConfig) -> Result<Self> {
+    pub async fn new(_config: NotificationConfig) -> Result<Self> {
         let template_cache = Arc::new(DashMap::new());
         let template_engine = Arc::new(TemplateEngine::new().await?);
         let channel_formatters = Arc::new(DashMap::new());
 
         let formatter = Self {
-            config,
             template_cache,
             template_engine,
             channel_formatters,

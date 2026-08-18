@@ -137,7 +137,7 @@ impl GradientChecker {
 
         for (name, input_var) in inputs {
             if self.config.verbose {
-                println!("Checking gradients for variable: {}", name);
+                tracing::debug!("Checking gradients for variable: {}", name);
             }
 
             let result = self.check_single_variable_gradient(f.clone(), inputs, name)?;
@@ -145,9 +145,11 @@ impl GradientChecker {
 
             if self.config.verbose {
                 let result = &results[name];
-                println!(
+                tracing::debug!(
                     "  Passed: {}, Max Rel Error: {:.2e}, Max Abs Error: {:.2e}",
-                    result.passed, result.max_relative_error, result.max_absolute_error
+                    result.passed,
+                    result.max_relative_error,
+                    result.max_absolute_error
                 );
             }
         }

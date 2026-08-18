@@ -4,9 +4,8 @@ use super::super::types::*;
 use super::correlator::AlertCorrelator;
 use super::error::{Result, ThresholdError};
 use super::processors::{
-    CriticalAlertProcessor, DefaultAlertProcessor, EmailNotificationChannel,
-    LogNotificationChannel, PerformanceAlertProcessor, ResourceAlertProcessor,
-    SlackNotificationChannel, WebhookNotificationChannel,
+    CriticalAlertProcessor, DefaultAlertProcessor, LogNotificationChannel,
+    PerformanceAlertProcessor, ResourceAlertProcessor,
 };
 use super::suppressor::AlertSuppressor;
 use chrono::{DateTime, Utc};
@@ -307,6 +306,26 @@ impl AlertManager {
         Ok(())
     }
 
+    /// Register an additional notification channel.
+    ///
+    /// [`AlertManager::start`] registers only the log channel, so anything that
+    /// leaves the process — a webhook, a pager, a mail relay — has to be handed
+    /// in here by the caller that owns its endpoint configuration.
+    pub fn add_channel(
+        &self,
+        channel: Box<dyn NotificationChannel + Send + Sync>,
+    ) -> Result<&Self> {
+        let mut channels = self.channels.lock().unwrap_or_else(|p| p.into_inner());
+        channels.push(channel);
+        Ok(self)
+    }
+
+    /// Names of the currently registered notification channels.
+    pub fn channel_names(&self) -> Vec<String> {
+        let channels = self.channels.lock().unwrap_or_else(|p| p.into_inner());
+        channels.iter().map(|c| c.name().to_string()).collect()
+    }
+
     /// Get alert manager statistics
     pub fn get_stats(&self) -> AlertManagerStats {
         AlertManagerStats {
@@ -492,13 +511,17 @@ impl AlertManager {
         Ok(())
     }
 
-    /// Initialize notification channels
+    /// Initialize notification channels.
+    ///
+    /// Only the log channel is registered by default, because it is the only
+    /// channel this sync trait can implement without a transport of its own.
+    /// Email, webhook and Slack delivery live in
+    /// [`crate::performance_optimizer::real_time_metrics::notifications::channels`],
+    /// which speaks real HTTP over an async trait; register additional channels
+    /// here with [`AlertManager::add_channel`] once they carry an endpoint.
     async fn initialize_channels(&self) -> Result<()> {
         let mut channels = self.channels.lock().unwrap_or_else(|p| p.into_inner());
         channels.push(Box::new(LogNotificationChannel::new()));
-        channels.push(Box::new(EmailNotificationChannel::new()));
-        channels.push(Box::new(WebhookNotificationChannel::new()));
-        channels.push(Box::new(SlackNotificationChannel::new()));
         Ok(())
     }
 }

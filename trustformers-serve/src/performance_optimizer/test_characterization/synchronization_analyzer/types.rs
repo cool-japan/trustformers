@@ -179,26 +179,10 @@ pub struct DeadlockPreventionConfig {
 /// - Fairness assessment
 /// - Optimization recommendations
 #[derive(Debug)]
-pub struct WaitTimeAnalyzer {
-    config: Arc<RwLock<WaitTimeAnalyzerConfig>>,
-    distribution_analyzer: Arc<WaitTimeDistributionAnalyzer>,
-    hotspot_detector: Arc<ContentionHotspotDetector>,
-    queue_analyzer: Arc<QueueLengthAnalyzer>,
-    fairness_assessor: Arc<FairnessAssessor>,
-    optimization_advisor: Arc<WaitTimeOptimizationAdvisor>,
-    analysis_results: Arc<Mutex<Vec<WaitTimeAnalysisResult>>>,
-}
+pub struct WaitTimeAnalyzer {}
 impl WaitTimeAnalyzer {
-    pub async fn new(config: WaitTimeAnalyzerConfig) -> Result<Self> {
-        Ok(Self {
-            config: Arc::new(RwLock::new(config)),
-            distribution_analyzer: Arc::new(WaitTimeDistributionAnalyzer::new().await?),
-            hotspot_detector: Arc::new(ContentionHotspotDetector::new().await?),
-            queue_analyzer: Arc::new(QueueLengthAnalyzer::new().await?),
-            fairness_assessor: Arc::new(FairnessAssessor::new().await?),
-            optimization_advisor: Arc::new(WaitTimeOptimizationAdvisor::new().await?),
-            analysis_results: Arc::new(Mutex::new(Vec::new())),
-        })
+    pub async fn new(_config: WaitTimeAnalyzerConfig) -> Result<Self> {
+        Ok(Self {})
     }
     pub async fn analyze_wait_times(
         &self,
@@ -319,12 +303,8 @@ pub struct SynchronizationAnalysisStats {
 struct CachedSynchronizationAnalysis {
     /// Analysis result
     pub result: SynchronizationAnalysisResult,
-    /// Cache timestamp
-    pub cached_at: DateTime<Utc>,
     /// Cache expiration
     pub expires_at: DateTime<Utc>,
-    /// Access count
-    pub access_count: u64,
     /// Last access
     pub last_access: DateTime<Utc>,
 }
@@ -521,26 +501,10 @@ impl DependencyStrengthAnalyzer {
 /// - Deadlock incident tracking
 /// - Performance trend analysis
 #[derive(Debug)]
-pub struct SynchronizationMetricsEngine {
-    config: Arc<RwLock<MetricsEngineConfig>>,
-    contention_collector: Arc<ContentionMetricsCollector>,
-    wait_time_collector: Arc<WaitTimeMetricsCollector>,
-    throughput_analyzer: Arc<ThroughputAnalyzer>,
-    incident_tracker: Arc<DeadlockIncidentTracker>,
-    trend_analyzer: Arc<PerformanceTrendAnalyzer>,
-    metrics_database: Arc<Mutex<SynchronizationMetricsDatabase>>,
-}
+pub struct SynchronizationMetricsEngine {}
 impl SynchronizationMetricsEngine {
-    pub async fn new(config: MetricsEngineConfig) -> Result<Self> {
-        Ok(Self {
-            config: Arc::new(RwLock::new(config)),
-            contention_collector: Arc::new(ContentionMetricsCollector::new().await?),
-            wait_time_collector: Arc::new(WaitTimeMetricsCollector::new().await?),
-            throughput_analyzer: Arc::new(ThroughputAnalyzer::new().await?),
-            incident_tracker: Arc::new(DeadlockIncidentTracker::new().await?),
-            trend_analyzer: Arc::new(PerformanceTrendAnalyzer::new().await?),
-            metrics_database: Arc::new(Mutex::new(SynchronizationMetricsDatabase::new())),
-        })
+    pub async fn new(_config: MetricsEngineConfig) -> Result<Self> {
+        Ok(Self {})
     }
     pub async fn collect_synchronization_metrics(
         &self,
@@ -633,7 +597,6 @@ impl SynchronizationPatternLibrary {
 /// - Synchronization bottlenecks
 #[derive(Debug)]
 pub struct SynchronizationPointDetector {
-    config: Arc<RwLock<SynchronizationPointDetectorConfig>>,
     barrier_detector: Arc<BarrierSynchronizationDetector>,
     producer_consumer_detector: Arc<ProducerConsumerDetector>,
     reader_writer_detector: Arc<ReaderWriterDetector>,
@@ -643,9 +606,8 @@ pub struct SynchronizationPointDetector {
 }
 impl SynchronizationPointDetector {
     /// Creates a new synchronization point detector
-    pub async fn new(config: SynchronizationPointDetectorConfig) -> Result<Self> {
+    pub async fn new(_config: SynchronizationPointDetectorConfig) -> Result<Self> {
         Ok(Self {
-            config: Arc::new(RwLock::new(config)),
             barrier_detector: Arc::new(BarrierSynchronizationDetector::new().await?),
             producer_consumer_detector: Arc::new(ProducerConsumerDetector::new().await?),
             reader_writer_detector: Arc::new(ReaderWriterDetector::new().await?),
@@ -1148,9 +1110,7 @@ impl SynchronizationAnalyzer {
         let cache_duration = Duration::from_secs(3600);
         let cached = CachedSynchronizationAnalysis {
             result: result.clone(),
-            cached_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::from_std(cache_duration)?,
-            access_count: 1,
             last_access: Utc::now(),
         };
         let mut cache = self.analysis_cache.lock().map_err(|_| anyhow::anyhow!("Lock poisoned"))?;

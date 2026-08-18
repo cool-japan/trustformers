@@ -20,10 +20,24 @@ pub struct WarmingPolicy {
     pub timeout_seconds: u64,
 }
 
+/// One query the service has actually observed, with the hour of day it
+/// arrived in.
+///
+/// The hour is what makes time-of-day warming possible without inventing
+/// anything: a prediction for 09:00 can only name queries that were really seen
+/// around 09:00.
+#[derive(Debug, Clone)]
+pub struct ObservedQuery {
+    /// The query text.
+    pub text: String,
+    /// Local hour of day (0-23) the query was observed in.
+    pub hour: u32,
+}
+
 /// Cache preload service
 pub struct PreloadService {
     popular_queries: Vec<String>,
-    recent_queries: Vec<String>,
+    recent_queries: Vec<ObservedQuery>,
     prediction_model: Option<Box<dyn PredictionModel>>,
 }
 
@@ -46,7 +60,9 @@ impl PreloadService {
     pub async fn get_warming_queries(&self, strategy: &WarmingStrategy) -> Vec<String> {
         match strategy {
             WarmingStrategy::PopularQueries => self.popular_queries.clone(),
-            WarmingStrategy::RecentQueries => self.recent_queries.clone(),
+            WarmingStrategy::RecentQueries => {
+                self.recent_queries.iter().map(|q| q.text.clone()).collect()
+            },
             WarmingStrategy::CustomQueries(queries) => queries.clone(),
             WarmingStrategy::PredictiveQueries => {
                 if let Some(model) = &self.prediction_model {
@@ -85,8 +101,18 @@ impl PreloadService {
         self.popular_queries = queries;
     }
 
-    /// Add recent query
+    /// Record a query the service actually served, stamped with the current
+    /// local hour so time-of-day warming has real evidence to work from.
     pub async fn add_recent_query(&mut self, query: String) {
+        self.add_observed_query(ObservedQuery {
+            text: query,
+            hour: chrono::Local::now().hour(),
+        })
+        .await;
+    }
+
+    /// Record a query observed at a specific hour of day.
+    pub async fn add_observed_query(&mut self, query: ObservedQuery) {
         self.recent_queries.push(query);
 
         // Keep only last 1000 queries
@@ -95,13 +121,18 @@ impl PreloadService {
         }
     }
 
+    /// Queries the service has observed, most recent last.
+    pub fn observed_queries(&self) -> &[ObservedQuery] {
+        &self.recent_queries
+    }
+
     /// Analyze query frequencies for pattern detection
     pub fn analyze_query_frequencies(&self) -> std::collections::HashMap<String, usize> {
         let mut frequency_map = std::collections::HashMap::new();
 
         // Count frequencies from recent queries
         for query in &self.recent_queries {
-            *frequency_map.entry(query.clone()).or_insert(0) += 1;
+            *frequency_map.entry(query.text.clone()).or_insert(0) += 1;
         }
 
         // Also include popular queries with higher weight
@@ -112,47 +143,33 @@ impl PreloadService {
         frequency_map
     }
 
-    /// Analyze time patterns for predictive queries
+    /// Queries this service has actually observed during the current hour of
+    /// day, most frequent first.
+    ///
+    /// Only real observations are returned. Before 0.2.1 this method matched
+    /// the current hour against three hard-coded buckets and returned invented
+    /// strings — `"morning report"`, `"lunch recommendations"`,
+    /// `"daily wrap-up"` — which the warmer then executed against the model and
+    /// stored in the cache. No user had ever issued them, so every one was a
+    /// wasted inference and a cache entry nobody would hit.
     pub fn analyze_time_patterns(&self) -> Vec<String> {
-        let mut pattern_queries = Vec::new();
+        self.queries_observed_at_hour(chrono::Local::now().hour())
+    }
 
-        // Simple time-based pattern analysis
-        // In a real implementation, this would analyze historical query patterns
-        // and predict likely queries based on current time
-        let now = chrono::Local::now();
-        let hour = now.hour();
-
-        // Add time-based predicted queries based on hour patterns
-        match hour {
-            6..=9 => {
-                // Morning patterns - work-related queries
-                pattern_queries.extend(vec![
-                    "morning report".to_string(),
-                    "daily summary".to_string(),
-                    "status update".to_string(),
-                ]);
-            },
-            12..=14 => {
-                // Lunch time patterns
-                pattern_queries.extend(vec![
-                    "lunch recommendations".to_string(),
-                    "quick summary".to_string(),
-                ]);
-            },
-            17..=19 => {
-                // Evening patterns - wrap-up queries
-                pattern_queries.extend(vec![
-                    "daily wrap-up".to_string(),
-                    "end of day report".to_string(),
-                ]);
-            },
-            _ => {
-                // General patterns
-                pattern_queries.extend(self.recent_queries.iter().take(5).cloned());
-            },
+    /// Queries observed during `hour`, most frequent first.
+    ///
+    /// Falls back to nothing — not to a guess — when the service has seen no
+    /// traffic in that hour.
+    pub fn queries_observed_at_hour(&self, hour: u32) -> Vec<String> {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for query in self.recent_queries.iter().filter(|q| q.hour == hour) {
+            *counts.entry(query.text.as_str()).or_insert(0) += 1;
         }
 
-        pattern_queries
+        let mut ranked: Vec<(&str, usize)> = counts.into_iter().collect();
+        // Frequency descending, then lexicographic so the order is stable.
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        ranked.into_iter().map(|(text, _)| text.to_string()).collect()
     }
 }
 
@@ -241,14 +258,13 @@ pub struct CacheWarmer {
     preload_service: Arc<RwLock<PreloadService>>,
     scheduler: Arc<RwLock<WarmingScheduler>>,
     result_cache: Arc<ResultCacheService>,
-    embedding_cache: Arc<EmbeddingCacheService>,
 }
 
 impl CacheWarmer {
     pub fn new(
         config: WarmingConfig,
         result_cache: Arc<ResultCacheService>,
-        embedding_cache: Arc<EmbeddingCacheService>,
+        _embedding_cache: Arc<EmbeddingCacheService>,
     ) -> Self {
         let preload_service = Arc::new(RwLock::new(PreloadService::new()));
         let scheduler = Arc::new(RwLock::new(WarmingScheduler::new(config.schedule.clone())));
@@ -258,7 +274,6 @@ impl CacheWarmer {
             preload_service,
             scheduler,
             result_cache,
-            embedding_cache,
         }
     }
 
@@ -535,21 +550,71 @@ mod tests {
     #[test]
     fn test_preload_service_analyze_query_frequencies() {
         let mut service = PreloadService::new();
-        // Manually add to recent_queries for testing
-        service.recent_queries.push("q1".to_string());
-        service.recent_queries.push("q1".to_string());
-        service.recent_queries.push("q2".to_string());
+        for (text, hour) in [("q1", 9), ("q1", 9), ("q2", 14)] {
+            service.recent_queries.push(ObservedQuery {
+                text: text.to_string(),
+                hour,
+            });
+        }
         let freqs = service.analyze_query_frequencies();
         assert_eq!(*freqs.get("q1").unwrap_or(&0), 2);
         assert_eq!(*freqs.get("q2").unwrap_or(&0), 1);
     }
 
     #[test]
-    fn test_preload_service_analyze_time_patterns_returns_vec() {
+    fn time_patterns_are_empty_without_observations() {
         let service = PreloadService::new();
-        let patterns = service.analyze_time_patterns();
-        // Just verify it returns without panic and is a Vec
-        let _ = patterns.len();
+        assert!(
+            service.analyze_time_patterns().is_empty(),
+            "a service that has seen no traffic must predict nothing, not a \
+             hard-coded guess at what people ask at this hour"
+        );
+    }
+
+    #[test]
+    fn time_patterns_only_name_queries_observed_in_that_hour() {
+        let mut service = PreloadService::new();
+        for (text, hour) in [
+            ("morning status", 9),
+            ("morning status", 9),
+            ("build report", 9),
+            ("evening rollup", 18),
+        ] {
+            service.recent_queries.push(ObservedQuery {
+                text: text.to_string(),
+                hour,
+            });
+        }
+
+        // Most frequent first, and nothing from another hour leaks in.
+        assert_eq!(
+            service.queries_observed_at_hour(9),
+            vec!["morning status".to_string(), "build report".to_string()]
+        );
+        assert_eq!(
+            service.queries_observed_at_hour(18),
+            vec!["evening rollup".to_string()]
+        );
+        assert!(
+            service.queries_observed_at_hour(3).is_empty(),
+            "no traffic was observed at 03:00, so nothing may be predicted for it"
+        );
+    }
+
+    #[tokio::test]
+    async fn recorded_queries_carry_the_hour_they_arrived_in() {
+        let mut service = PreloadService::new();
+        service
+            .add_observed_query(ObservedQuery {
+                text: "nightly index".to_string(),
+                hour: 2,
+            })
+            .await;
+
+        let observed = service.observed_queries();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].text, "nightly index");
+        assert_eq!(observed[0].hour, 2);
     }
 
     // --- WarmingScheduler tests ---

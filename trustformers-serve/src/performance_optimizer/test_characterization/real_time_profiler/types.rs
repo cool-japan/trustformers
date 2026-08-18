@@ -28,7 +28,6 @@ pub struct RealTimePerformanceCounters {
     anomalies_detected: AtomicU64,
     insights_generated: AtomicU64,
     processing_rate: AtomicU64,
-    last_reset: AtomicU64,
 }
 impl RealTimePerformanceCounters {
     pub fn new() -> Self {
@@ -37,7 +36,6 @@ impl RealTimePerformanceCounters {
             anomalies_detected: AtomicU64::new(0),
             insights_generated: AtomicU64::new(0),
             processing_rate: AtomicU64::new(0),
-            last_reset: AtomicU64::new(Utc::now().timestamp() as u64),
         }
     }
     pub fn increment_data_points_processed(&self) {
@@ -300,8 +298,6 @@ pub struct PerformanceCounterStats {
 pub struct StreamingAnalyzer {
     /// Analyzer configuration
     config: Arc<RwLock<StreamingAnalyzerConfig>>,
-    /// Analysis pipelines
-    pipelines: Arc<Mutex<Vec<Box<dyn StreamingPipeline + Send + Sync>>>>,
     /// Analysis state
     analyzing: Arc<AtomicBool>,
     /// Stream processing buffer
@@ -327,7 +323,6 @@ impl StreamingAnalyzer {
         pipelines.push(Box::new(AnomalyDetectionPipeline::new()));
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
-            pipelines: Arc::new(Mutex::new(pipelines)),
             analyzing: Arc::new(AtomicBool::new(false)),
             processing_buffer: Arc::new(Mutex::new(VecDeque::new())),
             results_cache: Arc::new(Mutex::new(BTreeMap::new())),
@@ -916,27 +911,6 @@ impl PerformanceTrendAnalyzer {
         self.analysis_handles.lock().push(handle);
         Ok(())
     }
-    /// Update prediction models with recent data
-    async fn update_prediction_models(&self) -> Result<()> {
-        let mut models = self.prediction_models.write();
-        let recent_data = self.time_series_db.get_recent_data(86400).await?;
-        const WINDOW_SIZE: usize = 10;
-        let mut training_data: Vec<(Vec<f64>, Vec<f64>)> = Vec::new();
-        if recent_data.len() > WINDOW_SIZE {
-            for i in WINDOW_SIZE..recent_data.len() {
-                let features: Vec<f64> =
-                    recent_data[i - WINDOW_SIZE..i].iter().map(|(_, value)| *value).collect();
-                let target = vec![recent_data[i].1];
-                training_data.push((features, target));
-            }
-        }
-        for (model_name, model) in models.iter_mut() {
-            if let Err(e) = model.train_with_data(&training_data) {
-                eprintln!("Error training prediction model {}: {}", model_name, e);
-            }
-        }
-        Ok(())
-    }
 }
 /// Real-time anomaly detection with adaptive thresholds and alerting
 ///
@@ -1065,16 +1039,6 @@ impl AnomalyDetectionEngine {
         self.detection_handles.lock().push(handle);
         Ok(())
     }
-    /// Update baseline models with recent data
-    async fn update_baseline_models(&self) -> Result<()> {
-        let mut models = self.baseline_models.write();
-        for (test_id, model) in models.iter_mut() {
-            if let Err(e) = model.update_with_recent_data().await {
-                eprintln!("Error updating baseline model for {}: {}", test_id, e);
-            }
-        }
-        Ok(())
-    }
 }
 /// Live reporting and dashboard updates with configurable output formats
 ///
@@ -1095,8 +1059,6 @@ pub struct RealTimeReportingEngine {
     formatters: Arc<Mutex<HashMap<String, Box<dyn OutputFormatter + Send + Sync>>>>,
     /// Report cache for quick access
     report_cache: Arc<RwLock<HashMap<String, RealTimeReport>>>,
-    /// Reporting metrics
-    reporting_metrics: Arc<ReportingMetrics>,
     /// Reporting handles
     reporting_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
@@ -1125,7 +1087,6 @@ impl RealTimeReportingEngine {
             dashboard_updater,
             formatters: Arc::new(Mutex::new(formatters)),
             report_cache: Arc::new(RwLock::new(HashMap::new())),
-            reporting_metrics: Arc::new(ReportingMetrics::new()),
             reporting_handles: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -1202,14 +1163,10 @@ pub struct LiveInsightsGenerator {
     generating: Arc<AtomicBool>,
     /// Insight engines
     insight_engines: Arc<Mutex<Vec<Box<dyn InsightEngine + Send + Sync>>>>,
-    /// Machine learning models for insight generation
-    ml_models: Arc<RwLock<HashMap<String, InsightModel>>>,
     /// Recommendation system
     recommendation_system: Arc<RecommendationSystem>,
     /// Insight cache for quick access
     insight_cache: Arc<RwLock<HashMap<String, LiveInsights>>>,
-    /// Insight generation metrics
-    generation_metrics: Arc<InsightGenerationMetrics>,
     /// Generation handles
     generation_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
@@ -1226,10 +1183,8 @@ impl LiveInsightsGenerator {
             config: Arc::new(RwLock::new(config)),
             generating: Arc::new(AtomicBool::new(false)),
             insight_engines: Arc::new(Mutex::new(insight_engines)),
-            ml_models: Arc::new(RwLock::new(HashMap::new())),
             recommendation_system,
             insight_cache: Arc::new(RwLock::new(HashMap::new())),
-            generation_metrics: Arc::new(InsightGenerationMetrics::new()),
             generation_handles: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -1303,14 +1258,6 @@ impl LiveInsightsGenerator {
             }
         });
         self.generation_handles.lock().push(handle);
-        Ok(())
-    }
-    /// Update machine learning models with recent data
-    async fn update_ml_models(&self) -> Result<()> {
-        let mut models = self.ml_models.write();
-        for (_model_name, model) in models.iter_mut() {
-            model.update_with_recent_data(&Vec::new());
-        }
         Ok(())
     }
 }

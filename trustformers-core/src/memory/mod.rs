@@ -493,8 +493,6 @@ impl TensorMemoryPool {
             Tensor::C64(_) => elements * 16,  // 2 * 64-bit complex
             Tensor::CF16(_) => elements * 4,  // 2 * 16-bit complex
             Tensor::CBF16(_) => elements * 4, // 2 * 16-bit bfloat complex
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => elements * 4, // Default to 32-bit
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => elements * data.dtype.size_in_bytes(),
             #[cfg(feature = "cuda")]

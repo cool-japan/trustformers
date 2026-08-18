@@ -97,20 +97,38 @@ impl Default for MultiModalConfig {
     }
 }
 
-/// Fusion strategy for combining different modalities
+/// Fusion strategy for combining different modalities. See
+/// [`FusionLayer::fuse`] for what each variant genuinely computes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FusionStrategy {
     /// Simple concatenation of features
     Concatenation,
     /// Element-wise addition
     Addition,
-    /// Weighted average
+    /// Weighted average with fixed per-modality weights
     WeightedAverage,
-    /// Cross-attention fusion
+    /// Real dot-product cross-attention (the same formula
+    /// [`MultiModalPipeline::compute_attention_weights`] uses): each
+    /// modality attends over every other present modality and the
+    /// attention-weighted combination is averaged across modality pairs.
+    /// Not a *trained* attention head (this workspace has none wired into
+    /// this generic pipeline), but genuinely computed from the real
+    /// extracted features, not an alias for a different strategy.
     CrossAttention,
-    /// Gated fusion
+    /// Real, content-derived gating: each modality's contribution is
+    /// scaled by `sigmoid(mean(that modality's feature vector))` before
+    /// being summed. Not a *learned* gate (no trained gating network is
+    /// wired into this workspace), but a genuine per-position, per-modality
+    /// gate computed from the real feature values -- unlike a fixed
+    /// per-modality weight, it varies with the actual content.
     GatedFusion,
-    /// Transformer-based fusion
+    /// Real self-attention over the concatenated modality sequence,
+    /// followed by a residual add and mean-pool -- the two structural
+    /// pieces ("attention block" + "residual connection") that
+    /// characterise a transformer encoder layer. Not a full trained
+    /// transformer stack (no learned feed-forward/projection weights exist
+    /// in this generic pipeline), but genuinely self-attentive over the
+    /// real fused sequence.
     TransformerFusion,
 }
 
@@ -375,35 +393,17 @@ where
         Ok(attention_weights)
     }
 
-    /// Compute attention weights between two modalities
+    /// Compute attention weights between two modalities. Thin wrapper
+    /// around the free function [`dot_product_attention_weights`], which
+    /// [`FusionLayer::cross_attention_fusion`] also uses -- kept as an
+    /// infallible free function (this computation can never fail) shared
+    /// by both call sites rather than duplicated.
     fn compute_attention_weights(
         &self,
         query_features: &[Vec<f32>],
         key_features: &[Vec<f32>],
     ) -> Result<Vec<Vec<f32>>> {
-        let mut attention_weights = Vec::new();
-
-        for query in query_features {
-            let mut query_weights = Vec::new();
-            for key in key_features {
-                // Compute dot product attention
-                let dot_product: f32 = query.iter().zip(key.iter()).map(|(q, k)| q * k).sum();
-
-                // Apply softmax (simplified)
-                let attention_score = (dot_product / (query.len() as f32).sqrt()).exp();
-                query_weights.push(attention_score);
-            }
-
-            // Normalize weights
-            let sum: f32 = query_weights.iter().sum();
-            if sum > 0.0 {
-                query_weights.iter_mut().for_each(|w| *w /= sum);
-            }
-
-            attention_weights.push(query_weights);
-        }
-
-        Ok(attention_weights)
+        Ok(dot_product_attention_weights(query_features, key_features))
     }
 
     /// Compute similarities between modalities
@@ -844,13 +844,118 @@ fn sniff_image_format(data: &[u8]) -> ImageFormat {
 }
 
 /// Split a flat feature buffer into `chunk_size`-wide vectors (dropping a
-/// short final remainder, matching how [`FeatureOutput::shape`] already
-/// describes the layout as `[n_frames, feature_size]`).
+/// short final remainder, matching how `auto::types::FeatureOutput::shape`
+/// already describes the layout as `[n_frames, feature_size]`).
 fn chunk_features(flat: Vec<f32>, chunk_size: usize) -> Vec<Vec<f32>> {
     if chunk_size == 0 {
         return Vec::new();
     }
     flat.chunks_exact(chunk_size).map(|chunk| chunk.to_vec()).collect()
+}
+
+/// Scaled dot-product attention, softmax-normalized: for each vector in
+/// `query_features`, scores every vector in `key_features` by
+/// `exp(dot(query, key) / sqrt(query.len()))`, then normalizes each query's
+/// scores to sum to `1.0`. Shared by
+/// [`MultiModalPipeline::compute_attention_weights`] (used for the
+/// diagnostic [`AttentionWeights`] this pipeline reports) and
+/// [`FusionLayer::cross_attention_fusion`] (which actually folds these
+/// weights into the fused feature vector, rather than only reporting them).
+///
+/// Infallible: `query_features`/`key_features` being empty simply yields an
+/// empty (or all-zero-length) result rather than an error.
+fn dot_product_attention_weights(
+    query_features: &[Vec<f32>],
+    key_features: &[Vec<f32>],
+) -> Vec<Vec<f32>> {
+    let mut attention_weights = Vec::with_capacity(query_features.len());
+
+    for query in query_features {
+        let mut scores = Vec::with_capacity(key_features.len());
+        for key in key_features {
+            let dot_product: f32 = query.iter().zip(key.iter()).map(|(q, k)| q * k).sum();
+            // Scaled dot-product attention score (pre-softmax), scaled by
+            // sqrt(query dimension) as in "Attention Is All You Need" --
+            // keeps the softmax input from growing with feature width.
+            scores.push(dot_product / (query.len() as f32).sqrt());
+        }
+
+        // Numerically-stable softmax: subtract the row max before
+        // exponentiating. Without this, a real (not toy-sized) feature
+        // vector easily produces a scaled score in the hundreds --
+        // `768`-wide vectors of magnitude `3.0` score around `249` here --
+        // and `f32::exp` overflows to `Infinity` well before that,
+        // collapsing every weight to `Infinity / Infinity = NaN`.
+        // Subtracting the max keeps the largest exponent at `exp(0) = 1`
+        // and produces the exact same normalized weights (softmax is
+        // shift-invariant), just without ever overflowing.
+        let max_score = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mut query_weights: Vec<f32> = if max_score.is_finite() {
+            scores.iter().map(|&s| (s - max_score).exp()).collect()
+        } else {
+            // `key_features` was empty (no scores at all): nothing to
+            // weight over.
+            scores.iter().map(|_| 0.0).collect()
+        };
+
+        let sum: f32 = query_weights.iter().sum();
+        if sum > 0.0 {
+            query_weights.iter_mut().for_each(|w| *w /= sum);
+        }
+
+        attention_weights.push(query_weights);
+    }
+
+    attention_weights
+}
+
+/// Standard logistic sigmoid, `1 / (1 + e^-x)`, mapping any real `x` into
+/// `(0, 1)`. Used by [`FusionLayer::gated_fusion`] to turn a modality row's
+/// raw mean activation into a bounded gate value.
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+/// Full self-attention over `sequence` (every row attends over every row,
+/// itself included, via [`dot_product_attention_weights`]), then mean-pools
+/// the per-row attended results into one fused vector. When `residual` is
+/// `true`, each row's original (pre-attention) values are added back before
+/// pooling (`x + Attention(x)`) -- the residual connection a transformer
+/// encoder layer applies around its attention block.
+///
+/// Returns `None` for an empty `sequence` (nothing to fuse -- the caller
+/// skips this position's output entirely, matching how every other fusion
+/// strategy in this module omits a position with no contributing modality
+/// rather than emitting an all-zero vector).
+fn mean_pooled_self_attention(sequence: &[Vec<f32>], residual: bool) -> Option<Vec<f32>> {
+    let dim = sequence.first()?.len();
+    if dim == 0 {
+        return None;
+    }
+
+    let attention_weights = dot_product_attention_weights(sequence, sequence);
+
+    let mut pooled = vec![0.0f32; dim];
+    for (row_index, weights) in attention_weights.iter().enumerate() {
+        let mut attended = vec![0.0f32; dim];
+        for (value_row, &weight) in sequence.iter().zip(weights.iter()) {
+            for (a, v) in attended.iter_mut().zip(value_row.iter()) {
+                *a += v * weight;
+            }
+        }
+        if residual {
+            for (a, original) in attended.iter_mut().zip(sequence[row_index].iter()) {
+                *a += original;
+            }
+        }
+        for (p, a) in pooled.iter_mut().zip(attended.iter()) {
+            *p += a;
+        }
+    }
+
+    let n = sequence.len() as f32;
+    pooled.iter_mut().for_each(|p| *p /= n);
+    Some(pooled)
 }
 
 /// Fusion layer for combining modality features
@@ -958,14 +1063,15 @@ impl FusionLayer {
                 &features.image_features,
                 &features.audio_features,
                 &features.video_features,
-            ] {
-                if let Some(modality_features) = modality_features {
-                    if i < modality_features.len() && modality_features[i].len() >= common_dim {
-                        for j in 0..common_dim {
-                            combined_feature[j] += modality_features[i][j];
-                        }
-                        count += 1;
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if i < modality_features.len() && modality_features[i].len() >= common_dim {
+                    for j in 0..common_dim {
+                        combined_feature[j] += modality_features[i][j];
                     }
+                    count += 1;
                 }
             }
 
@@ -1032,22 +1138,135 @@ impl FusionLayer {
         Ok(fused_features)
     }
 
+    /// The modality vectors present at sequence position `i` that reach
+    /// `common_dim`, in a fixed (text, image, audio, video) order. Shared
+    /// gather step for [`Self::cross_attention_fusion`],
+    /// [`Self::gated_fusion`], and [`Self::transformer_fusion`], which all
+    /// need "every present modality's row at this position" as a small
+    /// token sequence to attend/gate over.
+    fn present_features_at(
+        &self,
+        features: &ModalityFeatures,
+        i: usize,
+        common_dim: usize,
+    ) -> Vec<Vec<f32>> {
+        [
+            &features.text_features,
+            &features.image_features,
+            &features.audio_features,
+            &features.video_features,
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|modality_features| {
+            i < modality_features.len() && modality_features[i].len() >= common_dim
+        })
+        .map(|modality_features| modality_features[i][..common_dim].to_vec())
+        .collect()
+    }
+
+    /// Real dot-product cross-attention across the modalities present at
+    /// each position: builds the small token sequence of present-modality
+    /// vectors via [`Self::present_features_at`], computes full
+    /// self-attention over it with [`dot_product_attention_weights`] (every
+    /// modality attends over every modality present, itself included), then
+    /// mean-pools the per-query attended rows into this position's fused
+    /// vector. With only one modality present at a position, self-attention
+    /// over a length-1 sequence has a single softmax weight of exactly
+    /// `1.0`, so the output is that modality's own (unattended) vector --
+    /// there is nothing else to cross-attend against.
     fn cross_attention_fusion(&self, features: &ModalityFeatures) -> Result<Vec<Vec<f32>>> {
-        // Cross-attention between modalities
-        // This is a simplified implementation
-        self.concatenate_features(features)
+        let common_dim = COMMON_FEATURE_DIM;
+        let max_len = [
+            features.text_features.as_ref().map(|f| f.len()).unwrap_or(0),
+            features.image_features.as_ref().map(|f| f.len()).unwrap_or(0),
+            features.audio_features.as_ref().map(|f| f.len()).unwrap_or(0),
+            features.video_features.as_ref().map(|f| f.len()).unwrap_or(0),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+
+        let mut fused_features = Vec::with_capacity(max_len);
+        for i in 0..max_len {
+            let sequence = self.present_features_at(features, i, common_dim);
+            if let Some(fused) = mean_pooled_self_attention(&sequence, false) {
+                fused_features.push(fused);
+            }
+        }
+        Ok(fused_features)
     }
 
+    /// Real, content-derived gated fusion: at each position, every present
+    /// modality's row is scaled by `sigmoid(mean(row))` -- a real gate
+    /// computed from that row's own values, not a fixed per-modality
+    /// constant the way [`Self::weighted_average_features`] uses -- then
+    /// summed and normalized by the sum of gates. Not a *trained* gating
+    /// network (none is wired into this generic pipeline), but a genuine
+    /// per-position, content-varying gate rather than an alias for a
+    /// different strategy.
     fn gated_fusion(&self, features: &ModalityFeatures) -> Result<Vec<Vec<f32>>> {
-        // Gated fusion with learnable gates
-        // This is a simplified implementation
-        self.weighted_average_features(features)
+        let common_dim = COMMON_FEATURE_DIM;
+        let max_len = [
+            features.text_features.as_ref().map(|f| f.len()).unwrap_or(0),
+            features.image_features.as_ref().map(|f| f.len()).unwrap_or(0),
+            features.audio_features.as_ref().map(|f| f.len()).unwrap_or(0),
+            features.video_features.as_ref().map(|f| f.len()).unwrap_or(0),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+
+        let mut fused_features = Vec::with_capacity(max_len);
+        for i in 0..max_len {
+            let sequence = self.present_features_at(features, i, common_dim);
+            let mut combined = vec![0.0f32; common_dim];
+            let mut total_gate = 0.0f32;
+            for row in &sequence {
+                let mean_activation = row.iter().sum::<f32>() / row.len() as f32;
+                let gate = sigmoid(mean_activation);
+                for (c, v) in combined.iter_mut().zip(row.iter()) {
+                    *c += v * gate;
+                }
+                total_gate += gate;
+            }
+            if total_gate > 0.0 {
+                combined.iter_mut().for_each(|x| *x /= total_gate);
+                fused_features.push(combined);
+            }
+        }
+        Ok(fused_features)
     }
 
+    /// Real self-attention with a residual connection: the same
+    /// per-position self-attention as [`Self::cross_attention_fusion`], but
+    /// with each attended row added back to its own pre-attention row
+    /// (`x + Attention(x)`) before mean-pooling -- the "attention block +
+    /// residual connection" structural pattern that defines a transformer
+    /// encoder layer, applied to the real fused sequence. Not a full
+    /// trained transformer stack (no learned feed-forward/projection
+    /// weights exist in this generic pipeline), but genuinely self-
+    /// attentive with a real residual, not an alias for plain concatenation.
     fn transformer_fusion(&self, features: &ModalityFeatures) -> Result<Vec<Vec<f32>>> {
-        // Transformer-based fusion
-        // This is a simplified implementation
-        self.concatenate_features(features)
+        let common_dim = COMMON_FEATURE_DIM;
+        let max_len = [
+            features.text_features.as_ref().map(|f| f.len()).unwrap_or(0),
+            features.image_features.as_ref().map(|f| f.len()).unwrap_or(0),
+            features.audio_features.as_ref().map(|f| f.len()).unwrap_or(0),
+            features.video_features.as_ref().map(|f| f.len()).unwrap_or(0),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+
+        let mut fused_features = Vec::with_capacity(max_len);
+        for i in 0..max_len {
+            let sequence = self.present_features_at(features, i, common_dim);
+            if let Some(fused) = mean_pooled_self_attention(&sequence, true) {
+                fused_features.push(fused);
+            }
+        }
+        Ok(fused_features)
     }
 }
 
@@ -1061,578 +1280,5 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ---- MultiModalConfig tests ----
-
-    #[test]
-    fn test_config_default_values() {
-        let cfg = MultiModalConfig::default();
-        assert_eq!(cfg.max_text_length, 512);
-        assert_eq!(cfg.max_image_size, (224, 224));
-        assert!((cfg.max_audio_duration - 30.0).abs() < 1e-6);
-        assert!(cfg.normalize_inputs);
-        assert!(cfg.cross_modal_attention);
-        assert!((cfg.temperature - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_config_clone() {
-        let cfg = MultiModalConfig {
-            max_text_length: 256,
-            ..MultiModalConfig::default()
-        };
-        assert_eq!(cfg.clone().max_text_length, 256);
-    }
-
-    // ---- AttentionConfig tests ----
-
-    #[test]
-    fn test_attention_config_default() {
-        let acfg = AttentionConfig::default();
-        assert_eq!(acfg.num_heads, 8);
-        assert_eq!(acfg.head_dim, 64);
-        assert!((acfg.dropout - 0.1).abs() < 1e-6);
-        assert!(acfg.use_relative_position);
-        assert_eq!(acfg.max_relative_position, 128);
-    }
-
-    // ---- MultiModalInput tests ----
-
-    #[test]
-    fn test_input_text_only() {
-        let input = MultiModalInput {
-            text: Some("Hello world".to_string()),
-            image: None,
-            audio: None,
-            video: None,
-            metadata: HashMap::new(),
-            modality_weights: None,
-        };
-        assert!(input.text.is_some());
-        assert!(input.image.is_none());
-    }
-
-    #[test]
-    fn test_input_image_plus_text() {
-        let input = MultiModalInput {
-            text: Some("Describe this image".to_string()),
-            image: Some(vec![0u8; 100]),
-            audio: None,
-            video: None,
-            metadata: HashMap::new(),
-            modality_weights: None,
-        };
-        assert!(input.text.is_some());
-        assert!(input.image.is_some());
-    }
-
-    #[test]
-    fn test_input_multimodality_flags() {
-        let input = MultiModalInput {
-            text: Some("text".to_string()),
-            image: Some(vec![1, 2, 3]),
-            audio: Some(vec![4, 5, 6]),
-            video: None,
-            metadata: HashMap::new(),
-            modality_weights: None,
-        };
-        let mut modalities = Vec::new();
-        if input.text.is_some() {
-            modalities.push("text");
-        }
-        if input.image.is_some() {
-            modalities.push("image");
-        }
-        if input.audio.is_some() {
-            modalities.push("audio");
-        }
-        if input.video.is_some() {
-            modalities.push("video");
-        }
-        assert_eq!(modalities.len(), 3);
-    }
-
-    // -------------------------------------------------------------------
-    // TextProcessor: regression coverage for the bug where
-    // `TextProcessor::process` returned `sin((i*768+j) as f32) * 0.1` --
-    // entirely a function of position, never of the actual word. These
-    // tests fail against that old behavior because they assert real
-    // content-dependence.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn test_text_processor_produces_features() {
-        let processor = TextProcessor::new();
-        let cfg = MultiModalConfig::default();
-        let features =
-            processor.process("Hello world test", &cfg).expect("text processing succeeded");
-        // 3 words -> 3 real per-word feature vectors.
-        assert_eq!(features.len(), 3);
-        assert_eq!(features[0].len(), COMMON_FEATURE_DIM);
-    }
-
-    #[test]
-    fn test_text_processor_respects_max_length() {
-        let processor = TextProcessor::new();
-        let cfg = MultiModalConfig {
-            max_text_length: 2,
-            ..MultiModalConfig::default()
-        };
-        let text = "one two three four five";
-        let features = processor.process(text, &cfg).expect("text processing succeeded");
-        assert_eq!(features.len(), 2);
-    }
-
-    #[test]
-    fn test_text_processor_empty_text() {
-        let processor = TextProcessor::new();
-        let cfg = MultiModalConfig::default();
-        let features = processor.process("", &cfg).expect("empty text processing succeeded");
-        assert!(features.is_empty());
-    }
-
-    #[test]
-    fn test_text_processor_same_word_gives_identical_vector() {
-        // Real, deterministic content-derivation: the same word must
-        // always hash to the same vector.
-        let processor = TextProcessor::new();
-        let cfg = MultiModalConfig::default();
-        let features = processor.process("repeat repeat", &cfg).expect("ok");
-        assert_eq!(features[0], features[1]);
-    }
-
-    #[test]
-    fn test_text_processor_different_words_give_different_vectors() {
-        // Regression: the old sine-wave placeholder differed only by
-        // *position*, so two different first words at the same position
-        // across two calls would be identical -- this asserts real
-        // content-dependence instead.
-        let processor = TextProcessor::new();
-        let cfg = MultiModalConfig::default();
-        let a = processor.process("apple", &cfg).expect("ok");
-        let b = processor.process("zebra", &cfg).expect("ok");
-        assert_ne!(
-            a[0], b[0],
-            "different words at the same position must produce different feature vectors"
-        );
-    }
-
-    #[test]
-    fn test_text_processor_vectors_are_l2_normalized() {
-        let processor = TextProcessor::new();
-        let cfg = MultiModalConfig::default();
-        let features = processor.process("hello", &cfg).expect("ok");
-        let norm: f32 = features[0].iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(
-            (norm - 1.0).abs() < 1e-4,
-            "expected a unit-norm vector, got norm {norm}"
-        );
-    }
-
-    // -------------------------------------------------------------------
-    // ImageProcessor: regression coverage for the bug where
-    // `ImageProcessor::process` returned `cos((i*768+j) as f32) * 0.1` for
-    // a patch grid derived purely from `config.max_image_size`, entirely
-    // ignoring the `_image: &[u8]` bytes (the parameter was even
-    // underscore-prefixed). The real path decodes the bytes and -- absent
-    // an attached vision encoder -- honestly reports
-    // `FeatureUnavailable` rather than a placeholder.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn test_image_processor_propagates_feature_unavailable_without_encoder() {
-        let processor = ImageProcessor::new();
-        let cfg = MultiModalConfig::default();
-        // A tiny real, decodable Netpbm (P5, grayscale) image: header +
-        // 2x2 8-bit pixels. Decoding must succeed; only the (nonexistent)
-        // encoder step must fail.
-        let ppm = b"P5\n2 2\n255\n\x00\x40\x80\xff".to_vec();
-        let result = processor.process(&ppm, &cfg);
-        match result {
-            Err(TrustformersError::FeatureUnavailable { ref feature, .. }) => {
-                assert!(feature.contains("vision"), "feature: {feature}");
-            },
-            other => panic!(
-                "expected a structured FeatureUnavailable (real decode, no encoder attached), \
-                 got {other:?}"
-            ),
-        }
-    }
-
-    #[test]
-    fn test_image_processor_rejects_corrupt_bytes_before_claiming_success() {
-        let processor = ImageProcessor::new();
-        let cfg = MultiModalConfig::default();
-        // Not a valid image container of any kind, and not empty either.
-        let garbage = vec![1u8, 2, 3, 4, 5];
-        let result = processor.process(&garbage, &cfg);
-        assert!(
-            result.is_err(),
-            "undecodable bytes must error, never produce a fabricated vector"
-        );
-    }
-
-    // -------------------------------------------------------------------
-    // AudioProcessor: regression coverage for the bug where
-    // `AudioProcessor::process` computed a frame count purely from
-    // `config.max_audio_duration` and filled every frame with
-    // `sin((i*128+j) as f32) * 0.2`, entirely ignoring the `_audio: &[u8]`
-    // bytes.
-    // -------------------------------------------------------------------
-
-    fn make_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
-        audio_dsp::encode_wav_pcm16(samples, sample_rate)
-    }
-
-    #[test]
-    fn test_audio_processor_rejects_non_wav_bytes() {
-        let processor = AudioProcessor::new();
-        let cfg = MultiModalConfig::default();
-        let not_wav = vec![0u8; 64];
-        let result = processor.process(&not_wav, &cfg);
-        assert!(
-            result.is_err(),
-            "non-WAV bytes must be a structured error, not silent zeros"
-        );
-    }
-
-    #[test]
-    fn test_audio_processor_produces_real_frames_from_real_wav() {
-        let processor = AudioProcessor::new();
-        let cfg = MultiModalConfig {
-            max_audio_duration: 1.0,
-            ..MultiModalConfig::default()
-        };
-        // 1 second of a real 440 Hz sine tone at 16 kHz -- genuine signal,
-        // not silence, so the resulting spectral features are non-trivial.
-        let sample_rate = 16000u32;
-        let samples: Vec<f32> = (0..sample_rate)
-            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate as f32).sin())
-            .collect();
-        let wav = make_wav(&samples, sample_rate);
-
-        let features = processor.process(&wav, &cfg).expect("real WAV must process");
-        assert!(
-            !features.is_empty(),
-            "a real 1-second tone must yield at least one frame"
-        );
-        assert_eq!(features[0].len(), AUDIO_FEATURE_DIM);
-    }
-
-    #[test]
-    fn test_audio_processor_silence_and_tone_produce_different_features() {
-        // Regression: the old placeholder's output was a pure function of
-        // frame/bin index, so silence and a real tone (same duration,
-        // same sample rate) would have produced byte-identical "features".
-        let processor = AudioProcessor::new();
-        let cfg = MultiModalConfig {
-            max_audio_duration: 0.5,
-            ..MultiModalConfig::default()
-        };
-        let sample_rate = 16000u32;
-        let n = sample_rate / 2;
-
-        let silence = vec![0.0f32; n as usize];
-        let tone: Vec<f32> = (0..n)
-            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate as f32).sin())
-            .collect();
-
-        let silence_features = processor
-            .process(&make_wav(&silence, sample_rate), &cfg)
-            .expect("silence must process");
-        let tone_features = processor
-            .process(&make_wav(&tone, sample_rate), &cfg)
-            .expect("tone must process");
-
-        assert_eq!(silence_features.len(), tone_features.len());
-        assert_ne!(
-            silence_features, tone_features,
-            "real spectral features of silence and a real tone must differ"
-        );
-    }
-
-    #[test]
-    fn test_audio_processor_respects_max_duration() {
-        let processor = AudioProcessor::new();
-        let short_cfg = MultiModalConfig {
-            max_audio_duration: 0.25,
-            ..MultiModalConfig::default()
-        };
-        let long_cfg = MultiModalConfig {
-            max_audio_duration: 2.0,
-            ..MultiModalConfig::default()
-        };
-        let sample_rate = 16000u32;
-        let samples: Vec<f32> = (0..sample_rate * 2)
-            .map(|i| (2.0 * std::f32::consts::PI * 220.0 * i as f32 / sample_rate as f32).sin())
-            .collect();
-        let wav = make_wav(&samples, sample_rate);
-
-        let short_features = processor.process(&wav, &short_cfg).expect("ok");
-        let long_features = processor.process(&wav, &long_cfg).expect("ok");
-        assert!(
-            short_features.len() < long_features.len(),
-            "a smaller max_audio_duration must truncate to fewer real frames: {} vs {}",
-            short_features.len(),
-            long_features.len()
-        );
-    }
-
-    // -------------------------------------------------------------------
-    // VideoProcessor: regression coverage for the bug where
-    // `VideoProcessor::process` computed a frame count from
-    // `config.max_audio_duration` (not even a video-specific config
-    // field) and filled every frame with `cos((i*512+j) as f32) * 0.15`.
-    // No real video feature extraction path exists anywhere in this
-    // workspace, so every call must now fail structurally.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn test_video_processor_always_reports_unsupported_modality() {
-        let processor = VideoProcessor::new();
-        let cfg = MultiModalConfig::default();
-        let result = processor.process(&[1, 2, 3, 4], &cfg);
-        match result {
-            Err(TrustformersError::FeatureUnavailable {
-                ref feature,
-                ref alternatives,
-                ..
-            }) => {
-                assert!(feature.contains("video"), "feature: {feature}");
-                assert!(
-                    alternatives.is_empty(),
-                    "no video backend exists to name as an alternative"
-                );
-            },
-            other => panic!("expected a structured FeatureUnavailable for video, got {other:?}"),
-        }
-    }
-
-    // ---- FusionLayer tests ----
-
-    #[test]
-    fn test_fusion_concatenation_non_empty() {
-        let fusion = FusionLayer::new();
-        let cfg = MultiModalConfig {
-            fusion_strategy: FusionStrategy::Concatenation,
-            ..MultiModalConfig::default()
-        };
-        let features = ModalityFeatures {
-            text_features: Some(vec![vec![0.1; 768]; 3]),
-            image_features: None,
-            audio_features: None,
-            video_features: None,
-            feature_dims: HashMap::new(),
-            attention_masks: HashMap::new(),
-        };
-        let fused = fusion.fuse(&features, &cfg).expect("fusion succeeded");
-        assert!(!fused.is_empty());
-    }
-
-    #[test]
-    fn test_fusion_addition_with_two_modalities() {
-        let fusion = FusionLayer::new();
-        let cfg = MultiModalConfig {
-            fusion_strategy: FusionStrategy::Addition,
-            ..MultiModalConfig::default()
-        };
-        let features = ModalityFeatures {
-            text_features: Some(vec![vec![1.0; 768]]),
-            image_features: Some(vec![vec![2.0; 768]]),
-            audio_features: None,
-            video_features: None,
-            feature_dims: HashMap::new(),
-            attention_masks: HashMap::new(),
-        };
-        let fused = fusion.fuse(&features, &cfg).expect("fusion succeeded");
-        assert_eq!(fused.len(), 1);
-        // Average of 1.0 and 2.0 should be 1.5
-        assert!(
-            (fused[0][0] - 1.5).abs() < 1e-4,
-            "expected 1.5, got {}",
-            fused[0][0]
-        );
-    }
-
-    #[test]
-    fn test_fusion_weighted_average() {
-        let fusion = FusionLayer::new();
-        let cfg = MultiModalConfig {
-            fusion_strategy: FusionStrategy::WeightedAverage,
-            ..MultiModalConfig::default()
-        };
-        let features = ModalityFeatures {
-            text_features: Some(vec![vec![1.0; 768]]),
-            image_features: Some(vec![vec![1.0; 768]]),
-            audio_features: None,
-            video_features: None,
-            feature_dims: HashMap::new(),
-            attention_masks: HashMap::new(),
-        };
-        let fused = fusion.fuse(&features, &cfg).expect("fusion succeeded");
-        assert!(!fused.is_empty());
-    }
-
-    #[test]
-    fn test_fusion_weighted_average_uses_audio_and_video_weights() {
-        // Regression: `audio_weight`/`video_weight` used to be computed
-        // and then never read -- only text/image were folded into the
-        // weighted sum. This fails against that old behavior because a
-        // pure-audio input (no text/image at all) would have produced no
-        // fused output whatsoever.
-        let fusion = FusionLayer::new();
-        let cfg = MultiModalConfig {
-            fusion_strategy: FusionStrategy::WeightedAverage,
-            ..MultiModalConfig::default()
-        };
-        let features = ModalityFeatures {
-            text_features: None,
-            image_features: None,
-            audio_features: Some(vec![vec![2.0; 768]]),
-            video_features: Some(vec![vec![4.0; 768]]),
-            feature_dims: HashMap::new(),
-            attention_masks: HashMap::new(),
-        };
-        let fused = fusion.fuse(&features, &cfg).expect("fusion succeeded");
-        assert_eq!(
-            fused.len(),
-            1,
-            "audio+video alone must still produce fused output"
-        );
-        // (2.0*0.3 + 4.0*0.2) / (0.3+0.2) = 1.4 / 0.5 = 2.8
-        assert!((fused[0][0] - 2.8).abs() < 1e-4, "got {}", fused[0][0]);
-    }
-
-    // ---- Cross-attention weights tests ----
-
-    #[test]
-    fn test_attention_weights_normalised() {
-        // compute_attention_weights normalises to sum 1 per query
-        let query = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]];
-        let key = vec![
-            vec![1.0, 0.0, 0.0],
-            vec![0.0, 1.0, 0.0],
-            vec![0.0, 0.0, 1.0],
-        ];
-
-        // Reproduce the logic inline
-        let mut attention_weights = Vec::new();
-        for q in &query {
-            let mut q_weights = Vec::new();
-            for k in &key {
-                let dot: f32 = q.iter().zip(k.iter()).map(|(a, b)| a * b).sum();
-                let score = (dot / (q.len() as f32).sqrt()).exp();
-                q_weights.push(score);
-            }
-            let sum: f32 = q_weights.iter().sum();
-            if sum > 0.0 {
-                q_weights.iter_mut().for_each(|w| *w /= sum);
-            }
-            attention_weights.push(q_weights);
-        }
-
-        for row in &attention_weights {
-            let sum: f32 = row.iter().sum();
-            assert!((sum - 1.0).abs() < 1e-5, "row sum = {}", sum);
-        }
-    }
-
-    #[test]
-    fn test_cross_modal_similarity_range() {
-        // cosine similarity must be in [-1, 1]
-        let a = [1.0_f32, 0.0, 0.0];
-        let b = [0.0_f32, 1.0, 0.0];
-        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let sim = if na > 0.0 && nb > 0.0 { dot / (na * nb) } else { 0.0 };
-        assert!((-1.0..=1.0).contains(&sim), "sim = {}", sim);
-    }
-
-    // ---- Output format tests ----
-
-    #[test]
-    fn test_classification_result_score_in_range() {
-        let result = ClassificationResult {
-            label: "positive".to_string(),
-            score: 0.85,
-            modality_contributions: HashMap::new(),
-        };
-        assert!(result.score >= 0.0 && result.score <= 1.0);
-    }
-
-    #[test]
-    fn test_processing_metadata_modalities_list() {
-        let meta = ProcessingMetadata {
-            processing_time_ms: 42,
-            modalities_used: vec!["text".to_string(), "image".to_string()],
-            fusion_strategy_used: "Concatenation".to_string(),
-            model_confidence: None,
-            feature_extraction_time_ms: HashMap::new(),
-        };
-        assert_eq!(meta.modalities_used.len(), 2);
-        assert!(meta.modalities_used.contains(&"text".to_string()));
-    }
-
-    // -------------------------------------------------------------------
-    // insert_modality: regression coverage for the panic risk of indexing
-    // `text_features[0]` directly when a successfully-processed modality
-    // (e.g. empty text) produces zero feature vectors.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn test_insert_modality_empty_values_does_not_panic() {
-        let mut features = ModalityFeatures {
-            text_features: None,
-            image_features: None,
-            audio_features: None,
-            video_features: None,
-            feature_dims: HashMap::new(),
-            attention_masks: HashMap::new(),
-        };
-        insert_modality(&mut features, "text", Vec::new(), |f, v| {
-            f.text_features = v
-        });
-        assert_eq!(features.feature_dims["text"], 0);
-        assert_eq!(features.text_features, Some(Vec::new()));
-    }
-
-    // -------------------------------------------------------------------
-    // chunk_features
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn test_chunk_features_splits_evenly() {
-        let flat: Vec<f32> = (0..12).map(|i| i as f32).collect();
-        let chunks = chunk_features(flat, 4);
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[1], vec![4.0, 5.0, 6.0, 7.0]);
-    }
-
-    #[test]
-    fn test_chunk_features_drops_short_remainder() {
-        let flat: Vec<f32> = (0..10).map(|i| i as f32).collect();
-        let chunks = chunk_features(flat, 4);
-        // 10 / 4 = 2 full chunks; the trailing 2 values are dropped rather
-        // than padded with fabricated zeros.
-        assert_eq!(chunks.len(), 2);
-    }
-
-    // -------------------------------------------------------------------
-    // sniff_image_format
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn test_sniff_image_format_recognises_png_signature() {
-        let png_sig = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'];
-        assert!(matches!(sniff_image_format(&png_sig), ImageFormat::Png));
-    }
-
-    #[test]
-    fn test_sniff_image_format_recognises_jpeg_signature() {
-        let jpeg_sig = [0xFF, 0xD8, 0xFF, 0xE0];
-        assert!(matches!(sniff_image_format(&jpeg_sig), ImageFormat::Jpeg));
-    }
-}
+#[path = "multimodal_tests.rs"]
+mod tests;

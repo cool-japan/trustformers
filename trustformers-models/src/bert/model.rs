@@ -87,8 +87,46 @@ impl BertModel {
 
         let encoder_output = self.encoder.forward(embeddings, attention_mask_tensor)?;
 
-        // Temporarily disable pooler to test main tensor flow
-        let pooler_output = None;
+        // Run the real pooler over the `[CLS]` token.
+        //
+        // This used to read `let pooler_output = None; // Temporarily disable
+        // pooler to test main tensor flow`, which made every downstream
+        // consumer of `pooler_output` dead code: `BertForSequenceClassification`
+        // (and any other head that pools) could never run at all, because its
+        // forward pass errors out with "requires pooler output". The pooler
+        // parameters were nevertheless allocated, counted by
+        // `num_parameters()`, published by `named_tensors()` and bound by
+        // `load_from_checkpoint()` -- so a checkpoint's `pooler.dense.*`
+        // weights were loaded and then never used.
+        //
+        // `BertPooler` consumes a 2-D `[seq_len, hidden]` tensor and returns
+        // `[1, hidden]`, while the encoder emits `[1, seq_len, hidden]`; the
+        // reshape below bridges the two. A model whose pooler was dropped at
+        // load time (`add_pooling_layer=False` checkpoints, see
+        // `load_from_checkpoint`) still reports `None`, which is what
+        // HuggingFace does too.
+        let pooler_output = match &self.pooler {
+            Some(pooler) => {
+                let hidden_states = match &encoder_output {
+                    Tensor::F32(arr) => Tensor::F32(
+                        arr.to_shape(IxDyn(&[seq_len, hidden_size]))
+                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?
+                            .to_owned(),
+                    ),
+                    _ => {
+                        return Err(TrustformersError::tensor_op_error(
+                            "Unsupported tensor type for BERT pooling",
+                            "BertModel::forward_with_embeddings",
+                        ))
+                    },
+                };
+                Some(trustformers_core::traits::Layer::forward(
+                    pooler,
+                    hidden_states,
+                )?)
+            },
+            None => None,
+        };
 
         Ok(BertModelOutput {
             last_hidden_state: encoder_output,

@@ -3,7 +3,7 @@
 //! Multiple strategies for different optimization scenarios
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use std::{
     collections::{HashMap, VecDeque},
     time::Duration,
@@ -30,11 +30,8 @@ pub struct ParallelismOptimizationAlgorithm {
 
 #[derive(Debug, Clone)]
 struct ParallelismMetrics {
-    timestamp: DateTime<Utc>,
     cpu_utilization: f32,
     throughput: f64,
-    parallelism_level: usize,
-    contention_score: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -258,13 +255,9 @@ impl LiveOptimizationAlgorithm for ParallelismOptimizationAlgorithm {
 
         // Update the historical parallelism data with the observed outcome.
         // Negative feedback (value < 0.5) is encoded as elevated contention.
-        let contention_score = if feedback.value < 0.5 { 1.0 - feedback.value as f32 } else { 0.0 };
         self.historical_data.push_back(ParallelismMetrics {
-            timestamp: chrono::Utc::now(),
             cpu_utilization: feedback.value as f32,
             throughput: feedback.value,
-            parallelism_level: feedback.parallelism_level,
-            contention_score,
         });
         while self.historical_data.len() > 100 {
             self.historical_data.pop_front();
@@ -380,13 +373,7 @@ pub struct ResourceOptimizationAlgorithm {
 }
 
 #[derive(Debug, Clone)]
-struct ResourceSnapshot {
-    timestamp: DateTime<Utc>,
-    memory_utilization: f32,
-    cpu_utilization: f32,
-    io_utilization: f32,
-    network_utilization: f32,
-}
+struct ResourceSnapshot {}
 
 #[derive(Debug, Clone)]
 struct ResourceConfig {
@@ -394,7 +381,6 @@ struct ResourceConfig {
     memory_threshold_warning: f32,
     cpu_threshold_high: f32,
     io_threshold_high: f32,
-    optimization_interval: Duration,
 }
 
 impl Default for ResourceOptimizationAlgorithm {
@@ -413,7 +399,6 @@ impl ResourceOptimizationAlgorithm {
                 memory_threshold_warning: 0.8,
                 cpu_threshold_high: 0.85,
                 io_threshold_high: 0.8,
-                optimization_interval: Duration::from_secs(60),
             },
         }
     }
@@ -598,18 +583,7 @@ impl LiveOptimizationAlgorithm for ResourceOptimizationAlgorithm {
 
         // Record a resource snapshot derived from the feedback signal so that future
         // `optimize()` calls can identify patterns leading to ineffective recommendations.
-        let memory_utilization = if feedback.value < 0.5 {
-            0.9 - feedback.value as f32 * 0.4
-        } else {
-            feedback.value as f32 * 0.6
-        };
-        self.resource_history.push_back(ResourceSnapshot {
-            timestamp: chrono::Utc::now(),
-            memory_utilization,
-            cpu_utilization: feedback.value as f32,
-            io_utilization: 0.0,
-            network_utilization: 0.0,
-        });
+        self.resource_history.push_back(ResourceSnapshot {});
         while self.resource_history.len() > 100 {
             self.resource_history.pop_front();
         }
