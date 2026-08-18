@@ -772,8 +772,15 @@ impl LargeModelVisualizer {
 
     /// Generate interactive HTML with JavaScript
     fn generate_interactive_html(&self, sampled_layers: &[usize]) -> Result<(Vec<u8>, usize)> {
-        let cache = self.layer_cache.read();
+        // `calculate_model_stats` takes its own `self.layer_cache.read()`
+        // internally and drops it before returning; computed here, before
+        // this function's own `cache` guard below is acquired, so the two
+        // reads never overlap. Acquiring `cache` first (the original order)
+        // held it across this call, which -- parking_lot's `RwLock` gives no
+        // reentrancy guarantee either -- could deadlock a same-thread
+        // recursive read against a writer queued in between.
         let model_stats = self.calculate_model_stats()?;
+        let cache = self.layer_cache.read();
 
         let mut html = String::from(
             r#"<!DOCTYPE html>
@@ -1111,6 +1118,74 @@ mod tests {
 
         assert_eq!(result.stats.layers_visualized, 5);
         assert!(result.stats.output_size_bytes > 0);
+
+        Ok(())
+    }
+
+    /// Regression: `generate_interactive_html` used to hold its own
+    /// `self.layer_cache.read()` guard across the call to
+    /// `calculate_model_stats`, which also reads `self.layer_cache`.
+    /// `parking_lot::RwLock` documents a task-fair policy that blocks new
+    /// readers once a writer is queued (to avoid writer starvation), so a
+    /// same-thread recursive read can block forever once a concurrent
+    /// `add_layer` (`self.layer_cache.write()`) call is queued in between.
+    /// This hammers both sides of that race under a bounded timeout: a real
+    /// deadlock hangs instead of erroring.
+    #[test]
+    fn test_interactive_html_does_not_deadlock_against_concurrent_add_layer() -> Result<()> {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let config = LargeModelVisualizerConfig {
+            output_format: VisualizationFormat::InteractiveHtml,
+            ..Default::default()
+        };
+        let visualizer = Arc::new(LargeModelVisualizer::new(config));
+
+        for i in 0..5 {
+            visualizer.add_layer(LayerMetadata {
+                name: format!("layer_{i}"),
+                index: i,
+                layer_type: "Linear".to_string(),
+                param_count: 1024,
+                memory_mb: 1.0,
+                compute_flops: 1_000_000,
+                input_shape: vec![512],
+                output_shape: vec![512],
+                is_sampled: false,
+            })?;
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let writer_viz = Arc::clone(&visualizer);
+        let writer = std::thread::spawn(move || {
+            for i in 5..205 {
+                let _ = writer_viz.add_layer(LayerMetadata {
+                    name: format!("layer_{i}"),
+                    index: i,
+                    layer_type: "Linear".to_string(),
+                    param_count: 1024,
+                    memory_mb: 1.0,
+                    compute_flops: 1_000_000,
+                    input_shape: vec![512],
+                    output_shape: vec![512],
+                    is_sampled: false,
+                });
+            }
+        });
+
+        let reader_viz = Arc::clone(&visualizer);
+        let reader = std::thread::spawn(move || {
+            for _ in 0..200 {
+                let _ = reader_viz.visualize(None);
+            }
+            let _ = tx.send(());
+        });
+
+        rx.recv_timeout(Duration::from_secs(15))
+            .expect("visualize (InteractiveHtml) must not deadlock against concurrent add_layer");
+        writer.join().expect("writer thread panicked");
+        reader.join().expect("reader thread panicked");
 
         Ok(())
     }

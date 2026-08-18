@@ -1,4 +1,3 @@
-
 use super::*;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -465,7 +464,7 @@ fn test_lcg_f64_range() {
     let mut rng = Lcg::new(12345);
     for _ in 0..100 {
         let val = rng.next_f64();
-        assert!(val >= 0.0 && val < 1.0);
+        assert!((0.0..1.0).contains(&val));
     }
 }
 

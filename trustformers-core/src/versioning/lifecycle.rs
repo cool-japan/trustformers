@@ -147,10 +147,19 @@ impl VersionLifecycle {
 
     /// Auto-archive old versions based on policies
     pub async fn auto_archive(&self) -> Result<Vec<Uuid>> {
-        let policies = self.policies.read().await;
+        // `transition_with_reason`, called below for each version to
+        // archive, also awaits `self.policies.read()`. Holding this
+        // function's own `policies` guard across that call would deadlock
+        // against a concurrent `update_policies` (`self.policies.write()`):
+        // tokio's `RwLock` queues new readers behind a pending writer to
+        // avoid writer starvation, so a same-task recursive read can block
+        // forever once a writer is queued in between. Extract the one field
+        // this function needs and drop the guard immediately instead of
+        // holding it for the whole function body.
+        let max_age_days = self.policies.read().await.auto_archive_after_days;
         let mut archived_versions = Vec::new();
 
-        if let Some(max_age_days) = policies.auto_archive_after_days {
+        if let Some(max_age_days) = max_age_days {
             let cutoff_date = Utc::now() - chrono::Duration::days(max_age_days as i64);
 
             // Collect versions to archive first
@@ -518,6 +527,72 @@ mod tests {
 
         assert!(policies.allows_transition(VersionStatus::Development, VersionStatus::Production));
         assert!(!policies.allows_transition(VersionStatus::Development, VersionStatus::Staging));
+    }
+
+    /// Regression: `auto_archive` used to hold its own `self.policies.read()`
+    /// guard for its whole body, including across the call to
+    /// `transition_with_reason` (which also awaits `self.policies.read()`).
+    /// `tokio::sync::RwLock` queues new readers behind a pending writer to
+    /// avoid writer starvation, so once a concurrent `update_policies`
+    /// (`self.policies.write()`) call was queued in between, the recursive
+    /// read would block forever -- and the queued writer would never
+    /// proceed either, since it is waiting on the same guard `auto_archive`
+    /// never released. This hammers both sides of that race concurrently
+    /// under a bounded timeout: a real deadlock hangs instead of erroring,
+    /// so a `tokio::time::timeout` failure is what would have caught the
+    /// old code, not a normal assertion.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_auto_archive_does_not_deadlock_against_concurrent_update_policies() {
+        use std::sync::Arc;
+
+        let lifecycle = Arc::new(VersionLifecycle::new());
+
+        // A version that is immediately eligible for auto-archive: not in
+        // Production (so `can_archive` allows it), and `auto_archive_after_days:
+        // Some(0)` makes the cutoff "now", so the creation event (already in
+        // the past by the time `auto_archive` runs) is always older than it.
+        let version_id = Uuid::new_v4();
+        lifecycle
+            .initialize_version(version_id)
+            .await
+            .expect("initialize_version failed");
+        lifecycle
+            .update_policies(LifecyclePolicies {
+                auto_archive_after_days: Some(0),
+                ..LifecyclePolicies::default()
+            })
+            .await
+            .expect("update_policies failed");
+
+        let writer = Arc::clone(&lifecycle);
+        let writer_task = tokio::spawn(async move {
+            for _ in 0..200 {
+                let _ = writer
+                    .update_policies(LifecyclePolicies {
+                        auto_archive_after_days: Some(0),
+                        ..LifecyclePolicies::default()
+                    })
+                    .await;
+            }
+        });
+
+        let reader = Arc::clone(&lifecycle);
+        let reader_task = tokio::spawn(async move {
+            for _ in 0..200 {
+                let _ = reader.auto_archive().await;
+            }
+        });
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            writer_task.await.expect("writer task panicked");
+            reader_task.await.expect("reader task panicked");
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "auto_archive and update_policies must not deadlock against each other"
+        );
     }
 
     #[tokio::test]

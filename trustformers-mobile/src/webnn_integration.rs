@@ -18,7 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use trustformers_core::errors::{Result, TrustformersError};
+use trustformers_core::errors::{unsupported_operation, Result, TrustformersError};
 use trustformers_core::Tensor;
 
 /// WebNN backend device preference
@@ -218,6 +218,14 @@ pub struct WebNNCompiledGraph {
 
     /// Compilation metadata
     pub metadata: HashMap<String, String>,
+
+    /// The operation sequence this graph actually runs, in order, as passed
+    /// to [`WebNNBackend::build_graph`]. Previously this was discarded at
+    /// build time (`build_graph` never stored it) and `execute` simply
+    /// returned its inputs unchanged, so the compiled operation list was
+    /// pure decoration with no effect on inference. `execute` now replays
+    /// this sequence for real.
+    pub operations: Vec<WebNNOperation>,
 }
 
 /// WebNN execution context
@@ -333,12 +341,20 @@ impl WebNNBackend {
         // Create graph ID
         let graph_id = format!("{}_{}", name, self.compiled_graphs.len());
 
-        // In a real implementation, this would compile the graph using WebNN API
+        // This is not a real browser WebNN compilation (that requires the
+        // actual `navigator.ml` JS API, reachable only from `wasm32` +
+        // `web-sys`, which this native crate does not link against) -- it
+        // is a real, dependency-free reference interpreter over the same
+        // operation set, so a graph built here executes for real on any
+        // target this crate compiles for. The operation list is the part
+        // that used to be silently dropped; keeping it is what makes
+        // `execute` below able to do real work instead of an identity copy.
         let compiled = WebNNCompiledGraph {
             graph_id: graph_id.clone(),
             inputs: vec![],
             outputs: vec![],
             metadata: HashMap::new(),
+            operations,
         };
 
         self.compiled_graphs.insert(graph_id.clone(), compiled);
@@ -361,19 +377,149 @@ impl WebNNBackend {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn execute(&mut self, graph_id: &str, inputs: Vec<Tensor>) -> Result<Vec<Tensor>> {
-        if !self.compiled_graphs.contains_key(graph_id) {
-            return Err(TrustformersError::runtime_error(format!(
-                "Graph {} not found",
-                graph_id
-            )));
-        }
+        let graph = self.compiled_graphs.get(graph_id).ok_or_else(|| {
+            TrustformersError::runtime_error(format!("Graph {} not found", graph_id))
+        })?;
 
-        // Update statistics
+        let outputs = Self::run_graph(&graph.operations, inputs)?;
+
+        // Update statistics only after real execution has actually
+        // succeeded, so a failed run is never counted as a completed
+        // inference.
         self.context.num_inferences += 1;
 
-        // In a real implementation, this would execute the graph using WebNN API
-        // For now, return the inputs as a placeholder
-        Ok(inputs)
+        Ok(outputs)
+    }
+
+    /// Replay a compiled operation sequence over a stack seeded with
+    /// `inputs`, using real [`Tensor`] math from `trustformers_core` for
+    /// every op this reference interpreter supports.
+    ///
+    /// Semantics: unary ops (activations, `Reshape`, `Transpose`, reductions)
+    /// pop one tensor and push one result; binary ops (`MatMul`, `Add`,
+    /// `Mul`) pop two (in the order they were pushed: `lhs` then `rhs`) and
+    /// push one result. Whatever remains on the stack when the op list is
+    /// exhausted is returned as the graph's outputs -- for a well-formed
+    /// single-output graph that is exactly one tensor, but a graph that
+    /// legitimately produces several (e.g. no trailing op consumes every
+    /// stack entry) returns all of them rather than silently discarding the
+    /// extras.
+    ///
+    /// `Conv2d`, `BatchNorm`, `LayerNorm`, `MaxPool`, and `AvgPool` need
+    /// weight/parameter tensors (kernels, scale/bias, running stats) that
+    /// this graph representation has nowhere to carry -- `build_graph` only
+    /// ever receives an operation list, never weights -- so those ops return
+    /// a structured [`TrustformersError::unsupported_operation`] rather than
+    /// silently no-op'ing or fabricating a result.
+    fn run_graph(operations: &[WebNNOperation], inputs: Vec<Tensor>) -> Result<Vec<Tensor>> {
+        let mut stack: Vec<Tensor> = inputs;
+
+        let pop = |stack: &mut Vec<Tensor>, op: &WebNNOperation| -> Result<Tensor> {
+            stack.pop().ok_or_else(|| {
+                TrustformersError::runtime_error(format!(
+                    "WebNN graph execution: operation {:?} needs an input tensor but the stack \
+                     is empty",
+                    op
+                ))
+            })
+        };
+
+        for op in operations {
+            match op {
+                WebNNOperation::MatMul => {
+                    let rhs = pop(&mut stack, op)?;
+                    let lhs = pop(&mut stack, op)?;
+                    stack.push(lhs.matmul(&rhs)?);
+                },
+                WebNNOperation::Add => {
+                    let rhs = pop(&mut stack, op)?;
+                    let lhs = pop(&mut stack, op)?;
+                    stack.push(lhs.add(&rhs)?);
+                },
+                WebNNOperation::Mul => {
+                    let rhs = pop(&mut stack, op)?;
+                    let lhs = pop(&mut stack, op)?;
+                    stack.push(lhs.mul(&rhs)?);
+                },
+                WebNNOperation::Relu => {
+                    let x = pop(&mut stack, op)?;
+                    stack.push(x.relu()?);
+                },
+                WebNNOperation::Gelu => {
+                    let x = pop(&mut stack, op)?;
+                    stack.push(x.gelu()?);
+                },
+                WebNNOperation::Sigmoid => {
+                    let x = pop(&mut stack, op)?;
+                    stack.push(x.sigmoid()?);
+                },
+                WebNNOperation::Tanh => {
+                    let x = pop(&mut stack, op)?;
+                    stack.push(x.tanh()?);
+                },
+                WebNNOperation::Reshape { shape } => {
+                    let x = pop(&mut stack, op)?;
+                    let shape: Vec<usize> = shape
+                        .iter()
+                        .map(|&d| {
+                            usize::try_from(d).map_err(|_| {
+                                TrustformersError::runtime_error(format!(
+                                    "WebNN Reshape requires non-negative dimensions, got {d}"
+                                ))
+                            })
+                        })
+                        .collect::<Result<_>>()?;
+                    stack.push(x.reshape(&shape)?);
+                },
+                WebNNOperation::Transpose { perm } => {
+                    let x = pop(&mut stack, op)?;
+                    match perm.as_slice() {
+                        [dim0, dim1] => stack.push(x.transpose(*dim0, *dim1)?),
+                        _ => {
+                            return Err(unsupported_operation(
+                                "WebNN Transpose with a permutation other than a 2-axis swap",
+                                "WebNNBackend::run_graph",
+                            ));
+                        },
+                    }
+                },
+                WebNNOperation::ReduceSum { axes } => {
+                    let x = pop(&mut stack, op)?;
+                    stack.push(x.sum(Some(axes.clone()), false)?);
+                },
+                WebNNOperation::ReduceMean { axes } => {
+                    let x = pop(&mut stack, op)?;
+                    let reduced_count: usize = axes
+                        .iter()
+                        .map(|&axis| x.shape().get(axis).copied().unwrap_or(1))
+                        .product();
+                    let summed = x.sum(Some(axes.clone()), false)?;
+                    let denom = (reduced_count.max(1)) as f32;
+                    stack.push(summed.scalar_mul(1.0 / denom)?);
+                },
+                WebNNOperation::Conv2d { .. }
+                | WebNNOperation::BatchNorm
+                | WebNNOperation::LayerNorm
+                | WebNNOperation::MaxPool { .. }
+                | WebNNOperation::AvgPool { .. } => {
+                    return Err(unsupported_operation(
+                        format!(
+                            "WebNN {:?}: requires weight/parameter tensors this graph \
+                             representation does not carry",
+                            op
+                        ),
+                        "WebNNBackend::run_graph",
+                    ));
+                },
+            }
+        }
+
+        if stack.is_empty() {
+            return Err(TrustformersError::runtime_error(
+                "WebNN graph execution produced no output tensors".to_string(),
+            ));
+        }
+        Ok(stack)
     }
 
     /// Check if operation is supported
@@ -596,6 +742,89 @@ mod tests {
         // FP16 should use less memory
         let memory_fp16 = WebNNUtils::estimate_memory(&ops, &shapes, WebNNDataType::Float16);
         assert!(memory_fp16 < memory);
+    }
+
+    /// Regression test for the previous `execute`, which ignored the
+    /// compiled graph's operations entirely and returned its `inputs`
+    /// unchanged. A `Relu` graph fed a tensor with negative entries must
+    /// actually zero them out, not hand the negatives straight back.
+    #[test]
+    fn test_execute_relu_actually_transforms_input_not_identity() {
+        let mut backend =
+            WebNNBackend::new(WebNNGraphConfig::default()).expect("backend creation failed");
+        let graph_id = backend
+            .build_graph("relu_graph", vec![WebNNOperation::Relu])
+            .expect("build_graph failed");
+
+        let input =
+            Tensor::from_vec(vec![-2.0, -1.0, 0.5, 3.0], &[4]).expect("tensor construction");
+        let outputs = backend.execute(&graph_id, vec![input]).expect("execute failed");
+
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(
+            outputs[0].data().expect("tensor data"),
+            vec![0.0, 0.0, 0.5, 3.0]
+        );
+    }
+
+    /// Regression test: a two-input `Add` graph must perform a real
+    /// element-wise sum, not return only (or unchanged) the first input.
+    #[test]
+    fn test_execute_add_combines_both_inputs() {
+        let mut backend =
+            WebNNBackend::new(WebNNGraphConfig::default()).expect("backend creation failed");
+        let graph_id = backend
+            .build_graph("add_graph", vec![WebNNOperation::Add])
+            .expect("build_graph");
+
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("tensor a");
+        let b = Tensor::from_vec(vec![10.0, 20.0, 30.0], &[3]).expect("tensor b");
+        let outputs = backend.execute(&graph_id, vec![a, b]).expect("execute failed");
+
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(
+            outputs[0].data().expect("tensor data"),
+            vec![11.0, 22.0, 33.0]
+        );
+    }
+
+    /// Regression test: `execute` used to increment `num_inferences`
+    /// unconditionally even though it did no work; it must still count real
+    /// completed executions.
+    #[test]
+    fn test_execute_updates_inference_count() {
+        let mut backend =
+            WebNNBackend::new(WebNNGraphConfig::default()).expect("backend creation failed");
+        let graph_id = backend
+            .build_graph("relu_graph", vec![WebNNOperation::Relu])
+            .expect("build_graph");
+        assert_eq!(backend.get_statistics().num_inferences, 0);
+
+        let input = Tensor::from_vec(vec![1.0, 2.0], &[2]).expect("tensor");
+        backend.execute(&graph_id, vec![input]).expect("execute failed");
+        assert_eq!(backend.get_statistics().num_inferences, 1);
+    }
+
+    /// Operations that need weight/parameter tensors this graph
+    /// representation cannot carry must fail loudly, not silently pass
+    /// tensors through unchanged.
+    #[test]
+    fn test_execute_rejects_unsupported_parameterized_ops() {
+        let mut backend =
+            WebNNBackend::new(WebNNGraphConfig::default()).expect("backend creation failed");
+        let graph_id = backend
+            .build_graph(
+                "conv_graph",
+                vec![WebNNOperation::Conv2d {
+                    padding: vec![0, 0],
+                    stride: vec![1, 1],
+                }],
+            )
+            .expect("build_graph");
+
+        let input = Tensor::from_vec(vec![1.0, 2.0], &[2]).expect("tensor");
+        let result = backend.execute(&graph_id, vec![input]);
+        assert!(result.is_err());
     }
 
     #[test]

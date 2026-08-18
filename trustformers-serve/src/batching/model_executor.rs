@@ -2,8 +2,8 @@
 //!
 //! This module bridges [`trustformers_models`] decoders and
 //! [`trustformers_tokenizers`] tokenizers onto the dyn-safe
-//! [`BatchModel`](crate::batching::processor::BatchModel) /
-//! [`Tokenizer`](crate::batching::processor::Tokenizer) traits the batch
+//! [`crate::batching::processor::BatchModel`] /
+//! [`crate::batching::processor::Tokenizer`] traits the batch
 //! executor consumes.
 //!
 //! Nothing here fabricates output: every call runs the real forward pass of a

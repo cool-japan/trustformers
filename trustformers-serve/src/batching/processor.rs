@@ -362,10 +362,36 @@ impl ModelBatchExecutor {
         self
     }
 
+    /// The tokenizer this executor was built with, if any.
+    pub fn tokenizer(&self) -> Option<&Arc<dyn Tokenizer>> {
+        self.tokenizer.as_ref()
+    }
+
+    /// The model this executor drives.
+    pub fn model(&self) -> &Arc<dyn BatchModel> {
+        &self.model
+    }
+
     /// Run `max_new_tokens` greedy decoding steps over a ragged batch of prompts.
     ///
-    /// Returns, for each input row, the newly generated token ids (never the prompt).
-    fn generate(&self, prompts: &[Vec<u32>], max_new_tokens: usize) -> Result<Vec<Vec<u32>>> {
+    /// Returns, for each input row, the newly generated token ids (never the
+    /// prompt). A row that hit the model's end-of-sequence id ends with that id,
+    /// so a caller can tell "the model stopped" from "the budget ran out".
+    ///
+    /// This is the raw token-level entry point. Callers that need exact token
+    /// accounting — the OpenAI-compatible endpoints, for instance — use it
+    /// directly instead of [`BatchExecutor::execute_batch`], whose text output
+    /// would have to be re-encoded to be counted.
+    ///
+    /// This call is synchronous and CPU-bound; run it on a blocking thread when
+    /// calling from async code.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the model reports a zero-sized vocabulary, when a prompt plus
+    /// its decode budget exceeds the model's context window, or when the forward
+    /// pass itself fails.
+    pub fn generate(&self, prompts: &[Vec<u32>], max_new_tokens: usize) -> Result<Vec<Vec<u32>>> {
         let vocab = self.model.vocab_size();
         if vocab == 0 {
             return Err(anyhow!("model reports a zero-sized vocabulary"));
@@ -776,7 +802,7 @@ impl ContinuousBatchingExecutor {
     ///
     /// Always returns an error: this admission-only type owns neither a model nor
     /// a KV cache, so it cannot produce a token. Use
-    /// [`crate::continuous_batching::ContinuousBatchingScheduler`] for real
+    /// [`crate::continuous_batching::ContinuousBatchScheduler`] for real
     /// continuous decoding.
     pub async fn process_step(&self) -> Result<HashMap<RequestId, u32>> {
         Err(anyhow!(

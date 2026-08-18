@@ -183,35 +183,35 @@ pub struct LoggingCallback;
 
 impl HyperparameterCallback for LoggingCallback {
     fn on_study_start(&mut self, config: &TunerConfig) {
-        println!("Starting hyperparameter study: {}", config.study_name);
-        println!("Direction: {:?}", config.direction);
-        println!("Objective metric: {}", config.objective_metric);
+        tracing::info!("Starting hyperparameter study: {}", config.study_name);
+        tracing::info!("Direction: {:?}", config.direction);
+        tracing::info!("Objective metric: {}", config.objective_metric);
         if let Some(max_trials) = config.max_trials {
-            println!("Max trials: {}", max_trials);
+            tracing::info!("Max trials: {}", max_trials);
         }
     }
 
     fn on_study_end(&mut self, _config: &TunerConfig, statistics: &StudyStatistics) {
-        println!("\nHyperparameter study completed!");
-        println!("Total trials: {}", statistics.total_trials);
-        println!("Completed trials: {}", statistics.completed_trials);
-        println!("Success rate: {:.2}%", statistics.success_rate);
+        tracing::info!("\nHyperparameter study completed!");
+        tracing::info!("Total trials: {}", statistics.total_trials);
+        tracing::info!("Completed trials: {}", statistics.completed_trials);
+        tracing::info!("Success rate: {:.2}%", statistics.success_rate);
         if let Some(best_value) = statistics.best_value {
-            println!("Best value: {:.6}", best_value);
+            tracing::info!("Best value: {:.6}", best_value);
         }
-        println!("Total duration: {:?}", statistics.total_duration);
+        tracing::info!("Total duration: {:?}", statistics.total_duration);
     }
 
     fn on_trial_start(&mut self, trial: &Trial) {
-        println!("Starting trial {}: {}", trial.number, trial.summary());
+        tracing::info!("Starting trial {}: {}", trial.number, trial.summary());
     }
 
     fn on_trial_complete(&mut self, trial: &Trial) {
-        println!("Completed trial {}: {}", trial.number, trial.summary());
+        tracing::info!("Completed trial {}: {}", trial.number, trial.summary());
     }
 
     fn on_trial_pruned(&mut self, trial: &Trial, reason: &str) {
-        println!(
+        tracing::info!(
             "Pruned trial {} ({}): {}",
             trial.number,
             reason,
@@ -220,7 +220,7 @@ impl HyperparameterCallback for LoggingCallback {
     }
 
     fn on_new_best(&mut self, trial: &Trial, improvement: f64) {
-        println!(
+        tracing::info!(
             "New best trial {}: improvement={:.6}, {}",
             trial.number,
             improvement,
@@ -352,7 +352,7 @@ impl HyperparameterTuner {
             if let Some(params) = self.strategy.suggest(&self.search_space, &self.history) {
                 // Validate parameters
                 if let Err(e) = self.search_space.validate(&params) {
-                    eprintln!("Warning: Invalid parameters suggested: {}", e);
+                    tracing::warn!("Warning: Invalid parameters suggested: {}", e);
                     continue;
                 }
 
@@ -433,7 +433,7 @@ impl HyperparameterTuner {
                 // Save checkpoint if enabled
                 if self.config.save_checkpoints {
                     if let Err(e) = self.save_checkpoint() {
-                        eprintln!("Warning: Failed to save checkpoint: {}", e);
+                        tracing::warn!("Warning: Failed to save checkpoint: {}", e);
                     }
                 }
             } else {
@@ -675,7 +675,7 @@ pub fn hyperparams_to_training_args(
             },
             _ => {
                 // Unknown hyperparameter, ignore or log warning
-                eprintln!("Warning: Unknown hyperparameter: {}", name);
+                tracing::warn!("Warning: Unknown hyperparameter: {}", name);
             },
         }
     }

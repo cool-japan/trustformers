@@ -132,6 +132,89 @@ impl Model for BertModel {
 
         embeddings_params + encoder_params + pooler_params
     }
+
+    /// Enumerate the encoder's live parameters under HuggingFace `BertModel`
+    /// names.
+    ///
+    /// The spelling comes from the same [`BertLayerNames::bert`] table
+    /// [`BertModel::load_from_checkpoint`] binds through, so a file written from
+    /// these names reloads. The `bert.` prefix that task checkpoints carry is
+    /// *not* applied — this is the bare encoder, which HuggingFace exports
+    /// unprefixed; the loader detects either spelling.
+    ///
+    /// The pooler is listed only when this model actually has one:
+    /// `load_from_checkpoint` drops it for `add_pooling_layer=False` checkpoints
+    /// rather than keeping a randomly-initialised projection, and inventing a
+    /// name for a parameter that no longer exists would be worse than omitting
+    /// it.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters("", &mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters_mut("", &mut tensors);
+        tensors
+    }
+}
+
+/// Namespace every entry appended to `into` since `from` under `prefix`.
+///
+/// The encoder's own collectors spell HuggingFace's *unprefixed* `BertModel`
+/// names; the task wrappers in [`crate::bert::tasks`] nest that same encoder
+/// under `bert.`. Rewriting the names afterwards keeps one name table instead of
+/// threading a prefix argument through every sub-collector, and it leaves the
+/// tensor references untouched — only the `String` changes, so the published
+/// parameters stay live.
+fn namespace_from<T>(prefix: &str, from: usize, into: &mut [(String, T)]) {
+    if prefix.is_empty() {
+        return;
+    }
+    for (name, _) in into.iter_mut().skip(from) {
+        *name = format!("{prefix}.{name}");
+    }
+}
+
+impl BertModel {
+    /// Append every encoder parameter to `into`, namespaced under `prefix`.
+    ///
+    /// `prefix` is `""` for the bare `BertModel` export (HuggingFace writes
+    /// `embeddings.…` / `encoder.layer.N.…` at the root) and `"bert"` for the
+    /// task wrappers, whose checkpoints nest the encoder under `bert.`. Both
+    /// spellings are accepted on the way back in by
+    /// [`BertModel::load_from_checkpoint`], which probes for the prefix.
+    pub(crate) fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        let start = into.len();
+        let names = BertLayerNames::bert();
+        self.embeddings.collect_named_parameters(true, into);
+        self.encoder.collect_named_parameters(&names, into);
+        if let Some(pooler) = &self.pooler {
+            pooler.collect_named_parameters(into);
+        }
+        namespace_from(prefix, start, into);
+    }
+
+    /// Mutable counterpart of [`BertModel::collect_named_parameters`].
+    pub(crate) fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        let start = into.len();
+        let names = BertLayerNames::bert();
+        self.embeddings.collect_named_parameters_mut(true, into);
+        self.encoder.collect_named_parameters_mut(&names, into);
+        if let Some(pooler) = &mut self.pooler {
+            pooler.collect_named_parameters_mut(into);
+        }
+        namespace_from(prefix, start, into);
+    }
 }
 
 impl BertModel {

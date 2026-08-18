@@ -326,7 +326,7 @@ pub fn params_to_training_args(
             },
             _ => {
                 // Log unknown parameters
-                eprintln!("Unknown hyperparameter: {}", name);
+                tracing::warn!("Unknown hyperparameter: {}", name);
             },
         }
     }

@@ -237,7 +237,7 @@ impl CustomBenchmark for ExampleBenchmark {
     }
 
     fn setup(&mut self) -> Result<()> {
-        println!("Setting up benchmark for model: {}", self.model_name);
+        tracing::info!("Setting up benchmark for model: {}", self.model_name);
         Ok(())
     }
 

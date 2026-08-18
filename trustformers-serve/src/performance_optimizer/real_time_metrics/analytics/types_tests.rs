@@ -4,6 +4,9 @@
 //! statistical methods, and anomaly detection.
 
 use super::*;
+// `TrendDirection` lives in the shared real-time-metrics enum module; the
+// `use super::*` glob above only reaches the analytics module's own items.
+use crate::performance_optimizer::real_time_metrics::types::TrendDirection;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -18,7 +21,8 @@ impl Lcg {
     }
 
     fn next(&mut self) -> u64 {
-        self.state = self.state
+        self.state = self
+            .state
             .wrapping_mul(6364136223846793005u64)
             .wrapping_add(1442695040888963407u64);
         self.state
@@ -469,7 +473,10 @@ fn test_utilization_metrics_clone() {
     };
     let cloned = metrics.clone();
     assert!((cloned.current - metrics.current).abs() < f64::EPSILON);
-    assert_eq!(cloned.saturation_points.len(), metrics.saturation_points.len());
+    assert_eq!(
+        cloned.saturation_points.len(),
+        metrics.saturation_points.len()
+    );
 }
 
 #[test]
@@ -581,7 +588,7 @@ fn test_lcg_values_in_range() {
     let mut rng = Lcg::new(12345);
     for _ in 0..50 {
         let v = rng.next_f64();
-        assert!(v >= 0.0 && v < 1.0);
+        assert!((0.0..1.0).contains(&v));
     }
 }
 

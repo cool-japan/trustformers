@@ -29,8 +29,8 @@ swagger-ui = ["dep:utoipa-swagger-ui"]
 
 [dependencies]
 anyhow.workspace = true
-async-graphql = "7.2.1"
-async-graphql-axum = "7.2.1"
+async-graphql.workspace = true
+async-graphql-axum.workspace = true
 async-trait.workspace = true
 axum = { workspace = true, features = ["multipart"] }
 bytes.workspace = true
@@ -42,11 +42,11 @@ lazy_static.workspace = true
 log.workspace = true
 num_cpus.workspace = true
 once_cell.workspace = true
-opentelemetry = "0.32"
-opentelemetry-otlp = "0.32"
-opentelemetry-jaeger = "0.22"
-opentelemetry-zipkin = "0.32"
-opentelemetry-semantic-conventions = "0.32"
+opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry-jaeger.workspace = true
+opentelemetry-zipkin.workspace = true
+opentelemetry-semantic-conventions.workspace = true
 parking_lot.workspace = true
 ordered-float.workspace = true
 prometheus.workspace = true
@@ -66,18 +66,18 @@ tonic-prost.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
-tracing-opentelemetry = "0.33"
+tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
-utoipa = { version = "5.5", features = ["axum_extras", "chrono", "uuid"] }
+utoipa = { workspace = true, features = ["axum_extras", "chrono", "uuid"] }
 # Optional: gated behind the `swagger-ui` feature. Its build-dependency pulls the
 # banned `zip` crate, so it is excluded from the default Pure-Rust dependency tree.
-utoipa-swagger-ui = { version = "9.0", features = ["axum"], optional = true }
+utoipa-swagger-ui = { workspace = true, features = ["axum"], optional = true }
 clap.workspace = true
 env_logger.workspace = true
 tokio-rustls.workspace = true
-rustls = "0.23"
+rustls.workspace = true
 base64.workspace = true
 mime_guess.workspace = true
 fastrand.workspace = true
@@ -100,8 +100,11 @@ pbkdf2.workspace = true
 getrandom.workspace = true
 subtle.workspace = true
 zeroize.workspace = true
-glob = "0.3"
-sysinfo = "0.39.5"
+glob.workspace = true
+# This crate additionally needs `sysinfo::Disks` / `sysinfo::Networks`, which the
+# workspace entry leaves off; member feature lists are additive, so the extra two
+# features are requested here while the version stays workspace-wide.
+sysinfo = { workspace = true, features = ["disk", "network"] }
 libc.workspace = true
 oxicode.workspace = true
 rmp-serde.workspace = true
@@ -112,28 +115,28 @@ oxiarc-zstd.workspace = true
 # Message Queue Dependencies
 # rdkafka is optional and requires the "kafka" feature; cmake-build pulls in C/C++ deps.
 # The "zstd" feature is dropped: use oxiarc-zstd at the application layer instead.
-rdkafka = { version = "0.39", features = ["cmake-build", "ssl", "sasl"], optional = true }
-lapin = "4.10"
-redis = { version = "1.3", features = ["tokio-comp", "streams"] }
-async-nats = "0.49"
-aws-sdk-sqs = "1.102"
-aws-config = "1.8"
+rdkafka = { workspace = true, features = ["cmake-build", "ssl", "sasl"], optional = true }
+lapin.workspace = true
+redis = { workspace = true, features = ["tokio-comp", "streams"] }
+async-nats.workspace = true
+aws-sdk-sqs.workspace = true
+aws-config.workspace = true
 
 # Cloud Provider Dependencies
-aws-sdk-sagemaker = "1.210"
-aws-sdk-sagemakerruntime = "1.105"
-aws-sdk-lambda = "1.130"
-aws-sdk-cloudwatch = "1.118"
+aws-sdk-sagemaker.workspace = true
+aws-sdk-sagemakerruntime.workspace = true
+aws-sdk-lambda.workspace = true
+aws-sdk-cloudwatch.workspace = true
 # Optional: gated behind the `lambda` feature. Pulls the banned `brotli` crate,
 # so it is excluded from the default Pure-Rust dependency tree.
-lambda-web = { version = "0.2.1", optional = true }
-lambda_runtime = "1.2.1"
-google-cloud-gax = "1.11.0"
-google-cloud-functions-v2 = "1.12.0"
-azure_core = "1.0"
-azure_identity = "1.0"
-azure_mgmt_machinelearningservices = "0.21"
-azure_mgmt_web = "0.21"
+lambda-web = { workspace = true, optional = true }
+lambda_runtime.workspace = true
+google-cloud-gax.workspace = true
+google-cloud-functions-v2.workspace = true
+azure_core.workspace = true
+azure_identity.workspace = true
+azure_mgmt_machinelearningservices.workspace = true
+azure_mgmt_web.workspace = true
 
 # Internal dependencies
 trustformers-core.workspace = true

@@ -348,6 +348,37 @@ pytest tests/benchmarks/ --benchmark-only
 - GIL may limit parallelism in pure Python code
 - Large model loading requires significant memory
 - Type hints require Python 3.9+ for full support
+- **No Hugging Face Hub downloader**: `from_pretrained("bert-base-uncased")` only
+  resolves a local path -- either the string itself, or a directory/sibling
+  holding `config.json` and (`model.safetensors` | `pytorch_model.bin`). A name
+  that isn't a local path raises immediately rather than attempting a download.
+- **`BertModel`/`GPT2Model`/`GPT2LMHeadModel`/`T5Model`/`LlamaModel` load real
+  checkpoint weights** (safetensors or PyTorch `.bin`, via
+  `trustformers_core::traits::Model::load_pretrained`) when a local checkpoint
+  is found next to the config; `RwkvModel`/`MambaModel::from_pretrained` still
+  fall back to random initialisation for *any* checkpoint, because their
+  `Model::load_pretrained` in `trustformers-models` is not implemented yet
+  (returns a structured `not_implemented` error, which surfaces as a Python
+  exception rather than silently succeeding).
+- **`save_pretrained` writes a real `config.json` + `model.safetensors`** for
+  `BertModel`, `GPT2Model`, `GPT2LMHeadModel`, `T5Model`, and `LlamaModel`
+  (`BertForSequenceClassification` exports the BERT encoder only -- its
+  classification head is still a placeholder, tracked below). It raises for
+  `RwkvModel`/`MambaModel`, since `trustformers-models` has not yet given
+  either architecture a `Model::named_tensors()` override to enumerate weights
+  from; once one is added, `save_pretrained` starts working with no changes
+  needed on the Python-bindings side.
+- **`GPT2Model.generate()` is not available**: it has no language-modeling
+  head (mirrors HuggingFace's own headless `GPT2Model`). Use
+  `GPT2LMHeadModel.from_pretrained(...)` for real autoregressive generation
+  (greedy/temperature/top-k/top-p via `trustformers_core::generation::TextGenerator`).
+- **`pipelines.py` task pipelines are still stubbed**: `TextGenerationPipeline`,
+  `TextClassificationPipeline`, `TokenClassificationPipeline`, and
+  `QuestionAnsweringPipeline.__call__` all return hardcoded example output
+  (`"{text} [Generated continuation]"`, `score: 0.95`, always-`POSITIVE`
+  sentiment, etc.) rather than running their wrapped model/tokenizer. This is
+  a separate fake-implementation gap from the `models.py` one fixed above --
+  not yet wired to the same real inference paths.
 
 ---
 

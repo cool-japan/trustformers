@@ -76,14 +76,14 @@ impl StreamingTrainer {
         let mut word_freqs = HashMap::new();
         let mut lines_processed = 0;
 
-        println!("Phase 1: Collecting character and word frequencies...");
+        tracing::info!("Phase 1: Collecting character and word frequencies...");
         for line in reader.lines() {
             let line = line
                 .map_err(|e| TrustformersError::io_error(format!("Failed to read line: {}", e)))?;
             lines_processed += 1;
 
             if lines_processed % self.save_progress_every == 0 {
-                println!("Processed {} lines", lines_processed);
+                tracing::info!("Processed {} lines", lines_processed);
             }
 
             for word in line.split_whitespace() {
@@ -94,7 +94,7 @@ impl StreamingTrainer {
             }
         }
 
-        println!(
+        tracing::info!(
             "Phase 1 complete: {} lines, {} unique words, {} unique chars",
             lines_processed,
             word_freqs.len(),
@@ -119,7 +119,7 @@ impl StreamingTrainer {
             }
         }
 
-        println!(
+        tracing::info!(
             "Phase 2: Initialized vocabulary with {} tokens",
             vocab.len()
         );
@@ -128,7 +128,7 @@ impl StreamingTrainer {
         let mut merge_rules = Vec::new();
         let target_vocab_size = self.config.base_config.vocab_size;
 
-        println!(
+        tracing::info!(
             "Phase 3: Learning BPE merges (target vocab size: {})...",
             target_vocab_size
         );
@@ -150,7 +150,7 @@ impl StreamingTrainer {
                 chunk_count += 1;
 
                 if chunk_count % self.chunk_size == 0 {
-                    println!(
+                    tracing::info!(
                         "  Processing chunk {}, vocab size: {}",
                         chunk_count / self.chunk_size,
                         vocab.len()
@@ -189,7 +189,7 @@ impl StreamingTrainer {
                 next_id += 1;
 
                 if merge_rules.len() % 1000 == 0 {
-                    println!(
+                    tracing::info!(
                         "  Learned {} merge rules, vocab size: {}",
                         merge_rules.len(),
                         vocab.len()
@@ -201,7 +201,7 @@ impl StreamingTrainer {
         }
 
         let training_time = start_time.elapsed().as_secs_f64();
-        println!(
+        tracing::info!(
             "Training complete: {} vocab, {} merges, {:.2}s",
             vocab.len(),
             merge_rules.len(),
@@ -231,7 +231,7 @@ impl StreamingTrainer {
         let (tx, rx) = mpsc::channel();
         let mut handles = Vec::new();
 
-        println!("Starting training on {} corpora...", corpus_paths.len());
+        tracing::info!("Starting training on {} corpora...", corpus_paths.len());
 
         for (idx, path) in corpus_paths.iter().enumerate() {
             let path = path.as_ref().to_path_buf();
@@ -249,7 +249,7 @@ impl StreamingTrainer {
                     temp_dir: None,
                 };
 
-                println!("Training tokenizer {} on {:?}", idx, path);
+                tracing::info!("Training tokenizer {} on {:?}", idx, path);
                 let result = trainer.train_bpe_streaming(&path);
                 // The receiver is collected on the main thread below; if it has
                 // already been dropped there is nothing to do but discard.
@@ -280,7 +280,7 @@ impl StreamingTrainer {
         for (idx, result_opt) in results.into_iter().enumerate() {
             match result_opt {
                 Some(Ok(tokenizer)) => {
-                    println!("Successfully trained tokenizer {}", idx);
+                    tracing::info!("Successfully trained tokenizer {}", idx);
                     tokenizers.push(tokenizer);
                 },
                 Some(Err(e)) => {
@@ -298,7 +298,7 @@ impl StreamingTrainer {
             }
         }
 
-        println!(
+        tracing::info!(
             "Multi-corpus training complete: {} tokenizers",
             tokenizers.len()
         );
@@ -513,9 +513,11 @@ impl DistributedTrainingCoordinator {
             .flush()
             .map_err(|e| TrustformersError::io_error(format!("Failed to flush writer: {}", e)))?;
 
-        println!(
+        tracing::info!(
             "Node {} processed {} total lines, wrote partition to {:?}",
-            self.node_id, line_count, output_path
+            self.node_id,
+            line_count,
+            output_path
         );
 
         Ok(output_path.to_string_lossy().to_string())
@@ -563,7 +565,7 @@ impl DistributedTrainingCoordinator {
             combined_vocab.insert(token, idx as u32);
         }
 
-        println!(
+        tracing::info!(
             "Merged vocabularies from {} nodes: {} tokens",
             vocab_files.len(),
             combined_vocab.len()

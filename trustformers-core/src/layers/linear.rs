@@ -128,12 +128,24 @@ pub struct Linear {
     /// the whole of inference, so recomputing the transpose per forward call
     /// (a 128 MiB memcpy for a 4096x4096 f32 weight -- ~896 MiB per transformer
     /// block per token in decode) is pure waste. The transpose is computed once
-    /// here and rebuilt only when the weight itself changes.
+    /// and rebuilt only when the weight itself changes.
     ///
-    /// `Arc` so cloning a `Linear` does not deep-copy the cached matrix, and
-    /// `Option` so a weight that cannot be transposed (non-2D) simply falls back
-    /// to computing the transpose on the fly.
-    weight_transposed: Option<std::sync::Arc<Tensor>>,
+    /// # Why a `OnceLock`
+    ///
+    /// Invalidation happens through `&mut self` ([`Linear::set_weight`],
+    /// [`Linear::parameters_mut`]) but the *rebuild* has to happen inside
+    /// [`Layer::forward_ref`], which only has `&self`. A plain `Option` field
+    /// therefore had a one-way failure mode: anything that cleared it — notably
+    /// `Model::named_tensors_mut`, which hands out `&mut Tensor` for every
+    /// parameter — left the cache empty forever, and every subsequent forward
+    /// pass silently paid a full transpose. `OnceLock` closes that hole:
+    /// [`OnceLock::take`] clears it through `&mut self`, and `get_or_init`
+    /// refills it on the next forward through `&self`.
+    ///
+    /// The inner `Arc` means cloning a `Linear` does not deep-copy the cached
+    /// matrix; the inner `Option` records "this weight cannot be transposed"
+    /// (a non-2D weight) so the fallback path is taken without re-trying.
+    weight_transposed: std::sync::OnceLock<Option<std::sync::Arc<Tensor>>>,
     bias: Option<Tensor>,
     device: Device,
     #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -218,11 +230,11 @@ impl Linear {
             None
         };
 
-        let weight_transposed = Self::build_transposed_weight(&weight);
-
         Self {
             weight,
-            weight_transposed,
+            // Left empty: the first forward pass fills it. Building it eagerly
+            // would transpose weights that a checkpoint load is about to replace.
+            weight_transposed: std::sync::OnceLock::new(),
             bias,
             device,
             #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -271,11 +283,21 @@ impl Linear {
         weight.transpose(0, 1).ok().map(std::sync::Arc::new)
     }
 
-    /// Return `W^T`, using the cache when it is available.
+    /// Return `W^T`, filling the cache on first use.
     ///
-    /// The returned `Arc` is a refcount bump, not a copy.
+    /// Takes `&self` because every forward path does. The cache is refilled here
+    /// rather than at invalidation time, so clearing it through `&mut self` (a
+    /// checkpoint load, `named_tensors_mut`) costs nothing and the next forward
+    /// pass restores it — the transpose is never paid more than once per weight.
+    ///
+    /// The returned `Arc` is a refcount bump, not a copy. A weight that cannot be
+    /// transposed (not 2-D) caches `None` and is transposed on demand, which
+    /// simply reproduces the error each call.
     fn transposed_weight(&self) -> Result<std::sync::Arc<Tensor>> {
-        match &self.weight_transposed {
+        match self
+            .weight_transposed
+            .get_or_init(|| Self::build_transposed_weight(&self.weight))
+        {
             Some(cached) => Ok(std::sync::Arc::clone(cached)),
             None => Ok(std::sync::Arc::new(self.weight.transpose(0, 1)?)),
         }
@@ -295,10 +317,10 @@ impl Linear {
     ///
     /// This method is typically used when loading pretrained weights.
     pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
-        // Clear the device buffers first, then install the new transpose cache.
-        self.invalidate_weight_caches();
-        self.weight_transposed = Self::build_transposed_weight(&weight);
         self.weight = weight;
+        // Drop the stale transpose and device buffers; the next forward pass
+        // rebuilds the transpose from the weight just installed.
+        self.invalidate_weight_caches();
         Ok(())
     }
 
@@ -354,6 +376,7 @@ impl Linear {
     /// forward pass. Keeping the stale transpose instead would make every
     /// subsequent forward silently wrong.
     pub fn weight_mut(&mut self) -> &mut Tensor {
+        self.invalidate_weight_caches();
         &mut self.weight
     }
 
@@ -365,11 +388,80 @@ impl Linear {
         self.bias.as_mut()
     }
 
+    /// Append this layer's parameters to `into` under `<prefix>.weight` /
+    /// `<prefix>.bias`.
+    ///
+    /// `weight` and `bias` are the names PyTorch's `nn.Linear` uses, so a model
+    /// composing these calls produces HuggingFace-shaped keys for
+    /// [`Model::named_tensors`](crate::traits::Model::named_tensors) with no
+    /// per-model string plumbing. A layer without bias contributes exactly one
+    /// entry — the absence is never papered over with a zero vector.
+    ///
+    /// The references are to the *live* parameters, as the trait requires: no
+    /// tensor is copied, reshaped or transposed on the way out.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &self.weight));
+        if let Some(bias) = &self.bias {
+            into.push((format!("{prefix}.bias"), bias));
+        }
+    }
+
+    /// Mutable counterpart of [`Linear::collect_named_parameters`].
+    ///
+    /// Goes through [`Linear::parameters_mut`], so the cached transpose and any
+    /// GPU-resident weight buffer are invalidated before the caller can write.
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        let (weight, bias) = self.parameters_mut();
+        into.push((format!("{prefix}.weight"), weight));
+        if let Some(bias) = bias {
+            into.push((format!("{prefix}.bias"), bias));
+        }
+    }
+
+    /// Borrow the weight **and** the bias mutably at the same time.
+    ///
+    /// `weight_mut()` followed by `bias_mut()` cannot compile: each borrows all of
+    /// `*self`. Building a `Vec<(String, &mut Tensor)>` for
+    /// [`Model::named_tensors_mut`](crate::traits::Model::named_tensors_mut) needs
+    /// both live at once, which only disjoint *field* borrows inside this impl can
+    /// give. The cache invalidation also happens once here rather than per borrow.
+    ///
+    /// The bias is `None` exactly when the layer was built without one.
+    pub fn parameters_mut(&mut self) -> (&mut Tensor, Option<&mut Tensor>) {
+        self.invalidate_weight_caches();
+        (&mut self.weight, self.bias.as_mut())
+    }
+
+    /// Whether the `W^T` cache is currently unpopulated.
+    ///
+    /// Test-only introspection. The transpose cache is a pure performance
+    /// optimisation, so its state cannot be observed through outputs — a layer
+    /// whose cache never refills computes exactly the same numbers, just slower.
+    /// The regression test for that failure mode therefore has to look at the
+    /// cache itself.
+    #[cfg(test)]
+    pub(crate) fn transposed_weight_cache_is_empty(&self) -> bool {
+        self.weight_transposed.get().is_none()
+    }
+
     /// Drop every cached derivative of `self.weight`.
     ///
-    /// Mirrors exactly what [`Linear::set_weight`] invalidates.
+    /// Cheap by design: the transpose is *not* rebuilt here, only dropped.
+    /// [`Linear::transposed_weight`] refills it on the next forward pass, so a
+    /// caller that clears the cache and never runs a forward pass pays nothing,
+    /// and one that does pays the transpose exactly once.
     fn invalidate_weight_caches(&mut self) {
-        self.weight_transposed = None;
+        // `take` needs `&mut self`, which is precisely why every invalidation
+        // path funnels through here.
+        let _ = self.weight_transposed.take();
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             if let Ok(mut buffer_id) = self.weight_buffer_id.write() {

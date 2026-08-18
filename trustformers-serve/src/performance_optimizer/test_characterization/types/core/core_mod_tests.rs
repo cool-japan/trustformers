@@ -19,7 +19,8 @@ impl Lcg {
     }
 
     fn next(&mut self) -> u64 {
-        self.state = self.state
+        self.state = self
+            .state
             .wrapping_mul(6364136223846793005u64)
             .wrapping_add(1442695040888963407u64);
         self.state
@@ -91,12 +92,7 @@ fn test_test_characteristics_from_test_data() {
     let ri = ResourceIntensity::default();
     let cr = ConcurrencyRequirements::default();
     let sr = SynchronizationRequirements::default();
-    let tc = TestCharacteristics::from_test_data(
-        "test_001".to_string(),
-        ri,
-        cr,
-        sr,
-    );
+    let tc = TestCharacteristics::from_test_data("test_001".to_string(), ri, cr, sr);
     assert_eq!(tc.test_id, "test_001");
     assert!(tc.synchronization_dependencies.is_empty());
     assert!(tc.performance_patterns.is_empty());

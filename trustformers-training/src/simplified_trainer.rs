@@ -280,15 +280,17 @@ impl SimpleCallback for LoggingCallback {
         _state: &TrainingState,
         config: &SimpleTrainingConfig,
     ) -> Result<()> {
-        println!(
+        tracing::info!(
             "🚀 Starting training with config: learning_rate={}, batch_size={}, epochs={}",
-            config.learning_rate, config.batch_size, config.num_epochs
+            config.learning_rate,
+            config.batch_size,
+            config.num_epochs
         );
         Ok(())
     }
 
     fn on_epoch_begin(&mut self, epoch: u32, _state: &TrainingState) -> Result<()> {
-        println!("📚 Starting epoch {}", epoch);
+        tracing::info!("📚 Starting epoch {}", epoch);
         Ok(())
     }
 
@@ -299,16 +301,18 @@ impl SimpleCallback for LoggingCallback {
             String::new()
         };
 
-        println!(
+        tracing::info!(
             "✅ Epoch {} completed - train_loss: {:.4}{}",
-            epoch, state.train_loss, eval_info
+            epoch,
+            state.train_loss,
+            eval_info
         );
         Ok(())
     }
 
     fn on_log(&mut self, logs: &HashMap<String, f64>, state: &TrainingState) -> Result<()> {
         if matches!(self.log_level, LogLevel::Debug) {
-            println!("📊 Step {} - {:?}", state.global_step, logs);
+            tracing::debug!("📊 Step {} - {:?}", state.global_step, logs);
         }
         Ok(())
     }
@@ -316,7 +320,7 @@ impl SimpleCallback for LoggingCallback {
     fn on_train_end(&mut self, state: &TrainingState) -> Result<()> {
         if let Some(start_time) = state.start_time {
             let duration = start_time.elapsed();
-            println!("🎉 Training completed in {:.2}s", duration.as_secs_f64());
+            tracing::info!("🎉 Training completed in {:.2}s", duration.as_secs_f64());
         }
         Ok(())
     }
@@ -409,13 +413,14 @@ impl SimpleCallback for EarlyStoppingCallback {
             if improved {
                 self.best_value = Some(*current_value);
                 self.patience_counter = 0;
-                println!("🎯 New best {}: {:.4}", self.monitor, current_value);
+                tracing::info!("🎯 New best {}: {:.4}", self.monitor, current_value);
             } else {
                 self.patience_counter += 1;
                 if self.patience_counter >= self.patience {
-                    println!(
+                    tracing::info!(
                         "⏹️  Early stopping triggered. No improvement in {} for {} epochs",
-                        self.monitor, self.patience
+                        self.monitor,
+                        self.patience
                     );
                     // In a real implementation, we would set a flag to stop training
                 }
@@ -474,7 +479,7 @@ impl SimpleCallback for CheckpointCallback {
 
         if should_save {
             let checkpoint_path = format!("{}/checkpoint-{}", self.save_dir, state.global_step);
-            println!("💾 Saving checkpoint to {}", checkpoint_path);
+            tracing::info!("💾 Saving checkpoint to {}", checkpoint_path);
             // In a real implementation, would save model state here
         }
 
@@ -591,7 +596,7 @@ where
 
             // Check for early stopping
             if self.should_stop_early()? {
-                println!("Training stopped early at epoch {}", epoch);
+                tracing::info!("Training stopped early at epoch {}", epoch);
                 break;
             }
         }

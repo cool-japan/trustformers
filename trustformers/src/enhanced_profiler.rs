@@ -552,7 +552,7 @@ impl EnhancedProfiler {
 
             if latest_sample.latency_ms > self.config.thresholds.max_latency_ms {
                 alerts_triggered += 1;
-                println!(
+                tracing::warn!(
                     "ALERT: High latency detected: {:.2}ms",
                     latest_sample.latency_ms
                 );
@@ -560,7 +560,7 @@ impl EnhancedProfiler {
 
             if latest_sample.memory_usage_mb > self.config.thresholds.max_memory_usage_mb {
                 alerts_triggered += 1;
-                println!(
+                tracing::warn!(
                     "ALERT: High memory usage: {:.2}MB",
                     latest_sample.memory_usage_mb
                 );
@@ -568,7 +568,7 @@ impl EnhancedProfiler {
 
             if latest_sample.cpu_usage_percent > self.config.thresholds.max_cpu_usage_percent {
                 alerts_triggered += 1;
-                println!(
+                tracing::warn!(
                     "ALERT: High CPU usage: {:.2}%",
                     latest_sample.cpu_usage_percent
                 );

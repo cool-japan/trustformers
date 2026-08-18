@@ -145,8 +145,11 @@ pub mod wasm_simd;
 #[cfg(target_os = "ios")]
 pub mod neural_engine_v3;
 
-// Advanced Neural Engine V4 optimization for latest Apple hardware
-#[cfg(target_os = "ios")]
+// Advanced Neural Engine V4 optimization for latest Apple hardware.
+//
+// Not iOS-gated: the attention path is real on every platform (Metal on macOS
+// with the `metal` feature, real CPU kernels elsewhere), so gating it to iOS
+// only meant it was never compiled or tested.
 pub mod advanced_neural_engine_v4;
 
 // MLX-*style* graph engine for Apple Silicon, implemented on Metal + CPU.

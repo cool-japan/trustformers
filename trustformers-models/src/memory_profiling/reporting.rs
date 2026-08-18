@@ -130,9 +130,10 @@ impl super::profiler::MemoryProfiler {
         let html_content = self.generate_html_report(report)?;
         std::fs::write(&html_filename, html_content)?;
 
-        println!(
+        tracing::info!(
             "Memory report saved to: {} and {}",
-            json_filename, html_filename
+            json_filename,
+            html_filename
         );
         Ok(())
     }

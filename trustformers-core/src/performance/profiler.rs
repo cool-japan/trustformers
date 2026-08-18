@@ -201,7 +201,7 @@ impl PerformanceProfiler {
 
         if let Some(node) = stack.pop() {
             if node.name != name {
-                eprintln!("Profile mismatch: expected {}, got {}", name, node.name);
+                tracing::error!("Profile mismatch: expected {}, got {}", name, node.name);
                 return;
             }
 

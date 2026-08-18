@@ -454,6 +454,29 @@ impl MobileCompressionEngine {
         if !matches!(self.config.pruning_strategy, PruningStrategy::None) {
             compressed_weights = self.apply_pruning(&compressed_weights)?;
             tracing::info!("Applied pruning");
+
+            // Report the sparsity actually achieved (measured by counting
+            // real zeros in the pruned tensors), not the requested target --
+            // `prune_by_magnitude` rounds `count * sparsity` to the nearest
+            // integer, so the two can differ slightly, and previously this
+            // field was never populated by pruning at all (it stayed at its
+            // `CompressionStats::new()` initial `0.0`).
+            let mut layer_sparsity = HashMap::with_capacity(compressed_weights.len());
+            let mut total_elements = 0usize;
+            let mut total_zeros = 0usize;
+            for (name, tensor) in &compressed_weights {
+                let sparsity = MobilePruner::measured_sparsity(tensor)?;
+                layer_sparsity.insert(name.clone(), sparsity);
+                let element_count = tensor.shape().iter().product::<usize>();
+                total_elements += element_count;
+                total_zeros += (sparsity * element_count as f32).round() as usize;
+            }
+            self.compression_stats.layer_sparsity = layer_sparsity;
+            self.compression_stats.overall_sparsity = if total_elements > 0 {
+                total_zeros as f32 / total_elements as f32
+            } else {
+                0.0
+            };
         }
 
         // Stage 3: Knowledge Distillation (if enabled)
@@ -1267,10 +1290,53 @@ impl MobilePruner {
         Ok(weights.clone()) // Placeholder
     }
 
+    /// Zero out the `sparsity` fraction (`0.0..=1.0`) of `tensor`'s
+    /// elements with the smallest absolute value ("magnitude pruning" in
+    /// the literature: small weights contribute least to a layer's output,
+    /// so they are the cheapest to remove for a given accuracy budget).
+    ///
+    /// Previously this ignored `sparsity` entirely and returned
+    /// `tensor.clone()` unchanged -- every `PruningStrategy` variant
+    /// (`MagnitudeBased`, `GradualMagnitude`, `LayerAdaptive`) ultimately
+    /// routes through this function, so no pruning strategy in this crate
+    /// ever removed a single weight, while `CompressionStats`/the pruning
+    /// config still described a target sparsity as if it had been applied.
     fn prune_by_magnitude(&self, tensor: &Tensor, sparsity: f32) -> Result<Tensor> {
-        // Simplified magnitude pruning - in practice would implement actual pruning
-        // For now, just return the original tensor
-        Ok(tensor.clone())
+        let sparsity = sparsity.clamp(0.0, 1.0);
+        let shape = tensor.shape();
+        let mut data = tensor.data()?;
+
+        if data.is_empty() || sparsity <= 0.0 {
+            return Tensor::from_vec(data, &shape);
+        }
+
+        let prune_count = ((data.len() as f32) * sparsity).round() as usize;
+        let prune_count = prune_count.min(data.len());
+
+        // Rank element indices by ascending magnitude and zero the
+        // `prune_count` smallest -- deterministic (ties broken by original
+        // index order via a stable sort) so the same tensor always prunes
+        // the same way.
+        let mut indices: Vec<usize> = (0..data.len()).collect();
+        indices.sort_by(|&a, &b| {
+            data[a].abs().partial_cmp(&data[b].abs()).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for &idx in indices.iter().take(prune_count) {
+            data[idx] = 0.0;
+        }
+
+        Tensor::from_vec(data, &shape)
+    }
+
+    /// Real, measured zero-fraction of `tensor` -- used to report *actually
+    /// achieved* sparsity after pruning, rather than the requested target.
+    fn measured_sparsity(tensor: &Tensor) -> Result<f32> {
+        let data = tensor.data()?;
+        if data.is_empty() {
+            return Ok(0.0);
+        }
+        let zeros = data.iter().filter(|&&v| v == 0.0).count();
+        Ok(zeros as f32 / data.len() as f32)
     }
 
     fn determine_layer_sparsity(&self, layer_name: &str) -> f32 {
@@ -1489,5 +1555,98 @@ mod tests {
         assert_eq!(stats.compression_ratio, 1.0);
         assert_eq!(stats.inference_speedup, 1.0);
         assert_eq!(stats.memory_reduction_percent, 0.0);
+    }
+
+    /// Regression test for the previous `prune_by_magnitude`, which
+    /// returned `tensor.clone()` unchanged regardless of the requested
+    /// `sparsity` -- every weight always survived pruning. Requesting 50%
+    /// sparsity on a 10-element tensor must now zero exactly 5 elements,
+    /// and they must be the 5 smallest-magnitude ones.
+    #[test]
+    fn test_prune_by_magnitude_actually_zeros_smallest_weights() {
+        let pruner = MobilePruner::new();
+        let values = vec![9.0, -1.0, 8.0, 2.0, 7.0, -3.0, 6.0, 4.0, 5.0, -0.5];
+        let tensor = Tensor::from_vec(values.clone(), &[10]).expect("tensor construction");
+
+        let pruned = pruner.prune_by_magnitude(&tensor, 0.5).expect("pruning failed");
+        let pruned_data = pruned.data().expect("tensor data");
+
+        let zero_count = pruned_data.iter().filter(|&&v| v == 0.0).count();
+        assert_eq!(
+            zero_count, 5,
+            "50% sparsity on 10 elements must zero exactly 5"
+        );
+
+        // The 5 smallest-magnitude original values are -0.5, -1.0, 2.0,
+        // -3.0, 4.0 (magnitudes 0.5, 1.0, 2.0, 3.0, 4.0); every surviving
+        // entry must be an untouched original value, and every zeroed
+        // entry must correspond to one of those five small-magnitude
+        // positions.
+        let small_magnitude_indices: std::collections::HashSet<usize> =
+            [1usize, 3, 5, 7, 9].into_iter().collect();
+        for (i, (&orig, &after)) in values.iter().zip(pruned_data.iter()).enumerate() {
+            if small_magnitude_indices.contains(&i) {
+                assert_eq!(after, 0.0, "index {i} (small magnitude) must be pruned");
+            } else {
+                assert_eq!(
+                    after, orig,
+                    "index {i} (large magnitude) must survive unchanged"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_prune_by_magnitude_zero_sparsity_is_unchanged() {
+        let pruner = MobilePruner::new();
+        let values = vec![1.0, -2.0, 3.0];
+        let tensor = Tensor::from_vec(values.clone(), &[3]).expect("tensor construction");
+
+        let pruned = pruner.prune_by_magnitude(&tensor, 0.0).expect("pruning failed");
+        assert_eq!(pruned.data().expect("tensor data"), values);
+    }
+
+    #[test]
+    fn test_prune_by_magnitude_full_sparsity_zeros_everything() {
+        let pruner = MobilePruner::new();
+        let tensor =
+            Tensor::from_vec(vec![1.0, -2.0, 3.0, -4.0], &[4]).expect("tensor construction");
+
+        let pruned = pruner.prune_by_magnitude(&tensor, 1.0).expect("pruning failed");
+        assert_eq!(
+            pruned.data().expect("tensor data"),
+            vec![0.0, 0.0, 0.0, 0.0]
+        );
+    }
+
+    /// Regression test for `CompressionStats::overall_sparsity`/
+    /// `layer_sparsity`, which were previously never populated by pruning
+    /// (they stayed at the `CompressionStats::new()` initial `0.0` /
+    /// empty map even after `compress_model` ran a pruning stage).
+    #[test]
+    fn test_compress_model_reports_real_measured_sparsity() {
+        let mut config = CompressionConfig::default();
+        config.pruning_strategy = PruningStrategy::MagnitudeBased { sparsity: 0.5 };
+        config.quantization_strategy = QuantizationStrategy::Static(QuantizationPrecision::FP16);
+        config.device_adaptive = false;
+
+        let device_info = crate::device_info::MobileDeviceInfo::default();
+        let mut engine =
+            MobileCompressionEngine::new(config, &device_info).expect("engine creation failed");
+        let mut weights = HashMap::new();
+        weights.insert(
+            "layer.weight".to_string(),
+            Tensor::from_vec(vec![9.0, 1.0, 8.0, 2.0, 7.0, 3.0, 6.0, 4.0], &[8])
+                .expect("tensor construction"),
+        );
+
+        engine.compress_model(&weights).expect("compression failed");
+
+        assert!(
+            (engine.get_stats().overall_sparsity - 0.5).abs() < 1e-6,
+            "expected ~50% measured sparsity, got {}",
+            engine.get_stats().overall_sparsity
+        );
+        assert!(engine.get_stats().layer_sparsity.contains_key("layer.weight"));
     }
 }

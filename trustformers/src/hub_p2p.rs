@@ -305,9 +305,10 @@ impl P2PNode {
         // Connect to bootstrap peers
         self.connect_to_bootstrap_peers().await?;
 
-        println!(
+        tracing::info!(
             "P2P node {} started on {}",
-            self.peer_id, self.config.listen_address
+            self.peer_id,
+            self.config.listen_address
         );
         Ok(())
     }
@@ -344,12 +345,12 @@ impl P2PNode {
                             )
                             .await
                             {
-                                eprintln!("Error handling peer connection: {}", e);
+                                tracing::warn!("Error handling peer connection: {}", e);
                             }
                         });
                     },
                     Err(e) => {
-                        eprintln!("Failed to accept connection: {}", e);
+                        tracing::warn!("Failed to accept connection: {}", e);
                     },
                 }
             }
@@ -388,7 +389,7 @@ impl P2PNode {
                         }
                     },
                     Err(e) => {
-                        eprintln!("Discovery error: {}", e);
+                        tracing::warn!("Discovery error: {}", e);
                     },
                 }
             }
@@ -477,7 +478,7 @@ impl P2PNode {
                     }
                 },
                 Ok(Err(e)) => {
-                    eprintln!("Read error: {}", e);
+                    tracing::warn!("Read error: {}", e);
                     break;
                 },
                 Err(_) => {
@@ -640,11 +641,11 @@ impl P2PNode {
                     })?;
 
                     if let Err(e) = stream.write_all(&data).await {
-                        eprintln!("Failed to send discovery to {}: {}", peer_addr, e);
+                        tracing::warn!("Failed to send discovery to {}: {}", peer_addr, e);
                     }
                 },
                 Err(e) => {
-                    eprintln!("Failed to connect to bootstrap peer {}: {}", peer_addr, e);
+                    tracing::warn!("Failed to connect to bootstrap peer {}: {}", peer_addr, e);
                 },
             }
         }
@@ -713,7 +714,7 @@ impl P2PNode {
         let mut models_lock = self.models.write().await;
         models_lock.insert(model_version.id.clone(), model_version);
 
-        println!("Model {}:{} is now being shared", model_id, version);
+        tracing::info!("Model {}:{} is now being shared", model_id, version);
         Ok(())
     }
 

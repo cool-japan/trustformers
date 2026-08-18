@@ -557,34 +557,80 @@ impl FederatedLearningClient {
         }
     }
 
+    /// Battery charge fraction (`0.0..=1.0`) used to gate federated
+    /// participation. Real hardware readings are used where this crate can
+    /// obtain them without new dependencies (Android, via the kernel's
+    /// `power_supply` sysfs, exactly like real Android battery-monitoring
+    /// tools read it); everywhere else this returns a fixed, documented
+    /// policy constant rather than a value that impersonates a live sensor
+    /// reading. The previous implementation returned a hardware-independent
+    /// sine wave keyed to wall-clock time on iOS, and `cpu_core_count +
+    /// random jitter` on Android -- numbers that *looked* like plausible
+    /// telemetry (different every call, "smoothly" varying) while carrying
+    /// zero information about the device's actual battery.
     fn get_battery_level(&self) -> f32 {
-        #[cfg(target_os = "ios")]
-        {
-            // iOS battery level detection would use UIDevice.current.batteryLevel
-            // For this implementation, we'll simulate based on time patterns
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-            let cycle = (now % 3600) as f32 / 3600.0; // Hour cycle
-            0.2 + 0.7 * (1.0 + (cycle * 2.0 * std::f32::consts::PI).sin()) / 2.0
-        }
-
         #[cfg(target_os = "android")]
         {
-            // Android battery level detection via JNI/system calls would go here
-            // Simulate battery level based on device load
-            let cpu_cores = num_cpus::get();
-            let base_level = match cpu_cores {
-                1..=2 => 0.6,  // Low-end devices drain faster
-                3..=4 => 0.75, // Mid-range
-                _ => 0.85,     // High-end devices have better battery management
-            };
-            base_level + (DefaultRng::new().random::<f32>() - 0.5) * 0.2 // Add some randomness
+            Self::read_android_battery_capacity_fraction().unwrap_or(Self::UNKNOWN_BATTERY_LEVEL)
         }
 
-        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        #[cfg(not(target_os = "android"))]
         {
-            1.0 // Desktop/server always "plugged in"
+            // iOS: a real reading needs `UIDevice.current.batteryLevel`
+            // (Objective-C, requires `setBatteryMonitoringEnabled(true)`
+            // first) which this crate does not currently bridge to from
+            // this module. Desktop/server hosts (this dev/test machine
+            // included) commonly run on mains power with no battery to
+            // read at all. Both cases get the same fixed, documented
+            // "assume adequate" policy default -- not a fabricated
+            // measurement -- so federated participation gating degrades to
+            // "don't block on an unmeasurable signal" rather than silently
+            // always-pass (`1.0`) or always-fail (`0.0`).
+            Self::UNKNOWN_BATTERY_LEVEL
         }
+    }
+
+    /// Policy default used by [`Self::get_battery_level`] wherever a real
+    /// reading is not available. `0.5` is a deliberately neutral midpoint:
+    /// high enough that `has_sufficient_resources`'s `>= 0.3` threshold
+    /// still passes (an unmeasurable battery should not permanently block
+    /// federated participation), low enough that it does not claim the
+    /// device is fully charged.
+    const UNKNOWN_BATTERY_LEVEL: f32 = 0.5;
+
+    /// Real Android battery level, read from the kernel's `power_supply`
+    /// class (`/sys/class/power_supply/<supply>/capacity`, an integer
+    /// percentage `0..=100`) -- the same sysfs interface `dumpsys battery`
+    /// and other real battery-monitoring tools read, reachable via plain
+    /// `std::fs` with no JNI and no new dependency. Returns `None` if no
+    /// supply directory exposes a parseable `capacity` file (e.g. running
+    /// in a container/CI image with no battery at all).
+    #[cfg(target_os = "android")]
+    fn read_android_battery_capacity_fraction() -> Option<f32> {
+        let entries = std::fs::read_dir("/sys/class/power_supply").ok()?;
+        for entry in entries.flatten() {
+            let capacity_path = entry.path().join("capacity");
+            if let Ok(contents) = std::fs::read_to_string(&capacity_path) {
+                if let Some(fraction) = Self::parse_capacity_percent(&contents) {
+                    return Some(fraction);
+                }
+            }
+        }
+        None
+    }
+
+    /// Parse a `power_supply/*/capacity` file's contents (an integer
+    /// percentage, typically with a trailing newline) into a `0.0..=1.0`
+    /// fraction. Split out from [`Self::read_android_battery_capacity_fraction`]
+    /// so the parsing logic is unit-testable without a real
+    /// `/sys/class/power_supply` tree.
+    #[cfg(target_os = "android")]
+    fn parse_capacity_percent(contents: &str) -> Option<f32> {
+        let percent: i32 = contents.trim().parse().ok()?;
+        if !(0..=100).contains(&percent) {
+            return None;
+        }
+        Some(percent as f32 / 100.0)
     }
 
     fn estimate_network_quality(&self) -> NetworkQuality {
@@ -854,21 +900,6 @@ fn estimate_transfer_time(total_mb: f32) -> f32 {
     total_mb * 8.0 / 10.0
 }
 
-// Placeholder for uuid crate functionality
-mod uuid {
-    pub struct Uuid;
-    impl Uuid {
-        pub fn new_v4() -> Self {
-            Self
-        }
-    }
-    impl ToString for Uuid {
-        fn to_string(&self) -> String {
-            "mock-uuid".to_string()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -928,5 +959,81 @@ mod tests {
 
         assert_eq!(cost.total_upload_mb, 500.0); // 10MB * 50
         assert_eq!(cost.total_download_mb, 5000.0); // 100MB * 50
+    }
+
+    /// Regression test for the previous local `mod uuid` shim, whose
+    /// `Uuid::new_v4().to_string()` always returned the literal
+    /// `"mock-uuid"` -- every federated client using
+    /// `FederatedLearningConfig::default()` shared that one client ID, so a
+    /// server could never distinguish participants. Real UUIDs must differ
+    /// across independent generations and parse as valid v4 UUIDs.
+    #[test]
+    fn test_default_client_id_is_a_real_unique_uuid_not_mock_uuid() {
+        let a = FederatedLearningConfig::default();
+        let b = FederatedLearningConfig::default();
+
+        assert_ne!(a.client_id, "mock-uuid");
+        assert_ne!(
+            a.client_id, b.client_id,
+            "two clients must not share one ID"
+        );
+        assert!(
+            uuid::Uuid::parse_str(&a.client_id).is_ok(),
+            "client_id must be a real parseable UUID, got {}",
+            a.client_id
+        );
+    }
+
+    /// Regression test for the previous `get_battery_level`, which on iOS
+    /// returned a wall-clock-driven sine wave (a different number nearly
+    /// every call) and on Android added `+/- 0.1` of random jitter around a
+    /// CPU-core-derived base -- both designed to *look* like a live sensor
+    /// reading while carrying no real battery information. The
+    /// non-Android/non-iOS branch this host actually exercises must now be
+    /// a fixed, deterministic policy constant: identical across repeated
+    /// calls, and in `[0.0, 1.0]`.
+    #[test]
+    fn test_battery_level_is_deterministic_not_simulated_noise() {
+        let fl_config = FederatedLearningConfig::default();
+        let training_config = crate::training::OnDeviceTrainingConfig::default();
+        let mobile_config = crate::MobileConfig::default();
+        let client = FederatedLearningClient::new(fl_config, training_config, mobile_config)
+            .expect("client creation failed");
+
+        let readings: Vec<f32> = (0..5).map(|_| client.get_battery_level()).collect();
+        assert!(readings.iter().all(|&level| (0.0..=1.0).contains(&level)));
+        assert!(
+            readings.windows(2).all(|pair| pair[0] == pair[1]),
+            "a policy-default battery level must not vary call to call: {readings:?}"
+        );
+    }
+
+    #[cfg(target_os = "android")]
+    #[test]
+    fn test_parse_capacity_percent_accepts_real_sysfs_formats() {
+        assert_eq!(
+            FederatedLearningClient::parse_capacity_percent("87\n"),
+            Some(0.87)
+        );
+        assert_eq!(
+            FederatedLearningClient::parse_capacity_percent("100"),
+            Some(1.0)
+        );
+        assert_eq!(
+            FederatedLearningClient::parse_capacity_percent("0"),
+            Some(0.0)
+        );
+    }
+
+    #[cfg(target_os = "android")]
+    #[test]
+    fn test_parse_capacity_percent_rejects_garbage_and_out_of_range() {
+        assert_eq!(
+            FederatedLearningClient::parse_capacity_percent("not a number"),
+            None
+        );
+        assert_eq!(FederatedLearningClient::parse_capacity_percent("101"), None);
+        assert_eq!(FederatedLearningClient::parse_capacity_percent("-1"), None);
+        assert_eq!(FederatedLearningClient::parse_capacity_percent(""), None);
     }
 }

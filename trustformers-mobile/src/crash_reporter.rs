@@ -1397,25 +1397,76 @@ impl MobileCrashReporter {
         })
     }
 
+    /// Real memory figures via `sysinfo` (system-wide total/used/available,
+    /// and this process's RSS as the `heap_mb` estimate -- `sysinfo` reports
+    /// whole-process memory, not a heap/stack split, so `heap_mb` is that
+    /// process figure and `stack_mb` is left at `0.0` rather than invented).
+    /// Previously every field here was a hardcoded `0.0` regardless of
+    /// actual memory pressure at crash time.
     fn collect_memory_usage(&self) -> Result<MemoryUsageInfo> {
-        // Platform-specific memory collection would go here
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+        let mut system = System::new();
+        system.refresh_memory();
+        let total_mb = system.total_memory() as f32 / (1024.0 * 1024.0);
+        let used_mb = system.used_memory() as f32 / (1024.0 * 1024.0);
+        let available_mb = system.available_memory() as f32 / (1024.0 * 1024.0);
+
+        let pid = Pid::from_u32(std::process::id());
+        let mut proc_system = System::new();
+        proc_system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+        let heap_mb = proc_system
+            .process(pid)
+            .map(|p| p.memory() as f32 / (1024.0 * 1024.0))
+            .unwrap_or(0.0);
+
         Ok(MemoryUsageInfo {
-            total_mb: 0.0,
-            used_mb: 0.0,
-            available_mb: 0.0,
-            heap_mb: 0.0,
+            total_mb,
+            used_mb,
+            available_mb,
+            heap_mb,
             stack_mb: 0.0,
             gpu_mb: None,
         })
     }
 
+    /// Real CPU figures via `sysinfo`: global usage percentage (needs two
+    /// samples separated by `MINIMUM_CPU_UPDATE_INTERVAL`, mirroring the
+    /// pattern already used by `mlx_integration::sample_process_usage`),
+    /// the first detected core's clock, and the detected core count.
+    /// `report_crash` is a plain method call (this crate's
+    /// `setup_signal_handlers` is a documented no-op, not a real installed
+    /// OS signal handler), so a short synchronous sleep here is safe --
+    /// there is no async-signal-safety constraint to honor. Previously
+    /// every field here was a hardcoded constant (`0.0` usage, `0` MHz, a
+    /// fabricated `1` active core) regardless of the real system state.
     fn collect_cpu_info(&self) -> Result<CpuCrashInfo> {
+        use sysinfo::System;
+
+        let mut system = System::new();
+        system.refresh_cpu_usage();
+        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+        system.refresh_cpu_usage();
+
+        let usage_percent = system.global_cpu_usage();
+        let frequency_mhz = system.cpus().first().map(|c| c.frequency()).unwrap_or(0) as u32;
+        let active_cores = system.cpus().len().max(1);
+
         Ok(CpuCrashInfo {
-            usage_percent: 0.0,
-            frequency_mhz: 0,
+            usage_percent,
+            frequency_mhz,
+            // `sysinfo` (with this crate's enabled feature set) does not
+            // expose a portable per-platform CPU temperature/throttling
+            // signal; reporting `None`/`false` here is the honest
+            // "not measurable from this crate" answer, not a fabricated
+            // reading.
             temperature_c: None,
             throttling: false,
-            active_cores: 1,
+            active_cores,
         })
     }
 
@@ -1915,5 +1966,46 @@ mod tests {
             reporter.generate_recovery_suggestions(&crash_report).expect("Operation failed");
         assert!(!suggestions.is_empty());
         assert_eq!(suggestions[0].suggestion_type, RecoveryStrategy::ClearCache);
+    }
+
+    /// Regression test for the previous `collect_memory_usage`, which
+    /// returned every field as a hardcoded `0.0` regardless of actual
+    /// memory pressure. A process that is definitely resident (this test
+    /// process) must report a nonzero total and nonzero heap (RSS) figure.
+    #[test]
+    fn test_collect_memory_usage_reports_real_nonzero_figures() {
+        let config = CrashReporterConfig::default();
+        let reporter = MobileCrashReporter::new(config).expect("reporter creation failed");
+
+        let memory = reporter.collect_memory_usage().expect("memory collection failed");
+        assert!(
+            memory.total_mb > 0.0,
+            "total_mb must be a real measured figure"
+        );
+        assert!(
+            memory.heap_mb > 0.0,
+            "heap_mb (this process's RSS) must be nonzero"
+        );
+    }
+
+    /// Regression test for the previous `collect_cpu_info`, which returned
+    /// the hardcoded constants `usage_percent: 0.0`, `frequency_mhz: 0`, and
+    /// `active_cores: 1` on every device regardless of actual hardware.
+    #[test]
+    fn test_collect_cpu_info_reports_real_core_count() {
+        let config = CrashReporterConfig::default();
+        let reporter = MobileCrashReporter::new(config).expect("reporter creation failed");
+
+        let cpu = reporter.collect_cpu_info().expect("cpu collection failed");
+        // `usage_percent` legitimately can be 0.0 on an idle core, so it is
+        // not a safe inequality check; `active_cores` reflecting the same
+        // real detected core count `sysinfo` itself reports (rather than
+        // the old hardcoded `1`) is the property this test can assert
+        // without flakiness on any host.
+        let mut system = sysinfo::System::new();
+        system.refresh_cpu_usage();
+        let expected_cores = system.cpus().len().max(1);
+        assert_eq!(cpu.active_cores, expected_cores);
+        assert!(cpu.usage_percent >= 0.0 && cpu.usage_percent.is_finite());
     }
 }

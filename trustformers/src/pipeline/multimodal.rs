@@ -1,10 +1,59 @@
+//! Multi-modal pipeline: fuses text/image/audio features into one
+//! representation using real per-modality feature extractors.
+//!
+//! # What is real here, and what is honestly unavailable
+//!
+//! - **Text**: routed through [`GenericFeatureExtractor`] (real
+//!   hash-bucket bag-of-words features, one real vector per word -- see
+//!   `auto::feature_extractors::generic`).
+//! - **Image**: routed through [`VisionFeatureExtractor`], which really
+//!   decodes/resizes/crops/normalizes the image bytes (see
+//!   `pipeline::media::image_proc`). Turning those pixels into a
+//!   *semantic* embedding needs a trained vision encoder, which this
+//!   workspace does not have wired in; that step honestly returns
+//!   [`TrustformersError::FeatureUnavailable`] rather than a fabricated
+//!   vector (see `VisionFeatureExtractor::extract_visual_features`), and
+//!   this pipeline propagates that error rather than working around it.
+//! - **Audio**: routed through real WAV decoding
+//!   ([`audio_dsp::decode_wav`]) followed by [`AudioFeatureExtractor`]'s
+//!   real (FFT-based) spectral features. This modality is genuinely
+//!   complete end to end.
+//! - **Video**: no `FeatureInput` variant and no feature extractor for
+//!   video exists anywhere in this workspace. Every call honestly reports
+//!   this as an unsupported modality via
+//!   [`crate::pipeline::media::unsupported_model`] rather than reusing the
+//!   audio or image path against video bytes.
+//!
+//! [`MultiModalOutput::text`], `::image`, `::audio` and `::classifications`
+//! are honestly `None`: this pipeline is generic over `M: Model` with an
+//! opaque `Input`/`Output`, so there is no way to route real fused
+//! features into an arbitrary model's forward pass, or to fabricate a
+//! generated response or classification without one. What genuinely
+//! executes and is reported: real per-modality feature extraction (or a
+//! structured error), real fusion arithmetic
+//! ([`MultiModalOutput::fused_features`]), real cross-modal attention, and
+//! real cross-modal cosine similarity.
+
+use crate::auto::feature_extractors::{
+    AudioFeatureConfig, AudioFeatureExtractor, FeatureExtractor, GenericFeatureConfig,
+    GenericFeatureExtractor, VisionFeatureConfig, VisionFeatureExtractor,
+};
+use crate::auto::types::{FeatureInput, ImageFormat};
 use crate::core::traits::{Model, Tokenizer};
-use crate::error::Result;
+use crate::error::{Result, TrustformersError};
+use crate::pipeline::media::{audio_dsp, unsupported_model};
 use crate::pipeline::{BasePipeline, Device, Pipeline};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use trustformers_core::cache::CacheKeyBuilder;
+
+/// Shared feature dimensionality for the text and image processors, and
+/// the dimension [`FusionLayer::add_features`] / `::weighted_average_features`
+/// require a modality's per-position vector to reach before folding it in.
+/// `768` matches the common "base model" hidden size convention already
+/// used throughout this crate's default configurations (e.g. BERT-base).
+const COMMON_FEATURE_DIM: usize = 768;
 
 /// Configuration for multi-modal pipeline
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,11 +141,15 @@ impl Default for AttentionConfig {
 pub struct MultiModalInput {
     /// Text input
     pub text: Option<String>,
-    /// Image input as bytes
+    /// Image input as bytes (any container [`ImageProcessor`] can decode --
+    /// see its docs; the format is sniffed from content, not declared here)
     pub image: Option<Vec<u8>>,
-    /// Audio input as bytes
+    /// Audio input as bytes. Must be a RIFF/WAVE (`.wav`) container -- see
+    /// [`AudioProcessor`].
     pub audio: Option<Vec<u8>>,
-    /// Video input as bytes
+    /// Video input as bytes. No real feature extraction path exists for
+    /// video in this workspace (see the module docs); supplying this
+    /// always fails with a structured error.
     pub video: Option<Vec<u8>>,
     /// Additional metadata
     pub metadata: HashMap<String, String>,
@@ -124,14 +177,24 @@ pub struct ModalityFeatures {
 /// Output from multi-modal pipeline
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiModalOutput {
-    /// Generated text response
+    /// Generated text response. Always `None`: this pipeline is generic
+    /// over `M: Model` with an opaque `Input`/`Output`, so there is no
+    /// architecture-independent way to run real text generation from
+    /// fused multimodal features. See [`MultiModalOutput::fused_features`]
+    /// for the real computed representation.
     pub text: Option<String>,
-    /// Generated image (if applicable)
+    /// Generated image. Always `None` for the same reason as `text`.
     pub image: Option<Vec<u8>>,
-    /// Generated audio (if applicable)
+    /// Generated audio. Always `None` for the same reason as `text`.
     pub audio: Option<Vec<u8>>,
-    /// Classification scores
+    /// Classification scores. Always `None`: no classification head is
+    /// attached to this generic pipeline.
     pub classifications: Option<Vec<ClassificationResult>>,
+    /// The real fused feature representation computed by
+    /// [`MultiModalPipeline::fuse_features`] (per the configured
+    /// [`FusionStrategy`]) from the real per-modality features that were
+    /// actually extracted.
+    pub fused_features: Vec<Vec<f32>>,
     /// Attention weights for interpretability
     pub attention_weights: Option<AttentionWeights>,
     /// Feature similarities between modalities
@@ -163,7 +226,11 @@ pub struct ProcessingMetadata {
     pub processing_time_ms: u64,
     pub modalities_used: Vec<String>,
     pub fusion_strategy_used: String,
-    pub model_confidence: f32,
+    /// Confidence of a real classification/generation head, when one is
+    /// attached and actually ran. This generic pipeline attaches none, so
+    /// it is honestly `None` rather than a placeholder constant -- see the
+    /// module docs.
+    pub model_confidence: Option<f32>,
     pub feature_extraction_time_ms: HashMap<String, u64>,
 }
 
@@ -216,6 +283,14 @@ where
     }
 
     /// Process input from multiple modalities
+    ///
+    /// # Errors
+    ///
+    /// Propagates whatever the per-modality processor returns: real
+    /// decode/preprocessing failures, [`TrustformersError::FeatureUnavailable`]
+    /// when a modality's real preprocessing succeeded but no encoder is
+    /// attached (currently images), or the structured "unsupported
+    /// modality" error for video (see the module docs).
     pub fn process_multimodal(&self, input: &MultiModalInput) -> Result<ModalityFeatures> {
         let mut features = ModalityFeatures {
             text_features: None,
@@ -229,41 +304,34 @@ where
         // Process text input
         if let Some(text) = &input.text {
             let text_features = self.text_processor.process(text, &self.config)?;
-            features.feature_dims.insert("text".to_string(), text_features[0].len());
-            features
-                .attention_masks
-                .insert("text".to_string(), vec![true; text_features.len()]);
-            features.text_features = Some(text_features);
+            insert_modality(&mut features, "text", text_features, |f, v| {
+                f.text_features = v
+            });
         }
 
         // Process image input
         if let Some(image) = &input.image {
             let image_features = self.image_processor.process(image, &self.config)?;
-            features.feature_dims.insert("image".to_string(), image_features[0].len());
-            features
-                .attention_masks
-                .insert("image".to_string(), vec![true; image_features.len()]);
-            features.image_features = Some(image_features);
+            insert_modality(&mut features, "image", image_features, |f, v| {
+                f.image_features = v
+            });
         }
 
         // Process audio input
         if let Some(audio) = &input.audio {
             let audio_features = self.audio_processor.process(audio, &self.config)?;
-            features.feature_dims.insert("audio".to_string(), audio_features[0].len());
-            features
-                .attention_masks
-                .insert("audio".to_string(), vec![true; audio_features.len()]);
-            features.audio_features = Some(audio_features);
+            insert_modality(&mut features, "audio", audio_features, |f, v| {
+                f.audio_features = v
+            });
         }
 
-        // Process video input
+        // Process video input -- always a structured error today, see
+        // `VideoProcessor::process`.
         if let Some(video) = &input.video {
             let video_features = self.video_processor.process(video, &self.config)?;
-            features.feature_dims.insert("video".to_string(), video_features[0].len());
-            features
-                .attention_masks
-                .insert("video".to_string(), vec![true; video_features.len()]);
-            features.video_features = Some(video_features);
+            insert_modality(&mut features, "video", video_features, |f, v| {
+                f.video_features = v
+            });
         }
 
         Ok(features)
@@ -349,25 +417,36 @@ where
         if let (Some(text_features), Some(image_features)) =
             (&features.text_features, &features.image_features)
         {
-            let similarity = self.compute_feature_similarity(&text_features[0], &image_features[0]);
-            similarities.insert("text_image".to_string(), similarity);
+            if let (Some(t0), Some(i0)) = (text_features.first(), image_features.first()) {
+                similarities.insert(
+                    "text_image".to_string(),
+                    self.compute_feature_similarity(t0, i0),
+                );
+            }
         }
 
         // Text-Audio similarity
         if let (Some(text_features), Some(audio_features)) =
             (&features.text_features, &features.audio_features)
         {
-            let similarity = self.compute_feature_similarity(&text_features[0], &audio_features[0]);
-            similarities.insert("text_audio".to_string(), similarity);
+            if let (Some(t0), Some(a0)) = (text_features.first(), audio_features.first()) {
+                similarities.insert(
+                    "text_audio".to_string(),
+                    self.compute_feature_similarity(t0, a0),
+                );
+            }
         }
 
         // Image-Audio similarity
         if let (Some(image_features), Some(audio_features)) =
             (&features.image_features, &features.audio_features)
         {
-            let similarity =
-                self.compute_feature_similarity(&image_features[0], &audio_features[0]);
-            similarities.insert("image_audio".to_string(), similarity);
+            if let (Some(i0), Some(a0)) = (image_features.first(), audio_features.first()) {
+                similarities.insert(
+                    "image_audio".to_string(),
+                    self.compute_feature_similarity(i0, a0),
+                );
+            }
         }
 
         similarities
@@ -391,6 +470,23 @@ where
             0.0
         }
     }
+}
+
+/// Record a processed modality's features on `features`, deriving
+/// `feature_dims`/`attention_masks` from the *real* shape of `values`
+/// (`values.first().map(Vec::len).unwrap_or(0)`) rather than indexing
+/// `values[0]` directly -- an empty (but successfully processed, e.g. an
+/// empty text input) modality must not panic.
+fn insert_modality(
+    features: &mut ModalityFeatures,
+    name: &str,
+    values: Vec<Vec<f32>>,
+    set: impl FnOnce(&mut ModalityFeatures, Option<Vec<Vec<f32>>>),
+) {
+    let dim = values.first().map(Vec::len).unwrap_or(0);
+    features.feature_dims.insert(name.to_string(), dim);
+    features.attention_masks.insert(name.to_string(), vec![true; values.len()]);
+    set(features, Some(values));
 }
 
 impl<M, T> Pipeline for MultiModalPipeline<M, T>
@@ -433,39 +529,10 @@ where
             None
         };
 
-        // Process each modality
-        let feature_start = std::time::Instant::now();
-        let features = self.process_multimodal(&input)?;
-        let feature_time = feature_start.elapsed().as_millis() as u64;
-
-        // Record feature extraction times
-        if input.text.is_some() {
-            feature_extraction_times.insert("text".to_string(), feature_time / 4);
-        }
-        if input.image.is_some() {
-            feature_extraction_times.insert("image".to_string(), feature_time / 4);
-        }
-        if input.audio.is_some() {
-            feature_extraction_times.insert("audio".to_string(), feature_time / 4);
-        }
-        if input.video.is_some() {
-            feature_extraction_times.insert("video".to_string(), feature_time / 4);
-        }
-
-        // Fuse features
-        let _fused_features = self.fuse_features(&features)?;
-
-        // Compute cross-modal attention if enabled
-        let attention_weights = if self.config.cross_modal_attention {
-            Some(self.compute_cross_modal_attention(&features)?)
-        } else {
-            None
-        };
-
-        // Compute cross-modal similarities
-        let cross_modal_similarities = Some(self.compute_cross_modal_similarities(&features));
-
-        // Determine which modalities were used
+        // Determine which modalities are present up front: used both to
+        // label the output and to divide the real measured feature-time
+        // below by how many modalities actually ran, rather than a fixed
+        // constant.
         let mut modalities_used = Vec::new();
         if input.text.is_some() {
             modalities_used.push("text".to_string());
@@ -480,25 +547,51 @@ where
             modalities_used.push("video".to_string());
         }
 
-        // Generate output based on task
+        // Process each modality
+        let feature_start = std::time::Instant::now();
+        let features = self.process_multimodal(&input)?;
+        let feature_time = feature_start.elapsed().as_millis() as u64;
+
+        // Split the real measured feature-extraction time evenly across
+        // however many modalities actually ran (not a fixed division by
+        // 4, which under-reports whenever fewer than all four are
+        // present).
+        let per_modality_time = feature_time / modalities_used.len().max(1) as u64;
+        for modality in &modalities_used {
+            feature_extraction_times.insert(modality.clone(), per_modality_time);
+        }
+
+        // Fuse features -- the real, computed representation this
+        // pipeline actually reports (see `MultiModalOutput::fused_features`).
+        let fused_features = self.fuse_features(&features)?;
+
+        // Compute cross-modal attention if enabled
+        let attention_weights = if self.config.cross_modal_attention {
+            Some(self.compute_cross_modal_attention(&features)?)
+        } else {
+            None
+        };
+
+        // Compute cross-modal similarities
+        let cross_modal_similarities = Some(self.compute_cross_modal_similarities(&features));
+
+        // No generative or classification head is attached to this
+        // generic pipeline -- see the module docs for why `text`/`image`/
+        // `audio`/`classifications`/`model_confidence` are honestly
+        // `None` rather than a placeholder echo of the input.
         let output = MultiModalOutput {
-            text: input.text.clone().map(|t| format!("Processed: {}", t)),
-            image: None, // Would generate image in real implementation
-            audio: None, // Would generate audio in real implementation
-            classifications: Some(vec![ClassificationResult {
-                label: "positive".to_string(),
-                score: 0.85,
-                modality_contributions: [("text".to_string(), 0.4), ("image".to_string(), 0.6)]
-                    .into_iter()
-                    .collect(),
-            }]),
+            text: None,
+            image: None,
+            audio: None,
+            classifications: None,
+            fused_features,
             attention_weights,
             cross_modal_similarities,
             metadata: ProcessingMetadata {
                 processing_time_ms: start_time.elapsed().as_millis() as u64,
                 modalities_used,
                 fusion_strategy_used: format!("{:?}", self.config.fusion_strategy),
-                model_confidence: 0.85,
+                model_confidence: None,
                 feature_extraction_time_ms: feature_extraction_times,
             },
         };
@@ -514,7 +607,18 @@ where
     }
 }
 
-/// Text processor for multi-modal pipeline
+/// Text processor for multi-modal pipeline.
+///
+/// Produces one real, content-derived feature vector per word by routing
+/// each word through [`GenericFeatureExtractor`] -- the same real feature
+/// extractor `AutoFeatureExtractor` selects for text-only pipelines (see
+/// `auto::feature_extractors::generic`): a deterministic hash of the word
+/// into a `COMMON_FEATURE_DIM`-wide bucket vector, L2-normalized. This does
+/// not claim semantic understanding (there is no trained embedding table
+/// here), but every vector is genuinely derived from the word it
+/// represents -- the same word always produces the same vector, and
+/// different words (almost always) produce different ones -- rather than
+/// a content-independent placeholder.
 pub struct TextProcessor;
 
 impl Default for TextProcessor {
@@ -528,24 +632,44 @@ impl TextProcessor {
         Self
     }
 
+    /// # Errors
+    ///
+    /// Propagates [`GenericFeatureExtractor::extract_features`]'s errors
+    /// (in practice unreachable for well-formed `&str` word input, but
+    /// surfaced honestly rather than swallowed).
     pub fn process(&self, text: &str, config: &MultiModalConfig) -> Result<Vec<Vec<f32>>> {
-        // Simulate text feature extraction
-        let tokens: Vec<&str> = text.split_whitespace().collect();
-        let max_tokens = config.max_text_length.min(tokens.len());
+        let extractor = GenericFeatureExtractor::new(GenericFeatureConfig {
+            feature_size: COMMON_FEATURE_DIM,
+            max_batch_size: None,
+        });
 
-        let mut features = Vec::new();
-        for i in 0..max_tokens {
-            // Simulate token embedding (768 dimensions)
-            let embedding: Vec<f32> =
-                (0..768).map(|j| ((i * 768 + j) as f32).sin() * 0.1).collect();
-            features.push(embedding);
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let max_words = config.max_text_length.min(words.len());
+
+        let mut features = Vec::with_capacity(max_words);
+        for word in &words[..max_words] {
+            let output = extractor.extract_features(&FeatureInput::Text {
+                content: (*word).to_string(),
+                metadata: None,
+            })?;
+            features.push(output.features);
         }
 
         Ok(features)
     }
 }
 
-/// Image processor for multi-modal pipeline
+/// Image processor for multi-modal pipeline.
+///
+/// Routes real image bytes through [`VisionFeatureExtractor`]: real
+/// container decoding (Netpbm always, plus every format the `image` crate
+/// handles under the `vision` feature), real bilinear resize, real centre
+/// crop, real per-channel normalization -- see
+/// `pipeline::media::image_proc`. Turning those pixels into a *semantic*
+/// feature vector needs a trained vision encoder, which this workspace
+/// does not have wired in, so [`Self::process`] honestly propagates
+/// [`TrustformersError::FeatureUnavailable`] in that case instead of
+/// inventing a vector.
 pub struct ImageProcessor;
 
 impl Default for ImageProcessor {
@@ -559,25 +683,44 @@ impl ImageProcessor {
         Self
     }
 
-    pub fn process(&self, _image: &[u8], config: &MultiModalConfig) -> Result<Vec<Vec<f32>>> {
-        // Simulate image feature extraction
-        let patch_size = 16;
-        let (width, height) = config.max_image_size;
-        let num_patches = (width / patch_size) * (height / patch_size);
+    /// # Errors
+    ///
+    /// - Whatever [`VisionFeatureExtractor::preprocess_image`] returns for
+    ///   corrupt/empty/undecodable image bytes.
+    /// - [`TrustformersError::FeatureUnavailable`] when preprocessing
+    ///   succeeded but no vision encoder is attached (currently always,
+    ///   see the struct docs).
+    pub fn process(&self, image: &[u8], config: &MultiModalConfig) -> Result<Vec<Vec<f32>>> {
+        let extractor = VisionFeatureExtractor::new(VisionFeatureConfig {
+            image_size: config.max_image_size.0.max(1),
+            feature_size: COMMON_FEATURE_DIM,
+            normalize: config.normalize_inputs,
+            do_resize: true,
+            do_center_crop: true,
+            crop_size: None,
+            mean: vec![0.485, 0.456, 0.406],
+            std: vec![0.229, 0.224, 0.225],
+            max_batch_size: None,
+        });
 
-        let mut features = Vec::new();
-        for i in 0..num_patches {
-            // Simulate patch embedding (768 dimensions)
-            let embedding: Vec<f32> =
-                (0..768).map(|j| ((i * 768 + j) as f32).cos() * 0.1).collect();
-            features.push(embedding);
-        }
+        let output = extractor.extract_features(&FeatureInput::Image {
+            data: image.to_vec(),
+            format: sniff_image_format(image),
+            metadata: None,
+        })?;
 
-        Ok(features)
+        Ok(vec![output.features])
     }
 }
 
-/// Audio processor for multi-modal pipeline
+/// Audio processor for multi-modal pipeline.
+///
+/// Decodes a real RIFF/WAVE container ([`audio_dsp::decode_wav`]) and
+/// routes the decoded samples through [`AudioFeatureExtractor`] for real
+/// FFT-based spectral features -- genuinely complete end to end, unlike
+/// the image path (no trained encoder is needed for classical spectral
+/// features). Only WAV is supported today; any other container is a
+/// structured error rather than a silent all-zero fallback.
 pub struct AudioProcessor;
 
 impl Default for AudioProcessor {
@@ -586,33 +729,68 @@ impl Default for AudioProcessor {
     }
 }
 
+/// Feature dimensionality for [`AudioProcessor`]'s spectral features.
+/// `128` matches the common mel-spectrogram-bin convention for speech
+/// models (also the value the pre-fix placeholder happened to use).
+const AUDIO_FEATURE_DIM: usize = 128;
+
 impl AudioProcessor {
     pub fn new() -> Self {
         Self
     }
 
-    pub fn process(&self, _audio: &[u8], config: &MultiModalConfig) -> Result<Vec<Vec<f32>>> {
-        // Simulate audio feature extraction
-        let sample_rate = 16000;
-        let frame_length = 1024;
-        let hop_length = 512;
+    /// # Errors
+    ///
+    /// - [`TrustformersError::InvalidInput`] if `audio` is not a
+    ///   RIFF/WAVE byte stream.
+    /// - Whatever [`audio_dsp::decode_wav`] / [`AudioFeatureExtractor::extract_features`]
+    ///   return for a malformed or unsupported-codec container.
+    pub fn process(&self, audio: &[u8], config: &MultiModalConfig) -> Result<Vec<Vec<f32>>> {
+        if !audio_dsp::is_wav(audio) {
+            return Err(TrustformersError::invalid_input_simple(
+                "multimodal audio processor: only RIFF/WAVE (.wav) byte streams are supported \
+                 today; the input did not start with a RIFF/WAVE header"
+                    .to_string(),
+            ));
+        }
+        let mut decoded = audio_dsp::decode_wav(audio)?;
 
-        let num_frames =
-            ((config.max_audio_duration * sample_rate as f64) / hop_length as f64) as usize;
-
-        let mut features = Vec::new();
-        for i in 0..num_frames {
-            // Simulate spectral features (128 dimensions)
-            let embedding: Vec<f32> =
-                (0..128).map(|j| ((i * 128 + j) as f32).sin() * 0.2).collect();
-            features.push(embedding);
+        // Real use of `max_audio_duration`: truncate the real decoded
+        // samples rather than deriving a fabricated frame count from it.
+        if config.max_audio_duration > 0.0 {
+            let max_samples = (config.max_audio_duration * f64::from(decoded.sample_rate)) as usize;
+            if decoded.samples.len() > max_samples {
+                decoded.samples.truncate(max_samples);
+            }
         }
 
-        Ok(features)
+        let extractor = AudioFeatureExtractor::new(AudioFeatureConfig {
+            sampling_rate: decoded.sample_rate,
+            feature_size: AUDIO_FEATURE_DIM,
+            n_fft: 512,
+            hop_length: 160,
+            normalize: config.normalize_inputs,
+            max_batch_size: None,
+        });
+
+        let output = extractor.extract_features(&FeatureInput::Audio {
+            samples: decoded.samples,
+            sample_rate: decoded.sample_rate,
+            metadata: None,
+        })?;
+
+        Ok(chunk_features(output.features, AUDIO_FEATURE_DIM))
     }
 }
 
-/// Video processor for multi-modal pipeline
+/// Video processor for multi-modal pipeline.
+///
+/// No real video feature extraction path exists anywhere in this
+/// workspace: [`crate::auto::types::FeatureInput`] has no `Video` variant,
+/// and no `auto::feature_extractors` implementation decodes a video
+/// container. Reusing the audio or image path against video bytes would
+/// silently misinterpret the container, so every call instead reports
+/// this unsupported modality with a structured, self-describing error.
 pub struct VideoProcessor;
 
 impl Default for VideoProcessor {
@@ -626,21 +804,53 @@ impl VideoProcessor {
         Self
     }
 
-    pub fn process(&self, _video: &[u8], config: &MultiModalConfig) -> Result<Vec<Vec<f32>>> {
-        // Simulate video feature extraction
-        let frames_per_second = 30;
-        let max_frames = (config.max_audio_duration * frames_per_second as f64) as usize;
-
-        let mut features = Vec::new();
-        for i in 0..max_frames {
-            // Simulate frame embedding (512 dimensions)
-            let embedding: Vec<f32> =
-                (0..512).map(|j| ((i * 512 + j) as f32).cos() * 0.15).collect();
-            features.push(embedding);
-        }
-
-        Ok(features)
+    /// # Errors
+    ///
+    /// Always returns [`TrustformersError::FeatureUnavailable`] -- see the
+    /// struct docs.
+    pub fn process(&self, _video: &[u8], _config: &MultiModalConfig) -> Result<Vec<Vec<f32>>> {
+        Err(unsupported_model(
+            "multimodal-feature-extraction",
+            "video",
+            &[],
+        ))
     }
+}
+
+/// Best-effort image container sniffing from magic bytes, for the
+/// informational `format` field on [`FeatureInput::Image`]. Real decoding
+/// (see `pipeline::media::image_proc::decode_image_bytes`) auto-detects
+/// the container from its own byte signature and does not consult this
+/// value, so a wrong guess here cannot corrupt decoding -- it can only
+/// make an error message name the wrong container.
+fn sniff_image_format(data: &[u8]) -> ImageFormat {
+    if data.starts_with(&[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n']) {
+        ImageFormat::Png
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        ImageFormat::Jpeg
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        ImageFormat::Webp
+    } else if data.starts_with(b"BM") {
+        ImageFormat::Bmp
+    } else if data.starts_with(&[0x49, 0x49, 0x2A, 0x00])
+        || data.starts_with(&[0x4D, 0x4D, 0x00, 0x2A])
+    {
+        ImageFormat::Tiff
+    } else {
+        // Includes Netpbm (P5/P6), which `decode_image_bytes` sniffs and
+        // dispatches itself without consulting this label.
+        ImageFormat::Png
+    }
+}
+
+/// Split a flat feature buffer into `chunk_size`-wide vectors (dropping a
+/// short final remainder, matching how [`FeatureOutput::shape`] already
+/// describes the layout as `[n_frames, feature_size]`).
+fn chunk_features(flat: Vec<f32>, chunk_size: usize) -> Vec<Vec<f32>> {
+    if chunk_size == 0 {
+        return Vec::new();
+    }
+    flat.chunks_exact(chunk_size).map(|chunk| chunk.to_vec()).collect()
 }
 
 /// Fusion layer for combining modality features
@@ -725,9 +935,7 @@ impl FusionLayer {
     fn add_features(&self, features: &ModalityFeatures) -> Result<Vec<Vec<f32>>> {
         // Element-wise addition (requires same dimensions)
         let mut fused_features = Vec::new();
-
-        // Find common feature dimension
-        let common_dim = 768; // Assume all features are projected to this dimension
+        let common_dim = COMMON_FEATURE_DIM;
 
         let max_len = [
             features.text_features.as_ref().map(|f| f.len()).unwrap_or(0),
@@ -743,22 +951,21 @@ impl FusionLayer {
             let mut combined_feature = vec![0.0; common_dim];
             let mut count = 0;
 
-            // Add features from all available modalities
-            if let Some(text_features) = &features.text_features {
-                if i < text_features.len() && text_features[i].len() >= common_dim {
-                    for j in 0..common_dim {
-                        combined_feature[j] += text_features[i][j];
+            // Add features from all available modalities that reach the
+            // common dimension.
+            for modality_features in [
+                &features.text_features,
+                &features.image_features,
+                &features.audio_features,
+                &features.video_features,
+            ] {
+                if let Some(modality_features) = modality_features {
+                    if i < modality_features.len() && modality_features[i].len() >= common_dim {
+                        for j in 0..common_dim {
+                            combined_feature[j] += modality_features[i][j];
+                        }
+                        count += 1;
                     }
-                    count += 1;
-                }
-            }
-
-            if let Some(image_features) = &features.image_features {
-                if i < image_features.len() && image_features[i].len() >= common_dim {
-                    for j in 0..common_dim {
-                        combined_feature[j] += image_features[i][j];
-                    }
-                    count += 1;
                 }
             }
 
@@ -773,14 +980,14 @@ impl FusionLayer {
     }
 
     fn weighted_average_features(&self, features: &ModalityFeatures) -> Result<Vec<Vec<f32>>> {
-        // Weighted average with learnable weights
+        // Weighted average with fixed per-modality weights.
         let text_weight = 0.4;
         let image_weight = 0.6;
         let audio_weight = 0.3;
         let video_weight = 0.2;
 
         let mut fused_features = Vec::new();
-        let common_dim = 768;
+        let common_dim = COMMON_FEATURE_DIM;
 
         let max_len = [
             features.text_features.as_ref().map(|f| f.len()).unwrap_or(0),
@@ -796,22 +1003,22 @@ impl FusionLayer {
             let mut combined_feature = vec![0.0; common_dim];
             let mut total_weight = 0.0;
 
-            // Weighted combination
-            if let Some(text_features) = &features.text_features {
-                if i < text_features.len() && text_features[i].len() >= common_dim {
-                    for j in 0..common_dim {
-                        combined_feature[j] += text_features[i][j] * text_weight;
+            // Weighted combination across every modality present (not
+            // just text/image): each still only contributes once it
+            // reaches `common_dim`, same as `add_features`.
+            for (modality_features, weight) in [
+                (&features.text_features, text_weight),
+                (&features.image_features, image_weight),
+                (&features.audio_features, audio_weight),
+                (&features.video_features, video_weight),
+            ] {
+                if let Some(modality_features) = modality_features {
+                    if i < modality_features.len() && modality_features[i].len() >= common_dim {
+                        for j in 0..common_dim {
+                            combined_feature[j] += modality_features[i][j] * weight;
+                        }
+                        total_weight += weight;
                     }
-                    total_weight += text_weight;
-                }
-            }
-
-            if let Some(image_features) = &features.image_features {
-                if i < image_features.len() && image_features[i].len() >= common_dim {
-                    for j in 0..common_dim {
-                        combined_feature[j] += image_features[i][j] * image_weight;
-                    }
-                    total_weight += image_weight;
                 }
             }
 
@@ -947,7 +1154,13 @@ mod tests {
         assert_eq!(modalities.len(), 3);
     }
 
-    // ---- TextProcessor tests ----
+    // -------------------------------------------------------------------
+    // TextProcessor: regression coverage for the bug where
+    // `TextProcessor::process` returned `sin((i*768+j) as f32) * 0.1` --
+    // entirely a function of position, never of the actual word. These
+    // tests fail against that old behavior because they assert real
+    // content-dependence.
+    // -------------------------------------------------------------------
 
     #[test]
     fn test_text_processor_produces_features() {
@@ -955,9 +1168,9 @@ mod tests {
         let cfg = MultiModalConfig::default();
         let features =
             processor.process("Hello world test", &cfg).expect("text processing succeeded");
-        // 3 tokens → 3 feature vectors
+        // 3 words -> 3 real per-word feature vectors.
         assert_eq!(features.len(), 3);
-        assert_eq!(features[0].len(), 768); // embedding dim
+        assert_eq!(features[0].len(), COMMON_FEATURE_DIM);
     }
 
     #[test]
@@ -969,7 +1182,7 @@ mod tests {
         };
         let text = "one two three four five";
         let features = processor.process(text, &cfg).expect("text processing succeeded");
-        assert!(features.len() <= 2);
+        assert_eq!(features.len(), 2);
     }
 
     #[test]
@@ -980,45 +1193,221 @@ mod tests {
         assert!(features.is_empty());
     }
 
-    // ---- ImageProcessor tests ----
+    #[test]
+    fn test_text_processor_same_word_gives_identical_vector() {
+        // Real, deterministic content-derivation: the same word must
+        // always hash to the same vector.
+        let processor = TextProcessor::new();
+        let cfg = MultiModalConfig::default();
+        let features = processor.process("repeat repeat", &cfg).expect("ok");
+        assert_eq!(features[0], features[1]);
+    }
 
     #[test]
-    fn test_image_processor_produces_patch_features() {
+    fn test_text_processor_different_words_give_different_vectors() {
+        // Regression: the old sine-wave placeholder differed only by
+        // *position*, so two different first words at the same position
+        // across two calls would be identical -- this asserts real
+        // content-dependence instead.
+        let processor = TextProcessor::new();
+        let cfg = MultiModalConfig::default();
+        let a = processor.process("apple", &cfg).expect("ok");
+        let b = processor.process("zebra", &cfg).expect("ok");
+        assert_ne!(
+            a[0], b[0],
+            "different words at the same position must produce different feature vectors"
+        );
+    }
+
+    #[test]
+    fn test_text_processor_vectors_are_l2_normalized() {
+        let processor = TextProcessor::new();
+        let cfg = MultiModalConfig::default();
+        let features = processor.process("hello", &cfg).expect("ok");
+        let norm: f32 = features[0].iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-4,
+            "expected a unit-norm vector, got norm {norm}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // ImageProcessor: regression coverage for the bug where
+    // `ImageProcessor::process` returned `cos((i*768+j) as f32) * 0.1` for
+    // a patch grid derived purely from `config.max_image_size`, entirely
+    // ignoring the `_image: &[u8]` bytes (the parameter was even
+    // underscore-prefixed). The real path decodes the bytes and -- absent
+    // an attached vision encoder -- honestly reports
+    // `FeatureUnavailable` rather than a placeholder.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_image_processor_propagates_feature_unavailable_without_encoder() {
         let processor = ImageProcessor::new();
         let cfg = MultiModalConfig::default();
-        let dummy_image = vec![0u8; 224 * 224 * 3];
-        let features = processor.process(&dummy_image, &cfg).expect("image processing succeeded");
-        // 224/16 * 224/16 = 14 * 14 = 196 patches
-        assert_eq!(features.len(), 196);
-        assert_eq!(features[0].len(), 768);
+        // A tiny real, decodable Netpbm (P5, grayscale) image: header +
+        // 2x2 8-bit pixels. Decoding must succeed; only the (nonexistent)
+        // encoder step must fail.
+        let ppm = b"P5\n2 2\n255\n\x00\x40\x80\xff".to_vec();
+        let result = processor.process(&ppm, &cfg);
+        match result {
+            Err(TrustformersError::FeatureUnavailable { ref feature, .. }) => {
+                assert!(feature.contains("vision"), "feature: {feature}");
+            },
+            other => panic!(
+                "expected a structured FeatureUnavailable (real decode, no encoder attached), \
+                 got {other:?}"
+            ),
+        }
     }
 
     #[test]
-    fn test_image_processor_feature_dimensionality() {
+    fn test_image_processor_rejects_corrupt_bytes_before_claiming_success() {
         let processor = ImageProcessor::new();
-        let cfg = MultiModalConfig {
-            max_image_size: (32, 32),
-            ..MultiModalConfig::default()
-        };
-        let dummy = vec![0u8; 32 * 32 * 3];
-        let features = processor.process(&dummy, &cfg).expect("ok");
-        // 32/16 * 32/16 = 4 patches
-        assert_eq!(features.len(), 4);
+        let cfg = MultiModalConfig::default();
+        // Not a valid image container of any kind, and not empty either.
+        let garbage = vec![1u8, 2, 3, 4, 5];
+        let result = processor.process(&garbage, &cfg);
+        assert!(
+            result.is_err(),
+            "undecodable bytes must error, never produce a fabricated vector"
+        );
     }
 
-    // ---- AudioProcessor tests ----
+    // -------------------------------------------------------------------
+    // AudioProcessor: regression coverage for the bug where
+    // `AudioProcessor::process` computed a frame count purely from
+    // `config.max_audio_duration` and filled every frame with
+    // `sin((i*128+j) as f32) * 0.2`, entirely ignoring the `_audio: &[u8]`
+    // bytes.
+    // -------------------------------------------------------------------
+
+    fn make_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+        audio_dsp::encode_wav_pcm16(samples, sample_rate)
+    }
 
     #[test]
-    fn test_audio_processor_produces_frames() {
+    fn test_audio_processor_rejects_non_wav_bytes() {
+        let processor = AudioProcessor::new();
+        let cfg = MultiModalConfig::default();
+        let not_wav = vec![0u8; 64];
+        let result = processor.process(&not_wav, &cfg);
+        assert!(
+            result.is_err(),
+            "non-WAV bytes must be a structured error, not silent zeros"
+        );
+    }
+
+    #[test]
+    fn test_audio_processor_produces_real_frames_from_real_wav() {
         let processor = AudioProcessor::new();
         let cfg = MultiModalConfig {
             max_audio_duration: 1.0,
             ..MultiModalConfig::default()
         };
-        let dummy_audio = vec![0u8; 16000];
-        let features = processor.process(&dummy_audio, &cfg).expect("audio processing succeeded");
-        assert!(!features.is_empty());
-        assert_eq!(features[0].len(), 128); // spectral dims
+        // 1 second of a real 440 Hz sine tone at 16 kHz -- genuine signal,
+        // not silence, so the resulting spectral features are non-trivial.
+        let sample_rate = 16000u32;
+        let samples: Vec<f32> = (0..sample_rate)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate as f32).sin())
+            .collect();
+        let wav = make_wav(&samples, sample_rate);
+
+        let features = processor.process(&wav, &cfg).expect("real WAV must process");
+        assert!(
+            !features.is_empty(),
+            "a real 1-second tone must yield at least one frame"
+        );
+        assert_eq!(features[0].len(), AUDIO_FEATURE_DIM);
+    }
+
+    #[test]
+    fn test_audio_processor_silence_and_tone_produce_different_features() {
+        // Regression: the old placeholder's output was a pure function of
+        // frame/bin index, so silence and a real tone (same duration,
+        // same sample rate) would have produced byte-identical "features".
+        let processor = AudioProcessor::new();
+        let cfg = MultiModalConfig {
+            max_audio_duration: 0.5,
+            ..MultiModalConfig::default()
+        };
+        let sample_rate = 16000u32;
+        let n = sample_rate / 2;
+
+        let silence = vec![0.0f32; n as usize];
+        let tone: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate as f32).sin())
+            .collect();
+
+        let silence_features = processor
+            .process(&make_wav(&silence, sample_rate), &cfg)
+            .expect("silence must process");
+        let tone_features = processor
+            .process(&make_wav(&tone, sample_rate), &cfg)
+            .expect("tone must process");
+
+        assert_eq!(silence_features.len(), tone_features.len());
+        assert_ne!(
+            silence_features, tone_features,
+            "real spectral features of silence and a real tone must differ"
+        );
+    }
+
+    #[test]
+    fn test_audio_processor_respects_max_duration() {
+        let processor = AudioProcessor::new();
+        let short_cfg = MultiModalConfig {
+            max_audio_duration: 0.25,
+            ..MultiModalConfig::default()
+        };
+        let long_cfg = MultiModalConfig {
+            max_audio_duration: 2.0,
+            ..MultiModalConfig::default()
+        };
+        let sample_rate = 16000u32;
+        let samples: Vec<f32> = (0..sample_rate * 2)
+            .map(|i| (2.0 * std::f32::consts::PI * 220.0 * i as f32 / sample_rate as f32).sin())
+            .collect();
+        let wav = make_wav(&samples, sample_rate);
+
+        let short_features = processor.process(&wav, &short_cfg).expect("ok");
+        let long_features = processor.process(&wav, &long_cfg).expect("ok");
+        assert!(
+            short_features.len() < long_features.len(),
+            "a smaller max_audio_duration must truncate to fewer real frames: {} vs {}",
+            short_features.len(),
+            long_features.len()
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // VideoProcessor: regression coverage for the bug where
+    // `VideoProcessor::process` computed a frame count from
+    // `config.max_audio_duration` (not even a video-specific config
+    // field) and filled every frame with `cos((i*512+j) as f32) * 0.15`.
+    // No real video feature extraction path exists anywhere in this
+    // workspace, so every call must now fail structurally.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_video_processor_always_reports_unsupported_modality() {
+        let processor = VideoProcessor::new();
+        let cfg = MultiModalConfig::default();
+        let result = processor.process(&[1, 2, 3, 4], &cfg);
+        match result {
+            Err(TrustformersError::FeatureUnavailable {
+                ref feature,
+                ref alternatives,
+                ..
+            }) => {
+                assert!(feature.contains("video"), "feature: {feature}");
+                assert!(
+                    alternatives.is_empty(),
+                    "no video backend exists to name as an alternative"
+                );
+            },
+            other => panic!("expected a structured FeatureUnavailable for video, got {other:?}"),
+        }
     }
 
     // ---- FusionLayer tests ----
@@ -1086,6 +1475,36 @@ mod tests {
         assert!(!fused.is_empty());
     }
 
+    #[test]
+    fn test_fusion_weighted_average_uses_audio_and_video_weights() {
+        // Regression: `audio_weight`/`video_weight` used to be computed
+        // and then never read -- only text/image were folded into the
+        // weighted sum. This fails against that old behavior because a
+        // pure-audio input (no text/image at all) would have produced no
+        // fused output whatsoever.
+        let fusion = FusionLayer::new();
+        let cfg = MultiModalConfig {
+            fusion_strategy: FusionStrategy::WeightedAverage,
+            ..MultiModalConfig::default()
+        };
+        let features = ModalityFeatures {
+            text_features: None,
+            image_features: None,
+            audio_features: Some(vec![vec![2.0; 768]]),
+            video_features: Some(vec![vec![4.0; 768]]),
+            feature_dims: HashMap::new(),
+            attention_masks: HashMap::new(),
+        };
+        let fused = fusion.fuse(&features, &cfg).expect("fusion succeeded");
+        assert_eq!(
+            fused.len(),
+            1,
+            "audio+video alone must still produce fused output"
+        );
+        // (2.0*0.3 + 4.0*0.2) / (0.3+0.2) = 1.4 / 0.5 = 2.8
+        assert!((fused[0][0] - 2.8).abs() < 1e-4, "got {}", fused[0][0]);
+    }
+
     // ---- Cross-attention weights tests ----
 
     #[test]
@@ -1150,10 +1569,70 @@ mod tests {
             processing_time_ms: 42,
             modalities_used: vec!["text".to_string(), "image".to_string()],
             fusion_strategy_used: "Concatenation".to_string(),
-            model_confidence: 0.85,
+            model_confidence: None,
             feature_extraction_time_ms: HashMap::new(),
         };
         assert_eq!(meta.modalities_used.len(), 2);
         assert!(meta.modalities_used.contains(&"text".to_string()));
+    }
+
+    // -------------------------------------------------------------------
+    // insert_modality: regression coverage for the panic risk of indexing
+    // `text_features[0]` directly when a successfully-processed modality
+    // (e.g. empty text) produces zero feature vectors.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_insert_modality_empty_values_does_not_panic() {
+        let mut features = ModalityFeatures {
+            text_features: None,
+            image_features: None,
+            audio_features: None,
+            video_features: None,
+            feature_dims: HashMap::new(),
+            attention_masks: HashMap::new(),
+        };
+        insert_modality(&mut features, "text", Vec::new(), |f, v| {
+            f.text_features = v
+        });
+        assert_eq!(features.feature_dims["text"], 0);
+        assert_eq!(features.text_features, Some(Vec::new()));
+    }
+
+    // -------------------------------------------------------------------
+    // chunk_features
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_chunk_features_splits_evenly() {
+        let flat: Vec<f32> = (0..12).map(|i| i as f32).collect();
+        let chunks = chunk_features(flat, 4);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[1], vec![4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn test_chunk_features_drops_short_remainder() {
+        let flat: Vec<f32> = (0..10).map(|i| i as f32).collect();
+        let chunks = chunk_features(flat, 4);
+        // 10 / 4 = 2 full chunks; the trailing 2 values are dropped rather
+        // than padded with fabricated zeros.
+        assert_eq!(chunks.len(), 2);
+    }
+
+    // -------------------------------------------------------------------
+    // sniff_image_format
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_sniff_image_format_recognises_png_signature() {
+        let png_sig = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'];
+        assert!(matches!(sniff_image_format(&png_sig), ImageFormat::Png));
+    }
+
+    #[test]
+    fn test_sniff_image_format_recognises_jpeg_signature() {
+        let jpeg_sig = [0xFF, 0xD8, 0xFF, 0xE0];
+        assert!(matches!(sniff_image_format(&jpeg_sig), ImageFormat::Jpeg));
     }
 }

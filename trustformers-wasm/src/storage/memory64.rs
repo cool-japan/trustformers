@@ -2,8 +2,26 @@
 //!
 //! This module provides support for Memory64, allowing access to more than 4GB of memory
 //! in WebAssembly environments that support it.
+//!
+//! ## Design: JS-free core, thin `wasm_bindgen` wrappers
+//!
+//! Every `#[wasm_bindgen]`-exposed method here that used to do real work also
+//! constructed a `JsValue` (via `Result<_, JsValue>` or `web_sys::console`)
+//! somewhere on its success path. `JsValue` construction unconditionally
+//! panics on non-wasm32 targets (see `lib.rs`'s `InferenceSession` doc
+//! comments for the same constraint), which is exactly why this module's
+//! prior tests were `#[cfg(target_arch = "wasm32")]`-gated and therefore
+//! never actually ran under `cargo test` / `cargo nextest`.
+//!
+//! To make the real bookkeeping in this module natively testable, the
+//! allocation/storage logic lives in `pub(crate)` "core" methods that return
+//! `Result<_, String>` (or plain values) and never touch `JsValue` or
+//! `web_sys`. The `#[wasm_bindgen]`-exposed methods are thin wrappers that
+//! call the core, convert `String` errors to `JsValue`, and do any
+//! browser-console logging.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::vec::Vec;
 use wasm_bindgen::prelude::*;
 
@@ -62,6 +80,14 @@ pub struct Memory64Manager {
     current_usage_bytes: u64,
     allocation_chunks: Vec<AllocationChunk>,
     enabled: bool,
+    /// Real byte storage for models allocated via `allocate_for_model`,
+    /// keyed by `model_id`. Previously this storage did not exist at all -
+    /// `allocate_for_model` recorded only a `size_bytes` count and the
+    /// caller's actual bytes were discarded - so `get_model_data` had
+    /// nothing to return and unconditionally returned `Ok(None)` regardless
+    /// of what had been "allocated". A plain `HashMap` - no browser API
+    /// involved - so storing and retrieving is fully testable natively.
+    model_data: HashMap<String, Vec<u8>>,
 }
 
 /// Represents a chunk of allocated memory
@@ -70,6 +96,10 @@ struct AllocationChunk {
     id: u32,
     size_bytes: u64,
     purpose: String,
+    /// Set when this chunk backs a model registered via
+    /// `allocate_for_model_core`, so deallocating the chunk also evicts the
+    /// matching entry from `model_data`.
+    model_id: Option<String>,
 }
 
 /// Memory allocation strategy for large models
@@ -94,6 +124,90 @@ pub struct Memory64Capabilities {
     pub current_usage_bytes: u64,
 }
 
+impl Memory64Manager {
+    /// Pure, JS-free constructor: real bookkeeping state with no browser
+    /// API calls, so it - and everything built on it - is unit-testable on
+    /// native targets. Used both by the `#[wasm_bindgen]`-exposed `new`
+    /// (after a real `check_memory64_support` probe) and directly by native
+    /// tests below.
+    pub(crate) fn with_capacity_gb(max_memory_gb: u32) -> Self {
+        Self {
+            max_memory_gb,
+            current_usage_bytes: 0,
+            allocation_chunks: Vec::new(),
+            enabled: true,
+            model_data: HashMap::new(),
+        }
+    }
+
+    /// Pure core of chunk allocation: real bookkeeping, `String` errors
+    /// only (never `JsValue`).
+    pub(crate) fn allocate_chunk_core(
+        &mut self,
+        size_bytes: u64,
+        purpose: String,
+        model_id: Option<String>,
+    ) -> Result<u32, String> {
+        let limit_bytes = self.max_memory_gb as u64 * 1024 * 1024 * 1024;
+        if self.current_usage_bytes + size_bytes > limit_bytes {
+            return Err(format!(
+                "Cannot allocate {size_bytes} bytes for '{purpose}': would exceed memory limit of {} GB",
+                self.max_memory_gb
+            ));
+        }
+
+        let chunk_id = self.allocation_chunks.len() as u32;
+        self.allocation_chunks.push(AllocationChunk {
+            id: chunk_id,
+            size_bytes,
+            purpose,
+            model_id,
+        });
+        self.current_usage_bytes += size_bytes;
+
+        Ok(chunk_id)
+    }
+
+    /// Pure core of chunk deallocation. Also evicts any `model_data` entry
+    /// owned by the deallocated chunk, so freeing a model's chunk cannot
+    /// leave stale bytes reachable through `get_model_data_core`.
+    pub(crate) fn deallocate_chunk_core(&mut self, chunk_id: u32) -> Result<(), String> {
+        let pos = self
+            .allocation_chunks
+            .iter()
+            .position(|c| c.id == chunk_id)
+            .ok_or_else(|| format!("Chunk {chunk_id} not found"))?;
+        let chunk = self.allocation_chunks.remove(pos);
+        self.current_usage_bytes = self.current_usage_bytes.saturating_sub(chunk.size_bytes);
+        if let Some(ref model_id) = chunk.model_id {
+            self.model_data.remove(model_id);
+        }
+        Ok(())
+    }
+
+    /// Pure core of `allocate_for_model`: records real bookkeeping *and*
+    /// stores `data` itself, so `get_model_data_core` can return it later.
+    pub(crate) fn allocate_for_model_core(
+        &mut self,
+        model_id: &str,
+        data: &[u8],
+    ) -> Result<u32, String> {
+        let chunk_id = self.allocate_chunk_core(
+            data.len() as u64,
+            format!("model_{model_id}"),
+            Some(model_id.to_string()),
+        )?;
+        self.model_data.insert(model_id.to_string(), data.to_vec());
+        Ok(chunk_id)
+    }
+
+    /// Pure core of `get_model_data`: a real lookup into `model_data`,
+    /// rather than the unconditional `Ok(None)` this used to return.
+    pub(crate) fn get_model_data_core(&self, model_id: &str) -> Option<Vec<u8>> {
+        self.model_data.get(model_id).cloned()
+    }
+}
+
 #[wasm_bindgen]
 impl Memory64Manager {
     #[wasm_bindgen(constructor)]
@@ -112,12 +226,7 @@ impl Memory64Manager {
             .into());
         }
 
-        Ok(Memory64Manager {
-            max_memory_gb,
-            current_usage_bytes: 0,
-            allocation_chunks: Vec::new(),
-            enabled: true,
-        })
+        Ok(Self::with_capacity_gb(max_memory_gb))
     }
 
     /// Check if Memory64 is supported in the current environment
@@ -183,25 +292,9 @@ impl Memory64Manager {
     /// Allocate memory chunk for a specific purpose
     pub fn allocate_chunk(&mut self, size_gb: f64, purpose: &str) -> Result<u32, JsValue> {
         let size_bytes = (size_gb * 1024.0 * 1024.0 * 1024.0) as u64;
-
-        if self.current_usage_bytes + size_bytes > (self.max_memory_gb as u64 * 1024 * 1024 * 1024)
-        {
-            return Err(format!(
-                "Cannot allocate {} GB: would exceed memory limit of {} GB",
-                size_gb, self.max_memory_gb
-            )
-            .into());
-        }
-
-        let chunk_id = self.allocation_chunks.len() as u32;
-        let chunk = AllocationChunk {
-            id: chunk_id,
-            size_bytes,
-            purpose: purpose.to_string(),
-        };
-
-        self.allocation_chunks.push(chunk);
-        self.current_usage_bytes += size_bytes;
+        let chunk_id = self
+            .allocate_chunk_core(size_bytes, purpose.to_string(), None)
+            .map_err(|e| JsValue::from_str(&e))?;
 
         web_sys::console::log_1(
             &format!(
@@ -216,18 +309,26 @@ impl Memory64Manager {
 
     /// Deallocate a memory chunk
     pub fn deallocate_chunk(&mut self, chunk_id: u32) -> Result<(), JsValue> {
-        if let Some(pos) = self.allocation_chunks.iter().position(|c| c.id == chunk_id) {
-            let chunk = self.allocation_chunks.remove(pos);
-            self.current_usage_bytes = self.current_usage_bytes.saturating_sub(chunk.size_bytes);
+        // Look up the purpose before the core call removes the chunk, purely
+        // for the log message below.
+        let purpose = self
+            .allocation_chunks
+            .iter()
+            .find(|c| c.id == chunk_id)
+            .map(|c| c.purpose.clone());
 
-            web_sys::console::log_1(
-                &format!("Deallocated chunk {} ({})", chunk_id, chunk.purpose).into(),
-            );
+        self.deallocate_chunk_core(chunk_id).map_err(|e| JsValue::from_str(&e))?;
 
-            Ok(())
-        } else {
-            Err(format!("Chunk {} not found", chunk_id).into())
-        }
+        web_sys::console::log_1(
+            &format!(
+                "Deallocated chunk {} ({})",
+                chunk_id,
+                purpose.as_deref().unwrap_or("unknown")
+            )
+            .into(),
+        );
+
+        Ok(())
     }
 
     /// Get current memory usage in bytes
@@ -369,24 +470,29 @@ impl Memory64Manager {
         let count = self.allocation_chunks.len();
         self.allocation_chunks.clear();
         self.current_usage_bytes = 0;
+        self.model_data.clear();
 
         web_sys::console::log_1(&format!("Cleared {} memory allocations", count).into());
     }
 
-    /// Allocate memory for a specific model
-    pub fn allocate_for_model(
-        &mut self,
-        model_id: &str,
-        size_bytes: usize,
-    ) -> Result<u32, JsValue> {
-        let size_gb = size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-        self.allocate_chunk(size_gb, &format!("model_{}", model_id))
+    /// Allocate memory for a specific model and store its bytes so they can
+    /// be retrieved later via [`Self::get_model_data`].
+    ///
+    /// Previously this took only a `size_bytes: usize` count and discarded
+    /// the caller's actual data - so nothing was ever available for
+    /// `get_model_data` to return. It now takes the real bytes and stores
+    /// them (see [`Self::allocate_for_model_core`]).
+    pub fn allocate_for_model(&mut self, model_id: &str, data: &[u8]) -> Result<u32, JsValue> {
+        self.allocate_for_model_core(model_id, data).map_err(|e| JsValue::from_str(&e))
     }
 
-    /// Get model data from allocated memory
-    pub fn get_model_data(&self, _model_id: &str) -> Result<Option<Vec<u8>>, JsValue> {
-        // Stub implementation - would need actual memory mapping
-        Ok(None)
+    /// Get model data from allocated memory.
+    ///
+    /// Previously a stub that unconditionally returned `Ok(None)` regardless
+    /// of what had been "allocated" via `allocate_for_model`. Now returns
+    /// the real bytes stored by [`Self::allocate_for_model`], if any.
+    pub fn get_model_data(&self, model_id: &str) -> Result<Option<Vec<u8>>, JsValue> {
+        Ok(self.get_model_data_core(model_id))
     }
 
     /// Get memory statistics
@@ -473,8 +579,109 @@ pub fn can_load_model_size(model_size_gb: f64) -> Result<bool, JsValue> {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
     use super::*;
+
+    // -----------------------------------------------------------------
+    // All tests below exercise the pure, JS-free "core" methods directly
+    // (`with_capacity_gb`, `allocate_chunk_core`, `allocate_for_model_core`,
+    // `get_model_data_core`, `deallocate_chunk_core`) so they run natively
+    // under `cargo test` / `cargo nextest`, unlike the module's previous
+    // tests which were `#[cfg(target_arch = "wasm32")]`-gated (because they
+    // called `Memory64Manager::new`, which calls `check_memory64_support`,
+    // which calls `js_sys::eval` - unusable off wasm32) and therefore never
+    // actually ran in CI.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_with_capacity_gb_starts_empty() {
+        let manager = Memory64Manager::with_capacity_gb(8);
+        assert_eq!(manager.max_memory_gb, 8);
+        assert_eq!(manager.current_usage_bytes, 0);
+        assert!(manager.enabled);
+        assert!(manager.allocation_chunks.is_empty());
+        assert!(manager.model_data.is_empty());
+    }
+
+    #[test]
+    fn test_get_model_data_core_round_trips_real_bytes() {
+        // Regression test for the old `get_model_data`, which unconditionally
+        // returned `Ok(None)` no matter what had been allocated.
+        let mut manager = Memory64Manager::with_capacity_gb(4);
+        let payload = vec![1u8, 2, 3, 4, 5, 42, 255, 0];
+
+        manager
+            .allocate_for_model_core("model-a", &payload)
+            .expect("allocation within limit should succeed");
+
+        let retrieved = manager.get_model_data_core("model-a");
+        assert_eq!(retrieved, Some(payload));
+    }
+
+    #[test]
+    fn test_get_model_data_core_unknown_model_returns_none() {
+        let manager = Memory64Manager::with_capacity_gb(4);
+        assert_eq!(manager.get_model_data_core("does-not-exist"), None);
+    }
+
+    #[test]
+    fn test_allocate_for_model_core_tracks_usage_bytes() {
+        let mut manager = Memory64Manager::with_capacity_gb(4);
+        let payload = vec![0u8; 1024];
+
+        manager.allocate_for_model_core("model-a", &payload).expect("should succeed");
+
+        assert_eq!(manager.current_usage_bytes, 1024);
+    }
+
+    #[test]
+    fn test_allocate_for_model_core_rejects_over_limit() {
+        // 1 GB limit; request one byte more than that via the byte-count
+        // core directly (no need to actually materialize a multi-GB Vec in
+        // a test process).
+        let mut manager = Memory64Manager::with_capacity_gb(1);
+        let limit_bytes = 1024u64 * 1024 * 1024;
+        let result = manager.allocate_chunk_core(limit_bytes + 1, "oversized".to_string(), None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_deallocate_chunk_core_evicts_model_data() {
+        let mut manager = Memory64Manager::with_capacity_gb(4);
+        let payload = vec![9u8; 16];
+
+        let chunk_id = manager
+            .allocate_for_model_core("model-a", &payload)
+            .expect("allocation should succeed");
+
+        assert_eq!(manager.get_model_data_core("model-a"), Some(payload));
+
+        manager.deallocate_chunk_core(chunk_id).expect("deallocation should succeed");
+
+        // The whole point of this test: after deallocating the chunk that
+        // backed "model-a", its bytes must no longer be retrievable.
+        assert_eq!(manager.get_model_data_core("model-a"), None);
+        assert_eq!(manager.current_usage_bytes, 0);
+    }
+
+    #[test]
+    fn test_deallocate_chunk_core_unknown_id_errors() {
+        let mut manager = Memory64Manager::with_capacity_gb(4);
+        assert!(manager.deallocate_chunk_core(999).is_err());
+    }
+
+    #[test]
+    fn test_multiple_models_stored_independently() {
+        let mut manager = Memory64Manager::with_capacity_gb(4);
+        manager.allocate_for_model_core("model-a", &[1, 2, 3]).expect("ok");
+        manager.allocate_for_model_core("model-b", &[4, 5, 6, 7]).expect("ok");
+
+        assert_eq!(manager.get_model_data_core("model-a"), Some(vec![1, 2, 3]));
+        assert_eq!(
+            manager.get_model_data_core("model-b"),
+            Some(vec![4, 5, 6, 7])
+        );
+        assert_eq!(manager.current_usage_bytes, 7);
+    }
 
     #[test]
     #[cfg(target_arch = "wasm32")]

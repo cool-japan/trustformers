@@ -287,7 +287,7 @@ macro_rules! register_benchmark {
 pub fn auto_register(_metadata: BenchmarkMetadata) -> impl Fn() {
     || {
         // In practice, this would use the inventory crate for automatic registration
-        println!("Auto-registration placeholder");
+        tracing::debug!("Auto-registration placeholder");
     }
 }
 

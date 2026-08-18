@@ -376,7 +376,7 @@ impl NASController {
 
     /// Run DARTS algorithm
     fn run_darts(&mut self) -> Result<()> {
-        println!("Running DARTS algorithm...");
+        tracing::info!("Running DARTS algorithm...");
 
         // Initialize architecture weights
         let mut architecture_weights = self.initialize_architecture_weights()?;
@@ -409,7 +409,7 @@ impl NASController {
 
     /// Run GDAS algorithm
     fn run_gdas(&mut self) -> Result<()> {
-        println!("Running GDAS algorithm...");
+        tracing::info!("Running GDAS algorithm...");
 
         // Similar to DARTS but with gradient-based sampling
         for _epoch in 0..100 {
@@ -429,7 +429,7 @@ impl NASController {
 
     /// Run ENAS algorithm
     fn run_enas(&mut self) -> Result<()> {
-        println!("Running ENAS algorithm...");
+        tracing::info!("Running ENAS algorithm...");
 
         // Initialize controller
         let mut controller = ENASController::new();
@@ -457,7 +457,7 @@ impl NASController {
 
     /// Run ProxylessNAS algorithm
     fn run_proxyless_nas(&mut self) -> Result<()> {
-        println!("Running ProxylessNAS algorithm...");
+        tracing::info!("Running ProxylessNAS algorithm...");
 
         // Direct search without proxy tasks
         for _epoch in 0..100 {
@@ -477,7 +477,7 @@ impl NASController {
 
     /// Run progressive search
     fn run_progressive_search(&mut self) -> Result<()> {
-        println!("Running Progressive search...");
+        tracing::info!("Running Progressive search...");
 
         // Start with simple architectures and progressively increase complexity
         let complexity_levels = vec![0.2, 0.4, 0.6, 0.8, 1.0];
@@ -497,7 +497,7 @@ impl NASController {
 
     /// Run evolutionary search
     fn run_evolutionary_search(&mut self) -> Result<()> {
-        println!("Running Evolutionary search...");
+        tracing::info!("Running Evolutionary search...");
 
         // Initialize population
         let mut population = self.initialize_population(50)?;
@@ -533,7 +533,7 @@ impl NASController {
 
     /// Run random search baseline
     fn run_random_search(&mut self) -> Result<()> {
-        println!("Running Random search...");
+        tracing::info!("Running Random search...");
 
         for _ in 0..self.config.max_architectures {
             let architecture = self.sample_random_architecture()?;

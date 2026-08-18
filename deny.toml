@@ -1,39 +1,72 @@
-# TrustformeRS Cargo Deny Configuration
-# This file configures cargo-deny for dependency checking
+# TrustformeRS `cargo-deny` configuration
+#
+# Schema: cargo-deny 0.18/0.19 (the 0.13-era keys `[advisories] vulnerability`,
+# `notice`, `[licenses] unlicensed`/`default`/`allow-osi-fsf-free` and
+# `[bans] deprecated`/`denied` were removed upstream and make the whole file
+# fail to deserialize, which silently disabled every gate below).
+#
+# Run all gates:      cargo deny check
+# Run the ban gate:   cargo deny check bans      <- COOLJAPAN policy gate
+#
+# The ban list below is the COOLJAPAN Pure-Rust policy: no C/C++/Fortran in the
+# default dependency tree, and the oxi* ecosystem crates in place of the classic
+# C-backed (or ecosystem-duplicating) crates. Every exception is a `wrappers`
+# entry naming the exact parent crate that pulls the banned crate in, together
+# with the reason it is currently unavoidable.
 
-# The lint level for crates that have security vulnerabilities
+# ---------------------------------------------------------------------------
+# Dependency graph construction
+# ---------------------------------------------------------------------------
+[graph]
+# Resolve every feature of every workspace member. The policy is about what a
+# consumer *can* pull in, not only what `default` happens to enable, so the
+# opt-in backends (candle, swagger-ui, lambda, visual, video, cuda, metal, ...)
+# are all part of the graph that the ban list is evaluated against.
+all-features = true
+# `targets = []` (the default) keeps every platform in the graph, so the
+# iOS/Android/Windows-only dependency blocks are audited too.
+targets = []
+# Dev-dependencies stay in the graph: criterion's `html_reports` -> plotters ->
+# image codec stack is exactly the kind of transitive C-adjacent pull we want
+# visible.
+exclude-dev = false
+# NOTE for anyone reading a failure: `all-features = true` + `exclude-dev = false`
+# means these gates are evaluated over a graph that is strictly wider than any
+# real build (every opt-in backend plus every dev-dependency). A finding here is
+# a policy signal about what a consumer *could* pull in, not proof that the
+# default `cargo build` contains the crate.
+
+# ---------------------------------------------------------------------------
+# RustSec advisory database
+# ---------------------------------------------------------------------------
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "warn"
-notice = "warn"
+# "workspace" = flag unmaintained crates that this workspace depends on
+# directly; transitive-only unmaintained crates are not actionable here.
+unmaintained = "workspace"
+yanked = "deny"
 ignore = [
-    # Add any advisory IDs to ignore here
-    # Example: "RUSTSEC-2020-0001",
+    # Add RUSTSEC ids here ONLY with a comment stating why the exposure does not
+    # apply and who owns the removal. Never add one to silence a real finding.
 ]
 
-# Lint level for licenses
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
 [licenses]
-# The lint level for crates which do not have a detectable license
-unlicensed = "deny"
-# Lint level for crates with multiple versions with different licenses
-allow-osi-fsf-free = "both"
-# Lint level for licenses not explicitly allowed
-default = "deny"
-# The confidence threshold for detecting licenses from license text
-confidence-threshold = 0.8
-
-# List of allowed licenses
+# Anything not listed here is denied (that is the cargo-deny 0.18+ default, the
+# old explicit `default = "deny"` key no longer exists).
 allow = [
     "MIT",
+    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
     "Unicode-DFS-2016",
+    "Unicode-3.0",
     "CC0-1.0",
     "MPL-2.0",
     "BSL-1.0",
@@ -41,84 +74,153 @@ allow = [
     "Zlib",
     "0BSD",
     "OpenSSL",
+    "CDLA-Permissive-2.0",
 ]
+confidence-threshold = 0.8
 
-# List of denied licenses
-deny = [
-    "GPL-2.0",
-    "GPL-3.0",
-    "LGPL-2.0",
-    "LGPL-2.1", 
-    "LGPL-3.0",
-    "AGPL-3.0",
-    "BUSL-1.1",
-]
-
-# Clarify ambiguous license specifications
-[[licenses.clarify]]
-name = "ring"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [
-    { path = "LICENSE", hash = 0xbd0eed23 },
-]
-
-# Exceptions for specific crates
+# Per-crate exceptions. Each one names a permissive license that is fine for this
+# specific dependency but is deliberately NOT added to the global allow list.
 [[licenses.exceptions]]
-# Example: Allow a specific crate with GPL license
-# name = "some-gpl-crate"
-# allow = ["GPL-3.0"]
+# ffmpeg-next / ffmpeg-sys-next: WTFPL (public-domain-equivalent). Optional
+# `video` feature of trustformers-debug only; excluded from every default build.
+crate = "ffmpeg-next"
+allow = ["WTFPL"]
 
+[[licenses.exceptions]]
+crate = "ffmpeg-sys-next"
+allow = ["WTFPL"]
+
+[[licenses.exceptions]]
+# libfuzzer-sys: "(MIT OR Apache-2.0) AND NCSA" — NCSA is the permissive
+# University of Illinois/NCSA license covering the bundled libFuzzer sources.
+# Reached only through image -> ravif -> rav1e (opt-in `vision`/`visual`).
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
+
+[[licenses.exceptions]]
+# minicbor: Blue Oak Model License 1.0.0 (OSI-approved permissive). Pulled by the
+# AWS SDK's CBOR wire codec (aws-smithy-cbor -> aws-sdk-cloudwatch).
+crate = "minicbor"
+allow = ["BlueOak-1.0.0"]
+
+# `ring` ships a composite license that the SPDX scanner cannot infer from the
+# file alone.
+[[licenses.clarify]]
+crate = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# ---------------------------------------------------------------------------
+# Banned crates (COOLJAPAN Pure-Rust / oxi* ecosystem policy)
+# ---------------------------------------------------------------------------
 [bans]
-# Lint level for when multiple versions of a crate are detected
 multiple-versions = "warn"
-# Lint level for when a crate marked as 'deprecated' is used
-deprecated = "warn"
-# Lint level for crates which are not allowed
-denied = "deny"
-# Allow certain wildcard dependencies
-wildcards = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
 
-# Deny specific crates
 deny = [
-    # Example: { name = "openssl", reason = "Use rustls instead" },
+    # -- BLAS / LAPACK ------------------------------------------------------
+    # Every one of these compiles or links Fortran/C BLAS. `oxiblas` is the
+    # pure-Rust replacement and is already the workspace's BLAS provider.
+    { crate = "openblas", use-instead = "oxiblas", reason = "FFI bindings to the C/Fortran OpenBLAS library" },
+    { crate = "openblas-src", use-instead = "oxiblas", reason = "C/Fortran OpenBLAS build; COOLJAPAN uses the pure-Rust oxiblas stack" },
+    { crate = "openblas-build", use-instead = "oxiblas", reason = "build driver for the C/Fortran OpenBLAS sources" },
+    { crate = "blas-src", use-instead = "oxiblas", reason = "selects a C/Fortran BLAS backend; oxiblas provides BLAS in pure Rust" },
+    { crate = "blas-sys", use-instead = "oxiblas-blas", reason = "raw FFI bindings to a C BLAS" },
+    { crate = "lapack-src", use-instead = "oxiblas", reason = "selects a C/Fortran LAPACK backend" },
+    { crate = "lapack-sys", use-instead = "oxiblas", reason = "raw FFI bindings to a C/Fortran LAPACK" },
+    { crate = "netlib-src", use-instead = "oxiblas", reason = "builds reference Fortran BLAS/LAPACK" },
+    { crate = "intel-mkl-src", use-instead = "oxiblas", reason = "downloads and links Intel MKL (closed-source C)" },
+    { crate = "accelerate-src", use-instead = "oxiblas", reason = "links Apple's Accelerate framework (C); macOS-only escape hatch is not the default path" },
+
+    # -- Serialization ------------------------------------------------------
+    { crate = "bincode", use-instead = "oxicode", reason = "COOLJAPAN ecosystem replacement (oxicode) is the mandated binary codec" },
+
+    # -- FFT ----------------------------------------------------------------
+    { crate = "rustfft", use-instead = "oxifft", reason = "COOLJAPAN ecosystem replacement (oxifft)" },
+
+    # -- SQLite -------------------------------------------------------------
+    { crate = "rusqlite", use-instead = "oxisql-sqlite-compat", reason = "wraps libsqlite3 (C); oxisql-sqlite-compat is the pure-Rust SQLite-format backend" },
+    { crate = "libsqlite3-sys", use-instead = "oxisql-sqlite-compat", reason = "vendors/links the SQLite C amalgamation" },
+
+    # -- SMT solver ---------------------------------------------------------
+    { crate = "z3", use-instead = "oxiz", reason = "links the Z3 C++ solver; oxiz is the pure-Rust replacement" },
+    { crate = "z3-sys", use-instead = "oxiz", reason = "raw FFI bindings to the Z3 C++ solver" },
+
+    # -- Compression / archives (oxiarc-* family) ---------------------------
+    # `flate2` is never used first-hand; it is only reachable through third-party
+    # crates we do not control. Each wrapper below is a parent that is currently
+    # unavoidable, with the reason it cannot be dropped. Any OTHER parent is a
+    # real policy violation and is intentionally left unwrapped so this gate
+    # reports it (today: `compression-codecs` — see KNOWN OPEN VIOLATION below).
+    { crate = "flate2", use-instead = "oxiarc-deflate", wrappers = [
+        "png",   # image-rs PNG decoder (image -> png), opt-in `vision`/`visual`
+        "tiff",  # image-rs TIFF decoder (image -> tiff), opt-in `vision`/`visual`
+        "zip",   # utoipa-swagger-ui build script (opt-in `swagger-ui` feature)
+        # The AWS SDK compresses request bodies itself. trustformers-serve has a
+        # real, used CloudWatch metrics integration (29 call sites in
+        # src/), so this edge cannot be removed without dropping that feature.
+        "aws-sdk-cloudwatch",
+        "aws-smithy-compression",
+    ], reason = "C-free but ecosystem-duplicating DEFLATE; COOLJAPAN uses oxiarc-deflate" },
+    { crate = "miniz_oxide", use-instead = "oxiarc-deflate", wrappers = [
+        "flate2", # flate2's own pure-Rust backend
+        "png",    # image-rs PNG decoder
+        "exr",    # image-rs OpenEXR decoder (image -> exr)
+    ], reason = "DEFLATE implementation behind flate2; COOLJAPAN uses oxiarc-deflate" },
+    { crate = "zip", use-instead = "oxiarc-archive", wrappers = [
+        "utoipa-swagger-ui", # build-dependency that unpacks the bundled Swagger UI
+                             # assets; reachable only via the opt-in `swagger-ui`
+                             # feature of trustformers-serve.
+        "candle-core",       # optional `candle` backend of trustformers-core
+                             # (opt-in `candle` feature) unpacks PyTorch .zip
+                             # checkpoints.
+    ], reason = "COOLJAPAN uses oxiarc-archive for ZIP containers" },
+    { crate = "zstd", use-instead = "oxiarc-zstd", reason = "wraps the zstd C library" },
+    { crate = "zstd-sys", use-instead = "oxiarc-zstd", reason = "builds/links the zstd C library" },
+    { crate = "zstd-safe", use-instead = "oxiarc-zstd", reason = "safe wrapper over zstd-sys (C)" },
+    { crate = "bzip2", use-instead = "oxiarc-archive", reason = "wraps libbz2 (C)" },
+    { crate = "bzip2-sys", use-instead = "oxiarc-archive", reason = "builds/links libbz2 (C)" },
+    { crate = "lz4", use-instead = "oxiarc-lz4", reason = "wraps the lz4 C library" },
+    { crate = "lz4-sys", use-instead = "oxiarc-lz4", reason = "builds/links the lz4 C library" },
+    { crate = "lz4_flex", use-instead = "oxiarc-lz4", reason = "ecosystem-duplicating LZ4; COOLJAPAN uses oxiarc-lz4" },
+    { crate = "tar", use-instead = "oxiarc-archive", reason = "COOLJAPAN uses oxiarc-archive for TAR containers" },
+    { crate = "snap", use-instead = "oxiarc-archive", reason = "ecosystem-duplicating Snappy; COOLJAPAN uses the oxiarc-* family" },
+    { crate = "brotli", use-instead = "oxiarc-archive", wrappers = [
+        "lambda-web", # AWS Lambda adapter, opt-in `lambda` feature of
+                      # trustformers-serve (excluded from the default tree).
+    ], reason = "ecosystem-duplicating Brotli; COOLJAPAN uses the oxiarc-* family" },
+    { crate = "brotli-decompressor", use-instead = "oxiarc-archive", wrappers = [
+        "brotli", # brotli's own decompressor half; same opt-in `lambda` path.
+    ], reason = "ecosystem-duplicating Brotli; COOLJAPAN uses the oxiarc-* family" },
 ]
 
-# Skip certain crates when checking for duplicates
-skip = [
-    # Example: { name = "winapi", version = "0.2.8" },
-]
+# KNOWN OPEN VIOLATION (do not silence with a wrapper):
+#   flate2 <- compression-codecs <- async-compression <- tower-http 0.6
+#          <- reqwest (features "gzip"/"deflate" turned on by typespec_client_core)
+#          <- azure_core <- azure_mgmt_machinelearningservices / azure_mgmt_web
+#          <- trustformers-serve
+# The Azure SDK crates (`azure_core`, `azure_identity`, `azure_mgmt_*`) have zero
+# references in trustformers-serve/src. Dropping those unused dependencies removes
+# the last unwrapped `flate2` parent and makes `cargo deny check bans` pass with no
+# errors. Owned by trustformers-serve, tracked as the "unused cloud SDK deps"
+# finding; it is deliberately NOT whitelisted here so the gate keeps reporting it.
 
-# Similarly named crates that are allowed to coexist
-allow = [
-    # Example: { name = "num-traits", version = "0.1" },
-]
+# Crates allowed to appear at multiple versions (the `multiple-versions` lint is
+# only a warning today; add entries here with a justification when a duplicate
+# is genuinely unavoidable).
+skip = []
+skip-tree = []
 
-# Certain crates that are allowed to have wildcards
-# wildcards = [
-#     { allow = ["example-*"], reason = "Internal crates" },
-# ]
-
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
 [sources]
-# Lint level for what to happen when a crate from a git repository is used
-unknown-git = "warn"
-# Lint level for what to happen when a crate from a registry not in the allow list is used
-unknown-registry = "warn"
-# List of allowed registries
+unknown-registry = "deny"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# List of allowed Git repositories  
-allow-git = [
-    # Add any allowed git dependencies here
-    # Example: "https://github.com/rust-lang/cargo",
-]
+allow-git = []
 
 [sources.allow-org]
-# GitHub organizations that are allowed
-github = [
-    # Example: "rust-lang",
-    # Example: "tokio-rs",
-]
-# GitLab organizations that are allowed
-# gitlab = []
-# Bitbucket organizations that are allowed
-# bitbucket = []
+github = []

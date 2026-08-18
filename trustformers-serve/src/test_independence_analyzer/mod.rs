@@ -19,3 +19,6 @@ pub mod types;
 // Re-export all types
 pub use analysisconfig_traits::*;
 pub use functions::*;
+
+#[cfg(test)]
+mod types_tests;

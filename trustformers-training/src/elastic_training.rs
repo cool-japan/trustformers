@@ -188,7 +188,7 @@ impl ElasticTrainingCoordinator {
 
         workers.insert(worker_id, worker_info);
 
-        println!("Registered worker with rank {}", rank);
+        tracing::info!("Registered worker with rank {}", rank);
         Ok(rank)
     }
 
@@ -251,7 +251,7 @@ impl ElasticTrainingCoordinator {
             return Ok(());
         }
 
-        println!("Handling failure for worker: {}", worker_id);
+        tracing::warn!("Handling failure for worker: {}", worker_id);
 
         // Try to recover from checkpoint
         if let Some(checkpoint) = self.checkpoints.get(worker_id).cloned() {
@@ -281,6 +281,11 @@ impl ElasticTrainingCoordinator {
         let workers = self.workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let active_workers =
             workers.iter().filter(|(_, w)| matches!(w.status, WorkerStatus::Active)).count();
+        // `calculate_system_performance` and `should_rebalance` below both
+        // take `self.workers.lock()` too; holding this guard across those
+        // calls would deadlock (`Mutex` has no reentrancy at all, unlike an
+        // `RwLock` this is not even contention-dependent).
+        drop(workers);
 
         if active_workers < self.config.min_workers {
             return Ok(Some(ScalingDecision {
@@ -452,7 +457,7 @@ impl ElasticTrainingCoordinator {
             self.workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len();
         let workers_to_add = target_workers.saturating_sub(current_workers);
 
-        println!("Scaling up: adding {} workers", workers_to_add);
+        tracing::info!("Scaling up: adding {} workers", workers_to_add);
 
         // In a real implementation, this would:
         // 1. Request new worker instances from resource manager
@@ -469,7 +474,7 @@ impl ElasticTrainingCoordinator {
         let current_workers = workers.len();
         let workers_to_remove = current_workers.saturating_sub(target_workers);
 
-        println!("Scaling down: removing {} workers", workers_to_remove);
+        tracing::info!("Scaling down: removing {} workers", workers_to_remove);
 
         // Select workers to remove (prefer idle workers)
         let mut workers_to_remove_ids = Vec::new();
@@ -491,7 +496,7 @@ impl ElasticTrainingCoordinator {
 
     /// Rebalance workload across workers
     fn rebalance_workers(&mut self) -> Result<()> {
-        println!("Rebalancing workload across workers");
+        tracing::info!("Rebalancing workload across workers");
 
         // In a real implementation, this would:
         // 1. Calculate optimal workload distribution
@@ -520,7 +525,7 @@ impl ElasticTrainingCoordinator {
         };
 
         self.checkpoints.insert(worker_id.to_string(), checkpoint);
-        println!("Created checkpoint for worker: {}", worker_id);
+        tracing::info!("Created checkpoint for worker: {}", worker_id);
 
         Ok(())
     }
@@ -531,7 +536,7 @@ impl ElasticTrainingCoordinator {
         worker_id: &str,
         _checkpoint: &CheckpointInfo,
     ) -> Result<()> {
-        println!("Recovering worker {} from checkpoint", worker_id);
+        tracing::info!("Recovering worker {} from checkpoint", worker_id);
 
         // In a real implementation, this would:
         // 1. Restore model state from checkpoint
@@ -791,6 +796,60 @@ mod tests {
         let decision = decision.expect("operation failed in test");
         assert!(matches!(decision.decision_type, ScalingType::ScaleUp));
         assert_eq!(decision.target_workers, 2);
+    }
+
+    /// Regression: `evaluate_scaling_decision` used to hold its own
+    /// `self.workers.lock()` guard for its whole body, including across the
+    /// calls to `calculate_system_performance` and `should_rebalance`, which
+    /// both also lock `self.workers`. `Mutex` has no reentrancy at all (this
+    /// is not contention-dependent like an `RwLock` read-read case), so any
+    /// call that fell through the below/above worker-count early returns --
+    /// i.e. the normal case, active worker count within `[min, max]` --
+    /// deadlocked unconditionally. `test_scaling_decision` above never
+    /// reached this: with zero workers registered, `active_workers (0) <
+    /// min_workers (2)` returns before ever calling
+    /// `calculate_system_performance`.
+    ///
+    /// A genuinely deadlocked call hangs rather than erroring, so this runs
+    /// it on a background thread and fails on a bounded timeout instead of
+    /// hanging the whole suite.
+    #[test]
+    fn test_scaling_decision_in_normal_range_does_not_deadlock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let config = ElasticTrainingConfig {
+            min_workers: 1,
+            max_workers: 8,
+            dynamic_scaling: true,
+            ..Default::default()
+        };
+        let mut coordinator = ElasticTrainingCoordinator::new(config);
+
+        let hardware_info = HardwareInfo {
+            gpu_count: 1,
+            gpu_memory: 8000000000,
+            cpu_cores: 8,
+            ram: 16000000000,
+            network_bandwidth: 1000.0,
+            compute_capability: 7.5,
+        };
+        coordinator
+            .register_worker("worker1".to_string(), hardware_info)
+            .expect("register_worker failed");
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = coordinator.evaluate_scaling_decision();
+            // Only sent if evaluate_scaling_decision did not hang.
+            let _ = tx.send(result.is_ok());
+        });
+
+        let completed = rx.recv_timeout(Duration::from_secs(10)).expect(
+            "evaluate_scaling_decision must return promptly for an in-range worker \
+             count, not deadlock on its own workers lock",
+        );
+        assert!(completed, "evaluate_scaling_decision returned an error");
     }
 
     #[test]

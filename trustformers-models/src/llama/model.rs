@@ -65,6 +65,27 @@ impl RMSNorm {
     pub fn parameter_count(&self) -> usize {
         self.weight.len()
     }
+
+    /// Append the single scale parameter under `<prefix>.weight`.
+    ///
+    /// RMSNorm has no shift term, so exactly one entry is produced — matching
+    /// what LLaMA checkpoints actually contain.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &self.weight));
+    }
+
+    /// Mutable counterpart of [`RMSNorm::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &mut self.weight));
+    }
 }
 
 /// Rotary Position Embedding (RoPE)
@@ -289,6 +310,34 @@ impl LlamaMLP {
             + self.up_proj.parameter_count()
             + self.down_proj.parameter_count()
     }
+
+    /// Append the three SwiGLU projections under `<prefix>.…`.
+    ///
+    /// `gate_proj` / `up_proj` / `down_proj` are the names HuggingFace's
+    /// `LlamaMLP` uses, and the ones [`LlamaModel::load_from_path_with_config`]
+    /// looks up.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.gate_proj.collect_named_parameters(&format!("{prefix}.gate_proj"), into);
+        self.up_proj.collect_named_parameters(&format!("{prefix}.up_proj"), into);
+        self.down_proj.collect_named_parameters(&format!("{prefix}.down_proj"), into);
+    }
+
+    /// Mutable counterpart of [`LlamaMLP::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.gate_proj
+            .collect_named_parameters_mut(&format!("{prefix}.gate_proj"), into);
+        self.up_proj.collect_named_parameters_mut(&format!("{prefix}.up_proj"), into);
+        self.down_proj
+            .collect_named_parameters_mut(&format!("{prefix}.down_proj"), into);
+    }
 }
 
 /// LLaMA Attention layer with optional grouped-query attention
@@ -510,6 +559,34 @@ impl LlamaAttention {
             + self.o_proj.parameter_count()
         // Note: RotaryEmbedding doesn't have learnable parameters
     }
+
+    /// Append the four projections under `<prefix>.…`.
+    ///
+    /// The rotary embedding holds only derived cos/sin tables, not learnable
+    /// parameters, so it contributes nothing — exactly as in HuggingFace
+    /// checkpoints, which do not store `rotary_emb.*` either.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.q_proj.collect_named_parameters(&format!("{prefix}.q_proj"), into);
+        self.k_proj.collect_named_parameters(&format!("{prefix}.k_proj"), into);
+        self.v_proj.collect_named_parameters(&format!("{prefix}.v_proj"), into);
+        self.o_proj.collect_named_parameters(&format!("{prefix}.o_proj"), into);
+    }
+
+    /// Mutable counterpart of [`LlamaAttention::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.q_proj.collect_named_parameters_mut(&format!("{prefix}.q_proj"), into);
+        self.k_proj.collect_named_parameters_mut(&format!("{prefix}.k_proj"), into);
+        self.v_proj.collect_named_parameters_mut(&format!("{prefix}.v_proj"), into);
+        self.o_proj.collect_named_parameters_mut(&format!("{prefix}.o_proj"), into);
+    }
 }
 
 /// LLaMA decoder layer
@@ -575,6 +652,36 @@ impl LlamaDecoderLayer {
             + self.mlp.parameter_count()
             + self.input_layernorm.parameter_count()
             + self.post_attention_layernorm.parameter_count()
+    }
+
+    /// Append this decoder layer's parameters under `<prefix>.…`, in the order
+    /// [`LlamaModel::load_from_path_with_config`] binds them.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.self_attn.collect_named_parameters(&format!("{prefix}.self_attn"), into);
+        self.mlp.collect_named_parameters(&format!("{prefix}.mlp"), into);
+        self.input_layernorm
+            .collect_named_parameters(&format!("{prefix}.input_layernorm"), into);
+        self.post_attention_layernorm
+            .collect_named_parameters(&format!("{prefix}.post_attention_layernorm"), into);
+    }
+
+    /// Mutable counterpart of [`LlamaDecoderLayer::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.self_attn
+            .collect_named_parameters_mut(&format!("{prefix}.self_attn"), into);
+        self.mlp.collect_named_parameters_mut(&format!("{prefix}.mlp"), into);
+        self.input_layernorm
+            .collect_named_parameters_mut(&format!("{prefix}.input_layernorm"), into);
+        self.post_attention_layernorm
+            .collect_named_parameters_mut(&format!("{prefix}.post_attention_layernorm"), into);
     }
 }
 
@@ -749,6 +856,54 @@ impl Model for LlamaModel {
         total += self.norm.parameter_count();
 
         total
+    }
+
+    /// Enumerate the backbone's live parameters under HuggingFace LLaMA names.
+    ///
+    /// The spelling is exactly what [`LlamaModel::load_from_path_with_config`]
+    /// looks up: `model.embed_tokens.weight`, `model.layers.{i}.…`,
+    /// `model.norm.weight`. The `model.` prefix is part of HuggingFace's LLaMA
+    /// checkpoint layout even for the bare backbone, so it is included here
+    /// rather than added by the causal-LM wrapper.
+    ///
+    /// Order is embeddings, layers in index order, final norm — stable across
+    /// calls.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters(&mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters_mut(&mut tensors);
+        tensors
+    }
+}
+
+impl LlamaModel {
+    /// Append every backbone parameter under the `model.` namespace.
+    ///
+    /// Factored out of [`Model::named_tensors`] so [`LlamaForCausalLM`] can reuse
+    /// it without duplicating the name table.
+    pub(crate) fn collect_named_parameters<'a>(&'a self, into: &mut Vec<(String, &'a Tensor)>) {
+        self.embed_tokens.collect_named_parameters("model.embed_tokens", into);
+        for (index, layer) in self.layers.iter().enumerate() {
+            layer.collect_named_parameters(&format!("model.layers.{index}"), into);
+        }
+        self.norm.collect_named_parameters("model.norm", into);
+    }
+
+    /// Mutable counterpart of [`LlamaModel::collect_named_parameters`].
+    pub(crate) fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.embed_tokens.collect_named_parameters_mut("model.embed_tokens", into);
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            layer.collect_named_parameters_mut(&format!("model.layers.{index}"), into);
+        }
+        self.norm.collect_named_parameters_mut("model.norm", into);
     }
 }
 
@@ -1066,6 +1221,28 @@ impl Model for LlamaForCausalLM {
 
     fn num_parameters(&self) -> usize {
         self.model.num_parameters() + self.lm_head.parameter_count()
+    }
+
+    /// Enumerate the backbone (already `model.`-prefixed) plus `lm_head.weight`.
+    ///
+    /// This is the layout of a HuggingFace `LlamaForCausalLM` checkpoint, and
+    /// the pair of names [`LlamaForCausalLM::load_from_path`] binds.
+    ///
+    /// The head is a separate `Linear` in this implementation — LLaMA models
+    /// that tie it to the embedding table are loaded by *copying*, not aliasing —
+    /// so it is listed as its own tensor.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.model.collect_named_parameters(&mut tensors);
+        self.lm_head.collect_named_parameters("lm_head", &mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.model.collect_named_parameters_mut(&mut tensors);
+        self.lm_head.collect_named_parameters_mut("lm_head", &mut tensors);
+        tensors
     }
 }
 

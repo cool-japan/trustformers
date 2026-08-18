@@ -421,6 +421,91 @@ impl Model for Gpt2Model {
 
         total
     }
+
+    /// Enumerate the backbone's live parameters under HuggingFace GPT-2 names.
+    ///
+    /// The names are exactly the ones [`Gpt2Model::load_weights_from_reader`]
+    /// looks up, minus the optional `transformer.` prefix that only task
+    /// checkpoints carry: `wte.weight`, `wpe.weight`, `h.{i}.…`, `ln_f.{weight,
+    /// bias}`. `Gpt2LMHeadModel` re-publishes them *with* the prefix, matching
+    /// the `transformer.`-prefixed checkpoints HF ships for the LM head model.
+    ///
+    /// Ordering is embeddings, then blocks in index order, then the final norm —
+    /// stable across calls, as the trait requires.
+    ///
+    /// # Weight layout
+    ///
+    /// See [`Gpt2Block::collect_named_parameters`](super::model_blocks::Gpt2Block::collect_named_parameters):
+    /// the four `Conv1D`-derived projections per block are exposed in this
+    /// crate's `[out, in]` layout, not HuggingFace's on-disk `[in, out]`.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::with_capacity(2 + self.h.len() * 12 + 2);
+        self.collect_named_parameters("", &mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::with_capacity(2 + self.h.len() * 12 + 2);
+        self.collect_named_parameters_mut("", &mut tensors);
+        tensors
+    }
+}
+
+impl Gpt2Model {
+    /// Append every backbone parameter to `into`, prefixed with `prefix`.
+    ///
+    /// Factored out of [`Model::named_tensors`] so `Gpt2LMHeadModel` can publish
+    /// the same tensors under the `transformer.` prefix without duplicating the
+    /// name table.
+    pub(crate) fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        let scope = |name: &str| {
+            if prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{prefix}.{name}")
+            }
+        };
+
+        self.wte.collect_named_parameters(&scope("wte"), into);
+        self.wpe.collect_named_parameters(&scope("wpe"), into);
+        for (index, block) in self.h.iter().enumerate() {
+            block.collect_named_parameters(&scope(&format!("h.{index}")), into);
+        }
+        self.ln_f.collect_named_parameters(&scope("ln_f"), into);
+    }
+
+    /// Mutable counterpart of [`Gpt2Model::collect_named_parameters`].
+    pub(crate) fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        // Every name is materialised before the mutable borrows start, because
+        // `scope` would otherwise need to borrow `prefix` across them.
+        let scope = |name: &str| {
+            if prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{prefix}.{name}")
+            }
+        };
+        let wte_name = scope("wte");
+        let wpe_name = scope("wpe");
+        let block_names: Vec<String> =
+            (0..self.h.len()).map(|index| scope(&format!("h.{index}"))).collect();
+        let ln_f_name = scope("ln_f");
+
+        self.wte.collect_named_parameters_mut(&wte_name, into);
+        self.wpe.collect_named_parameters_mut(&wpe_name, into);
+        for (block, name) in self.h.iter_mut().zip(&block_names) {
+            block.collect_named_parameters_mut(name, into);
+        }
+        self.ln_f.collect_named_parameters_mut(&ln_f_name, into);
+    }
 }
 
 /// GPT-2 with language modeling head
@@ -1081,6 +1166,33 @@ impl Model for Gpt2LMHeadModel {
 
     fn num_parameters(&self) -> usize {
         self.transformer.num_parameters() + self.lm_head.parameter_count()
+    }
+
+    /// Enumerate the backbone under `transformer.…` plus the LM head.
+    ///
+    /// This matches the checkpoints HuggingFace ships for `GPT2LMHeadModel`,
+    /// which is also the prefix [`Gpt2Model::load_weights_from_reader`] detects.
+    ///
+    /// # Tied weights
+    ///
+    /// GPT-2 ties `lm_head.weight` to `transformer.wte.weight`, and
+    /// [`Gpt2LMHeadModel::load_pretrained`] reproduces that by *copying* the
+    /// embedding table into the head when the checkpoint has no `lm_head.weight`.
+    /// The two are therefore distinct tensors here and both are listed: the
+    /// trait forbids duplicate names, and skipping the head would silently drop
+    /// a parameter that this implementation really does own separately.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.transformer.collect_named_parameters("transformer", &mut tensors);
+        self.lm_head.collect_named_parameters("lm_head", &mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.transformer.collect_named_parameters_mut("transformer", &mut tensors);
+        self.lm_head.collect_named_parameters_mut("lm_head", &mut tensors);
+        tensors
     }
 }
 

@@ -337,6 +337,70 @@ impl MistralDecoderLayer {
     }
 }
 
+impl MistralAttention {
+    /// Append the four projections under `<prefix>.…`.
+    ///
+    /// Mistral uses HuggingFace's LLaMA-style spelling — `q_proj`, `k_proj`,
+    /// `v_proj`, `o_proj` — which is what
+    /// [`MistralForCausalLM::load_from_path`] looks up. `k_proj` / `v_proj` are
+    /// narrower than `q_proj` under grouped-query attention; the shapes come
+    /// straight from the live layers, so that asymmetry is preserved.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.q_proj.collect_named_parameters(&format!("{prefix}.q_proj"), into);
+        self.k_proj.collect_named_parameters(&format!("{prefix}.k_proj"), into);
+        self.v_proj.collect_named_parameters(&format!("{prefix}.v_proj"), into);
+        self.o_proj.collect_named_parameters(&format!("{prefix}.o_proj"), into);
+    }
+
+    /// Mutable counterpart of [`MistralAttention::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.q_proj.collect_named_parameters_mut(&format!("{prefix}.q_proj"), into);
+        self.k_proj.collect_named_parameters_mut(&format!("{prefix}.k_proj"), into);
+        self.v_proj.collect_named_parameters_mut(&format!("{prefix}.v_proj"), into);
+        self.o_proj.collect_named_parameters_mut(&format!("{prefix}.o_proj"), into);
+    }
+}
+
+impl MistralDecoderLayer {
+    /// Append this decoder layer's parameters under `<prefix>.…`, in the order
+    /// [`MistralForCausalLM::load_from_path`] binds them.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.self_attn.collect_named_parameters(&format!("{prefix}.self_attn"), into);
+        self.mlp.collect_named_parameters(&format!("{prefix}.mlp"), into);
+        self.input_layernorm
+            .collect_named_parameters(&format!("{prefix}.input_layernorm"), into);
+        self.post_attention_layernorm
+            .collect_named_parameters(&format!("{prefix}.post_attention_layernorm"), into);
+    }
+
+    /// Mutable counterpart of [`MistralDecoderLayer::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.self_attn
+            .collect_named_parameters_mut(&format!("{prefix}.self_attn"), into);
+        self.mlp.collect_named_parameters_mut(&format!("{prefix}.mlp"), into);
+        self.input_layernorm
+            .collect_named_parameters_mut(&format!("{prefix}.input_layernorm"), into);
+        self.post_attention_layernorm
+            .collect_named_parameters_mut(&format!("{prefix}.post_attention_layernorm"), into);
+    }
+}
+
 impl Layer for MistralDecoderLayer {
     type Input = Tensor;
     type Output = Tensor;
@@ -480,6 +544,51 @@ impl Model for MistralModel {
         // Total
         embedding_params + (per_layer_params * num_layers) + final_norm_params
     }
+
+    /// Enumerate the backbone's live parameters under HuggingFace Mistral names.
+    ///
+    /// Mistral shares LLaMA's checkpoint layout: `model.embed_tokens.weight`,
+    /// `model.layers.{i}.…`, `model.norm.weight` — the names
+    /// [`MistralForCausalLM::load_from_path`] looks up.
+    ///
+    /// Order is embeddings, layers in index order, final norm.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters(&mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.collect_named_parameters_mut(&mut tensors);
+        tensors
+    }
+}
+
+impl MistralModel {
+    /// Append every backbone parameter under the `model.` namespace.
+    ///
+    /// Factored out of [`Model::named_tensors`] so [`MistralForCausalLM`] can
+    /// reuse it without duplicating the name table.
+    pub(crate) fn collect_named_parameters<'a>(&'a self, into: &mut Vec<(String, &'a Tensor)>) {
+        self.embed_tokens.collect_named_parameters("model.embed_tokens", into);
+        for (index, layer) in self.layers.iter().enumerate() {
+            layer.collect_named_parameters(&format!("model.layers.{index}"), into);
+        }
+        self.norm.collect_named_parameters("model.norm", into);
+    }
+
+    /// Mutable counterpart of [`MistralModel::collect_named_parameters`].
+    pub(crate) fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.embed_tokens.collect_named_parameters_mut("model.embed_tokens", into);
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            layer.collect_named_parameters_mut(&format!("model.layers.{index}"), into);
+        }
+        self.norm.collect_named_parameters_mut("model.norm", into);
+    }
 }
 
 /// Mistral for causal language modeling (with LM head)
@@ -531,6 +640,25 @@ impl Model for MistralForCausalLM {
         let lm_head_params = config.hidden_size * config.vocab_size;
 
         model_params + lm_head_params
+    }
+
+    /// Enumerate the backbone (already `model.`-prefixed) plus `lm_head.weight`.
+    ///
+    /// The layout of a HuggingFace `MistralForCausalLM` checkpoint, and the
+    /// names [`MistralForCausalLM::load_from_path`] binds. The head is a
+    /// separate `Linear` here, so it is listed as its own tensor.
+    fn named_tensors(&self) -> Vec<(String, &Tensor)> {
+        let mut tensors = Vec::new();
+        self.model.collect_named_parameters(&mut tensors);
+        self.lm_head.collect_named_parameters("lm_head", &mut tensors);
+        tensors
+    }
+
+    fn named_tensors_mut(&mut self) -> Vec<(String, &mut Tensor)> {
+        let mut tensors = Vec::new();
+        self.model.collect_named_parameters_mut(&mut tensors);
+        self.lm_head.collect_named_parameters_mut("lm_head", &mut tensors);
+        tensors
     }
 }
 

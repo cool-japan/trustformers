@@ -11,6 +11,16 @@ use tracing::{debug, info};
 use crate::parallel_execution_engine::ResourceRequirement;
 use crate::test_parallelization::{ConflictResolutionConfig, ResourceAllocation};
 
+/// Recover the test id an allocation identifier was built from.
+///
+/// [`ResourceManagementSystem::allocate_resources`](super::manager::ResourceManagementSystem::allocate_resources)
+/// forms identifiers as `allocation-{test_id}`. The allocation history used to
+/// store `format!("test-{resource_id}")` instead, i.e. `test-allocation-foo`
+/// for the test `foo` — a value that matched no real test id.
+fn test_id_of(resource_id: &str) -> String {
+    resource_id.strip_prefix("allocation-").unwrap_or(resource_id).to_string()
+}
+
 /// Resource allocator for coordinating resource allocation
 #[derive(Debug)]
 pub struct ResourceAllocator {
@@ -22,7 +32,12 @@ pub struct ResourceAllocator {
     allocation_stats: Arc<Mutex<AllocationStatistics>>,
 }
 
-/// Conflict detector for identifying resource conflicts
+/// Conflict detector for identifying resource conflicts.
+///
+/// Detection compares a candidate [`ResourceRequirement`] against the claims
+/// registered by [`Self::register_claim`]. That registry is what makes the
+/// answer meaningful: without it every check would have nothing to compare
+/// against and could only ever answer "no conflict".
 #[derive(Debug)]
 pub struct ConflictDetector {
     /// Configuration
@@ -31,6 +46,28 @@ pub struct ConflictDetector {
     detection_rules: Arc<Mutex<Vec<ConflictDetectionRule>>>,
     /// Conflict history
     conflict_history: Arc<Mutex<Vec<ConflictEvent>>>,
+    /// Live claims, keyed by test id
+    claims: Arc<Mutex<HashMap<String, ResourceClaim>>>,
+}
+
+/// The resources one test holds between allocation and deallocation.
+///
+/// Copied verbatim from the granted [`ResourceRequirement`], so a claim states
+/// what was actually requested rather than an estimate of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceClaim {
+    /// Test that owns the claim.
+    pub test_id: String,
+    /// GPU device indices the test named explicitly.
+    pub gpu_devices: Vec<usize>,
+    /// Number of network ports granted.
+    pub network_ports: usize,
+    /// Number of temporary directories granted.
+    pub temp_directories: usize,
+    /// Number of database connections granted.
+    pub database_connections: usize,
+    /// When the claim was registered.
+    pub claimed_at: DateTime<Utc>,
 }
 
 /// Allocation statistics
@@ -74,6 +111,8 @@ pub enum ConflictDetectionLogic {
     DirectoryPathConflict,
     /// GPU device exclusive access
     GpuExclusiveAccess,
+    /// A test asking for a second allocation while it already holds one
+    DuplicateTestAllocation,
     /// Database connection limit
     DatabaseConnectionLimit,
     /// Memory usage limit
@@ -223,7 +262,7 @@ impl ResourceAllocator {
         let event = AllocationEvent {
             timestamp: Utc::now(),
             resource_id: allocation.resource_id.clone(),
-            test_id: format!("test-{}", allocation.resource_id), // Extract from resource_id
+            test_id: test_id_of(&allocation.resource_id),
             event_type: "allocation_tracked".to_string(),
             details: HashMap::new(),
         };
@@ -258,7 +297,7 @@ impl ResourceAllocator {
         let event = AllocationEvent {
             timestamp: Utc::now(),
             resource_id: allocation.resource_id.clone(),
-            test_id: format!("test-{}", allocation.resource_id), // Extract from resource_id
+            test_id: test_id_of(&allocation.resource_id),
             event_type: "allocation_deallocated".to_string(),
             details: HashMap::new(),
         };
@@ -348,24 +387,152 @@ impl ConflictDetector {
             config: Arc::new(Mutex::new(config)),
             detection_rules: Arc::new(Mutex::new(Self::default_detection_rules())),
             conflict_history: Arc::new(Mutex::new(Vec::new())),
+            claims: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    /// Check for conflicts with resource requirements
+    /// Register the resources `test_id` now holds.
+    ///
+    /// Called once an allocation has succeeded; until it is called the detector
+    /// has no record of the test and cannot detect anything about it.
+    pub async fn register_claim(
+        &self,
+        test_id: &str,
+        requirements: &ResourceRequirement,
+    ) -> Result<()> {
+        let claim = ResourceClaim {
+            test_id: test_id.to_string(),
+            gpu_devices: requirements.gpu_devices.clone(),
+            network_ports: requirements.network_ports,
+            temp_directories: requirements.temp_directories,
+            database_connections: requirements.database_connections,
+            claimed_at: Utc::now(),
+        };
+        self.claims.lock().insert(test_id.to_string(), claim);
+        Ok(())
+    }
+
+    /// Drop the claim held by `test_id`, reporting whether one was live.
+    pub async fn release_claim(&self, test_id: &str) -> Result<bool> {
+        Ok(self.claims.lock().remove(test_id).is_some())
+    }
+
+    /// Snapshot of every live claim.
+    pub async fn active_claims(&self) -> Vec<ResourceClaim> {
+        self.claims.lock().values().cloned().collect()
+    }
+
+    /// Check `requirements` for `test_id` against every enabled rule.
+    ///
+    /// Each enabled rule is evaluated against the live claims. A rule whose
+    /// [`ConflictDetectionLogic`] has no evaluator in this build is an error,
+    /// not a silent pass: reporting "no conflict" for a rule that was never run
+    /// would be indistinguishable from having checked it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an enabled rule uses a detection logic this build cannot
+    /// evaluate.
     pub async fn check_conflicts(
         &self,
-        _requirements: &ResourceRequirement,
+        requirements: &ResourceRequirement,
         test_id: &str,
     ) -> Result<Option<String>> {
         debug!("Checking conflicts for test: {}", test_id);
 
-        // In a real implementation, this would:
-        // 1. Check each detection rule against current allocations
-        // 2. Identify potential conflicts
-        // 3. Return conflict details or None
+        let rules: Vec<ConflictDetectionRule> = self.detection_rules.lock().clone();
+        let claims: Vec<ResourceClaim> = self.claims.lock().values().cloned().collect();
 
-        // For now, return no conflicts
+        for rule in rules.iter().filter(|rule| rule.enabled) {
+            let detected = match &rule.detection_logic {
+                ConflictDetectionLogic::DuplicateTestAllocation => {
+                    Self::duplicate_allocation_conflict(&claims, test_id)
+                },
+                ConflictDetectionLogic::GpuExclusiveAccess => {
+                    Self::gpu_exclusivity_conflict(&claims, requirements, test_id)
+                },
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "conflict detection rule '{}' uses {:?}, which has no evaluator in this \
+                         build; implement the evaluator or disable the rule rather than letting \
+                         it report a clean check it never performed",
+                        rule.name,
+                        other
+                    ));
+                },
+            };
+
+            if let Some((message, event)) = detected {
+                self.conflict_history.lock().push(event);
+                return Ok(Some(message));
+            }
+        }
+
         Ok(None)
+    }
+
+    /// Detect a test asking for a second allocation while holding one.
+    ///
+    /// Allocation identifiers are derived from the test id, so a second grant
+    /// would overwrite the first one's record and leak whatever it held.
+    fn duplicate_allocation_conflict(
+        claims: &[ResourceClaim],
+        test_id: &str,
+    ) -> Option<(String, ConflictEvent)> {
+        let existing = claims.iter().find(|claim| claim.test_id == test_id)?;
+        let message = format!(
+            "test '{}' already holds resources claimed at {}",
+            test_id, existing.claimed_at
+        );
+        let mut details = HashMap::new();
+        details.insert("claimed_at".to_string(), existing.claimed_at.to_string());
+        Some((
+            message.clone(),
+            ConflictEvent {
+                timestamp: Utc::now(),
+                conflict_type: ConflictType::Custom("duplicate_test_allocation".to_string()),
+                conflicting_tests: vec![test_id.to_string()],
+                resource_id: format!("allocation-{test_id}"),
+                severity: ConflictSeverity::High,
+                resolution: None,
+                details,
+            },
+        ))
+    }
+
+    /// Detect a GPU device index already held by a different test.
+    fn gpu_exclusivity_conflict(
+        claims: &[ResourceClaim],
+        requirements: &ResourceRequirement,
+        test_id: &str,
+    ) -> Option<(String, ConflictEvent)> {
+        for device in &requirements.gpu_devices {
+            let Some(holder) = claims
+                .iter()
+                .find(|claim| claim.test_id != test_id && claim.gpu_devices.contains(device))
+            else {
+                continue;
+            };
+            let message = format!(
+                "GPU device {} is already held by test '{}'",
+                device, holder.test_id
+            );
+            let mut details = HashMap::new();
+            details.insert("gpu_device".to_string(), device.to_string());
+            return Some((
+                message.clone(),
+                ConflictEvent {
+                    timestamp: Utc::now(),
+                    conflict_type: ConflictType::GpuConflict,
+                    conflicting_tests: vec![test_id.to_string(), holder.test_id.clone()],
+                    resource_id: format!("gpu-{device}"),
+                    severity: ConflictSeverity::High,
+                    resolution: None,
+                    details,
+                },
+            ));
+        }
+        None
     }
 
     /// Add a conflict detection rule
@@ -389,20 +556,24 @@ impl ConflictDetector {
         Ok(conflict_history.clone())
     }
 
-    /// Default detection rules
+    /// Default detection rules.
+    ///
+    /// Only rules this build can actually evaluate are installed.
+    /// [`ConflictDetectionLogic::PortRangeOverlap`] and
+    /// [`ConflictDetectionLogic::DirectoryPathConflict`] are deliberately *not*
+    /// installed: a [`ResourceRequirement`] carries only a count of ports and
+    /// directories, and the concrete port numbers and paths are picked by the
+    /// port and directory managers *after* this check runs, so there is nothing
+    /// to compare for overlap at check time. Those managers hand out disjoint
+    /// resources and fail loudly when their pool is exhausted, which is where
+    /// that guarantee actually lives. Installing the rules anyway would have
+    /// them report a clean check they never performed.
     fn default_detection_rules() -> Vec<ConflictDetectionRule> {
         vec![
             ConflictDetectionRule {
-                name: "port_range_overlap".to_string(),
-                resource_types: vec!["network_port".to_string()],
-                detection_logic: ConflictDetectionLogic::PortRangeOverlap,
-                priority: 1.0,
-                enabled: true,
-            },
-            ConflictDetectionRule {
-                name: "directory_path_conflict".to_string(),
-                resource_types: vec!["temp_directory".to_string()],
-                detection_logic: ConflictDetectionLogic::DirectoryPathConflict,
+                name: "duplicate_test_allocation".to_string(),
+                resource_types: vec!["*".to_string()],
+                detection_logic: ConflictDetectionLogic::DuplicateTestAllocation,
                 priority: 1.0,
                 enabled: true,
             },
@@ -792,5 +963,147 @@ mod tests {
         };
         assert_eq!(event.conflicting_tests.len(), 2);
         assert!(event.resolution.is_some());
+    }
+
+    /// A requirement naming the given GPU device indices and nothing else.
+    fn gpu_requirement(gpu_devices: Vec<usize>) -> ResourceRequirement {
+        ResourceRequirement {
+            resource_type: "gpu_device".to_string(),
+            min_amount: 0.0,
+            cpu_cores: 0.0,
+            memory_mb: 0,
+            gpu_devices,
+            network_ports: 0,
+            temp_directories: 0,
+            database_connections: 0,
+            custom_resources: HashMap::new(),
+        }
+    }
+
+    /// Regression: `check_conflicts` used to ignore its arguments and return
+    /// `Ok(None)` unconditionally, so a test that already held resources was
+    /// granted a second, colliding allocation.
+    #[tokio::test]
+    async fn duplicate_allocation_for_one_test_is_detected() {
+        let detector = ConflictDetector::new(ConflictResolutionConfig::default())
+            .await
+            .expect("detector builds");
+
+        assert!(
+            detector
+                .check_conflicts(&gpu_requirement(vec![]), "alpha")
+                .await
+                .expect("check runs")
+                .is_none(),
+            "nothing is held yet"
+        );
+
+        detector
+            .register_claim("alpha", &gpu_requirement(vec![]))
+            .await
+            .expect("claim registers");
+
+        let message = detector
+            .check_conflicts(&gpu_requirement(vec![]), "alpha")
+            .await
+            .expect("check runs")
+            .expect("alpha already holds resources");
+        assert!(message.contains("alpha"), "{message}");
+
+        // The conflict is recorded, so the history is no longer permanently empty.
+        let history = detector.get_conflict_history().await.expect("history readable");
+        assert_eq!(history.len(), 1);
+
+        assert!(detector.release_claim("alpha").await.expect("release runs"));
+        assert!(
+            detector
+                .check_conflicts(&gpu_requirement(vec![]), "alpha")
+                .await
+                .expect("check runs")
+                .is_none(),
+            "the claim was released"
+        );
+    }
+
+    /// Regression: a GPU device already held by another test was reported as
+    /// conflict-free.
+    #[tokio::test]
+    async fn gpu_device_held_by_another_test_is_detected() {
+        let detector = ConflictDetector::new(ConflictResolutionConfig::default())
+            .await
+            .expect("detector builds");
+        detector
+            .register_claim("alpha", &gpu_requirement(vec![0, 3]))
+            .await
+            .expect("claim registers");
+
+        let message = detector
+            .check_conflicts(&gpu_requirement(vec![3]), "beta")
+            .await
+            .expect("check runs")
+            .expect("device 3 is held by alpha");
+        assert!(message.contains("GPU device 3"), "{message}");
+        assert!(message.contains("alpha"), "{message}");
+
+        assert!(
+            detector
+                .check_conflicts(&gpu_requirement(vec![1]), "beta")
+                .await
+                .expect("check runs")
+                .is_none(),
+            "a free device is not a conflict"
+        );
+    }
+
+    /// A rule this build cannot evaluate must fail loudly rather than be
+    /// silently skipped, which would look identical to a clean check.
+    #[tokio::test]
+    async fn a_rule_without_an_evaluator_is_an_error() {
+        let detector = ConflictDetector::new(ConflictResolutionConfig::default())
+            .await
+            .expect("detector builds");
+        detector
+            .add_detection_rule(ConflictDetectionRule {
+                name: "port_range_overlap".to_string(),
+                resource_types: vec!["network_port".to_string()],
+                detection_logic: ConflictDetectionLogic::PortRangeOverlap,
+                priority: 1.0,
+                enabled: true,
+            })
+            .await
+            .expect("rule is added");
+
+        let error = detector
+            .check_conflicts(&gpu_requirement(vec![]), "alpha")
+            .await
+            .expect_err("an unevaluable rule must not pass silently");
+        assert!(error.to_string().contains("port_range_overlap"), "{error}");
+    }
+
+    /// The default rule set contains only rules with an evaluator.
+    #[tokio::test]
+    async fn default_rules_are_all_evaluable() {
+        let detector = ConflictDetector::new(ConflictResolutionConfig::default())
+            .await
+            .expect("detector builds");
+        detector
+            .check_conflicts(&gpu_requirement(vec![0]), "alpha")
+            .await
+            .expect("every default rule has an evaluator");
+    }
+
+    /// Regression: allocation events stored `test-allocation-foo` as the test id
+    /// of allocation `allocation-foo`.
+    #[tokio::test]
+    async fn allocation_history_records_the_real_test_id() {
+        let allocator = ResourceAllocator::new().await.expect("allocator builds");
+        allocator
+            .track_allocation(&make_resource_allocation("allocation-foo"))
+            .await
+            .expect("tracking succeeds");
+
+        let history = allocator.get_allocation_history().await.expect("history readable");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].test_id, "foo");
     }
 }

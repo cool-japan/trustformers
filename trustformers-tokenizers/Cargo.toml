@@ -35,6 +35,7 @@ base64.workspace = true
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true
+tracing.workspace = true
 tokio-stream.workspace = true
 num_cpus.workspace = true
 once_cell.workspace = true
@@ -44,17 +45,17 @@ memmap2.workspace = true
 # `include-flate` -> `zstd-sys` (C) into the default tree. Chinese segmentation
 # (`chinese.rs`) uses an in-crate pure-Rust dictionary/char-frequency segmenter,
 # not jieba. Re-add as an optional, feature-gated dep if jieba is ever wired in.
-mecab = { version = "0.1.6", optional = true }
+mecab = { workspace = true, optional = true }
 # Binary format dependencies
 oxiarc-deflate.workspace = true
-crc32fast = "1.5.0"
+crc32fast.workspace = true
 oxicode.workspace = true
 # Performance profiler dependencies
 chrono.workspace = true
 # MessagePack serialization
 rmp-serde.workspace = true
 # Additional dependencies for coverage and serialization
-unicode_categories = "0.1.1"
+unicode_categories.workspace = true
 serde_yaml.workspace = true
 # Python bindings
 pyo3 = { workspace = true, features = ["extension-module"], optional = true }
@@ -80,6 +81,8 @@ rstest.workspace = true
 pretty_assertions.workspace = true
 tempfile.workspace = true
 criterion.workspace = true
+# `tests/workspace_hygiene.rs` parses the workspace root manifest and deny.toml.
+toml.workspace = true
 
 [[bench]]
 name = "tokenizer_performance"

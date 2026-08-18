@@ -4,8 +4,8 @@
 mod tests {
     use crate::gpu_profiler::{
         AlertSeverity, BottleneckType, GpuAlertThresholds, GpuAlertType, GpuMonitorConfig,
-        GpuProfiler, GpuProfilerConfig, GpuProfilerError, MemoryAccessPattern,
-        MemoryFragmentation, MemorySegmentType, ThermalEventType, TrendDirection,
+        GpuProfiler, GpuProfilerConfig, GpuProfilerError, MemoryAccessPattern, MemoryFragmentation,
+        MemorySegmentType, ThermalEventType, TrendDirection,
     };
     use std::sync::atomic::Ordering;
 
@@ -17,7 +17,8 @@ mod tests {
             Lcg { state: seed }
         }
         fn next(&mut self) -> u64 {
-            self.state = self.state
+            self.state = self
+                .state
                 .wrapping_mul(6364136223846793005u64)
                 .wrapping_add(1442695040888963407u64);
             self.state
@@ -261,10 +262,20 @@ mod tests {
         let config = GpuProfilerConfig::default();
         if let Ok(profiler) = GpuProfiler::new(config) {
             let _ = profiler
-                .generate_alert(0, GpuAlertType::HighMemoryUtilization, AlertSeverity::Medium, 0.95)
+                .generate_alert(
+                    0,
+                    GpuAlertType::HighMemoryUtilization,
+                    AlertSeverity::Medium,
+                    0.95,
+                )
                 .await;
             let _ = profiler
-                .generate_alert(0, GpuAlertType::HighPowerConsumption, AlertSeverity::Critical, 300.0)
+                .generate_alert(
+                    0,
+                    GpuAlertType::HighPowerConsumption,
+                    AlertSeverity::Critical,
+                    300.0,
+                )
                 .await;
             let alerts = profiler.get_recent_alerts(None).await;
             assert_eq!(alerts.len(), 2);
@@ -369,7 +380,9 @@ mod tests {
 
     #[test]
     fn test_profiler_error_display() {
-        let err = GpuProfilerError::ConfigurationError { message: "bad value".to_string() };
+        let err = GpuProfilerError::ConfigurationError {
+            message: "bad value".to_string(),
+        };
         let msg = format!("{}", err);
         assert!(msg.contains("bad value"));
     }

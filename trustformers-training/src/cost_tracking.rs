@@ -483,9 +483,10 @@ impl CostTracker {
                     threshold.last_triggered = Some(current_time);
 
                     // In a real implementation, would send notifications here
-                    println!(
+                    tracing::warn!(
                         "Budget alert: {} has reached {}% of budget",
-                        budget.name, threshold.percentage
+                        budget.name,
+                        threshold.percentage
                     );
                 }
             }

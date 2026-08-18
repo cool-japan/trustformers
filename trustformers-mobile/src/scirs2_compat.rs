@@ -73,8 +73,49 @@ impl SimdOps {
         self.vector_width
     }
 
-    pub fn correlation(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<f32> {
-        Ok(0.5) // Placeholder correlation
+    /// Real Pearson product-moment correlation coefficient between `a` and
+    /// `b`, computed in `f64` for numerical stability and cast back to
+    /// `f32`. Previously this ignored both arguments entirely and always
+    /// returned the constant `0.5`.
+    pub fn correlation(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<f32> {
+        if a.data.len() != b.data.len() {
+            return Err(CoreError::runtime_error(format!(
+                "correlation requires equal-length tensors, got {} and {}",
+                a.data.len(),
+                b.data.len()
+            )));
+        }
+        if a.data.is_empty() {
+            return Err(CoreError::runtime_error(
+                "correlation requires non-empty tensors".to_string(),
+            ));
+        }
+
+        let n = a.data.len() as f64;
+        let mean_a = a.data.iter().map(|&x| x as f64).sum::<f64>() / n;
+        let mean_b = b.data.iter().map(|&x| x as f64).sum::<f64>() / n;
+
+        let mut covariance = 0.0f64;
+        let mut variance_a = 0.0f64;
+        let mut variance_b = 0.0f64;
+        for (&x, &y) in a.data.iter().zip(b.data.iter()) {
+            let dx = x as f64 - mean_a;
+            let dy = y as f64 - mean_b;
+            covariance += dx * dy;
+            variance_a += dx * dx;
+            variance_b += dy * dy;
+        }
+
+        let denominator = (variance_a * variance_b).sqrt();
+        if denominator == 0.0 {
+            // At least one series is constant, so Pearson's r is
+            // mathematically undefined (0/0 covariance ratio). Reporting 0
+            // (no linear relationship measurable) rather than NaN keeps
+            // this a total function over all finite inputs.
+            return Ok(0.0);
+        }
+
+        Ok((covariance / denominator) as f32)
     }
 
     pub fn abs(&self, tensor: &Tensor<f32>) -> Result<Tensor<f32>> {
@@ -295,5 +336,55 @@ pub mod random {
                 fastrand::usize(min..max)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the previous `correlation` implementation, which
+    /// ignored both tensors entirely and always returned `0.5`.
+    #[test]
+    fn test_correlation_is_computed_not_a_flat_constant() {
+        let ops = SimdOps::new_with_width(256).expect("simd ops");
+
+        // Perfectly positively correlated: b = 2*a.
+        let a = Tensor::from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0], &[5]).expect("tensor a");
+        let b = Tensor::from_slice(&[2.0, 4.0, 6.0, 8.0, 10.0], &[5]).expect("tensor b");
+        let r = ops.correlation(&a, &b).expect("correlation");
+        assert!((r - 1.0).abs() < 1e-5, "expected r ~= 1.0, got {r}");
+        assert_ne!(r, 0.5);
+
+        // Perfectly negatively correlated.
+        let c = Tensor::from_slice(&[5.0, 4.0, 3.0, 2.0, 1.0], &[5]).expect("tensor c");
+        let r_neg = ops.correlation(&a, &c).expect("correlation");
+        assert!(
+            (r_neg - (-1.0)).abs() < 1e-5,
+            "expected r ~= -1.0, got {r_neg}"
+        );
+
+        // Unrelated-but-not-degenerate data should not coincidentally land
+        // on the old placeholder value either.
+        let d = Tensor::from_slice(&[3.0, 1.0, 4.0, 1.0, 5.0], &[5]).expect("tensor d");
+        let r_other = ops.correlation(&a, &d).expect("correlation");
+        assert_ne!(r_other, 0.5);
+    }
+
+    #[test]
+    fn test_correlation_rejects_mismatched_lengths() {
+        let ops = SimdOps::new_with_width(256).expect("simd ops");
+        let a = Tensor::from_slice(&[1.0, 2.0, 3.0], &[3]).expect("tensor a");
+        let b = Tensor::from_slice(&[1.0, 2.0], &[2]).expect("tensor b");
+        assert!(ops.correlation(&a, &b).is_err());
+    }
+
+    #[test]
+    fn test_correlation_of_constant_series_is_zero_not_nan() {
+        let ops = SimdOps::new_with_width(256).expect("simd ops");
+        let a = Tensor::from_slice(&[7.0, 7.0, 7.0], &[3]).expect("tensor a");
+        let b = Tensor::from_slice(&[1.0, 2.0, 3.0], &[3]).expect("tensor b");
+        let r = ops.correlation(&a, &b).expect("correlation");
+        assert_eq!(r, 0.0);
     }
 }

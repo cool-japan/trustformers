@@ -421,6 +421,14 @@ impl TrainingMonitor {
     }
 
     /// Apply auto-recovery strategy
+    ///
+    /// `TrainingMonitor` only observes metrics (see its fields: no model,
+    /// optimizer, or gradient handle is held here), so none of the three
+    /// branches below actually restores a checkpoint, clips a gradient, or
+    /// frees memory — each just emits a `tracing::warn!` and reports success.
+    /// The `Ok(true)` return (surfaced as `AnomalyReport::auto_recovery_applied`)
+    /// is therefore a recommendation that a caller with real trainer/model
+    /// access still needs to act on, not a record of a completed recovery.
     fn apply_auto_recovery(&mut self, anomaly: &AnomalyReport) -> Result<bool> {
         let attempts = self.recovery_attempts.entry(anomaly.anomaly_type.clone()).or_insert(0);
         *attempts += 1;
@@ -428,17 +436,17 @@ impl TrainingMonitor {
         match anomaly.anomaly_type {
             AnomalyType::NanInf => {
                 // In real implementation, would restore from checkpoint
-                println!("Auto-recovery: Restoring from checkpoint due to NaN/Inf");
+                tracing::warn!("Auto-recovery: Restoring from checkpoint due to NaN/Inf");
                 Ok(true)
             },
             AnomalyType::GradientExplosion => {
                 // In real implementation, would apply gradient clipping
-                println!("Auto-recovery: Applying gradient clipping");
+                tracing::warn!("Auto-recovery: Applying gradient clipping");
                 Ok(true)
             },
             AnomalyType::MemoryLeak => {
                 // In real implementation, would trigger memory cleanup
-                println!("Auto-recovery: Triggering memory cleanup");
+                tracing::warn!("Auto-recovery: Triggering memory cleanup");
                 Ok(true)
             },
             _ => Ok(false),

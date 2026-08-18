@@ -1355,9 +1355,24 @@ impl UITestingFramework {
     ) -> Result<Box<dyn UITestRunner + Send + Sync>> {
         match framework {
             UITestFramework::Appium => Ok(Box::new(AppiumTestRunner::new(device_info.clone())?)),
-            UITestFramework::XCUITest => Ok(Box::new(XCUITestRunner::new(device_info.clone())?)),
-            UITestFramework::Espresso => {
-                Ok(Box::new(EspressoTestRunner::new(device_info.clone())?))
+            // `XCUITestRunner`/`EspressoTestRunner` exist (below) and every
+            // one of their `UITestRunner` methods honestly returns
+            // "not implemented" -- driving real XCUITest/Espresso requires
+            // an actual attached iOS/Android automation bridge this crate
+            // does not have. Constructing them here used to *succeed*,
+            // which advertised XCUITest/Espresso as available frameworks
+            // right up until the caller's first actual test/screenshot/
+            // element call failed. Failing here instead, at framework
+            // selection, reports the true capability immediately rather
+            // than after a caller has already committed to the framework.
+            UITestFramework::XCUITest | UITestFramework::Espresso => {
+                Err(TrustformersError::runtime_error(format!(
+                    "{:?} test framework is not available: it requires a real on-device \
+                     automation bridge (Xcode/xcodebuild for XCUITest, the Android test \
+                     orchestrator for Espresso) that is not attached in this environment",
+                    framework
+                ))
+                .into())
             },
             _ => Err(TrustformersError::runtime_error(format!(
                 "Unsupported test framework: {:?}",
@@ -1788,5 +1803,38 @@ mod tests {
         assert_eq!(thresholds.min_frame_rate, 30.0);
         assert_eq!(thresholds.max_memory_usage, 512);
         assert_eq!(thresholds.max_cpu_usage, 80.0);
+    }
+
+    /// Regression test: `create_test_runner` (and therefore
+    /// `UITestingFramework::new`) used to construct `XCUITestRunner` and
+    /// `EspressoTestRunner` successfully even though every one of their
+    /// `UITestRunner` trait methods unconditionally returns a
+    /// "not implemented" error -- so requesting either framework looked
+    /// available right up until the first real test/screenshot/element
+    /// call. Framework selection must now fail immediately instead.
+    #[test]
+    fn test_xcuitest_and_espresso_are_not_falsely_advertised_as_available() {
+        for framework in [UITestFramework::XCUITest, UITestFramework::Espresso] {
+            let mut config = UITestingConfig::default();
+            config.automation_config.frameworks = vec![framework];
+
+            let result = UITestingFramework::new(config, MobileDeviceInfo::default());
+            assert!(
+                result.is_err(),
+                "{:?} must not construct a usable test runner in this environment",
+                framework
+            );
+        }
+    }
+
+    /// The framework this crate genuinely supports (Appium) must remain
+    /// unaffected by the XCUITest/Espresso fix above.
+    #[test]
+    fn test_appium_framework_still_constructs() {
+        let mut config = UITestingConfig::default();
+        config.automation_config.frameworks = vec![UITestFramework::Appium];
+
+        let result = UITestingFramework::new(config, MobileDeviceInfo::default());
+        assert!(result.is_ok());
     }
 }

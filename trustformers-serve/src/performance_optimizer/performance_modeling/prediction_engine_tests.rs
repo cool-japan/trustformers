@@ -8,9 +8,8 @@
 #[cfg(test)]
 mod tests {
     use crate::performance_optimizer::performance_modeling::prediction_engine::{
-        CachedPrediction, EnsembleCoordinator, EnsembleStrategy,
-        PredictionCache, PredictionEngine, PredictionEngineConfig, PredictionModelRegistry,
-        WeightedPrediction,
+        CachedPrediction, EnsembleCoordinator, EnsembleStrategy, PredictionCache, PredictionEngine,
+        PredictionEngineConfig, PredictionModelRegistry, WeightedPrediction,
     };
     use crate::performance_optimizer::performance_modeling::types::{
         ModelAccuracyMetrics, PerformancePrediction, PredictionRequest,
@@ -141,7 +140,10 @@ mod tests {
     fn test_prediction_engine_new_with_default_config() {
         let engine = PredictionEngine::new(PredictionEngineConfig::default());
         let stats = engine.get_prediction_statistics();
-        assert_eq!(stats.total_predictions, 0, "fresh engine must have zero predictions");
+        assert_eq!(
+            stats.total_predictions, 0,
+            "fresh engine must have zero predictions"
+        );
     }
 
     #[test]
@@ -167,10 +169,7 @@ mod tests {
     impl crate::performance_optimizer::performance_modeling::types::PerformancePredictor
         for MockPredictor
     {
-        fn predict(
-            &self,
-            _request: &PredictionRequest,
-        ) -> Result<PerformancePrediction> {
+        fn predict(&self, _request: &PredictionRequest) -> Result<PerformancePrediction> {
             Ok(make_prediction(self.throughput, 0.8))
         }
 
@@ -212,7 +211,11 @@ mod tests {
         registry
             .register_model("model_a".to_string(), model, 0.5)
             .expect("register_model must succeed");
-        assert_eq!(registry.model_count(), 1, "registry must have 1 model after registration");
+        assert_eq!(
+            registry.model_count(),
+            1,
+            "registry must have 1 model after registration"
+        );
     }
 
     #[test]
@@ -265,7 +268,10 @@ mod tests {
     fn test_registry_update_weight_unknown_model_returns_error() {
         let mut registry = PredictionModelRegistry::new();
         let result = registry.update_model_weight("nonexistent", 0.5);
-        assert!(result.is_err(), "updating nonexistent model must return error");
+        assert!(
+            result.is_err(),
+            "updating nonexistent model must return error"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -297,7 +303,10 @@ mod tests {
     fn test_cache_contains_key_after_insert() {
         let mut cache = PredictionCache::new(100);
         cache.insert("key2".to_string(), make_cached_prediction(300, 200.0));
-        assert!(cache.contains_key("key2"), "cache must contain key after insert");
+        assert!(
+            cache.contains_key("key2"),
+            "cache must contain key after insert"
+        );
     }
 
     #[test]
@@ -339,7 +348,11 @@ mod tests {
     #[test]
     fn test_cache_hit_rate_zero_initially() {
         let cache = PredictionCache::new(100);
-        assert_eq!(cache.hit_rate(), 0.0, "hit rate must be 0.0 with no operations");
+        assert_eq!(
+            cache.hit_rate(),
+            0.0,
+            "hit rate must be 0.0 with no operations"
+        );
     }
 
     #[test]
@@ -360,7 +373,10 @@ mod tests {
     fn test_ensemble_coordinator_empty_predictions_error() {
         let coord = EnsembleCoordinator::new(EnsembleStrategy::SimpleAverage);
         let result = coord.combine_predictions(vec![]);
-        assert!(result.is_err(), "empty prediction list must return an error");
+        assert!(
+            result.is_err(),
+            "empty prediction list must return an error"
+        );
     }
 
     #[test]
@@ -401,6 +417,9 @@ mod tests {
             model_id: "best".to_string(),
         };
         let result = coord.combine_predictions(vec![wp]);
-        assert!(result.is_ok(), "best model strategy must succeed with one prediction");
+        assert!(
+            result.is_ok(),
+            "best model strategy must succeed with one prediction"
+        );
     }
 }

@@ -530,9 +530,10 @@ impl AnomalyDetector {
 
     /// Report an anomaly
     fn report_anomaly(&mut self, anomaly: Anomaly) {
-        eprintln!(
+        tracing::warn!(
             "🚨 Anomaly detected: {} at {}",
-            anomaly.description, anomaly.location
+            anomaly.description,
+            anomaly.location
         );
 
         // Update monitoring stats

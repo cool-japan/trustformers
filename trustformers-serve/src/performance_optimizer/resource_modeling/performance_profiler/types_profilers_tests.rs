@@ -15,7 +15,8 @@ impl Lcg {
     }
 
     fn next(&mut self) -> u64 {
-        self.state = self.state
+        self.state = self
+            .state
             .wrapping_mul(6364136223846793005u64)
             .wrapping_add(1442695040888963407u64);
         self.state
@@ -228,8 +229,12 @@ fn test_network_latency_tester_analyze() {
     let result = tester.analyze_comprehensive_latency();
     assert!(result.is_ok());
     if let Ok(analysis) = result {
-        assert!(analysis.min_latency_ms <= analysis.avg_latency_ms || analysis.avg_latency_ms == 0.0);
-        assert!(analysis.avg_latency_ms <= analysis.max_latency_ms || analysis.max_latency_ms == 0.0);
+        assert!(
+            analysis.min_latency_ms <= analysis.avg_latency_ms || analysis.avg_latency_ms == 0.0
+        );
+        assert!(
+            analysis.avg_latency_ms <= analysis.max_latency_ms || analysis.max_latency_ms == 0.0
+        );
     }
 }
 

@@ -110,7 +110,9 @@ impl AutoOptimizer {
     ///
     /// * `config` - Model configuration as JSON value
     pub fn from_config(config: &serde_json::Value) -> Result<Box<dyn Optimizer>> {
-        let model_type = config.get("model_type").and_then(|v| v.as_str()).unwrap_or("default");
+        // Selection below is purely a function of the estimated parameter
+        // count (see the doc comment above); `model_type` is not read here
+        // because it does not currently affect the choice of optimizer.
 
         // Choose optimizer based on model characteristics
         let hidden_size =
@@ -255,6 +257,11 @@ pub trait Optimizer: Send + Sync + std::fmt::Debug {
     /// computed gradients. Implementations should update internal state
     /// (momentum, variance estimates, etc.) and return parameter updates.
     ///
+    /// Any gradients previously handed to [`Optimizer::accumulate_gradients`]
+    /// since the last [`Optimizer::zero_grad`] are folded in elementwise with
+    /// whatever is passed here, matching the usual "accumulate across
+    /// micro-batches, then step" training loop pattern.
+    ///
     /// # Arguments
     ///
     /// * `gradients` - Gradients for all parameters to be updated
@@ -262,13 +269,35 @@ pub trait Optimizer: Send + Sync + std::fmt::Debug {
     /// # Returns
     ///
     /// Parameter updates that should be applied to model weights
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a gradient's length disagrees with the length of
+    /// the accumulated gradient (or restored moment state) for the same
+    /// parameter, rather than indexing out of bounds or silently truncating.
     fn step(&mut self, gradients: &OptimizerGradients) -> Result<OptimizerUpdate>;
+
+    /// Accumulate gradients into an internal per-parameter buffer without
+    /// taking an optimization step.
+    ///
+    /// Calling this multiple times sums the gradients elementwise (the same
+    /// semantics as calling `.backward()` repeatedly without an intervening
+    /// `zero_grad()` in a typical autodiff-based trainer): a gradient
+    /// accumulation loop can call this once per micro-batch and then call
+    /// [`Optimizer::step`] once per effective batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a parameter is accumulated at one length and then
+    /// accumulated again at a different length (e.g. the model shape
+    /// changed without an intervening [`Optimizer::zero_grad`]).
+    fn accumulate_gradients(&mut self, gradients: &OptimizerGradients) -> Result<()>;
 
     /// Zero accumulated gradients
     ///
-    /// In frameworks with automatic gradient accumulation, this method
-    /// clears any accumulated gradients. Implementation depends on the
-    /// specific gradient computation backend.
+    /// Clears the buffer built up by [`Optimizer::accumulate_gradients`].
+    /// After this call, [`Optimizer::step`] uses only the gradients passed
+    /// to it directly, with nothing carried over from prior accumulation.
     fn zero_grad(&mut self);
 
     /// Get current learning rate
@@ -290,9 +319,17 @@ pub trait Optimizer: Send + Sync + std::fmt::Debug {
     /// Get optimizer state for serialization
     ///
     /// Returns a serializable representation of the optimizer's internal
-    /// state, including momentum terms, variance estimates, step counts, etc.
-    /// This enables saving and loading optimizer state for training resumption.
-    fn state_dict(&self) -> HashMap<String, serde_json::Value>;
+    /// state, including the first/second moment estimates (for optimizers
+    /// that have them) and step count. This enables saving and loading
+    /// optimizer state for training resumption.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error rather than silently emitting JSON `null` when a
+    /// moment estimate holds a non-finite (`NaN`/`Infinity`) value — `null`
+    /// would round-trip back as `0.0`, hiding that the optimizer had
+    /// diverged.
+    fn state_dict(&self) -> Result<HashMap<String, serde_json::Value>>;
 
     /// Load optimizer state from serialized data
     ///
@@ -302,7 +339,186 @@ pub trait Optimizer: Send + Sync + std::fmt::Debug {
     /// # Arguments
     ///
     /// * `state` - Serialized optimizer state
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a moment-estimate entry is present but is not a
+    /// JSON object of parameter name -> array-of-numbers, or contains a
+    /// non-numeric entry (including `null`, which a state dict produced by
+    /// an unguarded serializer could contain in place of a diverged value).
     fn load_state_dict(&mut self, state: HashMap<String, serde_json::Value>) -> Result<()>;
+}
+
+/// Serialize a per-parameter moment-estimate map (`m` or `v`) to JSON,
+/// rejecting any non-finite value instead of letting `serde_json` silently
+/// turn it into `null`.
+///
+/// `serde_json::Number::from_f64` returns `None` for `NaN`/`Infinity`, and
+/// `serde_json::to_value` on such an `f32` therefore serializes it as JSON
+/// `null` with no error. A `null` in a moment estimate would round-trip back
+/// through [`moment_map_from_json`] as an error (good), but silently
+/// *skipping* the value at serialize time would be worse: it would make a
+/// diverged optimizer's checkpoint look like a healthy all-zero one. This
+/// helper fails loudly instead.
+fn moment_map_to_json(
+    moments: &HashMap<String, Vec<f32>>,
+    which: &str,
+) -> Result<serde_json::Value> {
+    let mut object = serde_json::Map::with_capacity(moments.len());
+    for (name, values) in moments {
+        let mut array = Vec::with_capacity(values.len());
+        for &value in values {
+            let number = serde_json::Number::from_f64(value as f64).ok_or_else(|| {
+                crate::error::TrustformersError::runtime_error(format!(
+                    "optimizer state_dict: non-finite value in `{which}` moment estimate for \
+                     parameter `{name}` (value = {value}); cannot serialize a diverged \
+                     optimizer's state losslessly"
+                ))
+            })?;
+            array.push(serde_json::Value::Number(number));
+        }
+        object.insert(name.clone(), serde_json::Value::Array(array));
+    }
+    Ok(serde_json::Value::Object(object))
+}
+
+/// Inverse of [`moment_map_to_json`]. Returns an empty map when `value` is
+/// `None` (the key was absent from the state dict, e.g. a checkpoint saved
+/// before this field existed), and a structured error for anything present
+/// but malformed rather than silently defaulting missing entries to zero.
+fn moment_map_from_json(
+    value: Option<&serde_json::Value>,
+    which: &str,
+) -> Result<HashMap<String, Vec<f32>>> {
+    let mut result = HashMap::new();
+    let Some(value) = value else {
+        return Ok(result);
+    };
+    let object = value.as_object().ok_or_else(|| {
+        crate::error::TrustformersError::runtime_error(format!(
+            "optimizer load_state_dict: `{which}` must be a JSON object mapping parameter names \
+             to arrays of floats, got {value}"
+        ))
+    })?;
+    for (name, array_value) in object {
+        let array = array_value.as_array().ok_or_else(|| {
+            crate::error::TrustformersError::runtime_error(format!(
+                "optimizer load_state_dict: `{which}.{name}` must be a JSON array of floats, got \
+                 {array_value}"
+            ))
+        })?;
+        let mut values = Vec::with_capacity(array.len());
+        for entry in array {
+            let f = entry.as_f64().ok_or_else(|| {
+                crate::error::TrustformersError::runtime_error(format!(
+                    "optimizer load_state_dict: `{which}.{name}` contains a non-numeric entry \
+                     ({entry}) -- a JSON `null` here usually means the checkpoint was written by \
+                     a serializer that silently dropped a non-finite (NaN/Infinity) value"
+                ))
+            })?;
+            values.push(f as f32);
+        }
+        result.insert(name.clone(), values);
+    }
+    Ok(result)
+}
+
+/// Compute the effective per-parameter gradient for a `step()` call: the
+/// gradient passed to `step` plus whatever was accumulated via
+/// `accumulate_gradients` for the same parameter (elementwise sum), in
+/// stable order (parameters present only in `gradients`, then parameters
+/// present only in `accumulated`).
+///
+/// # Errors
+///
+/// Returns an error if a parameter appears in both maps with different
+/// lengths.
+fn merge_accumulated_gradients(
+    gradients: &OptimizerGradients,
+    accumulated: &HashMap<String, Vec<f32>>,
+) -> Result<HashMap<String, Vec<f32>>> {
+    let mut effective = HashMap::with_capacity(gradients.parameters.len().max(accumulated.len()));
+
+    for (name, passed) in &gradients.parameters {
+        match accumulated.get(name) {
+            Some(acc) => {
+                if acc.len() != passed.len() {
+                    return Err(crate::error::TrustformersError::runtime_error(format!(
+                        "optimizer step: accumulated gradient for `{name}` has {} values but the \
+                         step's gradient has {} -- shapes must match (call zero_grad() if the \
+                         model shape changed)",
+                        acc.len(),
+                        passed.len()
+                    )));
+                }
+                effective.insert(
+                    name.clone(),
+                    passed.iter().zip(acc.iter()).map(|(g, a)| g + a).collect(),
+                );
+            },
+            None => {
+                effective.insert(name.clone(), passed.clone());
+            },
+        }
+    }
+    for (name, acc) in accumulated {
+        effective.entry(name.clone()).or_insert_with(|| acc.clone());
+    }
+
+    Ok(effective)
+}
+
+/// Accumulate `gradients` elementwise into `accumulated`, in place.
+///
+/// # Errors
+///
+/// Returns an error if a parameter was previously accumulated at a
+/// different length than the newly supplied gradient.
+fn accumulate_into(
+    accumulated: &mut HashMap<String, Vec<f32>>,
+    gradients: &OptimizerGradients,
+) -> Result<()> {
+    for (name, grad) in &gradients.parameters {
+        match accumulated.get_mut(name) {
+            Some(existing) => {
+                if existing.len() != grad.len() {
+                    return Err(crate::error::TrustformersError::runtime_error(format!(
+                        "optimizer accumulate_gradients: `{name}` was previously accumulated at \
+                         {} values, new gradient has {} -- call zero_grad() before changing \
+                         parameter shape",
+                        existing.len(),
+                        grad.len()
+                    )));
+                }
+                for (acc, g) in existing.iter_mut().zip(grad.iter()) {
+                    *acc += g;
+                }
+            },
+            None => {
+                accumulated.insert(name.clone(), grad.clone());
+            },
+        }
+    }
+    Ok(())
+}
+
+/// Guard against a restored (or freshly initialized) moment-estimate vector
+/// whose length disagrees with the current effective gradient -- indexing
+/// into a mismatched vector would otherwise panic instead of erroring.
+fn ensure_moment_len(
+    moment: &[f32],
+    expected_len: usize,
+    which: &str,
+    param_name: &str,
+) -> Result<()> {
+    if moment.len() != expected_len {
+        return Err(crate::error::TrustformersError::runtime_error(format!(
+            "optimizer step: restored `{which}` state for `{param_name}` has {} entries but the \
+             gradient has {expected_len} -- this checkpoint does not match the current model shape",
+            moment.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Container for gradients during optimization
@@ -405,6 +621,13 @@ pub struct AdamWOptimizer {
     step_count: usize,
     m: HashMap<String, Vec<f32>>, // First moment estimates
     v: HashMap<String, Vec<f32>>, // Second moment estimates
+    /// Per-parameter running maximum of `v`, used only when
+    /// `config.amsgrad` is set (Reddi et al., 2018). Kept separate from `v`
+    /// so state_dict() can omit it for the common non-AMSGrad case.
+    v_max: HashMap<String, Vec<f32>>,
+    /// Gradients accumulated via [`Optimizer::accumulate_gradients`] since
+    /// the last [`Optimizer::zero_grad`]; folded into the next [`Optimizer::step`].
+    accumulated_gradients: HashMap<String, Vec<f32>>,
 }
 
 /// Configuration for AdamW optimizer
@@ -432,21 +655,36 @@ impl AdamWOptimizer {
             step_count: 0,
             m: HashMap::new(),
             v: HashMap::new(),
+            v_max: HashMap::new(),
+            accumulated_gradients: HashMap::new(),
         }
     }
 }
 
 impl Optimizer for AdamWOptimizer {
     fn step(&mut self, gradients: &OptimizerGradients) -> Result<OptimizerUpdate> {
+        let effective_gradients =
+            merge_accumulated_gradients(gradients, &self.accumulated_gradients)?;
         self.step_count += 1;
         let mut parameter_updates = HashMap::new();
 
-        for (param_name, grad) in &gradients.parameters {
+        for (param_name, grad) in &effective_gradients {
             // Initialize moment estimates if needed (entry API avoids a fallible lookup)
             let m = self.m.entry(param_name.clone()).or_insert_with(|| vec![0.0; grad.len()]);
+            ensure_moment_len(m, grad.len(), "m", param_name)?;
             let v = self.v.entry(param_name.clone()).or_insert_with(|| vec![0.0; grad.len()]);
+            ensure_moment_len(v, grad.len(), "v", param_name)?;
+            let v_max = if self.config.amsgrad {
+                let entry =
+                    self.v_max.entry(param_name.clone()).or_insert_with(|| vec![0.0; grad.len()]);
+                ensure_moment_len(entry, grad.len(), "v_max", param_name)?;
+                Some(entry)
+            } else {
+                None
+            };
 
             let mut updates = Vec::with_capacity(grad.len());
+            let mut v_max = v_max;
 
             for i in 0..grad.len() {
                 // Update biased first moment estimate
@@ -459,13 +697,32 @@ impl Optimizer for AdamWOptimizer {
                 // Compute bias-corrected first moment estimate
                 let m_hat = m[i] / (1.0 - (self.config.beta1 as f32).powi(self.step_count as i32));
 
-                // Compute bias-corrected second raw moment estimate
-                let v_hat = v[i] / (1.0 - (self.config.beta2 as f32).powi(self.step_count as i32));
+                // Compute bias-corrected second raw moment estimate. Under
+                // AMSGrad (Reddi et al., 2018) the denominator uses the
+                // running *maximum* of `v_hat`'s numerator instead of the
+                // current `v[i]`, which prevents the effective learning rate
+                // from increasing late in training and fixes Adam's
+                // non-convergence counterexample.
+                let v_for_denom = if let Some(v_max) = v_max.as_deref_mut() {
+                    v_max[i] = v_max[i].max(v[i]);
+                    v_max[i]
+                } else {
+                    v[i]
+                };
+                let v_hat =
+                    v_for_denom / (1.0 - (self.config.beta2 as f32).powi(self.step_count as i32));
 
-                // Compute update (AdamW style weight decay is applied separately)
-                let update = -self.config.learning_rate as f32 * m_hat
+                // AdamW-style decoupled weight decay: `weight_decay` shrinks
+                // the parameter directly (scaled by the learning rate, as in
+                // Loshchilov & Hutter, 2019), rather than being folded into
+                // the gradient the way plain L2 regularization would be. It
+                // is therefore added on top of the raw Adam update rather
+                // than mixed into `grad[i]` above.
+                let adam_update = -self.config.learning_rate as f32 * m_hat
                     / (v_hat.sqrt() + self.config.eps as f32);
-                updates.push(update);
+                let decay_update =
+                    -self.config.learning_rate as f32 * self.config.weight_decay as f32;
+                updates.push(adam_update + decay_update);
             }
 
             parameter_updates.insert(param_name.clone(), updates);
@@ -478,9 +735,12 @@ impl Optimizer for AdamWOptimizer {
         })
     }
 
+    fn accumulate_gradients(&mut self, gradients: &OptimizerGradients) -> Result<()> {
+        accumulate_into(&mut self.accumulated_gradients, gradients)
+    }
+
     fn zero_grad(&mut self) {
-        // In a real implementation, this would clear accumulated gradients
-        // This is typically handled by the training loop or automatic differentiation system
+        self.accumulated_gradients.clear();
     }
 
     fn get_lr(&self) -> f64 {
@@ -491,7 +751,7 @@ impl Optimizer for AdamWOptimizer {
         self.config.learning_rate = lr;
     }
 
-    fn state_dict(&self) -> HashMap<String, serde_json::Value> {
+    fn state_dict(&self) -> Result<HashMap<String, serde_json::Value>> {
         let mut state = HashMap::new();
         state.insert(
             "step_count".to_string(),
@@ -505,8 +765,15 @@ impl Optimizer for AdamWOptimizer {
                     serde_json::Value::String(format!("{}", self.config.learning_rate))
                 }),
         );
-        // In a real implementation, would serialize m and v moment estimates
-        state
+        state.insert("m".to_string(), moment_map_to_json(&self.m, "m")?);
+        state.insert("v".to_string(), moment_map_to_json(&self.v, "v")?);
+        if self.config.amsgrad {
+            state.insert(
+                "v_max".to_string(),
+                moment_map_to_json(&self.v_max, "v_max")?,
+            );
+        }
+        Ok(state)
     }
 
     fn load_state_dict(&mut self, state: HashMap<String, serde_json::Value>) -> Result<()> {
@@ -516,6 +783,9 @@ impl Optimizer for AdamWOptimizer {
         if let Some(lr) = state.get("learning_rate").and_then(|v| v.as_f64()) {
             self.config.learning_rate = lr;
         }
+        self.m = moment_map_from_json(state.get("m"), "m")?;
+        self.v = moment_map_from_json(state.get("v"), "v")?;
+        self.v_max = moment_map_from_json(state.get("v_max"), "v_max")?;
         Ok(())
     }
 }
@@ -532,6 +802,12 @@ pub struct AdamOptimizer {
     step_count: usize,
     m: HashMap<String, Vec<f32>>, // First moment estimates
     v: HashMap<String, Vec<f32>>, // Second moment estimates
+    /// Per-parameter running maximum of `v`, used only when
+    /// `config.amsgrad` is set (Reddi et al., 2018).
+    v_max: HashMap<String, Vec<f32>>,
+    /// Gradients accumulated via [`Optimizer::accumulate_gradients`] since
+    /// the last [`Optimizer::zero_grad`]; folded into the next [`Optimizer::step`].
+    accumulated_gradients: HashMap<String, Vec<f32>>,
 }
 
 /// Configuration for Adam optimizer
@@ -557,6 +833,8 @@ impl AdamOptimizer {
             step_count: 0,
             m: HashMap::new(),
             v: HashMap::new(),
+            v_max: HashMap::new(),
+            accumulated_gradients: HashMap::new(),
         }
     }
 }
@@ -564,15 +842,28 @@ impl AdamOptimizer {
 impl Optimizer for AdamOptimizer {
     fn step(&mut self, gradients: &OptimizerGradients) -> Result<OptimizerUpdate> {
         // Similar to AdamW but without weight decay
+        let effective_gradients =
+            merge_accumulated_gradients(gradients, &self.accumulated_gradients)?;
         self.step_count += 1;
         let mut parameter_updates = HashMap::new();
 
-        for (param_name, grad) in &gradients.parameters {
+        for (param_name, grad) in &effective_gradients {
             // Initialize moment estimates if needed (entry API avoids a fallible lookup)
             let m = self.m.entry(param_name.clone()).or_insert_with(|| vec![0.0; grad.len()]);
+            ensure_moment_len(m, grad.len(), "m", param_name)?;
             let v = self.v.entry(param_name.clone()).or_insert_with(|| vec![0.0; grad.len()]);
+            ensure_moment_len(v, grad.len(), "v", param_name)?;
+            let v_max = if self.config.amsgrad {
+                let entry =
+                    self.v_max.entry(param_name.clone()).or_insert_with(|| vec![0.0; grad.len()]);
+                ensure_moment_len(entry, grad.len(), "v_max", param_name)?;
+                Some(entry)
+            } else {
+                None
+            };
 
             let mut updates = Vec::with_capacity(grad.len());
+            let mut v_max = v_max;
 
             for i in 0..grad.len() {
                 m[i] = self.config.beta1 as f32 * m[i] + (1.0 - self.config.beta1 as f32) * grad[i];
@@ -580,7 +871,16 @@ impl Optimizer for AdamOptimizer {
                     + (1.0 - self.config.beta2 as f32) * grad[i] * grad[i];
 
                 let m_hat = m[i] / (1.0 - (self.config.beta1 as f32).powi(self.step_count as i32));
-                let v_hat = v[i] / (1.0 - (self.config.beta2 as f32).powi(self.step_count as i32));
+                // See `AdamWOptimizer::step` for why AMSGrad uses a running
+                // maximum of `v` in the denominator instead of `v` itself.
+                let v_for_denom = if let Some(v_max) = v_max.as_deref_mut() {
+                    v_max[i] = v_max[i].max(v[i]);
+                    v_max[i]
+                } else {
+                    v[i]
+                };
+                let v_hat =
+                    v_for_denom / (1.0 - (self.config.beta2 as f32).powi(self.step_count as i32));
 
                 let update = -self.config.learning_rate as f32 * m_hat
                     / (v_hat.sqrt() + self.config.eps as f32);
@@ -597,7 +897,13 @@ impl Optimizer for AdamOptimizer {
         })
     }
 
-    fn zero_grad(&mut self) {}
+    fn accumulate_gradients(&mut self, gradients: &OptimizerGradients) -> Result<()> {
+        accumulate_into(&mut self.accumulated_gradients, gradients)
+    }
+
+    fn zero_grad(&mut self) {
+        self.accumulated_gradients.clear();
+    }
 
     fn get_lr(&self) -> f64 {
         self.config.learning_rate
@@ -607,7 +913,7 @@ impl Optimizer for AdamOptimizer {
         self.config.learning_rate = lr;
     }
 
-    fn state_dict(&self) -> HashMap<String, serde_json::Value> {
+    fn state_dict(&self) -> Result<HashMap<String, serde_json::Value>> {
         let mut state = HashMap::new();
         state.insert(
             "step_count".to_string(),
@@ -621,7 +927,15 @@ impl Optimizer for AdamOptimizer {
                     serde_json::Value::String(format!("{}", self.config.learning_rate))
                 }),
         );
-        state
+        state.insert("m".to_string(), moment_map_to_json(&self.m, "m")?);
+        state.insert("v".to_string(), moment_map_to_json(&self.v, "v")?);
+        if self.config.amsgrad {
+            state.insert(
+                "v_max".to_string(),
+                moment_map_to_json(&self.v_max, "v_max")?,
+            );
+        }
+        Ok(state)
     }
 
     fn load_state_dict(&mut self, state: HashMap<String, serde_json::Value>) -> Result<()> {
@@ -631,6 +945,9 @@ impl Optimizer for AdamOptimizer {
         if let Some(lr) = state.get("learning_rate").and_then(|v| v.as_f64()) {
             self.config.learning_rate = lr;
         }
+        self.m = moment_map_from_json(state.get("m"), "m")?;
+        self.v = moment_map_from_json(state.get("v"), "v")?;
+        self.v_max = moment_map_from_json(state.get("v_max"), "v_max")?;
         Ok(())
     }
 }
@@ -718,6 +1035,10 @@ impl Optimizer for ScheduledOptimizer {
         self.optimizer.step(gradients)
     }
 
+    fn accumulate_gradients(&mut self, gradients: &OptimizerGradients) -> Result<()> {
+        self.optimizer.accumulate_gradients(gradients)
+    }
+
     fn zero_grad(&mut self) {
         self.optimizer.zero_grad();
     }
@@ -731,8 +1052,8 @@ impl Optimizer for ScheduledOptimizer {
         self.optimizer.set_lr(lr);
     }
 
-    fn state_dict(&self) -> HashMap<String, serde_json::Value> {
-        let mut state = self.optimizer.state_dict();
+    fn state_dict(&self) -> Result<HashMap<String, serde_json::Value>> {
+        let mut state = self.optimizer.state_dict()?;
         state.insert(
             "current_step".to_string(),
             serde_json::Value::Number(self.current_step.into()),
@@ -743,7 +1064,7 @@ impl Optimizer for ScheduledOptimizer {
                 .map(serde_json::Value::Number)
                 .unwrap_or_else(|| serde_json::Value::String(format!("{}", self.initial_lr))),
         );
-        state
+        Ok(state)
     }
 
     fn load_state_dict(&mut self, mut state: HashMap<String, serde_json::Value>) -> Result<()> {
@@ -770,628 +1091,4 @@ impl Optimizer for ScheduledOptimizer {
 // - ScheduledOptimizer: Optimizer wrapper with learning rate scheduling
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // -------------------------------------------------------------------------
-    // LCG for deterministic pseudo-random numbers (no rand crate)
-    // -------------------------------------------------------------------------
-
-    struct Lcg {
-        state: u64,
-    }
-
-    impl Lcg {
-        fn new(seed: u64) -> Self {
-            Lcg { state: seed }
-        }
-
-        fn next(&mut self) -> u64 {
-            self.state = self
-                .state
-                .wrapping_mul(6_364_136_223_846_793_005_u64)
-                .wrapping_add(1_442_695_040_888_963_407_u64);
-            self.state
-        }
-
-        fn next_f32(&mut self) -> f32 {
-            (self.next() >> 11) as f32 / (1u64 << 53) as f32
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // AdamWConfig
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_adamw_config_creation() {
-        let config = AdamWConfig {
-            learning_rate: 2e-5,
-            beta1: 0.9,
-            beta2: 0.999,
-            weight_decay: 0.01,
-            eps: 1e-8,
-            amsgrad: false,
-        };
-        let diff = (config.learning_rate - 2e-5).abs();
-        assert!(diff < 1e-10, "learning_rate should be set correctly");
-        assert!(!config.amsgrad, "amsgrad should be false");
-    }
-
-    #[test]
-    fn test_adamw_config_weight_decay() {
-        let config = AdamWConfig {
-            learning_rate: 1e-4,
-            beta1: 0.9,
-            beta2: 0.999,
-            weight_decay: 0.1,
-            eps: 1e-8,
-            amsgrad: false,
-        };
-        let diff = (config.weight_decay - 0.1).abs();
-        assert!(diff < 1e-10, "weight_decay should be 0.1");
-    }
-
-    // -------------------------------------------------------------------------
-    // AdamConfig
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_adam_config_creation() {
-        let config = AdamConfig {
-            learning_rate: 5e-5,
-            beta1: 0.9,
-            beta2: 0.999,
-            eps: 1e-8,
-            amsgrad: false,
-        };
-        let diff = (config.learning_rate - 5e-5).abs();
-        assert!(diff < 1e-12, "learning_rate should be set correctly");
-    }
-
-    #[test]
-    fn test_adam_config_beta_values() {
-        let config = AdamConfig {
-            learning_rate: 1e-3,
-            beta1: 0.95,
-            beta2: 0.99,
-            eps: 1e-6,
-            amsgrad: true,
-        };
-        let b1_diff = (config.beta1 - 0.95).abs();
-        let b2_diff = (config.beta2 - 0.99).abs();
-        assert!(b1_diff < 1e-10, "beta1 should be 0.95");
-        assert!(b2_diff < 1e-10, "beta2 should be 0.99");
-        assert!(config.amsgrad, "amsgrad should be true");
-    }
-
-    // -------------------------------------------------------------------------
-    // AdamWOptimizer
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_adamw_optimizer_creation() {
-        let config = AdamWConfig {
-            learning_rate: 2e-5,
-            beta1: 0.9,
-            beta2: 0.999,
-            weight_decay: 0.01,
-            eps: 1e-8,
-            amsgrad: false,
-        };
-        let optimizer = AdamWOptimizer::new(config);
-        let diff = (optimizer.get_lr() - 2e-5).abs();
-        assert!(diff < 1e-12, "Initial LR should match config");
-    }
-
-    #[test]
-    fn test_adamw_get_lr() {
-        let optimizer = AdamWOptimizer::new(AdamWConfig {
-            learning_rate: 3e-4,
-            beta1: 0.9,
-            beta2: 0.999,
-            weight_decay: 0.01,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        let diff = (optimizer.get_lr() - 3e-4).abs();
-        assert!(diff < 1e-12, "get_lr should return initial learning rate");
-    }
-
-    #[test]
-    fn test_adamw_set_lr() {
-        let mut optimizer = AdamWOptimizer::new(AdamWConfig {
-            learning_rate: 1e-4,
-            beta1: 0.9,
-            beta2: 0.999,
-            weight_decay: 0.01,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        optimizer.set_lr(5e-5);
-        let diff = (optimizer.get_lr() - 5e-5).abs();
-        assert!(diff < 1e-12, "LR should be updated after set_lr");
-    }
-
-    #[test]
-    fn test_adamw_step_produces_update() {
-        let mut optimizer = AdamWOptimizer::new(AdamWConfig {
-            learning_rate: 1e-3,
-            beta1: 0.9,
-            beta2: 0.999,
-            weight_decay: 0.01,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        let mut lcg = Lcg::new(42);
-        let grads: Vec<f32> = (0..4).map(|_| lcg.next_f32() - 0.5).collect();
-        let mut parameters = HashMap::new();
-        parameters.insert("layer.weight".to_string(), grads);
-        let mut parameter_shapes = HashMap::new();
-        parameter_shapes.insert("layer.weight".to_string(), vec![4]);
-        let gradients = OptimizerGradients {
-            parameters,
-            parameter_shapes,
-        };
-
-        let result = optimizer.step(&gradients);
-        assert!(result.is_ok(), "step() should succeed");
-        if let Ok(update) = result {
-            assert_eq!(
-                update.step_count, 1,
-                "Step count should be 1 after first step"
-            );
-            assert!(
-                update.parameter_updates.contains_key("layer.weight"),
-                "Update should contain parameter updates"
-            );
-        }
-    }
-
-    #[test]
-    fn test_adamw_step_count_increments() {
-        let mut optimizer = AdamWOptimizer::new(AdamWConfig {
-            learning_rate: 1e-3,
-            beta1: 0.9,
-            beta2: 0.999,
-            weight_decay: 0.0,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        let grads = vec![0.1_f32, -0.2, 0.05];
-        let mut parameters = HashMap::new();
-        parameters.insert("w".to_string(), grads);
-        let mut shapes = HashMap::new();
-        shapes.insert("w".to_string(), vec![3]);
-        let gradients = OptimizerGradients {
-            parameters,
-            parameter_shapes: shapes,
-        };
-
-        for expected_step in 1..=3usize {
-            let result = optimizer.step(&gradients);
-            if let Ok(update) = result {
-                assert_eq!(update.step_count, expected_step);
-            }
-        }
-    }
-
-    #[test]
-    fn test_adamw_state_dict_contains_step_count() {
-        let mut optimizer = AdamWOptimizer::new(AdamWConfig {
-            learning_rate: 1e-3,
-            beta1: 0.9,
-            beta2: 0.999,
-            weight_decay: 0.01,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        // Do one step to increment counter
-        let mut parameters = HashMap::new();
-        parameters.insert("w".to_string(), vec![0.1_f32]);
-        let mut shapes = HashMap::new();
-        shapes.insert("w".to_string(), vec![1]);
-        let _ = optimizer.step(&OptimizerGradients {
-            parameters,
-            parameter_shapes: shapes,
-        });
-        let state = optimizer.state_dict();
-        assert!(
-            state.contains_key("step_count"),
-            "state_dict should contain step_count"
-        );
-    }
-
-    #[test]
-    fn test_adamw_load_state_dict_updates_lr() {
-        let mut optimizer = AdamWOptimizer::new(AdamWConfig {
-            learning_rate: 1e-3,
-            beta1: 0.9,
-            beta2: 0.999,
-            weight_decay: 0.01,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        let mut state = HashMap::new();
-        state.insert("learning_rate".to_string(), serde_json::json!(2e-4));
-        let result = optimizer.load_state_dict(state);
-        assert!(result.is_ok(), "load_state_dict should succeed");
-        let diff = (optimizer.get_lr() - 2e-4).abs();
-        assert!(diff < 1e-12, "LR should be updated from loaded state");
-    }
-
-    // -------------------------------------------------------------------------
-    // AdamOptimizer
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_adam_optimizer_creation() {
-        let optimizer = AdamOptimizer::new(AdamConfig {
-            learning_rate: 5e-5,
-            beta1: 0.9,
-            beta2: 0.999,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        let diff = (optimizer.get_lr() - 5e-5).abs();
-        assert!(diff < 1e-12, "Initial LR should match config");
-    }
-
-    #[test]
-    fn test_adam_set_lr() {
-        let mut optimizer = AdamOptimizer::new(AdamConfig {
-            learning_rate: 1e-3,
-            beta1: 0.9,
-            beta2: 0.999,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        optimizer.set_lr(1e-4);
-        let diff = (optimizer.get_lr() - 1e-4).abs();
-        assert!(diff < 1e-12, "LR should be updated after set_lr");
-    }
-
-    #[test]
-    fn test_adam_step_produces_update() {
-        let mut optimizer = AdamOptimizer::new(AdamConfig {
-            learning_rate: 1e-3,
-            beta1: 0.9,
-            beta2: 0.999,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        let mut parameters = HashMap::new();
-        parameters.insert("bias".to_string(), vec![0.5_f32, -0.3]);
-        let mut shapes = HashMap::new();
-        shapes.insert("bias".to_string(), vec![2]);
-        let gradients = OptimizerGradients {
-            parameters,
-            parameter_shapes: shapes,
-        };
-
-        let result = optimizer.step(&gradients);
-        assert!(result.is_ok(), "Adam step should succeed");
-        if let Ok(update) = result {
-            assert!(
-                update.parameter_updates.contains_key("bias"),
-                "Update should contain 'bias'"
-            );
-        }
-    }
-
-    #[test]
-    fn test_adam_zero_grad_does_not_panic() {
-        let mut optimizer = AdamOptimizer::new(AdamConfig {
-            learning_rate: 1e-3,
-            beta1: 0.9,
-            beta2: 0.999,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        optimizer.zero_grad(); // Should not panic
-    }
-
-    // -------------------------------------------------------------------------
-    // LearningRateSchedule
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_lr_schedule_constant_variant() {
-        let schedule = LearningRateSchedule::Constant;
-        // Just verifying that the variant can be created and matched
-        assert!(matches!(schedule, LearningRateSchedule::Constant));
-    }
-
-    #[test]
-    fn test_lr_schedule_linear_warmup_fields() {
-        let schedule = LearningRateSchedule::LinearWarmup {
-            warmup_steps: 1000,
-            max_lr: 5e-5,
-        };
-        if let LearningRateSchedule::LinearWarmup {
-            warmup_steps,
-            max_lr,
-        } = schedule
-        {
-            assert_eq!(warmup_steps, 1000);
-            let diff = (max_lr - 5e-5).abs();
-            assert!(diff < 1e-12, "max_lr should be 5e-5");
-        } else {
-            panic!("Expected LinearWarmup variant");
-        }
-    }
-
-    #[test]
-    fn test_lr_schedule_cosine_annealing_fields() {
-        let schedule = LearningRateSchedule::CosineAnnealing {
-            t_max: 500,
-            eta_min: 1e-6,
-        };
-        if let LearningRateSchedule::CosineAnnealing { t_max, eta_min } = schedule {
-            assert_eq!(t_max, 500);
-            let diff = (eta_min - 1e-6).abs();
-            assert!(diff < 1e-12, "eta_min should be 1e-6");
-        } else {
-            panic!("Expected CosineAnnealing variant");
-        }
-    }
-
-    #[test]
-    fn test_lr_schedule_step_lr_fields() {
-        let schedule = LearningRateSchedule::StepLR {
-            step_size: 100,
-            gamma: 0.1,
-        };
-        if let LearningRateSchedule::StepLR { step_size, gamma } = schedule {
-            assert_eq!(step_size, 100);
-            let diff = (gamma - 0.1).abs();
-            assert!(diff < 1e-12, "gamma should be 0.1");
-        } else {
-            panic!("Expected StepLR variant");
-        }
-    }
-
-    #[test]
-    fn test_lr_schedule_polynomial_decay_fields() {
-        let schedule = LearningRateSchedule::PolynomialDecay {
-            power: 2.0,
-            end_lr: 1e-7,
-            total_steps: 10_000,
-        };
-        if let LearningRateSchedule::PolynomialDecay {
-            power,
-            end_lr,
-            total_steps,
-        } = schedule
-        {
-            let p_diff = (power - 2.0).abs();
-            assert!(p_diff < 1e-10, "power should be 2.0");
-            let e_diff = (end_lr - 1e-7).abs();
-            assert!(e_diff < 1e-14, "end_lr should be 1e-7");
-            assert_eq!(total_steps, 10_000);
-        } else {
-            panic!("Expected PolynomialDecay variant");
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // ScheduledOptimizer
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_scheduled_optimizer_constant_lr() {
-        let base = AdamWOptimizer::new(AdamWConfig {
-            learning_rate: 1e-3,
-            beta1: 0.9,
-            beta2: 0.999,
-            weight_decay: 0.01,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        let mut sched = ScheduledOptimizer::new(Box::new(base), LearningRateSchedule::Constant);
-        let initial_lr = sched.get_lr();
-
-        let mut parameters = HashMap::new();
-        parameters.insert("w".to_string(), vec![0.1_f32]);
-        let mut shapes = HashMap::new();
-        shapes.insert("w".to_string(), vec![1]);
-        let _ = sched.step(&OptimizerGradients {
-            parameters,
-            parameter_shapes: shapes,
-        });
-
-        let lr_diff = (sched.get_lr() - initial_lr).abs();
-        assert!(
-            lr_diff < 1e-10,
-            "Constant schedule should keep LR unchanged"
-        );
-    }
-
-    #[test]
-    fn test_scheduled_optimizer_warmup_increases_lr() {
-        let initial_lr = 1e-5_f64;
-        let max_lr = 5e-4_f64;
-        let base = AdamWOptimizer::new(AdamWConfig {
-            learning_rate: initial_lr,
-            beta1: 0.9,
-            beta2: 0.999,
-            weight_decay: 0.01,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        let mut sched = ScheduledOptimizer::new(
-            Box::new(base),
-            LearningRateSchedule::LinearWarmup {
-                warmup_steps: 100,
-                max_lr,
-            },
-        );
-
-        let mut parameters = HashMap::new();
-        parameters.insert("w".to_string(), vec![0.01_f32]);
-        let mut shapes = HashMap::new();
-        shapes.insert("w".to_string(), vec![1]);
-
-        // After several warmup steps, LR should increase
-        for _ in 0..50 {
-            let _ = sched.step(&OptimizerGradients {
-                parameters: parameters.clone(),
-                parameter_shapes: shapes.clone(),
-            });
-        }
-        let lr_after = sched.get_lr();
-        assert!(lr_after > initial_lr, "LR should increase during warmup");
-        assert!(lr_after < max_lr + 1e-10, "LR should not exceed max_lr");
-    }
-
-    #[test]
-    fn test_scheduled_optimizer_state_dict_contains_step() {
-        let base = AdamOptimizer::new(AdamConfig {
-            learning_rate: 1e-3,
-            beta1: 0.9,
-            beta2: 0.999,
-            eps: 1e-8,
-            amsgrad: false,
-        });
-        let mut sched = ScheduledOptimizer::new(Box::new(base), LearningRateSchedule::Constant);
-        let mut parameters = HashMap::new();
-        parameters.insert("w".to_string(), vec![0.1_f32]);
-        let mut shapes = HashMap::new();
-        shapes.insert("w".to_string(), vec![1]);
-        let _ = sched.step(&OptimizerGradients {
-            parameters,
-            parameter_shapes: shapes,
-        });
-        let state = sched.state_dict();
-        assert!(
-            state.contains_key("current_step"),
-            "state_dict should have current_step key"
-        );
-    }
-
-    // -------------------------------------------------------------------------
-    // AutoOptimizer::from_config
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_auto_optimizer_from_config_small_model() {
-        let config = serde_json::json!({
-            "model_type": "bert",
-            "hidden_size": 128,
-            "num_hidden_layers": 2
-        });
-        let result = AutoOptimizer::from_config(&config);
-        assert!(result.is_ok(), "AutoOptimizer::from_config should succeed");
-        if let Ok(optimizer) = result {
-            assert!(
-                optimizer.get_lr() > 0.0,
-                "Optimizer should have positive LR"
-            );
-        }
-    }
-
-    #[test]
-    fn test_auto_optimizer_from_config_large_model() {
-        let config = serde_json::json!({
-            "model_type": "gpt2",
-            "hidden_size": 1024,
-            "num_hidden_layers": 36
-        });
-        let result = AutoOptimizer::from_config(&config);
-        assert!(
-            result.is_ok(),
-            "AutoOptimizer::from_config should succeed for large model"
-        );
-        if let Ok(optimizer) = result {
-            // Large model should use lower LR
-            assert!(
-                optimizer.get_lr() <= 2e-5 + 1e-12,
-                "Large model should use lower LR"
-            );
-        }
-    }
-
-    #[test]
-    fn test_auto_optimizer_for_task_text_generation() {
-        let config = serde_json::json!({});
-        let result = AutoOptimizer::for_task("text-generation", &config);
-        assert!(result.is_ok(), "for_task text-generation should succeed");
-    }
-
-    #[test]
-    fn test_auto_optimizer_for_task_classification() {
-        let config = serde_json::json!({});
-        let result = AutoOptimizer::for_task("text-classification", &config);
-        assert!(
-            result.is_ok(),
-            "for_task text-classification should succeed"
-        );
-    }
-
-    #[test]
-    fn test_auto_optimizer_for_task_question_answering() {
-        let config = serde_json::json!({});
-        let result = AutoOptimizer::for_task("question-answering", &config);
-        assert!(result.is_ok(), "for_task question-answering should succeed");
-    }
-
-    #[test]
-    fn test_auto_optimizer_for_task_unknown_uses_default() {
-        let config = serde_json::json!({
-            "hidden_size": 256,
-            "num_hidden_layers": 4
-        });
-        let result = AutoOptimizer::for_task("some-unknown-task", &config);
-        assert!(result.is_ok(), "Unknown task should fall back to default");
-    }
-
-    #[test]
-    fn test_auto_optimizer_with_schedule() {
-        let base = AutoOptimizer::from_config(&serde_json::json!({}));
-        assert!(base.is_ok(), "Base optimizer should be created");
-        if let Ok(base_opt) = base {
-            let schedule = LearningRateSchedule::LinearWarmup {
-                warmup_steps: 500,
-                max_lr: 5e-5,
-            };
-            let sched = AutoOptimizer::with_schedule(base_opt, schedule);
-            assert!(
-                sched.get_lr() > 0.0,
-                "Scheduled optimizer should have positive LR"
-            );
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // OptimizerGradients / OptimizerUpdate
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_optimizer_gradients_creation() {
-        let mut parameters = HashMap::new();
-        parameters.insert("layer1.weight".to_string(), vec![0.1_f32, 0.2, -0.3]);
-        let mut parameter_shapes = HashMap::new();
-        parameter_shapes.insert("layer1.weight".to_string(), vec![3]);
-        let gradients = OptimizerGradients {
-            parameters,
-            parameter_shapes,
-        };
-        assert_eq!(gradients.parameters.len(), 1);
-        assert!(gradients.parameters.contains_key("layer1.weight"));
-    }
-
-    #[test]
-    fn test_optimizer_update_fields() {
-        let mut parameter_updates = HashMap::new();
-        parameter_updates.insert("w".to_string(), vec![-0.001_f32, 0.002]);
-        let update = OptimizerUpdate {
-            parameter_updates,
-            learning_rate: 1e-3,
-            step_count: 5,
-        };
-        assert_eq!(update.step_count, 5);
-        let lr_diff = (update.learning_rate - 1e-3).abs();
-        assert!(lr_diff < 1e-12, "learning_rate should match");
-        assert!(update.parameter_updates.contains_key("w"));
-    }
-}
+mod tests;

@@ -14,8 +14,12 @@ pub mod config;
 pub mod distributed;
 pub mod embedding_cache;
 pub mod kv_cache;
+/// Generic LRU cache with hit/miss/eviction accounting.
+pub mod lru;
 pub mod metrics;
 pub mod result_cache;
+/// Similarity-based cache keyed on caller-supplied embeddings.
+pub mod semantic_cache;
 pub mod warming;
 
 pub use result_cache::{
@@ -40,6 +44,12 @@ pub use metrics::{
 
 pub use config::{
     CacheConfig, CacheMode, ConsistencyLevel, EvictionPolicy, TierConfig, WarmingStrategy,
+};
+
+pub use lru::{LruCache, LruCacheStats};
+
+pub use semantic_cache::{
+    SemanticCache, SemanticCacheConfig, SemanticCacheEntry, SemanticCacheError, SemanticCacheStats,
 };
 
 use anyhow::Result;

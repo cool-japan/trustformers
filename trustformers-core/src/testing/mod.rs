@@ -103,9 +103,10 @@ impl IntegrationTestRunner {
         let report = self.detector.generate_report(test_name);
 
         if report.leaked_bytes > 0 {
-            eprintln!(
+            tracing::warn!(
                 "Memory leak in test '{}': {} bytes",
-                test_name, report.leaked_bytes
+                test_name,
+                report.leaked_bytes
             );
         }
 

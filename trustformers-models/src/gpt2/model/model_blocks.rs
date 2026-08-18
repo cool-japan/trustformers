@@ -118,6 +118,44 @@ impl Gpt2Block {
             + self.mlp.parameter_count()
     }
 
+    /// Append this block's parameters under `<prefix>.…` in HuggingFace order.
+    ///
+    /// `prefix` is the block's checkpoint path (`transformer.h.3`, say). The
+    /// names produced here mirror [`Gpt2Block::load_weights`] exactly, so a file
+    /// written from `named_tensors` reloads through `load_pretrained`.
+    ///
+    /// # Weight layout
+    ///
+    /// `attn.c_attn`, `attn.c_proj`, `mlp.c_fc` and `mlp.c_proj` are HuggingFace
+    /// `Conv1D` layers, stored `[in, out]` in the checkpoint and transposed to
+    /// `[out, in]` on load. The trait contract requires *live* references, so
+    /// they are exposed in the model's own `[out, in]` layout — transposing here
+    /// would mean returning references to temporaries, which is impossible, and
+    /// silently copying would break the "live parameters" contract. Consumers
+    /// that need HF's on-disk layout must transpose these four names themselves.
+    pub(crate) fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.ln_1.collect_named_parameters(&format!("{prefix}.ln_1"), into);
+        self.attn.collect_named_parameters(&format!("{prefix}.attn"), into);
+        self.ln_2.collect_named_parameters(&format!("{prefix}.ln_2"), into);
+        self.mlp.collect_named_parameters(&format!("{prefix}.mlp"), into);
+    }
+
+    /// Mutable counterpart of [`Gpt2Block::collect_named_parameters`].
+    pub(crate) fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.ln_1.collect_named_parameters_mut(&format!("{prefix}.ln_1"), into);
+        self.attn.collect_named_parameters_mut(&format!("{prefix}.attn"), into);
+        self.ln_2.collect_named_parameters_mut(&format!("{prefix}.ln_2"), into);
+        self.mlp.collect_named_parameters_mut(&format!("{prefix}.mlp"), into);
+    }
+
     #[allow(dead_code)]
     pub(crate) fn forward(
         &self,
@@ -592,6 +630,25 @@ impl Gpt2Attention {
 
     fn parameter_count(&self) -> usize {
         self.c_attn.parameter_count() + self.c_proj.parameter_count()
+    }
+
+    /// Append the fused QKV and output projections under `<prefix>.…`.
+    ///
+    /// Names mirror [`Gpt2Attention::load_weights`]; see
+    /// [`Gpt2Block::collect_named_parameters`] for the `Conv1D` layout caveat.
+    fn collect_named_parameters<'a>(&'a self, prefix: &str, into: &mut Vec<(String, &'a Tensor)>) {
+        self.c_attn.collect_named_parameters(&format!("{prefix}.c_attn"), into);
+        self.c_proj.collect_named_parameters(&format!("{prefix}.c_proj"), into);
+    }
+
+    /// Mutable counterpart of [`Gpt2Attention::collect_named_parameters`].
+    fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.c_attn.collect_named_parameters_mut(&format!("{prefix}.c_attn"), into);
+        self.c_proj.collect_named_parameters_mut(&format!("{prefix}.c_proj"), into);
     }
 
     #[allow(dead_code)]
@@ -1313,6 +1370,25 @@ impl Gpt2MLP {
 
     fn parameter_count(&self) -> usize {
         self.c_fc.parameter_count() + self.c_proj.parameter_count()
+    }
+
+    /// Append the two MLP projections under `<prefix>.…`.
+    ///
+    /// Names mirror [`Gpt2MLP::load_weights`]; see
+    /// [`Gpt2Block::collect_named_parameters`] for the `Conv1D` layout caveat.
+    fn collect_named_parameters<'a>(&'a self, prefix: &str, into: &mut Vec<(String, &'a Tensor)>) {
+        self.c_fc.collect_named_parameters(&format!("{prefix}.c_fc"), into);
+        self.c_proj.collect_named_parameters(&format!("{prefix}.c_proj"), into);
+    }
+
+    /// Mutable counterpart of [`Gpt2MLP::collect_named_parameters`].
+    fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.c_fc.collect_named_parameters_mut(&format!("{prefix}.c_fc"), into);
+        self.c_proj.collect_named_parameters_mut(&format!("{prefix}.c_proj"), into);
     }
 
     /// Fused `matmul + bias + GELU` for the `c_fc` projection on the Metal GPU.

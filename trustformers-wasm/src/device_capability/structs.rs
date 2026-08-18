@@ -297,6 +297,12 @@ pub struct PerformanceMetrics {
     pub memory_used_mb: f64,
     pub memory_total_mb: f64,
     pub memory_limit_mb: f64,
+    /// Whether `performance.memory` (a Chromium-only, non-standard API) was
+    /// actually present and readable. When `false`, the three `memory_*_mb`
+    /// fields above are `0.0` - an honest "not measured" default, not a
+    /// fabricated reading - because no other standard API exposes JS heap
+    /// size.
+    pub memory_api_available: bool,
     pub timing_navigation_start: f64,
     pub timing_dom_loading: f64,
     pub timing_dom_complete: f64,
@@ -304,8 +310,19 @@ pub struct PerformanceMetrics {
     pub(crate) connection_type: String,
     pub connection_downlink: f64,
     pub connection_rtt: u32,
+    /// Whether `navigator.connection` (the Network Information API) was
+    /// actually present. When `false`, `connection_type` is `"unknown"` and
+    /// `connection_downlink`/`connection_rtt` are `0.0`/`0` - honest
+    /// "not measured" defaults, not fabricated readings.
+    pub connection_api_available: bool,
     pub battery_level: f64,
     pub battery_charging: bool,
+    /// Whether `navigator.getBattery` was actually present and resolved.
+    /// When `false`, `battery_level`/`battery_charging` are `0.0`/`false` -
+    /// honest "not measured" defaults, not fabricated readings (most
+    /// browsers besides Firefox for Android have removed the Battery
+    /// Status API entirely).
+    pub battery_api_available: bool,
 }
 
 #[wasm_bindgen]
@@ -326,6 +343,11 @@ impl PerformanceMetrics {
     }
 
     #[wasm_bindgen(getter)]
+    pub fn memory_api_available(&self) -> bool {
+        self.memory_api_available
+    }
+
+    #[wasm_bindgen(getter)]
     pub fn connection_type(&self) -> String {
         self.connection_type.clone()
     }
@@ -341,6 +363,11 @@ impl PerformanceMetrics {
     }
 
     #[wasm_bindgen(getter)]
+    pub fn connection_api_available(&self) -> bool {
+        self.connection_api_available
+    }
+
+    #[wasm_bindgen(getter)]
     pub fn battery_level(&self) -> f64 {
         self.battery_level
     }
@@ -348,6 +375,11 @@ impl PerformanceMetrics {
     #[wasm_bindgen(getter)]
     pub fn battery_charging(&self) -> bool {
         self.battery_charging
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn battery_api_available(&self) -> bool {
+        self.battery_api_available
     }
 }
 

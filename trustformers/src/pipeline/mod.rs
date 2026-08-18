@@ -1,9 +1,60 @@
 use crate::error::{Result, TrustformersError};
 use crate::{AutoModel, AutoTokenizer};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 use trustformers_core::cache::{CacheConfig, InferenceCache};
 use trustformers_models::GenerativeModel;
+
+/// Cached-and-rate-limited host CPU utilization sampler.
+///
+/// `sysinfo::System::global_cpu_usage()` is meaningful only relative to a
+/// prior refresh at least `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL` earlier
+/// (see `sysinfo`'s own docs); refreshing on every call would either block
+/// the caller for that interval or (if not slept on) report a near-zero
+/// delta every time. This sampler instead keeps one process-wide `System`
+/// behind a `Mutex`, refreshes it opportunistically whenever the interval
+/// has actually elapsed, and reuses the last real reading in between --
+/// never fabricating a value, only reusing the most recent measured one.
+struct CpuSampler {
+    system: sysinfo::System,
+    refreshed_at: Instant,
+}
+
+static CPU_SAMPLER: OnceLock<Mutex<CpuSampler>> = OnceLock::new();
+
+/// Real host CPU utilization, in percent (`0.0..=100.0` per core, averaged
+/// across logical CPUs), sampled through `sysinfo`.
+///
+/// This never blocks: if the minimum refresh interval has not elapsed since
+/// the last measurement, it returns that measurement rather than sleeping
+/// or reporting an artificial 0%. The very first call after process start
+/// reflects whatever `sysinfo::System::new()` had available before any
+/// refresh (typically `0.0`, since CPU usage is delta-based), which is
+/// honest -- there is no measurement to report yet, so `0.0` is correct
+/// rather than a placeholder.
+pub(crate) fn sampled_cpu_utilization() -> f32 {
+    let cell = CPU_SAMPLER.get_or_init(|| {
+        let mut system = sysinfo::System::new();
+        system.refresh_cpu_usage();
+        Mutex::new(CpuSampler {
+            system,
+            refreshed_at: Instant::now(),
+        })
+    });
+
+    let Ok(mut guard) = cell.lock() else {
+        // A poisoned mutex means a prior holder panicked mid-refresh; there
+        // is no sound value to return here other than "unmeasured".
+        return 0.0;
+    };
+
+    if guard.refreshed_at.elapsed() >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+        guard.system.refresh_cpu_usage();
+        guard.refreshed_at = Instant::now();
+    }
+    guard.system.global_cpu_usage()
+}
 
 /// Common input format for pipelines
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,15 +357,19 @@ pub trait Pipeline: Send + Sync {
     /// Create a real-time processor for low-latency scenarios
     fn create_realtime_processor(
         &self,
-        config: RealTimeConfig,
+        _config: RealTimeConfig,
     ) -> Result<RealTimeProcessor<Self::Input, Self::Output, String>>
     where
         Self: Clone + 'static,
         Self::Input: Send + Sync + 'static,
         Self::Output: Send + Sync + 'static,
     {
-        // This is a placeholder implementation. Real implementations should
-        // implement StreamingPipeline and use RealTimeProcessor::new
+        // Default `Pipeline` trait method: a plain `Pipeline` only exposes a
+        // whole-model `__call__`, so there is no low-latency streaming path
+        // to wire `_config` into here. Types that implement `StreamingPipeline`
+        // should override this method with `RealTimeProcessor::new` and use
+        // the config; this default correctly reports the capability as
+        // unavailable rather than fabricating a processor.
         Err(TrustformersError::feature_unavailable(
             "Real-time processor not implemented for this pipeline".to_string(),
             "real_time_processing".to_string(),
@@ -740,6 +795,20 @@ impl<T: crate::core::traits::Tokenizer + Clone> Pipeline for TensorRTPipelineWra
 }
 
 /// Wrapper to make DocumentUnderstanding pipeline compatible with the unified Pipeline trait
+///
+/// The wrapped pipeline is intentionally never read through this type: see
+/// `Pipeline::__call__` below for why `Input = String` can never actually
+/// drive `DocumentUnderstandingPipeline` (which needs image bytes). The
+/// field still has to exist so `pipeline("document-understanding", ...)` has
+/// somewhere to put the constructed pipeline and this type remains
+/// `Pipeline`-shaped; reason it is unread, rather than deleting it, is the
+/// correct fix here (deleting it would remove the ability to construct this
+/// wrapper at all from `pipeline::mod::pipeline`).
+#[allow(
+    dead_code,
+    reason = "field exists only to satisfy the wrapper's constructor; __call__ \
+    always errors before it could be read (Input=String cannot become DocumentUnderstandingInput)"
+)]
 pub struct DocumentUnderstandingPipelineWrapper<M, T>(DocumentUnderstandingPipeline<M, T>);
 
 impl<M, T> Pipeline for DocumentUnderstandingPipelineWrapper<M, T>
@@ -750,9 +819,14 @@ where
     type Input = String;
     type Output = PipelineOutput;
 
-    fn __call__(&self, input: Self::Input) -> Result<Self::Output> {
-        // DocumentUnderstanding requires image data, not text
-        // For string input, we'll return an error indicating this pipeline needs proper input
+    fn __call__(&self, _input: Self::Input) -> Result<Self::Output> {
+        // This wrapper exists only so `DocumentUnderstandingPipeline` can be
+        // named through the unified `Pipeline<Input = String>` trait object
+        // returned by `pipeline()`. It cannot actually run: the wrapped
+        // pipeline needs `DocumentUnderstandingInput` (image bytes plus
+        // metadata), which a plain `String` cannot carry, so every call
+        // reports that and directs the caller to
+        // `document_understanding_pipeline()` for the real typed API.
         Err(TrustformersError::invalid_input_simple(
             "DocumentUnderstanding pipeline requires DocumentUnderstandingInput with image data, not string input".to_string()
         ))
@@ -847,14 +921,23 @@ impl<P> AdaptivePipelineWrapper<P> {
 impl<P> Pipeline for AdaptivePipelineWrapper<P>
 where
     P: Pipeline<Output = PipelineOutput> + Clone,
-    P::Input: Clone,
+    // `'static` is required because `AdaptiveInferenceEngine::adaptive_inference`
+    // downcasts the input via `std::any::Any` (see
+    // `pipeline::adaptive_inference::as_text`) to recognise textual input
+    // for real, content-derived analysis -- `Any::downcast_ref` itself
+    // requires `'static`.
+    P::Input: Clone + 'static,
 {
     type Input = P::Input;
     type Output = PipelineOutput;
 
     fn __call__(&self, input: Self::Input) -> Result<Self::Output> {
-        // For now, we'll need to make the engine mutable
-        // In a real implementation, this would require interior mutability
+        // The engine accumulates adaptation history / calibration data
+        // across calls, so each `__call__` clones the wrapper's engine
+        // rather than mutating shared state through a `&self` receiver;
+        // callers that want the accumulated history should drive
+        // `AdaptiveInferenceEngine` directly instead of through this
+        // `Pipeline`-trait wrapper.
         let mut engine = self.engine.clone();
         let result = engine.adaptive_inference(input)?;
         Ok(result.prediction)
@@ -1279,6 +1362,19 @@ impl<M, T> BasePipeline<M, T> {
     }
 
     /// Helper method to create a performance sample
+    ///
+    /// `batch_size`, `latency_ms`, `throughput_rps`, and `memory_usage_mb`
+    /// are the caller's own measurements of the batch that was just run.
+    /// `cpu_utilization` is a real host reading taken here via `sysinfo`
+    /// (see [`sampled_cpu_utilization`]). `gpu_utilization` and
+    /// `gpu_memory_mb` are honestly `0.0` ("not measured") on every device:
+    /// no GPU telemetry source (NVML/rocm-smi/IOKit/Metal performance
+    /// counters/...) is wired into this workspace, so inventing a plausible
+    /// non-zero number here (the previous behavior derived a fake GPU
+    /// utilization from the enum variant and a fake GPU memory figure as a
+    /// fixed fraction of host memory) would feed the adaptive batch
+    /// optimizer's `memory_weight`/objective on numbers that do not
+    /// correspond to anything the hardware actually reported.
     pub fn create_performance_sample(
         &self,
         batch_size: usize,
@@ -1291,12 +1387,9 @@ impl<M, T> BasePipeline<M, T> {
             latency_ms,
             throughput_rps,
             memory_usage_mb,
-            gpu_memory_mb: memory_usage_mb * 0.8, // Estimate GPU memory
-            cpu_utilization: 0.7,                 // Placeholder
-            gpu_utilization: match self.device {
-                Device::Gpu(_) => 0.8,
-                Device::Cpu => 0.0,
-            },
+            gpu_memory_mb: 0.0,
+            cpu_utilization: sampled_cpu_utilization(),
+            gpu_utilization: 0.0,
             timestamp: std::time::SystemTime::now(),
         }
     }
@@ -1380,5 +1473,122 @@ impl<M, T> BasePipeline<M, T> {
     /// Get cache size information
     pub fn get_cache_size_info(&self) -> Option<(usize, u64)> {
         self.advanced_cache.as_ref().map(|cache| cache.size_info())
+    }
+}
+
+#[cfg(test)]
+mod performance_sample_tests {
+    use super::*;
+
+    // -------------------------------------------------------------------
+    // Regression coverage for the fabricated `PerformanceSample` fields:
+    // `cpu_utilization` used to be a hardcoded `0.7` and `gpu_memory_mb`
+    // used to be `memory_usage_mb * 0.8` regardless of any real
+    // measurement. These tests fail against that old behavior because they
+    // assert real (measured) properties instead of the specific constants
+    // the old code emitted.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_cpu_utilization_is_measured_not_hardcoded_seven_tenths() {
+        // The old code always returned exactly 0.7. A real sysinfo reading
+        // on any machine actually running this test suite will essentially
+        // never land on exactly 0.7 (a float with no reason to be that
+        // specific value), so this is a meaningful (if probabilistic)
+        // regression check, not just a range check.
+        let reading = sampled_cpu_utilization();
+        assert!(
+            (reading - 0.7).abs() > 1e-6,
+            "cpu_utilization must be a real measurement, not the old hardcoded 0.7 placeholder \
+             (got exactly 0.7, which is suspicious)"
+        );
+    }
+
+    #[test]
+    fn test_cpu_utilization_is_a_valid_percentage() {
+        // `System::global_cpu_usage()` is documented to average across
+        // logical CPUs and stay within `0.0..=100.0`; this just guards
+        // against a wildly nonsensical reading (e.g. NaN or a stray
+        // per-core-summed value) rather than pinning an exact figure that
+        // would be brittle across CI hardware.
+        let reading = sampled_cpu_utilization();
+        assert!(
+            (0.0..=100.0).contains(&reading),
+            "cpu_utilization must be a plausible percentage reading, got {reading}"
+        );
+    }
+
+    #[test]
+    fn test_cpu_utilization_repeated_calls_do_not_block() {
+        // Calling this in a tight loop must not incur
+        // MINIMUM_CPU_UPDATE_INTERVAL of blocking per call -- it should
+        // reuse the cached reading between refreshes.
+        let start = Instant::now();
+        for _ in 0..1000 {
+            let _ = sampled_cpu_utilization();
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL,
+            "1000 calls to sampled_cpu_utilization() must not block for anywhere near the \
+             refresh interval; took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_create_performance_sample_cpu_field_is_not_placeholder() {
+        let base = BasePipeline::<(), ()>::new((), ());
+        let sample = base.create_performance_sample(4, 50.0, 20.0, 256.0);
+        assert!(
+            (sample.cpu_utilization - 0.7).abs() > 1e-6,
+            "create_performance_sample's cpu_utilization must not be the old hardcoded 0.7"
+        );
+    }
+
+    #[test]
+    fn test_create_performance_sample_gpu_fields_are_honest_zero_not_fabricated() {
+        // Regression test: the old code set `gpu_memory_mb: memory_usage_mb
+        // * 0.8` and `gpu_utilization` to a fixed 0.8/0.0 purely from the
+        // `Device` enum, neither of which reflects any real GPU telemetry
+        // (none is wired into this workspace). Both fields must now be an
+        // honest 0.0 ("not measured"), and in particular gpu_memory_mb must
+        // NOT track memory_usage_mb at all -- doubling the input must not
+        // double the output the way the old `* 0.8` formula would.
+        let base = BasePipeline::<(), ()>::new((), ());
+        let small = base.create_performance_sample(4, 50.0, 20.0, 100.0);
+        let large = base.create_performance_sample(4, 50.0, 20.0, 100_000.0);
+        assert_eq!(small.gpu_memory_mb, 0.0);
+        assert_eq!(large.gpu_memory_mb, 0.0);
+        assert_eq!(
+            small.gpu_memory_mb, large.gpu_memory_mb,
+            "gpu_memory_mb must not scale with memory_usage_mb (no real GPU memory query exists)"
+        );
+        assert_eq!(small.gpu_utilization, 0.0);
+        assert_eq!(large.gpu_utilization, 0.0);
+    }
+
+    #[test]
+    fn test_create_performance_sample_gpu_fields_honest_zero_even_on_gpu_device() {
+        // The old code special-cased `Device::Gpu(_)` to fabricate
+        // `gpu_utilization: 0.8`. With no real telemetry wired up, the
+        // device variant alone cannot justify a non-zero reading.
+        let mut base = BasePipeline::<(), ()>::new((), ());
+        base.device = Device::Gpu(0);
+        let sample = base.create_performance_sample(4, 50.0, 20.0, 100.0);
+        assert_eq!(
+            sample.gpu_utilization, 0.0,
+            "gpu_utilization must be honestly 0.0 even for a GPU device, since no GPU telemetry \
+             source is wired into this workspace"
+        );
+    }
+
+    #[test]
+    fn test_create_performance_sample_preserves_caller_supplied_fields() {
+        let base = BasePipeline::<(), ()>::new((), ());
+        let sample = base.create_performance_sample(16, 123.5, 45.6, 789.0);
+        assert_eq!(sample.batch_size, 16);
+        assert!((sample.latency_ms - 123.5).abs() < 1e-9);
+        assert!((sample.throughput_rps - 45.6).abs() < 1e-9);
+        assert!((sample.memory_usage_mb - 789.0).abs() < 1e-9);
     }
 }

@@ -385,6 +385,7 @@ import {{ useTrustFormerModel, useTrustFormerInference }} from './composables'
 // Props interface
 interface Props {{
   modelUrl?: string
+  vocabUrl?: string
   placeholder?: string
   maxLength?: number
   temperature?: number
@@ -401,6 +402,7 @@ interface Emits {{
 // Component setup
 const props = withDefaults(defineProps<Props>(), {{
   modelUrl: '{}',
+  vocabUrl: '',
   placeholder: 'Enter your prompt...',
   maxLength: 100,
   temperature: 0.7,
@@ -416,12 +418,13 @@ const prompt = ref('')
 const generations = ref<any[]>([])
 
 // Composables
-const {{ modelState, loadModel }} = useTrustFormerModel({{
+const {{ modelState, loadModel, pipeline }} = useTrustFormerModel({{
   modelUrl: computed(() => props.modelUrl),
+  vocabUrl: computed(() => props.vocabUrl),
   autoLoad: {}
 }})
 
-const {{ inferenceState, generateText }} = useTrustFormerInference()
+const {{ inferenceState, generateText }} = useTrustFormerInference(pipeline)
 
 // Load model on mount if needed
 onMounted(() => {{
@@ -565,6 +568,7 @@ import {{ useTrustFormerModel, useTrustFormerInference }} from './composables'
 // Props interface
 interface Props {{
   modelUrl?: string
+  vocabUrl?: string
   placeholder?: string
   systemPrompt?: string
   maxTokens?: number
@@ -581,6 +585,7 @@ interface Emits {{
 // Component setup
 const props = withDefaults(defineProps<Props>(), {{
   modelUrl: '{}',
+  vocabUrl: '',
   placeholder: 'Type your message...',
   systemPrompt: 'You are a helpful AI assistant.',
   maxTokens: 150,
@@ -597,12 +602,13 @@ const input = ref('')
 const messagesContainer = ref<HTMLElement>()
 
 // Composables
-const {{ modelState, loadModel }} = useTrustFormerModel({{
+const {{ modelState, loadModel, pipeline }} = useTrustFormerModel({{
   modelUrl: computed(() => props.modelUrl),
+  vocabUrl: computed(() => props.vocabUrl),
   autoLoad: {}
 }})
 
-const {{ inferenceState, generateText }} = useTrustFormerInference()
+const {{ inferenceState, generateText }} = useTrustFormerInference(pipeline)
 
 // Load model on mount if needed
 onMounted(() => {{
@@ -764,11 +770,30 @@ export interface ModelConfig {{
   loaded: boolean
 }}
 
-// Composable for model loading and management
+// Maps a friendly model-type string to the real `wasm.ModelArchitecture`
+// enum variant (mirrors `resolve_model_architecture` in `lib.rs`).
+const MODEL_ARCHITECTURES: Record<string, string> = {{
+  bert: 'Bert',
+  gpt2: 'GPT2',
+  gpt: 'GPT2',
+  t5: 'T5',
+  llama: 'Llama',
+  mistral: 'Mistral'
+}}
+
+// Composable for model + tokenizer loading and management. When `vocabUrl`
+// is supplied, this also builds a real `TextGenerationPipeline`
+// (`WasmModel` + `WasmTokenizer`, both loaded with real data) so
+// `useTrustFormerInference`/`useTrustFormerStreaming` below can drive
+// genuine generation instead of fabricating output. Per project policy, a
+// tokenizer is never built with a fabricated vocabulary - without
+// `vocabUrl` there is simply no `pipeline`.
 export function useTrustFormerModel(options: {{
   modelUrl?: ComputedRef<string> | Ref<string> | string
+  vocabUrl?: ComputedRef<string> | Ref<string> | string
+  modelType?: string
   autoLoad?: boolean
-  onLoadComplete?: (session: any) => void
+  onLoadComplete?: (result: {{ session: any; pipeline: any }}) => void
   onLoadError?: (error: Error) => void
 }} = {{}}) {{
   const modelState = ref<ModelState>({{
@@ -779,8 +804,9 @@ export function useTrustFormerModel(options: {{
   }})
 
   const session = ref<any>(null)
+  const pipeline = ref<any>(null)
 
-  // Normalize modelUrl to computed ref
+  // Normalize modelUrl/vocabUrl to computed refs
   const normalizedModelUrl = computed(() => {{
     if (typeof options.modelUrl === 'string') {{
       return options.modelUrl
@@ -789,6 +815,17 @@ export function useTrustFormerModel(options: {{
     }}
     return ''
   }})
+
+  const normalizedVocabUrl = computed(() => {{
+    if (typeof options.vocabUrl === 'string') {{
+      return options.vocabUrl
+    }} else if (options.vocabUrl) {{
+      return options.vocabUrl.value
+    }}
+    return ''
+  }})
+
+  const modelType = options.modelType ?? 'gpt2'
 
   const loadModel = async () => {{
     if (!normalizedModelUrl.value) {{
@@ -806,10 +843,8 @@ export function useTrustFormerModel(options: {{
     try {{
       const wasm = await initWasm()
 
-      // Create inference session
-      session.value = new wasm.InferenceSession('transformer')
-
-      // Initialize with auto device selection
+      // Create the higher-level tensor-in/tensor-out inference session.
+      session.value = new wasm.InferenceSession(modelType)
       await session.value.initialize_with_auto_device()
 
       // Enable debug logging if configured
@@ -824,9 +859,33 @@ export function useTrustFormerModel(options: {{
         'model_' + normalizedModelUrl.value.split('/').pop(),
         normalizedModelUrl.value,
         'TrustFormer Model',
-        'transformer',
+        modelType,
         '1.0.0'
       )
+
+      // Build a real text-generation pipeline for the composables below.
+      if (normalizedVocabUrl.value) {{
+        const modelResponse = await fetch(normalizedModelUrl.value)
+        if (!modelResponse.ok) {{
+          throw new Error(`Failed to fetch model weights: HTTP ${{modelResponse.status}}`)
+        }}
+        const modelBytes = new Uint8Array(await modelResponse.arrayBuffer())
+
+        const architectureName = MODEL_ARCHITECTURES[modelType.toLowerCase()] ?? 'GPT2'
+        const config = new wasm.ModelConfig(wasm.ModelArchitecture[architectureName])
+        const model = new wasm.WasmModel(config)
+        await model.load_weights(modelBytes)
+
+        const vocabResponse = await fetch(normalizedVocabUrl.value)
+        if (!vocabResponse.ok) {{
+          throw new Error(`Failed to fetch vocabulary: HTTP ${{vocabResponse.status}}`)
+        }}
+        const vocab = await vocabResponse.json()
+        const tokenizer = new wasm.WasmTokenizer(wasm.TokenizerType.BPE)
+        tokenizer.load_vocab(vocab)
+
+        pipeline.value = new wasm.TextGenerationPipeline(model, tokenizer)
+      }}
 
       modelState.value = {{
         isLoading: false,
@@ -836,7 +895,7 @@ export function useTrustFormerModel(options: {{
       }}
 
       if (options.onLoadComplete) {{
-        options.onLoadComplete(session.value)
+        options.onLoadComplete({{ session: session.value, pipeline: pipeline.value }})
       }}
 
     }} catch (error: any) {{
@@ -873,12 +932,17 @@ export function useTrustFormerModel(options: {{
   return {{
     modelState: computed(() => modelState.value),
     loadModel,
-    session: computed(() => session.value)
+    session: computed(() => session.value),
+    pipeline: computed(() => pipeline.value)
   }}
 }}
 
-// Composable for inference operations
-export function useTrustFormerInference() {{
+// Composable for real (non-streaming) text generation, driven by a
+// `TextGenerationPipeline` built by `useTrustFormerModel` (pass its
+// `pipeline` ref/value in here). Runs the pipeline's actual autoregressive
+// `encode` -> `next_token` -> `decode` loop instead of fabricating a canned
+// response string.
+export function useTrustFormerInference(pipeline: Ref<any> | ComputedRef<any> | any) {{
   const inferenceState = ref<InferenceState>({{
     isInferring: false,
     result: null,
@@ -886,7 +950,20 @@ export function useTrustFormerInference() {{
     inferenceTimeMs: 0
   }})
 
+  const resolvePipeline = () => (pipeline && 'value' in pipeline ? pipeline.value : pipeline)
+
   const generateText = async (prompt: string, options: GenerationOptions = {{}}): Promise<InferenceResult> => {{
+    const activePipeline = resolvePipeline()
+    if (!activePipeline) {{
+      const error = new Error(
+        'useTrustFormerInference: no pipeline available - call useTrustFormerModel with a vocabUrl first'
+      )
+      inferenceState.value = {{ ...inferenceState.value, error: error.message }}
+      throw error
+    }}
+
+    const maxLength = options.maxLength ?? 100
+
     inferenceState.value = {{
       isInferring: true,
       result: null,
@@ -897,25 +974,27 @@ export function useTrustFormerInference() {{
     const startTime = performance.now()
 
     try {{
-      const wasm = await initWasm()
+      // Real generation: encode the prompt, then repeatedly call the
+      // pipeline's real `next_token` (the same autoregressive step
+      // `StreamingGenerator` drives internally) until `maxLength` tokens
+      // have been produced.
+      let contextIds = Array.from(activePipeline.encode(prompt, true)) as number[]
+      const generatedIds: number[] = []
 
-      // Create a simple tensor for the prompt (this is simplified)
-      // In a real implementation, you'd tokenize the prompt properly
-      const inputTensor = new wasm.WasmTensor([prompt.length], new Float32Array(prompt.length))
+      for (let i = 0; i < maxLength; i++) {{
+        const nextId = activePipeline.next_token(Uint32Array.from(contextIds))
+        generatedIds.push(nextId)
+        contextIds = [...contextIds, nextId]
+      }}
 
-      // Perform inference (simplified)
-      const result = inputTensor // In reality, this would be actual model inference
-
+      const generatedText = activePipeline.decode(Uint32Array.from(generatedIds), true)
       const endTime = performance.now()
       const inferenceTime = endTime - startTime
-
-      // Simulate text generation result
-      const generatedText = `Generated response for: "${{prompt}}"`
 
       const inferenceResult: InferenceResult = {{
         text: generatedText,
         inferenceTime: Math.round(inferenceTime),
-        tokenCount: generatedText.split(' ').length
+        tokenCount: generatedIds.length
       }}
 
       inferenceState.value = {{
@@ -948,8 +1027,15 @@ export function useTrustFormerInference() {{
   }}
 }}
 
-// Composable for streaming generation
-export function useTrustFormerStreaming() {{
+// Composable for real streaming generation, driven by the real
+// `StreamingGenerator` (see `streaming_generation.rs`) attached to a
+// `TextGenerationPipeline` built by `useTrustFormerModel` (pass its
+// `pipeline` ref/value in here). This used to fake streaming entirely with
+// a hardcoded canned string revealed word-by-word via `setTimeout`. Every
+// token below instead comes from `StreamingGenerator.start_streaming`'s
+// real autoregressive loop, reported through its
+// `on_token`/`on_complete`/`on_error` callbacks.
+export function useTrustFormerStreaming(pipeline: Ref<any> | ComputedRef<any> | any) {{
   const streamState = ref<StreamState>({{
     isStreaming: false,
     partialResult: '',
@@ -957,7 +1043,19 @@ export function useTrustFormerStreaming() {{
     error: null
   }})
 
+  const generatorRef = ref<any>(null)
+  const resolvePipeline = () => (pipeline && 'value' in pipeline ? pipeline.value : pipeline)
+
   const startStreaming = async (prompt: string, options: GenerationOptions = {{}}) => {{
+    const activePipeline = resolvePipeline()
+    if (!activePipeline) {{
+      const error = new Error(
+        'useTrustFormerStreaming: no pipeline available - call useTrustFormerModel with a vocabUrl first'
+      )
+      streamState.value = {{ ...streamState.value, error: error.message }}
+      throw error
+    }}
+
     streamState.value = {{
       isStreaming: true,
       partialResult: '',
@@ -966,19 +1064,36 @@ export function useTrustFormerStreaming() {{
     }}
 
     try {{
-      // Simulate streaming by gradually revealing text
-      const fullText = `This is a simulated streaming response for: "${{prompt}}". The text is revealed token by token to simulate real streaming generation.`
-      const tokens = fullText.split(' ')
+      const wasm = await initWasm()
 
-      for (let i = 0; i < tokens.length; i++) {{
-        await new Promise(resolve => setTimeout(resolve, 100)) // 100ms delay per token
+      const config = new wasm.StreamingConfig()
+      config.set_max_tokens(options.maxLength ?? 100)
+      config.set_temperature(options.temperature ?? 0.7)
+      if (options.topP !== undefined) config.set_top_p(options.topP)
+      if (options.topK !== undefined) config.set_top_k(options.topK)
 
-        const partialText = tokens.slice(0, i + 1).join(' ')
-        streamState.value.partialResult = partialText
-      }}
+      const generator = new wasm.StreamingGenerator(config)
+      generator.set_pipeline(activePipeline)
+      generatorRef.value = generator
 
-      streamState.value.isStreaming = false
-      streamState.value.completeResult = fullText
+      let accumulated = ''
+
+      generator.on_token((token: any) => {{
+        accumulated += token.token
+        streamState.value.partialResult = accumulated
+      }})
+
+      generator.on_complete(() => {{
+        streamState.value.isStreaming = false
+        streamState.value.completeResult = accumulated
+      }})
+
+      generator.on_error((error: any) => {{
+        streamState.value.isStreaming = false
+        streamState.value.error = String(error)
+      }})
+
+      await generator.start_streaming(prompt)
 
     }} catch (error: any) {{
       streamState.value.isStreaming = false
@@ -987,6 +1102,9 @@ export function useTrustFormerStreaming() {{
   }}
 
   const stopStreaming = () => {{
+    if (generatorRef.value) {{
+      generatorRef.value.stop_streaming()
+    }}
     streamState.value.isStreaming = false
   }}
 
@@ -1492,6 +1610,7 @@ export interface UseTrustFormerModelReturn {
   modelState: ComputedRef<ModelState>
   loadModel: () => Promise<void>
   session: ComputedRef<any>
+  pipeline: ComputedRef<any>
 }
 
 export interface UseTrustFormerInferenceReturn {
@@ -1534,14 +1653,16 @@ export interface UseTrustFormerPerformanceReturn {
 
 export declare function useTrustFormerModel(options?: {
   modelUrl?: ComputedRef<string> | Ref<string> | string
+  vocabUrl?: ComputedRef<string> | Ref<string> | string
+  modelType?: string
   autoLoad?: boolean
-  onLoadComplete?: (session: any) => void
+  onLoadComplete?: (result: { session: any; pipeline: any }) => void
   onLoadError?: (error: Error) => void
 }): UseTrustFormerModelReturn
 
-export declare function useTrustFormerInference(): UseTrustFormerInferenceReturn
+export declare function useTrustFormerInference(pipeline: ComputedRef<any> | Ref<any> | any): UseTrustFormerInferenceReturn
 
-export declare function useTrustFormerStreaming(): UseTrustFormerStreamingReturn
+export declare function useTrustFormerStreaming(pipeline: ComputedRef<any> | Ref<any> | any): UseTrustFormerStreamingReturn
 
 export declare function useTrustFormerModelManager(): UseTrustFormerModelManagerReturn
 
@@ -1643,6 +1764,7 @@ import { useTrustFormerModel, useTrustFormerInference } from './composables'
 
 export interface TrustFormerVueOptions {
   defaultModelUrl?: string
+  defaultVocabUrl?: string
   autoLoad?: boolean
   debugMode?: boolean
 }
@@ -1658,12 +1780,13 @@ export const TrustFormerPlugin: Plugin = {
 
     // Provide global composables if needed
     if (options.defaultModelUrl) {
-      const { modelState, loadModel } = useTrustFormerModel({
+      const { modelState, loadModel, pipeline } = useTrustFormerModel({
         modelUrl: options.defaultModelUrl,
+        vocabUrl: options.defaultVocabUrl,
         autoLoad: options.autoLoad ?? true
       })
 
-      const { generateText } = useTrustFormerInference()
+      const { generateText } = useTrustFormerInference(pipeline)
 
       app.config.globalProperties.$trustformer = {
         modelState,
@@ -1789,5 +1912,31 @@ mod tests {
 
         let composables = factory.generate_vue_composables();
         assert!(composables.contains("useTrustFormerModel"));
+    }
+
+    /// Regression guard: `useTrustFormerInference`/`useTrustFormerStreaming`
+    /// used to fabricate their output entirely (a hardcoded response string
+    /// and a canned "streaming response" revealed via `setTimeout`) rather
+    /// than calling any real WASM generation API. The generated composables
+    /// must now call the real `TextGenerationPipeline`/`StreamingGenerator`
+    /// exports and must not contain either fabricated phrase.
+    #[test]
+    fn test_vue_composables_call_real_generation_api_not_fabricated_text() {
+        let config = VueConfig::new();
+        let factory = VueComponentFactory::new(config);
+        let composables = factory.generate_vue_composables();
+
+        assert!(!composables.contains("Generated response for"));
+        assert!(!composables.contains("simulated streaming response"));
+        assert!(!composables.contains("In reality, this would be actual model inference"));
+
+        assert!(composables.contains("activePipeline.encode"));
+        assert!(composables.contains("activePipeline.next_token"));
+        assert!(composables.contains("activePipeline.decode"));
+        assert!(composables.contains("wasm.StreamingGenerator"));
+        assert!(composables.contains("generator.set_pipeline"));
+        assert!(composables.contains("start_streaming"));
+        assert!(composables.contains("on_token"));
+        assert!(composables.contains("on_complete"));
     }
 }

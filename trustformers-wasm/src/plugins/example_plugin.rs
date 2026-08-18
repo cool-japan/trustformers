@@ -41,6 +41,7 @@ impl Plugin for TextProcessorPlugin {
                 PluginPermission::ReadModelData,
                 PluginPermission::DebugAccess,
             ],
+            checksum: None,
         }
     }
 
@@ -155,6 +156,7 @@ impl Plugin for ModelOptimizerPlugin {
                 PluginPermission::GpuAccess,
                 PluginPermission::ProfilingAccess,
             ],
+            checksum: None,
         }
     }
 
@@ -299,6 +301,7 @@ impl Plugin for VisualizationPlugin {
             plugin_type: PluginType::Visualizer,
             dependencies: vec![],
             permissions: vec![PluginPermission::ReadModelData, PluginPermission::UiAccess],
+            checksum: None,
         }
     }
 

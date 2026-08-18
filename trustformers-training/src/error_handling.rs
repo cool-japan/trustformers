@@ -239,7 +239,7 @@ impl ErrorManager {
         };
 
         if let Err(e) = self.record_error(error.clone()) {
-            eprintln!("Failed to record error: {}", e);
+            tracing::error!("Failed to record error: {}", e);
         }
 
         error
@@ -318,16 +318,18 @@ impl ErrorManager {
                 let recent_matching_errors = self.count_recent_matching_errors(pattern)?;
 
                 if recent_matching_errors >= pattern.frequency_threshold {
-                    println!(
+                    tracing::warn!(
                         "🚨 Error pattern detected: {} (occurred {} times)",
-                        pattern.pattern_id, recent_matching_errors
+                        pattern.pattern_id,
+                        recent_matching_errors
                     );
 
                     // Apply suggested actions
                     for suggestion in &pattern.suggested_actions {
-                        println!(
+                        tracing::info!(
                             "💡 Suggestion: {} - {}",
-                            suggestion.action, suggestion.description
+                            suggestion.action,
+                            suggestion.description
                         );
                     }
                 }
@@ -360,7 +362,7 @@ impl ErrorManager {
     fn attempt_recovery(&self, error: &TrainingError) -> Result<()> {
         // Check if this is a critical error that requires immediate attention
         if is_critical_error(&error.error_code) {
-            println!(
+            tracing::error!(
                 "🚨 Critical error detected: {} - Manual intervention required",
                 error.error_code
             );
@@ -375,7 +377,7 @@ impl ErrorManager {
         // Try built-in recovery strategies first
         if let Some(success) = self.try_builtin_recovery(error)? {
             if success {
-                println!(
+                tracing::info!(
                     "✅ Built-in recovery successful for error: {}",
                     error.error_code
                 );
@@ -387,23 +389,23 @@ impl ErrorManager {
         if let Some(type_strategies) = strategies.get(&error.error_type) {
             for strategy in type_strategies {
                 if strategy.auto_apply && strategy.applicable_errors.contains(&error.error_code) {
-                    println!("🔧 Attempting automatic recovery: {}", strategy.name);
+                    tracing::info!("🔧 Attempting automatic recovery: {}", strategy.name);
 
                     match (strategy.handler)(error) {
                         Ok(action) => {
-                            println!("✅ Recovery action determined: {:?}", action);
+                            tracing::debug!("✅ Recovery action determined: {:?}", action);
 
                             // Execute the recovery action
                             if let Err(e) = self.execute_recovery_action(&action, error) {
-                                println!("❌ Failed to execute recovery action: {}", e);
+                                tracing::error!("❌ Failed to execute recovery action: {}", e);
                                 continue;
                             }
 
-                            println!("✅ Recovery action executed successfully");
+                            tracing::info!("✅ Recovery action executed successfully");
                             return Ok(());
                         },
                         Err(e) => {
-                            println!("❌ Recovery strategy failed: {}", e);
+                            tracing::error!("❌ Recovery strategy failed: {}", e);
                         },
                     }
                 }
@@ -419,25 +421,25 @@ impl ErrorManager {
     fn try_builtin_recovery(&self, error: &TrainingError) -> Result<Option<bool>> {
         match error.error_code.as_str() {
             "RESOURCE_OOM" | "RESOURCE_GPU_OOM" => {
-                println!("🔧 Attempting memory recovery for OOM error");
+                tracing::warn!("🔧 Attempting memory recovery for OOM error");
                 // Simulate memory cleanup
                 self.simulate_memory_cleanup()?;
                 Ok(Some(true))
             },
             "TRAIN_NAN_LOSS" | "TRAIN_INF_LOSS" => {
-                println!("🔧 Attempting numerical stability recovery");
+                tracing::warn!("🔧 Attempting numerical stability recovery");
                 // Suggest lower learning rate and gradient clipping
                 self.suggest_numerical_fixes(error)?;
                 Ok(Some(false)) // Don't automatically apply, just suggest
             },
             "DATA_FILE_NOT_FOUND" => {
-                println!("🔧 Attempting data path recovery");
+                tracing::warn!("🔧 Attempting data path recovery");
                 // Try to find alternative data paths
                 self.suggest_data_path_fixes(error)?;
                 Ok(Some(false))
             },
             "NETWORK_CONNECTION_TIMEOUT" => {
-                println!("🔧 Attempting network recovery");
+                tracing::warn!("🔧 Attempting network recovery");
                 // Try retry with exponential backoff
                 self.attempt_network_retry(error)?;
                 Ok(Some(true))
@@ -454,11 +456,11 @@ impl ErrorManager {
     ) -> Result<()> {
         match action {
             RecoveryAction::Continue => {
-                println!("📝 Recovery action: Continue training");
+                tracing::info!("📝 Recovery action: Continue training");
                 Ok(())
             },
             RecoveryAction::Retry { max_attempts } => {
-                println!(
+                tracing::info!(
                     "📝 Recovery action: Retry operation (max {} attempts)",
                     max_attempts
                 );
@@ -466,7 +468,7 @@ impl ErrorManager {
                 Ok(())
             },
             RecoveryAction::Restart { checkpoint } => {
-                println!(
+                tracing::info!(
                     "📝 Recovery action: Restart from checkpoint: {:?}",
                     checkpoint
                 );
@@ -474,18 +476,18 @@ impl ErrorManager {
                 Ok(())
             },
             RecoveryAction::Abort => {
-                println!("📝 Recovery action: Abort training");
+                tracing::error!("📝 Recovery action: Abort training");
                 Err(anyhow::anyhow!(
                     "Training aborted due to unrecoverable error"
                 ))
             },
             RecoveryAction::ReduceResources { factor } => {
-                println!("📝 Recovery action: Reduce resources by factor {}", factor);
+                tracing::info!("📝 Recovery action: Reduce resources by factor {}", factor);
                 // In a real implementation, would reduce batch size, model size, etc.
                 Ok(())
             },
             RecoveryAction::ChangeConfiguration { config_changes } => {
-                println!(
+                tracing::info!(
                     "📝 Recovery action: Change configuration: {:?}",
                     config_changes
                 );
@@ -493,7 +495,7 @@ impl ErrorManager {
                 Ok(())
             },
             RecoveryAction::SwitchFallback { fallback_config } => {
-                println!(
+                tracing::info!(
                     "📝 Recovery action: Switch to fallback configuration: {}",
                     fallback_config
                 );
@@ -505,23 +507,23 @@ impl ErrorManager {
 
     /// Simulate memory cleanup for OOM errors
     fn simulate_memory_cleanup(&self) -> Result<()> {
-        println!("🧹 Simulating memory cleanup...");
-        println!("  - Clearing unused tensors");
-        println!("  - Running garbage collection");
-        println!("  - Reducing batch size temporarily");
+        tracing::debug!("🧹 Simulating memory cleanup...");
+        tracing::debug!("  - Clearing unused tensors");
+        tracing::debug!("  - Running garbage collection");
+        tracing::debug!("  - Reducing batch size temporarily");
         Ok(())
     }
 
     /// Suggest numerical stability fixes
     fn suggest_numerical_fixes(&self, error: &TrainingError) -> Result<()> {
-        println!("💡 Numerical stability suggestions:");
-        println!("  - Reduce learning rate by factor of 10");
-        println!("  - Enable gradient clipping (max_norm=1.0)");
-        println!("  - Check input data normalization");
-        println!("  - Consider using mixed precision training");
+        tracing::info!("💡 Numerical stability suggestions:");
+        tracing::info!("  - Reduce learning rate by factor of 10");
+        tracing::info!("  - Enable gradient clipping (max_norm=1.0)");
+        tracing::info!("  - Check input data normalization");
+        tracing::info!("  - Consider using mixed precision training");
 
         if let Some(lr) = error.context.learning_rate {
-            println!("  - Current learning rate: {}, suggested: {}", lr, lr * 0.1);
+            tracing::info!("  - Current learning rate: {}, suggested: {}", lr, lr * 0.1);
         }
 
         Ok(())
@@ -529,31 +531,31 @@ impl ErrorManager {
 
     /// Suggest data path fixes
     fn suggest_data_path_fixes(&self, _error: &TrainingError) -> Result<()> {
-        println!("💡 Data path suggestions:");
-        println!("  - Check if file path is correct");
-        println!("  - Verify file permissions");
-        println!("  - Try relative vs absolute paths");
-        println!("  - Check if data is in expected location");
+        tracing::info!("💡 Data path suggestions:");
+        tracing::info!("  - Check if file path is correct");
+        tracing::info!("  - Verify file permissions");
+        tracing::info!("  - Try relative vs absolute paths");
+        tracing::info!("  - Check if data is in expected location");
         Ok(())
     }
 
     /// Attempt network retry with exponential backoff
     fn attempt_network_retry(&self, _error: &TrainingError) -> Result<()> {
-        println!("🔄 Attempting network retry with exponential backoff...");
+        tracing::warn!("🔄 Attempting network retry with exponential backoff...");
 
         for attempt in 1..=3 {
-            println!("  Attempt {}/3", attempt);
+            tracing::debug!("  Attempt {}/3", attempt);
 
             // Simulate network operation
             std::thread::sleep(std::time::Duration::from_millis(100 * (1 << attempt)));
 
             // Simulate random success/failure
             if fastrand::bool() {
-                println!("  ✅ Network operation succeeded");
+                tracing::info!("  ✅ Network operation succeeded");
                 return Ok(());
             }
 
-            println!("  ❌ Network operation failed, retrying...");
+            tracing::warn!("  ❌ Network operation failed, retrying...");
         }
 
         Err(anyhow::anyhow!("Network operation failed after 3 attempts"))
@@ -561,30 +563,30 @@ impl ErrorManager {
 
     /// Suggest manual recovery steps
     fn suggest_manual_recovery(&self, error: &TrainingError) {
-        println!("🔧 Manual recovery suggestions for {}:", error.error_code);
+        tracing::warn!("🔧 Manual recovery suggestions for {}:", error.error_code);
 
         for suggestion in &error.recovery_suggestions {
-            println!(
+            tracing::info!(
                 "  {} (Priority: {}) - {}",
                 if suggestion.automatic { "🤖 AUTO" } else { "👤 MANUAL" },
                 suggestion.priority,
                 suggestion.action
             );
-            println!("    📝 {}", suggestion.description);
+            tracing::info!("    📝 {}", suggestion.description);
         }
 
         // Additional context-specific suggestions
         if let Some(epoch) = error.context.epoch {
-            println!("  📊 Error occurred at epoch {}", epoch);
+            tracing::info!("  📊 Error occurred at epoch {}", epoch);
             if epoch < 5 {
-                println!(
+                tracing::info!(
                     "    💡 Early training failure - check data loading and model initialization"
                 );
             }
         }
 
         if let Some(step) = error.context.step {
-            println!("  📊 Error occurred at step {}", step);
+            tracing::info!("  📊 Error occurred at step {}", step);
         }
     }
 

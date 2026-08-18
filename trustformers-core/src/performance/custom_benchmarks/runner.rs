@@ -123,7 +123,7 @@ impl BenchmarkRunner {
             anyhow::bail!("No benchmarks to run");
         }
 
-        println!("Running {} benchmarks...", self.benchmarks.len());
+        tracing::info!("Running {} benchmarks...", self.benchmarks.len());
 
         if self.config.parallel && self.benchmarks.len() > 1 {
             self.run_parallel()?;
@@ -175,8 +175,8 @@ impl BenchmarkRunner {
     ) -> Result<BenchmarkReport> {
         let start_time = Instant::now();
 
-        println!("\nRunning benchmark: {}", benchmark.name());
-        println!("Description: {}", benchmark.description());
+        tracing::info!("\nRunning benchmark: {}", benchmark.name());
+        tracing::info!("Description: {}", benchmark.description());
 
         // Setup
         benchmark.setup()?;
@@ -198,12 +198,12 @@ impl BenchmarkRunner {
 
         // Warmup
         if warmup_iterations > 0 {
-            println!("  Warming up ({} iterations)...", warmup_iterations);
+            tracing::info!("  Warming up ({} iterations)...", warmup_iterations);
             benchmark.warmup(warmup_iterations)?;
         }
 
         // Measurement
-        println!("  Measuring ({} iterations)...", measurement_iterations);
+        tracing::info!("  Measuring ({} iterations)...", measurement_iterations);
         let mut iterations = Vec::new();
         let mut total_duration = Duration::ZERO;
 
@@ -211,7 +211,7 @@ impl BenchmarkRunner {
             // Check time limits
             if let Some(max_duration) = config.max_duration {
                 if total_duration > max_duration {
-                    println!("  Reached maximum duration, stopping early");
+                    tracing::info!("  Reached maximum duration, stopping early");
                     break;
                 }
             }
@@ -232,7 +232,7 @@ impl BenchmarkRunner {
             if config.validate_results {
                 let valid = benchmark.validate(&iteration)?;
                 if !valid {
-                    eprintln!("  Warning: Iteration {} failed validation", i);
+                    tracing::warn!("  Warning: Iteration {} failed validation", i);
                 }
             }
 
@@ -274,7 +274,7 @@ impl BenchmarkRunner {
             start_time.elapsed(),
         );
 
-        println!("  Completed in {:.2}s", start_time.elapsed().as_secs_f64());
+        tracing::info!("  Completed in {:.2}s", start_time.elapsed().as_secs_f64());
         // Note: print_summary is an instance method, can't call from static context
 
         Ok(report)
@@ -345,7 +345,7 @@ impl BenchmarkRunner {
             }
         }
 
-        println!("\nResults saved to: {}", output_dir);
+        tracing::info!("\nResults saved to: {}", output_dir);
         Ok(())
     }
 
@@ -375,7 +375,7 @@ impl BenchmarkRunner {
             }
         }
 
-        println!("\nResults saved to: {}", output_dir);
+        tracing::info!("\nResults saved to: {}", output_dir);
         Ok(())
     }
 }

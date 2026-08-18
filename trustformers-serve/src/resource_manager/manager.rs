@@ -294,6 +294,13 @@ impl ResourceManagementSystem {
             .await
             .context("Failed to track resource allocation")?;
 
+        // Register what this test now holds, so the next conflict check has
+        // something to compare against.
+        self.conflict_detector
+            .register_claim(test_id, requirements)
+            .await
+            .context("Failed to register resource claim")?;
+
         info!(
             "Resources allocated successfully for test: {} (ports: {}, dirs: {}, gpus: {}, db: {})",
             test_id,
@@ -369,6 +376,12 @@ impl ResourceManagementSystem {
             .mark_deallocated(allocation)
             .await
             .context("Failed to mark allocation as deallocated")?;
+
+        // Drop the claim so the resources become allocatable again.
+        self.conflict_detector
+            .release_claim(test_id)
+            .await
+            .context("Failed to release resource claim")?;
 
         info!(
             "Resource deallocation completed for: {}",

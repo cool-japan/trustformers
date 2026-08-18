@@ -362,7 +362,15 @@ impl NumaAllocator {
         let topology = self.topology.read().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         match &policy.strategy {
-            NumaStrategy::LocalNode => self.get_current_node(),
+            // `get_current_node` used to take no arguments and re-acquire
+            // `self.topology.read()` itself; called from here while this
+            // function's own `topology` guard was still held, that was a
+            // same-thread recursive read lock. `std::sync::RwLock` gives no
+            // reentrancy guarantee (its docs warn a second read from the
+            // same thread can deadlock against a writer queued in between),
+            // so `get_current_node` now takes the already-locked topology
+            // like its sibling `select_*` helpers instead of re-locking.
+            NumaStrategy::LocalNode => Self::get_current_node(&topology),
             NumaStrategy::Interleaved => self.select_least_loaded_node(&topology),
             NumaStrategy::PreferredNodes(nodes) => {
                 self.select_from_preferred_nodes(&topology, nodes, policy.strict)
@@ -382,11 +390,10 @@ impl NumaAllocator {
         }
     }
 
-    fn get_current_node(&self) -> Result<u32> {
+    fn get_current_node(topology: &NumaTopology) -> Result<u32> {
         // In a real implementation, this would detect which NUMA node the current thread is running on
         // For now, we'll use a simple heuristic based on thread ID
         let thread_id = thread::current().id();
-        let topology = self.topology.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         let node_count = topology.total_nodes;
 
         // Simple hash-based selection
@@ -1073,6 +1080,41 @@ mod tests {
             .expect("operation failed in test");
 
         assert!(topology.nodes.contains_key(&node_id));
+    }
+
+    /// Regression: `select_optimal_node`'s `LocalNode` branch used to call
+    /// `self.get_current_node()`, which independently re-acquired
+    /// `self.topology.read()` while `select_optimal_node`'s own `topology`
+    /// read guard was still held on the same thread. `std::sync::RwLock`
+    /// gives no reentrancy guarantee for that (its docs warn a second same
+    /// thread read can deadlock against a writer queued in between), so
+    /// `get_current_node` now takes the already-held guard instead of
+    /// re-locking. This test pins the observable behavior (`LocalNode`
+    /// resolves to a valid node) across that refactor; a `cargo expand` or
+    /// manual reading of `select_optimal_node` is the way to confirm no
+    /// second `self.topology.read()` call remains in that branch.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_local_node_strategy_resolves_without_reacquiring_topology_lock() {
+        let allocator = NumaAllocator::new().expect("operation failed in test");
+        let topology = allocator.get_topology();
+
+        // `NumaPolicy::default()` uses `NumaStrategy::LocalNode`, and passing
+        // `policy_name: None` resolves to that default -- this exercises
+        // exactly the `select_optimal_node` branch that used to re-acquire
+        // `self.topology.read()` recursively.
+        let allocation = allocator
+            .allocate_numa_aware(1024, 64, None, AccessPattern::Sequential)
+            .expect("LocalNode allocation must succeed without deadlocking");
+
+        assert!(
+            topology.nodes.contains_key(&allocation.node_id),
+            "LocalNode must resolve to a real node in the detected topology"
+        );
+
+        allocator
+            .deallocate(&allocation.allocation_id)
+            .expect("operation failed in test");
     }
 
     #[cfg(target_os = "linux")]

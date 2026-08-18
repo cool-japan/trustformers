@@ -567,9 +567,9 @@ impl ProtobufExporter {
         if self.config.validate_output {
             let warnings = ProtobufSerializer::validate_model(model)?;
             if !warnings.is_empty() {
-                eprintln!("Validation warnings:");
+                tracing::warn!("Validation warnings:");
                 for warning in warnings {
-                    eprintln!("  - {}", warning);
+                    tracing::warn!("  - {}", warning);
                 }
             }
         }

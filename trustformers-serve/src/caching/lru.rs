@@ -216,21 +216,36 @@ mod tests {
     // 9. hit_rate returns 1.0 with all hits
     #[test]
     fn test_cache_stats_hit_rate_all_hits() {
-        let stats = LruCacheStats { hits: 5, misses: 0, evictions: 0, total_bytes: 0 };
+        let stats = LruCacheStats {
+            hits: 5,
+            misses: 0,
+            evictions: 0,
+            total_bytes: 0,
+        };
         assert!((stats.hit_rate() - 1.0).abs() < 1e-9);
     }
 
     // 10. hit_rate returns 0.5 with equal hits and misses
     #[test]
     fn test_cache_stats_hit_rate_half() {
-        let stats = LruCacheStats { hits: 4, misses: 4, evictions: 0, total_bytes: 0 };
+        let stats = LruCacheStats {
+            hits: 4,
+            misses: 4,
+            evictions: 0,
+            total_bytes: 0,
+        };
         assert!((stats.hit_rate() - 0.5).abs() < 1e-9);
     }
 
     // 11. total_requests = hits + misses
     #[test]
     fn test_cache_stats_total_requests() {
-        let stats = LruCacheStats { hits: 3, misses: 7, evictions: 0, total_bytes: 0 };
+        let stats = LruCacheStats {
+            hits: 3,
+            misses: 7,
+            evictions: 0,
+            total_bytes: 0,
+        };
         assert_eq!(stats.total_requests(), 10);
     }
 
@@ -386,14 +401,24 @@ mod tests {
     // 26. LruCacheStats hit_rate with only misses returns 0.0
     #[test]
     fn test_cache_stats_hit_rate_only_misses() {
-        let s = LruCacheStats { hits: 0, misses: 10, evictions: 0, total_bytes: 0 };
+        let s = LruCacheStats {
+            hits: 0,
+            misses: 10,
+            evictions: 0,
+            total_bytes: 0,
+        };
         assert_eq!(s.hit_rate(), 0.0);
     }
 
     // 27. LruCacheStats hit_rate with only hits returns 1.0
     #[test]
     fn test_cache_stats_hit_rate_only_hits() {
-        let s = LruCacheStats { hits: 7, misses: 0, evictions: 0, total_bytes: 0 };
+        let s = LruCacheStats {
+            hits: 7,
+            misses: 0,
+            evictions: 0,
+            total_bytes: 0,
+        };
         assert!((s.hit_rate() - 1.0).abs() < 1e-9);
     }
 

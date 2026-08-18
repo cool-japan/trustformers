@@ -765,6 +765,12 @@ pub use router::{
     OpenAiInferenceBackend,
 };
 
+// ─── Backend ──────────────────────────────────────────────────────────────────
+
+mod backend;
+
+pub use backend::BatchExecutorBackend;
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

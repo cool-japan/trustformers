@@ -418,6 +418,10 @@ impl TensorMemoryPool {
 
         let mut pool = self.pool.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         pool.entry(shape).or_default().push(entry);
+        // `cleanup_if_needed` below also takes `self.pool.write()`; holding
+        // this guard across that call would deadlock (a `RwLock` write guard
+        // is exclusive, even against the same thread).
+        drop(pool);
 
         // Update current size and peak usage
         {
@@ -1157,6 +1161,50 @@ mod tests {
         // Get it again (should come from pool)
         let tensor2 = pool.get_tensor(&shape, crate::tensor::DType::F32)?;
         assert_eq!(tensor2.shape(), shape.as_slice());
+
+        Ok(())
+    }
+
+    /// Regression: `return_tensor` used to hold its own `self.pool.write()`
+    /// guard, unscoped, all the way through its call to `cleanup_if_needed`,
+    /// which also takes `self.pool.write()`. `RwLock::write` is exclusive
+    /// even against the same thread, so every `return_tensor` call that
+    /// actually reached the cleanup path (i.e. `cleanup_interval` elapsed,
+    /// or the pool exceeded its dynamic max size -- both false immediately
+    /// after construction, which is why the existing get/return tests above
+    /// never tripped this) deadlocked. `cleanup_interval: Duration::ZERO`
+    /// forces `should_cleanup_time` true on the very first call, driving
+    /// `return_tensor` straight into the previously-deadlocking path.
+    ///
+    /// A genuinely deadlocked call hangs rather than erroring, so this runs
+    /// the call on a background thread and fails on a bounded timeout
+    /// instead of hanging the whole suite.
+    #[test]
+    fn test_return_tensor_does_not_deadlock_on_cleanup() -> Result<()> {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let config = MemoryConfig {
+            cleanup_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let pool = Arc::new(TensorMemoryPool::new(config));
+
+        let shape = vec![2, 3];
+        let tensor = pool.get_tensor(&shape, crate::tensor::DType::F32)?;
+
+        let (tx, rx) = mpsc::channel();
+        let pool_clone = Arc::clone(&pool);
+        std::thread::spawn(move || {
+            let result = pool_clone.return_tensor(tensor);
+            // Only sent if return_tensor did not hang.
+            let _ = tx.send(result);
+        });
+
+        let result = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("return_tensor must return promptly, not deadlock on its own pool guard");
+        result?;
 
         Ok(())
     }

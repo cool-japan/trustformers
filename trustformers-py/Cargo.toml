@@ -20,12 +20,27 @@ readme = "README.md"
 name = "trustformers"
 crate-type = ["cdylib", "rlib"]
 
+# This crate is excluded from the main workspace (see `[workspace]` above), so it
+# cannot use `[lints] workspace = true`; these duplicate the main workspace's
+# `[workspace.lints]` table (trustformers/Cargo.toml at the repo root) by hand.
+[lints.rust]
+unused_variables = "warn"
+unused_imports = "warn"
+dead_code = "warn"
+unused_mut = "warn"
+unused_assignments = "warn"
+deprecated = "warn"
+
+[lints.clippy]
+all = "warn"
+
 [dependencies]
 # Python bindings — pinned to 0.28 to match scirs2-core 0.5.0 (which pins pyo3 = "0.28.3").
 # Upgrading to pyo3 0.29 is blocked until scirs2-core publishes with pyo3 0.29 support.
 # See RUSTSEC-2026-0176 / RUSTSEC-2026-0177 notes in TODO.md Security Advisories.
 pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
-scirs2-numpy = { version = "0.6.5" }
+# Pinned to 0.5.1 for the same pyo3-0.29-conflict reason as scirs2-core below.
+scirs2-numpy = { version = "0.5.1" }
 
 # Error handling
 anyhow = "1.0.100"
@@ -36,9 +51,22 @@ parking_lot = "0.12.5"
 lazy_static = "1.5"
 approx = "0.5"
 libc = "0.2"
+# Structured logging (replaces ad-hoc println!/eprintln! in library code, which a
+# Python extension module cannot let the host application route or filter).
+tracing = "0.1.44"
+# Real `model.safetensors` export for `save_pretrained`. Version matches the pin
+# used workspace-wide (trustformers-core / trustformers-models depend on it too).
+safetensors = "0.8"
 
 # SciRS2 Integration Policy: Use scirs2-core abstractions instead of direct dependencies
-scirs2-core = { version = "0.6.5", default-features = false, features = ["python", "random", "parallel", "array", "serialization"] }
+#
+# Pinned to 0.5.1 (not the nominal "latest crates" 0.6.5): scirs2-numpy 0.6.5 hard-requires
+# pyo3 = "0.29.0" (verified against its published Cargo.toml), which conflicts with this
+# crate's own `pyo3 = "0.28"` pin (both declare `links = "python"`, so only one may be in the
+# dependency graph). 0.5.1 is the version this workspace's own Cargo.lock already resolved
+# against pyo3 0.28.3. Bumping to 0.6.5 requires a pyo3 0.28 -> 0.29 migration across this
+# crate's ~9k lines of PyO3 surface, which is out of scope here; tracked as a follow-up.
+scirs2-core = { version = "0.5.1", default-features = false, features = ["python", "random", "parallel", "array", "serialization"] }
 
 # TrustformeRS dependencies (path-based for standalone build)
 trustformers-core = { path = "../trustformers-core", default-features = false }

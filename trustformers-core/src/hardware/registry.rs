@@ -446,6 +446,13 @@ impl HardwareRegistry {
         }
 
         backend_instances.remove(backend_id);
+        // `update_statistics` below takes `self.backends.read()`; holding this
+        // function's own write guards across that call would deadlock (a
+        // `RwLock` write guard excludes even a same-thread read), the same
+        // way `register_backend` already avoids it above by dropping its
+        // guards before calling `update_statistics`.
+        drop(backends);
+        drop(backend_instances);
 
         // Emit event
         self.emit_event(RegistryEvent::BackendUnregistered {
@@ -558,6 +565,10 @@ impl HardwareRegistry {
                 device_id
             )));
         }
+        // `update_statistics` below takes `self.devices.read()`; holding this
+        // function's own write guard across that call would deadlock (a
+        // `RwLock` write guard excludes even a same-thread read).
+        drop(devices);
 
         // Emit event
         self.emit_event(RegistryEvent::DeviceUnregistered {
@@ -974,7 +985,7 @@ impl ConsoleEventListener {
 
 impl RegistryEventListener for ConsoleEventListener {
     fn handle_event(&self, event: &RegistryEvent) {
-        println!("[{}] Registry event: {:?}", self.name, event);
+        tracing::info!("[{}] Registry event: {:?}", self.name, event);
     }
 
     fn name(&self) -> &str {
@@ -1141,6 +1152,50 @@ mod tests {
         assert!(
             registry.get_backend_instance("no-such-backend").is_none(),
             "an unregistered id must still return None"
+        );
+    }
+
+    /// Regression: `unregister_backend`/`unregister_device` used to hold
+    /// their own `backends`/`devices` write guard across the call to
+    /// `update_statistics`, which takes a `read` on that same lock.
+    /// `RwLock::write` excludes even a same-thread `read`, so the old code
+    /// deadlocked the calling thread every time either method ran (this is
+    /// not contention-dependent, unlike a read-read recursion -- a write
+    /// guard is always exclusive). `register_backend`/`register_device`
+    /// already got this right by dropping their guards first; the fix
+    /// mirrors that.
+    ///
+    /// A genuinely deadlocked call does not return an `Err`, it hangs
+    /// forever, so this drives both calls on a background thread and fails
+    /// (rather than hanging the whole suite) if they do not complete within
+    /// a generous bound.
+    #[test]
+    fn test_unregister_does_not_deadlock_on_its_own_locks() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let registry = Arc::new(HardwareRegistry::new());
+        let (tx, rx) = mpsc::channel();
+
+        let reg = Arc::clone(&registry);
+        std::thread::spawn(move || {
+            let backend = super::super::backends::CPUBackend::new();
+            let backend_id =
+                reg.register_backend(Box::new(backend)).expect("register_backend failed");
+            reg.unregister_backend(&backend_id).expect("unregister_backend failed");
+
+            let device = super::super::devices::CPUDevice::new("cpu-0".to_string());
+            reg.register_device(Box::new(device), "unused-backend-id")
+                .expect("register_device failed");
+            reg.unregister_device("cpu-0").expect("unregister_device failed");
+
+            // Only sent if neither call above hung.
+            let _ = tx.send(());
+        });
+
+        rx.recv_timeout(Duration::from_secs(10)).expect(
+            "unregister_backend/unregister_device must return promptly, not deadlock \
+             on their own write guard",
         );
     }
 }

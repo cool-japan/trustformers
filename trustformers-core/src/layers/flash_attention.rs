@@ -192,22 +192,21 @@ fn projected_attention(
     attention_mask: Option<&Tensor>,
     params: &FlashParams,
 ) -> Result<Tensor> {
+    // `forward_ref` borrows: the same `[batch, seq, hidden]` tensor feeds all
+    // three projections, and the owning `Layer::forward` would deep-copy it once
+    // per projection — three wasted copies per attention call.
     let query_states = split_heads(
-        &query.forward(hidden_states.clone())?,
+        &query.forward_ref(hidden_states)?,
         num_query_heads,
         head_dim,
     )?;
     let key_states = expand_kv_heads(
-        &split_heads(&key.forward(hidden_states.clone())?, num_kv_heads, head_dim)?,
+        &split_heads(&key.forward_ref(hidden_states)?, num_kv_heads, head_dim)?,
         num_kv_heads,
         num_query_heads,
     )?;
     let value_states = expand_kv_heads(
-        &split_heads(
-            &value.forward(hidden_states.clone())?,
-            num_kv_heads,
-            head_dim,
-        )?,
+        &split_heads(&value.forward_ref(hidden_states)?, num_kv_heads, head_dim)?,
         num_kv_heads,
         num_query_heads,
     )?;
@@ -1159,6 +1158,94 @@ mod tests {
                 &training.data().expect("data")
             ) > 1e-4,
             "training mode must apply attention dropout"
+        );
+    }
+
+    /// The shared projection pipeline feeds its hidden states to the three
+    /// projections through [`Layer::forward_ref`] instead of handing each one a
+    /// deep copy.
+    ///
+    /// The previous revision spelled this as three `forward(hidden_states.clone())`
+    /// calls, so the numbers must be *bit-identical* — this test pins that
+    /// equivalence. A `forward_ref` that ever diverged from `forward` would
+    /// silently change the output of every model built on `FlashAttention`,
+    /// `MultiQueryAttention` or `GroupedQueryAttention`, and only this assertion
+    /// would notice.
+    #[test]
+    fn projected_attention_borrows_without_changing_its_result() {
+        let (batch, seq, heads, head_dim) = (2usize, 6usize, 2usize, 4usize);
+        let hidden = heads * head_dim;
+        let query = linear(hidden, hidden, 11);
+        let key = linear(hidden, hidden, 21);
+        let value = linear(hidden, hidden, 31);
+        let out_proj = linear(hidden, hidden, 41);
+        let hidden_states = deterministic(&[batch, seq, hidden], 7);
+        let params = FlashParams::new(head_dim, false, 4);
+
+        let produced = projected_attention(
+            &hidden_states,
+            &query,
+            &key,
+            &value,
+            &out_proj,
+            heads,
+            heads,
+            head_dim,
+            None,
+            &params,
+        )
+        .expect("the borrowing pipeline must run");
+
+        // The pre-refactor pipeline, spelled out with the owning `forward`.
+        let reference = {
+            let q = split_heads(
+                &query.forward(hidden_states.clone()).expect("query projection"),
+                heads,
+                head_dim,
+            )
+            .expect("split query heads");
+            let k = expand_kv_heads(
+                &split_heads(
+                    &key.forward(hidden_states.clone()).expect("key projection"),
+                    heads,
+                    head_dim,
+                )
+                .expect("split key heads"),
+                heads,
+                heads,
+            )
+            .expect("expand key heads");
+            let v = expand_kv_heads(
+                &split_heads(
+                    &value.forward(hidden_states.clone()).expect("value projection"),
+                    heads,
+                    head_dim,
+                )
+                .expect("split value heads"),
+                heads,
+                heads,
+            )
+            .expect("expand value heads");
+            let context = flash_attention(&q, &k, &v, None, &params).expect("attention");
+            out_proj
+                .forward(merge_heads(&context).expect("merge heads"))
+                .expect("output projection")
+        };
+
+        assert_eq!(
+            max_abs_difference(
+                &produced.to_vec_f32().expect("f32"),
+                &reference.to_vec_f32().expect("f32")
+            ),
+            0.0,
+            "borrowing the hidden states must be bit-identical to cloning them"
+        );
+
+        // The caller still owns an untouched tensor.
+        assert_eq!(
+            hidden_states.to_vec_f32().expect("f32"),
+            deterministic(&[batch, seq, hidden], 7).to_vec_f32().expect("f32"),
+            "forward_ref must not mutate the caller's tensor"
         );
     }
 

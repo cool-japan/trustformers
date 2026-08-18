@@ -69,7 +69,7 @@ mod linear_tests;
 mod tests;
 
 pub use attention::{
-    AttentionConfig, AttentionOptimizationHints, AttentionProjections, AttentionUtils,
+    join_name, AttentionConfig, AttentionOptimizationHints, AttentionProjections, AttentionUtils,
     FlashAttention, MultiHeadAttention,
 };
 pub use conv2d::Conv2d;

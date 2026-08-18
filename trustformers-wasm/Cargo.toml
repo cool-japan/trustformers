@@ -31,6 +31,9 @@ dlmalloc = { version = "0.2.14", features = ["global"], optional = true }
 bytemuck = { workspace = true }
 # Pure-Rust F16/BF16 <-> F32 conversion for SafeTensors weight loading.
 half = { workspace = true }
+# Real SHA-256 plugin-bytes integrity checksums (see plugin_framework.rs);
+# RustCrypto, pure Rust, COOLJAPAN policy compliant.
+sha2 = { workspace = true }
 # Pure-Rust DEFLATE (RFC 1951) for real cache/chunk compression (COOLJAPAN
 # policy forbids flate2/zstd/lz4/etc. directly; oxiarc-* is the substitute).
 oxiarc-deflate = { workspace = true }

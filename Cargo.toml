@@ -11,7 +11,19 @@ members = [
     "trustformers-debug",
     "trustformers-serve",
 ]
-exclude = ["examples/server", "examples/grpc-server", "trustformers-py", "trustformers-c"]
+# Packages that live inside the repository tree but are intentionally not built as
+# workspace members. `trustformers-serve/clients/rust` is a standalone generated
+# client that is neither a member nor buildable in place; listing it here makes the
+# exclusion explicit instead of implicit.
+# (`trustformers-js` needs no entry: it contains no Cargo.toml at all, so cargo
+# never considers it a package.)
+exclude = [
+    "examples/server",
+    "examples/grpc-server",
+    "trustformers-py",
+    "trustformers-c",
+    "trustformers-serve/clients/rust",
+]
 resolver = "2"
 
 [workspace.package]
@@ -81,11 +93,15 @@ slh-dsa = "0.2.0-rc.5"
 rand_core = "0.10.1"
 # Arbitrary-precision integers for the Paillier cryptosystem and the
 # Schnorr/Fiat-Shamir sigma protocol (pure Rust).
-num-bigint = "0.5.1"
+num-bigint = { version = "0.5.1", features = ["rand_core_0_10"] }
 num-integer = "0.1.47"
 # Pure-Rust cross-platform system telemetry (CPU utilization, temperature sensors,
 # memory) for hardware/ device metrics. No C/C++ toolchain required.
-sysinfo = { version = "0.38.4", default-features = false, features = ["system", "component"] }
+# One version for the whole workspace: trustformers-serve used to pin 0.39 locally
+# for `sysinfo::Disks` / `sysinfo::Networks`, which put two majors of sysinfo in
+# every build. It now takes this entry and adds the `disk`/`network` features on
+# top, so the duplicate is gone.
+sysinfo = { version = "0.39.6", default-features = false, features = ["system", "component"] }
 
 # ML/Math dependencies
 # Note: Per SciRS2 Integration Policy, scientific computing deps are accessed via scirs2-core
@@ -234,6 +250,8 @@ web-sys = { version = "0.3.103", features = [
     "ScreenOrientation",
     "Storage",
     "StorageManager",
+    "NetworkInformation",
+    "MediaQueryList",
     "NodeList",
     "HtmlCollection",
     "Url",
@@ -244,8 +262,10 @@ web-sys = { version = "0.3.103", features = [
 rmp-serde = "1.3"
 
 # Python bindings dependencies
+# NOTE: `numpy = "0.29"` used to be declared here with no consumer anywhere in the
+# workspace (trustformers-py is excluded from the workspace and binds NumPy through
+# `scirs2-numpy`). Removed so every entry in this table has a real user.
 pyo3 = "0.29"
-numpy = "0.29"
 
 # Additional core dependencies
 oxicode = { version = "0.2.6", features = ["serde"] }
@@ -329,6 +349,92 @@ scirs2-core = { version = "0.6.5", default-features = false, features = [
     "serialization",  # Required for config and model loading
     # Metal removed - enable via platform-specific dependencies in individual crates
 ]}
+
+# ---------------------------------------------------------------------------
+# COOLJAPAN workspace policy: every dependency version is declared exactly once,
+# here. Members reference them with `<crate>.workspace = true` and add only
+# `optional = true` / extra `features` on top. The entries below were hoisted out
+# of member manifests that used to carry inline version pins; the versions are the
+# ones already selected in Cargo.lock, so hoisting them does not change resolution.
+# ---------------------------------------------------------------------------
+
+# GPU / accelerator backends (trustformers-core, all optional & feature-gated)
+# `mpi` keeps `default-features = false` at the workspace level: its default
+# feature set builds `libffi-sys` (C) and fails on macOS ARM64.
+mpi = { version = "0.8.2", default-features = false }
+pollster = "0.4.0"
+opencl3 = "0.12.3"
+# Apple GPU stack (macOS/iOS target blocks only)
+metal = "0.33.0"
+mpsgraph = "0.2.0"
+# oxicuda: COOLJAPAN pure-Rust CUDA/Metal compute backends
+oxicuda-blas = "0.5.5"
+oxicuda-dnn = "0.5.5"
+oxicuda-memory = "0.5.5"
+oxicuda-driver = "0.5.5"
+oxicuda-metal = "0.5.5"
+oxicuda-backend = "0.5.5"
+
+# Mobile target-specific dependencies (trustformers-mobile). These are only ever
+# compiled for their `cfg(target_os = ...)` block; the versions live here so the
+# workspace has a single source of truth.
+objc = "0.2.7"
+core-foundation = "0.10.1"
+core-foundation-sys = "0.8.7"
+cocoa = "0.26.1"
+jni = "0.22.4"
+android_logger = "0.15.1"
+console_error_panic_hook = "0.1.7"
+
+# Tokenizer support crates
+# `mecab` is a C++ libmecab FFI binding: optional and excluded from every default
+# feature set (COOLJAPAN Pure-Rust policy).
+mecab = "0.1.6"
+crc32fast = "1.5.0"
+unicode_categories = "0.1.1"
+
+# Async stream adapters for the umbrella crate's `async` feature
+async-stream = "0.3.6"
+
+# Serving layer: GraphQL / OpenAPI / TLS / observability
+async-graphql = "7.2.1"
+async-graphql-axum = "7.2.1"
+utoipa = "5.5.0"
+# Pulls the banned `zip` crate through its build script; keep it optional and out
+# of every default feature set.
+utoipa-swagger-ui = "9.0.2"
+rustls = "0.23.43"
+glob = "0.3.4"
+opentelemetry = "0.32.0"
+opentelemetry-otlp = "0.32.0"
+opentelemetry-jaeger = "0.22.0"
+opentelemetry-zipkin = "0.32.0"
+opentelemetry-semantic-conventions = "0.32.1"
+tracing-opentelemetry = "0.33.0"
+
+# Serving layer: message queues
+# `rdkafka` builds librdkafka (C/C++ via cmake); optional, `kafka` feature only.
+rdkafka = "0.39.0"
+lapin = "4.10.0"
+redis = "1.5.0"
+async-nats = "0.49.1"
+
+# Serving layer: cloud provider SDKs
+aws-config = "1.10.1"
+aws-sdk-sqs = "1.105.0"
+aws-sdk-sagemaker = "1.221.0"
+aws-sdk-sagemakerruntime = "1.109.0"
+aws-sdk-lambda = "1.138.0"
+aws-sdk-cloudwatch = "1.123.0"
+# `lambda-web` depends on the banned `brotli` crates; optional, `lambda` feature only.
+lambda-web = "0.2.1"
+lambda_runtime = "1.3.0"
+google-cloud-gax = "1.13.0"
+google-cloud-functions-v2 = "1.13.0"
+azure_core = "1.1.0"
+azure_identity = "1.0.0"
+azure_mgmt_machinelearningservices = "0.21.0"
+azure_mgmt_web = "0.21.0"
 
 [profile.release]
 lto = true

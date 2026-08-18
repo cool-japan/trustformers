@@ -7,6 +7,7 @@
 //! - Dynamic quantization for runtime adaptation
 
 use half::f16;
+use scirs2_core::ndarray::{ArrayD, IxDyn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;

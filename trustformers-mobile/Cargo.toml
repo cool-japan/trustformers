@@ -27,6 +27,11 @@ tracing.workspace = true
 tokio.workspace = true
 sha2.workspace = true
 hex.workspace = true
+uuid.workspace = true
+safetensors.workspace = true
+aes-gcm.workspace = true
+pbkdf2.workspace = true
+oxiarc-zstd.workspace = true
 
 # Cryptography (pure Rust). Used by `advanced_security` / `advanced_privacy_mechanisms`
 # for real post-quantum KEM/signatures, real Paillier homomorphic encryption, real
@@ -37,6 +42,7 @@ slh-dsa.workspace = true
 rand_core.workspace = true
 num-bigint.workspace = true
 num-integer.workspace = true
+num-traits.workspace = true
 chacha20poly1305.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
@@ -71,16 +77,16 @@ path = "src/bin/abi-checker.rs"
 
 # iOS specific dependencies (conditional compilation)
 [target.'cfg(target_os = "ios")'.dependencies]
-objc = "0.2.7"
-core-foundation = "0.10.1"
-core-foundation-sys = "0.8.7"
-metal = "0.33.0"
-cocoa = "0.26.1"
+objc.workspace = true
+core-foundation.workspace = true
+core-foundation-sys.workspace = true
+metal.workspace = true
+cocoa.workspace = true
 
 # Android specific dependencies (conditional compilation)
 [target.'cfg(target_os = "android")'.dependencies]
-jni = "0.22.4"
-android_logger = "0.15.1"
+jni.workspace = true
+android_logger.workspace = true
 
 # WebAssembly specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -88,7 +94,7 @@ wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 web-sys.workspace = true
 js-sys.workspace = true
-console_error_panic_hook = "0.1.7"
+console_error_panic_hook.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

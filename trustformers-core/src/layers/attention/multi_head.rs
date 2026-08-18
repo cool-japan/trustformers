@@ -101,6 +101,12 @@ impl MultiHeadAttention {
     }
 
     /// Mutable counterpart of [`MultiHeadAttention::projections`].
+    ///
+    /// The four projections are separate fields of [`AttentionProjections`], so a
+    /// caller can borrow each of them mutably at once through this single handle —
+    /// which is what building a `Vec<(String, &mut Tensor)>` for
+    /// [`Model::named_tensors_mut`](crate::traits::Model::named_tensors_mut)
+    /// requires.
     pub fn projections_mut(&mut self) -> &mut AttentionProjections {
         &mut self.projections
     }
@@ -622,5 +628,69 @@ mod tests {
             MultiHeadAttention::new(512, 8, 0.1, true).expect("operation failed in test");
         attention.update_optimization_hints(2, 2048, Some(1024));
         assert!(attention.optimization_hints.use_flash_attention);
+    }
+
+    /// The projections now run through `Layer::forward_ref` instead of
+    /// `forward(x.clone())`, removing three deep clones of the hidden state per
+    /// attention call. That is a pure performance change: the numbers must be
+    /// bit-identical to what the cloning path produced.
+    ///
+    /// The check is anchored on `Linear` directly, because that is the layer
+    /// whose `forward_ref` the attention path calls: `forward_ref(&x)` must
+    /// equal `forward(x.clone())` for every projection and every input shape the
+    /// attention layer feeds it.
+    #[test]
+    fn projection_forward_ref_matches_the_cloning_path() {
+        let hidden_size = 32;
+        let attention = attention_with_weights(hidden_size, 4);
+        let input = deterministic(&[2, 6, hidden_size], 77);
+        let projections = attention.projections();
+
+        for (label, layer) in [
+            ("query", &projections.query),
+            ("key", &projections.key),
+            ("value", &projections.value),
+            ("out_proj", &projections.out_proj),
+        ] {
+            let cloned = layer.forward(input.clone()).expect("owning forward");
+            let borrowed = layer.forward_ref(&input).expect("borrowing forward");
+            assert_eq!(cloned.shape(), borrowed.shape(), "{label} shape");
+            assert_eq!(
+                max_abs_difference(
+                    &cloned.data().expect("data"),
+                    &borrowed.data().expect("data")
+                ),
+                0.0,
+                "{label}: forward_ref must be bit-identical to forward"
+            );
+        }
+    }
+
+    /// End-to-end guard on the same change: the full attention output must not
+    /// have moved, and the input the caller still owns must be untouched.
+    #[test]
+    fn self_attention_output_is_unchanged_and_leaves_its_input_intact() {
+        let hidden_size = 32;
+        let attention = attention_with_weights(hidden_size, 4);
+        let input = deterministic(&[1, 5, hidden_size], 91);
+        let before = input.data().expect("input data");
+
+        let first = attention
+            .forward_self_attention(&input, None, false)
+            .expect("first attention pass");
+        let second = attention
+            .forward_self_attention(&input, None, false)
+            .expect("second attention pass");
+
+        assert_eq!(
+            max_abs_difference(&first.data().expect("data"), &second.data().expect("data")),
+            0.0,
+            "borrowing the input must not make attention non-deterministic"
+        );
+        assert_eq!(
+            max_abs_difference(&before, &input.data().expect("input data")),
+            0.0,
+            "forward_ref must not mutate the caller's tensor"
+        );
     }
 }

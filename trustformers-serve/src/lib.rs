@@ -500,9 +500,9 @@ pub use slo::{
     SloPerformance, SloStats, SloTracker, SloWindow, TrendDirection, WindowType,
 };
 pub use speculative_decoding::{
-    DraftModel, DraftToken, ModelInfo as SpeculativeModelInfo, SpeculativeDecoder,
-    SpeculativeDecodingConfig, SpeculativeDecodingManager, SpeculativeStats, TargetModel,
-    VerificationResult,
+    validate_speculative_config, DraftModel, DraftToken, ModelInfo as SpeculativeModelInfo,
+    SpeculativeDecoder, SpeculativeDecodingConfig, SpeculativeDecodingManager, SpeculativeStats,
+    TargetModel, VerificationResult,
 };
 pub use streaming::{
     ChunkStream, SseEvent, SseHandler, StreamType, StreamingConfig, StreamingService,

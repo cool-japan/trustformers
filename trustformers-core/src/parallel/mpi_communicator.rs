@@ -60,11 +60,11 @@ impl MpiCommunicatorImpl {
             let rank = world.rank() as usize;
             let world_size = world.size() as usize;
 
-            println!("MPI Communicator initialized:");
-            println!("  Rank: {}", rank);
-            println!("  World Size: {}", world_size);
+            tracing::info!("MPI Communicator initialized:");
+            tracing::info!("  Rank: {}", rank);
+            tracing::info!("  World Size: {}", world_size);
             if let Ok(proc_name) = mpi::environment::processor_name() {
-                println!("  Processor Name: {}", proc_name);
+                tracing::info!("  Processor Name: {}", proc_name);
             }
 
             // SAFETY: MPI requests are only driven from a single dedicated MPI thread,

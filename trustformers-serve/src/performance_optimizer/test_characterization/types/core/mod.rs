@@ -1827,3 +1827,6 @@ pub struct ContextFactorType {
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod core_tests;
+
+#[cfg(test)]
+mod core_mod_tests;

@@ -1568,3 +1568,6 @@ mod tests {
         assert_eq!(state.arms.len(), 7);
     }
 }
+
+#[cfg(test)]
+mod ab_testing_extra_tests;

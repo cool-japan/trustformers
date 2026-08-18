@@ -665,3 +665,6 @@ pub struct GpuTelemetrySample {
 pub async fn discover_gpu_devices() -> types::GpuResult<Vec<types::GpuDeviceInfo>> {
     manager::GpuResourceManager::enumerate_devices(&types::GpuPoolConfig::default()).await
 }
+
+#[cfg(test)]
+mod types_tests;

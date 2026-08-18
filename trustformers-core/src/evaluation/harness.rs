@@ -95,7 +95,7 @@ impl EvaluationHarness {
         let mut combined_suite = EvaluationSuite::new();
 
         for (evaluator_name, evaluator) in &self.evaluators {
-            println!("Running evaluator: {}", evaluator_name);
+            tracing::info!("Running evaluator: {}", evaluator_name);
             let suite = evaluator.evaluate(model, &self.config)?;
 
             // Add all results to combined suite
@@ -274,7 +274,7 @@ impl EvaluationHarness {
         let json_string = serde_json::to_string_pretty(&summary_data)?;
         std::fs::write(output_path, json_string)?;
 
-        println!("Results saved to: {}", output_path);
+        tracing::info!("Results saved to: {}", output_path);
         Ok(())
     }
 
@@ -427,7 +427,7 @@ impl EvaluationHarness {
             let json_string = serde_json::to_string_pretty(&comparison_data)?;
             std::fs::write(output_path, json_string)?;
 
-            println!("Comparison saved to: {}", output_path);
+            tracing::info!("Comparison saved to: {}", output_path);
         }
 
         Ok(comparisons)

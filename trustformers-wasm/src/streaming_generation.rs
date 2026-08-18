@@ -4,6 +4,7 @@
 //! to generate text progressively for improved user experience.
 
 #![allow(dead_code)]
+use crate::core::pipeline::TextGenerationPipeline;
 use js_sys::{Array, Function, Object, Promise};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -11,6 +12,27 @@ use std::format;
 use std::string::String;
 use std::vec::Vec;
 use wasm_bindgen::prelude::*;
+
+/// Wall-clock milliseconds since the Unix epoch. `js_sys::Date::now()`
+/// unconditionally panics ("cannot call wasm-bindgen imported functions")
+/// when called on non-wasm32 targets - there is no JS engine to call into -
+/// so timing logic that needs to run under native `cargo test`/nextest
+/// (which only ever computes *differences* between two readings, never the
+/// absolute value itself) goes through this indirection instead. Same
+/// pattern as `optimization::batch_processing::now_ms`.
+#[cfg(target_arch = "wasm32")]
+fn now_ms() -> f64 {
+    js_sys::Date::now()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn now_ms() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
+}
 
 /// Streaming generation configuration
 #[wasm_bindgen]
@@ -27,10 +49,21 @@ pub struct StreamingConfig {
     stop_sequences: Vec<String>,
 }
 
-/// Streaming text generator
+/// Streaming text generator.
+///
+/// `pipeline` is the real transformer model + tokenizer driving generation.
+/// Before this fix, `StreamingGenerator` held no model reference at all -
+/// `generate_token_chunk` fabricated tokens as `format!("token_{n}")` with
+/// a `js_sys::Math::random()`-based "confidence" score, so every streamed
+/// "generation" was entirely disconnected from any real model, weights, or
+/// input prompt. A `StreamingGenerator` without a pipeline attached
+/// (`pipeline: None`) now returns a structured error from
+/// [`Self::start_streaming`] rather than silently falling back to
+/// fabricated output.
 #[wasm_bindgen]
 pub struct StreamingGenerator {
     config: StreamingConfig,
+    pipeline: Option<TextGenerationPipeline>,
     is_streaming: bool,
     current_session: Option<StreamingSession>,
     token_buffer: VecDeque<String>,
@@ -44,6 +77,11 @@ struct StreamingSession {
     id: String,
     prompt: String,
     generated_tokens: Vec<String>,
+    /// The full running token-id context (prompt + every real token
+    /// generated so far), rebuilt into the model's input on every step -
+    /// same "feed generated tokens back in" requirement as
+    /// [`crate::core::pipeline::TextGenerationPipeline::generate_ids`].
+    generated_ids: Vec<u32>,
     total_tokens: usize,
     start_time: f64,
     last_token_time: f64,
@@ -241,11 +279,15 @@ impl Default for StreamingConfig {
 
 #[wasm_bindgen]
 impl StreamingGenerator {
-    /// Create a new streaming generator
+    /// Create a new streaming generator with no model attached yet. Call
+    /// [`Self::set_pipeline`] before [`Self::start_streaming`], or
+    /// `start_streaming` returns a structured "no model loaded" error
+    /// rather than fabricating output.
     #[wasm_bindgen(constructor)]
     pub fn new(config: StreamingConfig) -> StreamingGenerator {
         StreamingGenerator {
             config,
+            pipeline: None,
             is_streaming: false,
             current_session: None,
             token_buffer: VecDeque::new(),
@@ -254,20 +296,45 @@ impl StreamingGenerator {
         }
     }
 
-    /// Start streaming text generation
+    /// Attach the real model + tokenizer pipeline that
+    /// [`Self::start_streaming`] will drive. Required before streaming can
+    /// begin.
+    pub fn set_pipeline(&mut self, pipeline: TextGenerationPipeline) {
+        self.pipeline = Some(pipeline);
+    }
+
+    /// Whether a real generation pipeline has been attached via
+    /// [`Self::set_pipeline`].
+    #[wasm_bindgen(getter)]
+    pub fn has_pipeline(&self) -> bool {
+        self.pipeline.is_some()
+    }
+
+    /// Start streaming text generation.
+    ///
+    /// Returns a structured error - never fabricated text - when no
+    /// pipeline has been attached via [`Self::set_pipeline`].
     pub async fn start_streaming(&mut self, prompt: &str) -> Result<String, JsValue> {
         if self.is_streaming {
             return Err("Already streaming. Stop current session first.".into());
         }
+        let Some(pipeline) = self.pipeline.as_ref() else {
+            return Err(JsValue::from_str(
+                "StreamingGenerator: no model pipeline attached; call set_pipeline() first",
+            ));
+        };
 
-        let session_id = format!("session_{}", js_sys::Date::now() as u64);
+        let prompt_ids = pipeline.encode(prompt, true)?;
+
+        let session_id = format!("session_{}", now_ms() as u64);
         let session = StreamingSession {
             id: session_id.clone(),
             prompt: prompt.to_string(),
             generated_tokens: Vec::new(),
+            generated_ids: prompt_ids,
             total_tokens: 0,
-            start_time: js_sys::Date::now(),
-            last_token_time: js_sys::Date::now(),
+            start_time: now_ms(),
+            last_token_time: now_ms(),
             is_complete: false,
             completion_reason: CompletionReason::MaxTokens,
         };
@@ -278,6 +345,7 @@ impl StreamingGenerator {
         self.stats.total_sessions += 1;
         self.stats.current_session_tokens = 0;
 
+        #[cfg(target_arch = "wasm32")]
         web_sys::console::log_1(
             &format!("Starting streaming generation for prompt: {}", prompt).into(),
         );
@@ -291,10 +359,9 @@ impl StreamingGenerator {
     /// Process streaming generation asynchronously
     async fn process_streaming_generation(&mut self) -> Result<(), JsValue> {
         let mut tokens_generated = 0;
-        let start_time = js_sys::Date::now();
+        let start_time = now_ms();
 
         while self.is_streaming && tokens_generated < self.config.max_tokens {
-            // Simulate token generation (in real implementation, this would call the model)
             let generated_tokens = self.generate_token_chunk().await?;
 
             for token in generated_tokens {
@@ -303,7 +370,7 @@ impl StreamingGenerator {
                 if let Some(ref mut session) = self.current_session {
                     session.generated_tokens.push(token.token.clone());
                     session.total_tokens += 1;
-                    session.last_token_time = js_sys::Date::now();
+                    session.last_token_time = now_ms();
                 }
 
                 self.stats.current_session_tokens += 1;
@@ -363,26 +430,85 @@ impl StreamingGenerator {
         Ok(())
     }
 
-    /// Generate a chunk of tokens (simulated)
-    async fn generate_token_chunk(&self) -> Result<Vec<StreamingToken>, JsValue> {
-        // This is a simulation - in real implementation, this would call the actual model
+    /// Generate a chunk of up to `self.config.chunk_size` tokens by running
+    /// `self.config.chunk_size` real forward passes through the attached
+    /// pipeline, feeding every newly generated token back into the running
+    /// context before predicting the next one (same requirement as
+    /// [`crate::core::pipeline::TextGenerationPipeline::generate_ids`] -
+    /// this is the streaming, one-token-at-a-time equivalent of that same
+    /// loop, sharing its `next_token_with_confidence` step).
+    ///
+    /// Previously this was a pure simulation: `token_text` was
+    /// `format!("token_{n}")` (a counter, not vocabulary output) and
+    /// `confidence` was `0.8 + Math::random() * 0.2` - no model, tokenizer,
+    /// weights, or prompt was ever involved. `token_text` is now the
+    /// tokenizer's real decoded output for the model's real predicted
+    /// token id, and `confidence` is that token's real softmax probability
+    /// from the model's own logits.
+    ///
+    /// Thin `JsValue`-wrapping shim around [`Self::generate_token_chunk_inner`]
+    /// - see that method for why the split exists.
+    async fn generate_token_chunk(&mut self) -> Result<Vec<StreamingToken>, JsValue> {
+        self.generate_token_chunk_inner().await.map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Real logic behind [`Self::generate_token_chunk`], returning `String`
+    /// errors rather than `JsValue`. `JsValue::from_str` (used to build the
+    /// "no pipeline attached" / "no active session" error messages) panics
+    /// on non-wasm32 native targets ("cannot call wasm-bindgen imported
+    /// functions"), so - matching the "String-error inner / JsValue-wrapping
+    /// outer" pattern used throughout this crate (see e.g.
+    /// `lib.rs::require_loaded_model`) - native tests call this method
+    /// directly to exercise the error paths without ever constructing a
+    /// `JsValue`.
+    async fn generate_token_chunk_inner(&mut self) -> Result<Vec<StreamingToken>, String> {
+        let Some(pipeline) = self.pipeline.as_ref() else {
+            return Err(
+                "StreamingGenerator: no model pipeline attached; call set_pipeline() first"
+                    .to_string(),
+            );
+        };
+        let max_position = pipeline.max_position_embeddings();
+
         let mut tokens = Vec::new();
 
         for i in 0..self.config.chunk_size {
             // Simulate token generation delay
             if i > 0 {
-                self.sleep(10).await?; // Small delay between tokens in chunk
+                self.sleep(10).await.map_err(|e| format!("{e:?}"))?; // Small delay between tokens in chunk
             }
 
-            let token_text = format!("token_{}", self.stats.current_session_tokens + i as u32);
-            let confidence = 0.8 + (js_sys::Math::random() * 0.2); // Random confidence 0.8-1.0
-            let is_stop = self.is_stop_token(&token_text);
+            let context_ids =
+                match self.current_session.as_ref() {
+                    Some(session) => session.generated_ids.clone(),
+                    None => return Err(
+                        "StreamingGenerator: generate_token_chunk called with no active session"
+                            .to_string(),
+                    ),
+                };
+            if context_ids.len() >= max_position {
+                break;
+            }
+
+            let pipeline = self.pipeline.as_ref().expect("checked above");
+            let (token_id, confidence) = pipeline
+                .next_token_with_confidence(&context_ids)
+                .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
+            let token_text = pipeline
+                .decode(std::vec![token_id], false)
+                .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
+            let is_stop = self.is_stop_token(&token_text)
+                || TextGenerationPipeline::is_eos_token(Some(token_id));
+
+            if let Some(session) = self.current_session.as_mut() {
+                session.generated_ids.push(token_id);
+            }
 
             let token = StreamingToken {
                 token: token_text,
-                confidence: confidence as f32,
-                token_id: self.stats.current_session_tokens + i as u32,
-                timestamp: js_sys::Date::now(),
+                confidence,
+                token_id,
+                timestamp: now_ms(),
                 is_stop_token: is_stop,
             };
 
@@ -516,7 +642,7 @@ impl StreamingGenerator {
 
     /// Update statistics
     fn update_stats(&mut self, start_time: f64) {
-        let duration_ms = js_sys::Date::now() - start_time;
+        let duration_ms = now_ms() - start_time;
         self.stats.current_session_duration_ms = duration_ms as f32;
 
         if duration_ms > 0.0 {
@@ -535,6 +661,7 @@ impl StreamingGenerator {
             if let Some(ref mut session) = self.current_session {
                 session.completion_reason = CompletionReason::ManualStop;
             }
+            #[cfg(target_arch = "wasm32")]
             web_sys::console::log_1(&"Streaming generation stopped manually".into());
         }
     }
@@ -596,7 +723,7 @@ impl StreamingGenerator {
             0.0
         };
 
-        let current_time = js_sys::Date::now();
+        let current_time = now_ms();
         let elapsed_time = if let Some(ref session) = self.current_session {
             current_time - session.start_time
         } else {
@@ -816,6 +943,11 @@ pub fn get_optimal_streaming_config() -> StreamingConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::model::weights::{layer_prefix, NamedWeights};
+    use crate::core::model::{ModelArchitecture, ModelConfig, WasmModel};
+    use crate::core::pipeline::GenerationConfig;
+    use crate::core::tensor::WasmTensor;
+    use crate::core::tokenizer::TokenizerType;
 
     #[test]
     fn test_streaming_config() {
@@ -844,5 +976,276 @@ mod tests {
     fn test_feature_detection() {
         let _supported = is_streaming_supported();
         let _config = get_optimal_streaming_config();
+    }
+
+    // -----------------------------------------------------------------
+    // `StreamingGenerator`: was a pure simulation (`format!("token_{n}")` +
+    // `Math::random()`-based confidence) with no model reference at all.
+    // These tests exercise the real (non-`#[wasm_bindgen]`-boundary)
+    // `generate_token_chunk` step against a tiny real GPT2-shaped model.
+    // -----------------------------------------------------------------
+
+    /// Deterministic pseudo-random f32 generator, matching the pattern used
+    /// in `core::pipeline`'s own tests.
+    fn fill(n: usize, seed: u32) -> Vec<f32> {
+        let mut s = seed.wrapping_add(1);
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1103515245).wrapping_add(12345);
+                ((s >> 8) as f32 / u32::MAX as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    fn tensor(data: Vec<f32>, shape: Vec<usize>) -> WasmTensor {
+        WasmTensor::new(data, shape).expect("valid tensor")
+    }
+
+    /// Build a tiny, fully-populated GPT-2-shaped `TextGenerationPipeline`
+    /// (real weights, real tokenizer, no network/wasm-bindgen boundary).
+    fn build_test_pipeline() -> TextGenerationPipeline {
+        let config = ModelConfig {
+            architecture: ModelArchitecture::GPT2,
+            vocab_size: 12,
+            hidden_size: 8,
+            num_layers: 2,
+            num_heads: 2,
+            max_position_embeddings: 16,
+            intermediate_size: 10,
+            hidden_dropout_prob: 0.0,
+            attention_dropout_prob: 0.0,
+        };
+        let h = config.hidden_size;
+        let inter = config.intermediate_size;
+        let mut w = NamedWeights::new();
+        let mut seed = 3u32;
+        let mut next = |n: usize| {
+            seed = seed.wrapping_add(211);
+            fill(n, seed)
+        };
+
+        w.insert(
+            "token_embeddings.weight",
+            tensor(next(config.vocab_size * h), std::vec![config.vocab_size, h]),
+        );
+        w.insert(
+            "position_embeddings.weight",
+            tensor(
+                next(config.max_position_embeddings * h),
+                std::vec![config.max_position_embeddings, h],
+            ),
+        );
+        for i in 0..config.num_layers {
+            let p = layer_prefix(i);
+            for name in ["attn.q_proj", "attn.k_proj", "attn.v_proj", "attn.o_proj"] {
+                w.insert(
+                    format!("{p}{name}.weight"),
+                    tensor(next(h * h), std::vec![h, h]),
+                );
+            }
+            w.insert(
+                format!("{p}norm1.weight"),
+                tensor(std::vec![1.0; h], std::vec![h]),
+            );
+            w.insert(
+                format!("{p}norm2.weight"),
+                tensor(std::vec![1.0; h], std::vec![h]),
+            );
+            w.insert(
+                format!("{p}ffn.fc1.weight"),
+                tensor(next(h * inter), std::vec![h, inter]),
+            );
+            w.insert(
+                format!("{p}ffn.fc2.weight"),
+                tensor(next(inter * h), std::vec![inter, h]),
+            );
+        }
+        w.insert("final_norm.weight", tensor(std::vec![1.0; h], std::vec![h]));
+
+        let vocab_size = config.vocab_size;
+        let model = WasmModel::with_weights_for_test(config, w);
+        let mut tokenizer = crate::core::tokenizer::WasmTokenizer::new(TokenizerType::BPE);
+        // Real (if tiny) vocabulary, loaded through the `JsValue`-free
+        // native-test path (`load_vocab_map`, not the `#[wasm_bindgen]`
+        // `load_vocab`, which needs a real `JsValue` and would panic here) -
+        // one single-byte-alphabet symbol per id, covering the whole
+        // `vocab_size: 12` range so any argmax-selected token id decodes to
+        // real text instead of erroring on "no vocabulary loaded".
+        let vocab: std::collections::BTreeMap<String, u32> = (0u32..vocab_size as u32)
+            .map(|id| (((b'a' + id as u8) as char).to_string(), id))
+            .collect();
+        tokenizer.load_vocab_map(vocab).expect("non-empty vocab");
+        TextGenerationPipeline::new(model, tokenizer)
+    }
+
+    fn generator_for_test() -> StreamingGenerator {
+        StreamingGenerator {
+            config: StreamingConfig::new(),
+            pipeline: None,
+            is_streaming: false,
+            current_session: None,
+            token_buffer: VecDeque::new(),
+            callback_registry: Vec::new(),
+            stats: StreamingStats::new(),
+        }
+    }
+
+    #[test]
+    fn test_has_pipeline_reflects_set_pipeline() {
+        let mut generator = generator_for_test();
+        assert!(!generator.has_pipeline());
+        generator.set_pipeline(build_test_pipeline());
+        assert!(generator.has_pipeline());
+    }
+
+    /// Poll a `Future` to completion without a real async runtime. Every
+    /// future used in these tests resolves quickly (no real timers/I/O
+    /// beyond in-process `setTimeout`-driven sleeps, which are skipped by
+    /// using `stream_delay_ms: 0` / a single-token chunk), mirroring the
+    /// `pollster_block_on` helper used in `storage::streaming_loader`'s
+    /// tests for the same "no async runtime available natively" reason.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::pin::pin;
+        use std::task::{Context, Poll, Waker};
+
+        let mut future = pin!(future);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        for _ in 0..10_000 {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+                return output;
+            }
+        }
+        panic!("future did not resolve within the poll budget");
+    }
+
+    #[test]
+    fn test_generate_token_chunk_without_pipeline_errors_not_fabricates() {
+        let mut generator = generator_for_test();
+        generator.current_session = Some(StreamingSession {
+            id: "s".to_string(),
+            prompt: "hi".to_string(),
+            generated_tokens: Vec::new(),
+            generated_ids: std::vec![0u32],
+            total_tokens: 0,
+            start_time: 0.0,
+            last_token_time: 0.0,
+            is_complete: false,
+            completion_reason: CompletionReason::MaxTokens,
+        });
+
+        // `generate_token_chunk_inner`, not `generate_token_chunk`: the
+        // latter's `JsValue::from_str` error-wrapping panics on native,
+        // non-wasm32 targets.
+        let result = block_on(generator.generate_token_chunk_inner());
+        assert!(
+            result.is_err(),
+            "must error, not fabricate tokens, when no pipeline is attached"
+        );
+    }
+
+    #[test]
+    fn test_generate_token_chunk_produces_real_decoded_tokens_not_counters() {
+        // chunk_size 1 (not e.g. 3): `generate_token_chunk`'s inter-token
+        // delay uses a real browser `setTimeout`-backed `Promise`
+        // (`Self::sleep`), which panics on native, non-wasm32 targets
+        // ("cannot call wasm-bindgen imported functions") - only reachable
+        // once `i > 0` within the chunk loop, so a chunk size of 1 never
+        // triggers it.
+        let mut generator = generator_for_test();
+        generator.config.set_chunk_size(1);
+        let mut pipeline = build_test_pipeline();
+        pipeline.set_config(GenerationConfig {
+            max_length: 64,
+            do_sample: false, // argmax: deterministic, no js_sys::Math::random()
+            early_stopping: false,
+            ..GenerationConfig::default()
+        });
+        generator.set_pipeline(pipeline);
+
+        // Hand-crafted ids within the tiny test model's `vocab_size: 12`
+        // (rather than `pipeline.encode("hello", true)`, whose BPE/vocab
+        // token ids are unrelated to this model's tiny vocab and would
+        // exceed it, making `forward` legitimately error).
+        let prompt_ids: Vec<u32> = std::vec![1, 2, 3];
+        generator.current_session = Some(StreamingSession {
+            id: "s".to_string(),
+            prompt: "hello".to_string(),
+            generated_tokens: Vec::new(),
+            generated_ids: prompt_ids.clone(),
+            total_tokens: 0,
+            start_time: 0.0,
+            last_token_time: 0.0,
+            is_complete: false,
+            completion_reason: CompletionReason::MaxTokens,
+        });
+
+        let tokens = block_on(generator.generate_token_chunk()).expect("should generate");
+        assert!(!tokens.is_empty());
+
+        // Old fabricated tokens were always exactly `format!("token_{n}")`
+        // for a monotonically increasing counter `n`, with confidence drawn
+        // uniformly from [0.8, 1.0). Real tokens must not match that shape,
+        // and confidence must be a genuine softmax probability in [0, 1].
+        for token in &tokens {
+            assert!(
+                !token.token.starts_with("token_"),
+                "token text looks like the old fabricated counter format: {}",
+                token.token
+            );
+            assert!(
+                (0.0..=1.0).contains(&token.confidence),
+                "confidence must be a valid probability: {}",
+                token.confidence
+            );
+        }
+
+        // The session's running context must have grown by exactly the
+        // number of tokens generated - proof the "feed generated tokens
+        // back into context" requirement (mirroring
+        // `TextGenerationPipeline::generate_ids`) is honored here too.
+        let session = generator.current_session.as_ref().expect("session set");
+        assert_eq!(session.generated_ids.len(), prompt_ids.len() + tokens.len());
+    }
+
+    #[test]
+    fn test_generate_token_chunk_feeds_tokens_back_for_autoregressive_context() {
+        // Regression test analogous to
+        // `core::pipeline::tests::test_generate_ids_feeds_generated_tokens_back_into_context`:
+        // generate two chunks back-to-back and confirm the second chunk's
+        // starting context is strictly longer than the first's - i.e. each
+        // call really does build on the previous one's output, rather than
+        // e.g. always re-reading the original prompt.
+        let mut generator = generator_for_test();
+        generator.config.set_chunk_size(1);
+        let mut pipeline = build_test_pipeline();
+        pipeline.set_config(GenerationConfig {
+            max_length: 64,
+            do_sample: false,
+            early_stopping: false,
+            ..GenerationConfig::default()
+        });
+        generator.set_pipeline(pipeline);
+
+        let prompt_ids: Vec<u32> = std::vec![1, 2];
+        generator.current_session = Some(StreamingSession {
+            id: "s".to_string(),
+            prompt: "hi".to_string(),
+            generated_tokens: Vec::new(),
+            generated_ids: prompt_ids.clone(),
+            total_tokens: 0,
+            start_time: 0.0,
+            last_token_time: 0.0,
+            is_complete: false,
+            completion_reason: CompletionReason::MaxTokens,
+        });
+
+        let _first = block_on(generator.generate_token_chunk()).expect("should generate");
+        let len_after_first = generator.current_session.as_ref().unwrap().generated_ids.len();
+        assert!(len_after_first > prompt_ids.len());
+
+        let _second = block_on(generator.generate_token_chunk()).expect("should generate");
+        let len_after_second = generator.current_session.as_ref().unwrap().generated_ids.len();
+        assert!(len_after_second > len_after_first);
     }
 }

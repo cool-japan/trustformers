@@ -113,7 +113,7 @@ impl MemoryProfiler {
                 let current_metrics = match Self::collect_memory_metrics(tracked).await {
                     Ok(metrics) => metrics,
                     Err(e) => {
-                        eprintln!("Failed to collect memory metrics: {}", e);
+                        tracing::warn!("Failed to collect memory metrics: {}", e);
                         continue;
                     },
                 };

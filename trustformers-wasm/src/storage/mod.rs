@@ -417,7 +417,7 @@ impl StorageManager {
                 .into(),
             );
             memory_manager
-                .allocate_for_model(model_id, model_data.len())
+                .allocate_for_model(model_id, model_data)
                 .map_err(|e| StorageError::MemoryError(format!("{:?}", e)))?;
             return Ok(());
         }

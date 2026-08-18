@@ -323,6 +323,7 @@ import {{ useTrustFormerModel, useTrustFormerInference }} from './hooks';
 
 const TrustFormerTextGenerator = ({{
   modelUrl = '{}',
+  vocabUrl,
   placeholder = 'Enter your prompt...',
   maxLength = 100,
   temperature = 0.7,
@@ -334,12 +335,13 @@ const TrustFormerTextGenerator = ({{
   const [prompt, setPrompt] = useState('');
   const [generations, setGenerations] = useState([]);
 
-  const {{ modelState, loadModel }} = useTrustFormerModel({{
+  const {{ modelState, loadModel, pipeline }} = useTrustFormerModel({{
     modelUrl,
+    vocabUrl,
     autoLoad: {}
   }});
 
-  const {{ inferenceState, generateText }} = useTrustFormerInference();
+  const {{ inferenceState, generateText }} = useTrustFormerInference(pipeline);
 
   useEffect(() => {{
     if (modelUrl && !modelState.model_loaded && !modelState.is_loading) {{
@@ -461,6 +463,7 @@ import {{ useTrustFormerModel, useTrustFormerInference }} from './hooks';
 
 const TrustFormerChatInterface = ({{
   modelUrl = '{}',
+  vocabUrl,
   placeholder = 'Type your message...',
   systemPrompt = 'You are a helpful AI assistant.',
   maxTokens = 150,
@@ -473,12 +476,13 @@ const TrustFormerChatInterface = ({{
   const [input, setInput] = useState('');
   const messagesEndRef = useRef(null);
 
-  const {{ modelState, loadModel }} = useTrustFormerModel({{
+  const {{ modelState, loadModel, pipeline }} = useTrustFormerModel({{
     modelUrl,
+    vocabUrl,
     autoLoad: {}
   }});
 
-  const {{ inferenceState, generateText }} = useTrustFormerInference();
+  const {{ inferenceState, generateText }} = useTrustFormerInference(pipeline);
 
   const scrollToBottom = () => {{
     messagesEndRef.current?.scrollIntoView({{ behavior: 'smooth' }});
@@ -658,9 +662,29 @@ const initWasm = async () => {{
   return wasmModule;
 }};
 
-// Hook for managing TrustFormer model loading
+// Maps a friendly model-type string to the real `wasm.ModelArchitecture`
+// enum variant (mirrors `resolve_model_architecture` in `lib.rs`).
+const MODEL_ARCHITECTURES = {{
+  bert: 'Bert',
+  gpt2: 'GPT2',
+  gpt: 'GPT2',
+  t5: 'T5',
+  llama: 'Llama',
+  mistral: 'Mistral'
+}};
+
+// Hook for managing TrustFormer model + tokenizer loading. When `vocabUrl`
+// is supplied, this also builds a real `TextGenerationPipeline`
+// (`WasmModel` + `WasmTokenizer`, both loaded with real data) so
+// `useTrustFormerInference`/`useTrustFormerStreaming` below can drive
+// genuine generation instead of fabricating output. Per project policy, a
+// tokenizer is never built with a fabricated vocabulary - without
+// `vocabUrl` there is simply no `pipeline`, and callers get a real error
+// rather than fake text (see those hooks).
 export const useTrustFormerModel = ({{
   modelUrl,
+  vocabUrl,
+  modelType = 'gpt2',
   autoLoad = true,
   onLoadComplete,
   onLoadError
@@ -673,6 +697,7 @@ export const useTrustFormerModel = ({{
   }});
 
   const sessionRef = useRef(null);
+  const pipelineRef = useRef(null);
 
   const loadModel = useCallback(async () => {{
     if (!modelUrl) {{
@@ -693,10 +718,8 @@ export const useTrustFormerModel = ({{
     try {{
       const wasm = await initWasm();
 
-      // Create inference session
-      sessionRef.current = new wasm.InferenceSession('transformer');
-
-      // Initialize with auto device selection
+      // Create the higher-level tensor-in/tensor-out inference session.
+      sessionRef.current = new wasm.InferenceSession(modelType);
       await sessionRef.current.initialize_with_auto_device();
 
       // Enable debug logging if configured
@@ -711,9 +734,33 @@ export const useTrustFormerModel = ({{
         'model_' + modelUrl.split('/').pop(),
         modelUrl,
         'TrustFormer Model',
-        'transformer',
+        modelType,
         '1.0.0'
       );
+
+      // Build a real text-generation pipeline for the hooks below.
+      if (vocabUrl) {{
+        const modelResponse = await fetch(modelUrl);
+        if (!modelResponse.ok) {{
+          throw new Error(`Failed to fetch model weights: HTTP ${{modelResponse.status}}`);
+        }}
+        const modelBytes = new Uint8Array(await modelResponse.arrayBuffer());
+
+        const architectureName = MODEL_ARCHITECTURES[modelType.toLowerCase()] ?? 'GPT2';
+        const config = new wasm.ModelConfig(wasm.ModelArchitecture[architectureName]);
+        const model = new wasm.WasmModel(config);
+        await model.load_weights(modelBytes);
+
+        const vocabResponse = await fetch(vocabUrl);
+        if (!vocabResponse.ok) {{
+          throw new Error(`Failed to fetch vocabulary: HTTP ${{vocabResponse.status}}`);
+        }}
+        const vocab = await vocabResponse.json();
+        const tokenizer = new wasm.WasmTokenizer(wasm.TokenizerType.BPE);
+        tokenizer.load_vocab(vocab);
+
+        pipelineRef.current = new wasm.TextGenerationPipeline(model, tokenizer);
+      }}
 
       setModelState(prev => ({{
         ...prev,
@@ -723,7 +770,7 @@ export const useTrustFormerModel = ({{
       }}));
 
       if (onLoadComplete) {{
-        onLoadComplete(sessionRef.current);
+        onLoadComplete({{ session: sessionRef.current, pipeline: pipelineRef.current }});
       }}
 
     }} catch (error) {{
@@ -740,7 +787,7 @@ export const useTrustFormerModel = ({{
         onLoadError(error);
       }}
     }}
-  }}, [modelUrl, onLoadComplete, onLoadError]);
+  }}, [modelUrl, vocabUrl, modelType, onLoadComplete, onLoadError]);
 
   useEffect(() => {{
     if (autoLoad && modelUrl && !modelState.model_loaded && !modelState.is_loading) {{
@@ -751,12 +798,17 @@ export const useTrustFormerModel = ({{
   return {{
     modelState,
     loadModel,
-    session: sessionRef.current
+    session: sessionRef.current,
+    pipeline: pipelineRef.current
   }};
 }};
 
-// Hook for managing inference
-export const useTrustFormerInference = () => {{
+// Hook for real (non-streaming) text generation, driven by a
+// `TextGenerationPipeline` built by `useTrustFormerModel` (pass its
+// `pipeline` in here). Runs the pipeline's actual autoregressive
+// `encode` -> `next_token` -> `decode` loop instead of fabricating a canned
+// response string.
+export const useTrustFormerInference = (pipeline) => {{
   const [inferenceState, setInferenceState] = useState({{
     is_inferring: false,
     result: null,
@@ -765,6 +817,16 @@ export const useTrustFormerInference = () => {{
   }});
 
   const generateText = useCallback(async (prompt, options = {{}}) => {{
+    if (!pipeline) {{
+      const error = new Error(
+        'useTrustFormerInference: no pipeline available - call useTrustFormerModel with a vocabUrl first'
+      );
+      setInferenceState(prev => ({{ ...prev, error: error.message }}));
+      throw error;
+    }}
+
+    const {{ maxLength = 100 }} = options;
+
     setInferenceState(prev => ({{
       ...prev,
       is_inferring: true,
@@ -774,25 +836,27 @@ export const useTrustFormerInference = () => {{
     const startTime = performance.now();
 
     try {{
-      const wasm = await initWasm();
+      // Real generation: encode the prompt, then repeatedly call the
+      // pipeline's real `next_token` (the same autoregressive step
+      // `StreamingGenerator` drives internally) until `maxLength` tokens
+      // have been produced.
+      let contextIds = Array.from(pipeline.encode(prompt, true));
+      const generatedIds = [];
 
-      // Create a simple tensor for the prompt (this is simplified)
-      // In a real implementation, you'd tokenize the prompt properly
-      const inputTensor = new wasm.WasmTensor([prompt.length], new Float32Array(prompt.length));
+      for (let i = 0; i < maxLength; i++) {{
+        const nextId = pipeline.next_token(Uint32Array.from(contextIds));
+        generatedIds.push(nextId);
+        contextIds = [...contextIds, nextId];
+      }}
 
-      // Perform inference (simplified)
-      const result = inputTensor; // In reality, this would be actual model inference
-
+      const generatedText = pipeline.decode(Uint32Array.from(generatedIds), true);
       const endTime = performance.now();
       const inferenceTime = endTime - startTime;
-
-      // Simulate text generation result
-      const generatedText = `Generated response for: "${{prompt}}"`;
 
       const inferenceResult = {{
         text: generatedText,
         inferenceTime: Math.round(inferenceTime),
-        tokenCount: generatedText.split(' ').length
+        tokenCount: generatedIds.length
       }};
 
       setInferenceState(prev => ({{
@@ -816,7 +880,7 @@ export const useTrustFormerInference = () => {{
 
       throw error;
     }}
-  }}, []);
+  }}, [pipeline]);
 
   return {{
     inferenceState,
@@ -824,8 +888,15 @@ export const useTrustFormerInference = () => {{
   }};
 }};
 
-// Hook for streaming generation
-export const useTrustFormerStreaming = () => {{
+// Hook for real streaming generation, driven by the real
+// `StreamingGenerator` (see `streaming_generation.rs`) attached to a
+// `TextGenerationPipeline` built by `useTrustFormerModel` (pass its
+// `pipeline` in here). This used to fake streaming entirely with a
+// hardcoded canned string revealed word-by-word via `setTimeout`. Every
+// token below instead comes from `StreamingGenerator.start_streaming`'s
+// real autoregressive loop, reported through its
+// `on_token`/`on_complete`/`on_error` callbacks.
+export const useTrustFormerStreaming = (pipeline) => {{
   const [streamState, setStreamState] = useState({{
     is_streaming: false,
     partial_result: '',
@@ -833,7 +904,19 @@ export const useTrustFormerStreaming = () => {{
     error: null
   }});
 
+  const generatorRef = useRef(null);
+
   const startStreaming = useCallback(async (prompt, options = {{}}) => {{
+    if (!pipeline) {{
+      const error = new Error(
+        'useTrustFormerStreaming: no pipeline available - call useTrustFormerModel with a vocabUrl first'
+      );
+      setStreamState(prev => ({{ ...prev, error: error.message }}));
+      throw error;
+    }}
+
+    const {{ maxTokens = 100, temperature = 0.7 }} = options;
+
     setStreamState({{
       is_streaming: true,
       partial_result: '',
@@ -841,31 +924,66 @@ export const useTrustFormerStreaming = () => {{
       error: null
     }});
 
-    // Simulate streaming by gradually revealing text
-    const fullText = `This is a simulated streaming response for: "${{prompt}}". The text is revealed token by token to simulate real streaming generation.`;
-    const tokens = fullText.split(' ');
+    try {{
+      const wasm = await initWasm();
 
-    for (let i = 0; i < tokens.length; i++) {{
-      await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay per token
+      const config = new wasm.StreamingConfig();
+      config.set_max_tokens(maxTokens);
+      config.set_temperature(temperature);
 
-      const partialText = tokens.slice(0, i + 1).join(' ');
+      const generator = new wasm.StreamingGenerator(config);
+      generator.set_pipeline(pipeline);
+      generatorRef.current = generator;
+
+      let accumulated = '';
+
+      generator.on_token((token) => {{
+        accumulated += token.token;
+        setStreamState(prev => ({{
+          ...prev,
+          partial_result: accumulated
+        }}));
+      }});
+
+      generator.on_complete(() => {{
+        setStreamState(prev => ({{
+          ...prev,
+          is_streaming: false,
+          complete_result: accumulated
+        }}));
+      }});
+
+      generator.on_error((error) => {{
+        setStreamState(prev => ({{
+          ...prev,
+          is_streaming: false,
+          error: String(error)
+        }}));
+      }});
+
+      await generator.start_streaming(prompt);
+
+    }} catch (error) {{
+      console.error('Streaming generation failed:', error);
       setStreamState(prev => ({{
         ...prev,
-        partial_result: partialText
+        is_streaming: false,
+        error: error.message || 'Streaming generation failed'
       }}));
+      throw error;
     }}
+  }}, [pipeline]);
 
-    setStreamState(prev => ({{
-      ...prev,
-      is_streaming: false,
-      complete_result: fullText
-    }}));
-
+  const stopStreaming = useCallback(() => {{
+    if (generatorRef.current) {{
+      generatorRef.current.stop_streaming();
+    }}
   }}, []);
 
   return {{
     streamState,
-    startStreaming
+    startStreaming,
+    stopStreaming
   }};
 }};
 
@@ -1504,5 +1622,34 @@ mod tests {
 
         let hooks = factory.generate_react_hooks();
         assert!(hooks.contains("useTrustFormerModel"));
+    }
+
+    /// Regression guard: `useTrustFormerInference`/`useTrustFormerStreaming`
+    /// used to fabricate their output entirely (a hardcoded
+    /// `Generated response for: "..."` string, and a canned "simulated
+    /// streaming response" revealed via `setTimeout`) rather than calling
+    /// any real WASM generation API. The generated hooks must now call the
+    /// real `TextGenerationPipeline`/`StreamingGenerator` exports and must
+    /// not contain either fabricated phrase.
+    #[test]
+    fn test_react_hooks_call_real_generation_api_not_fabricated_text() {
+        let config = ReactConfig::new();
+        let factory = ReactComponentFactory::new(config);
+        let hooks = factory.generate_react_hooks();
+
+        // The old fabrications must be gone.
+        assert!(!hooks.contains("Generated response for"));
+        assert!(!hooks.contains("simulated streaming response"));
+        assert!(!hooks.contains("In reality, this would be actual model inference"));
+
+        // Real, exported WASM API surface must be present instead.
+        assert!(hooks.contains("pipeline.encode"));
+        assert!(hooks.contains("pipeline.next_token"));
+        assert!(hooks.contains("pipeline.decode"));
+        assert!(hooks.contains("wasm.StreamingGenerator"));
+        assert!(hooks.contains("generator.set_pipeline"));
+        assert!(hooks.contains("start_streaming"));
+        assert!(hooks.contains("on_token"));
+        assert!(hooks.contains("on_complete"));
     }
 }

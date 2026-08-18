@@ -729,9 +729,9 @@ impl HubUiServer {
             retry_recommended: true,
         })?;
 
-        println!("🚀 TrustformeRS Hub UI server running on http://{}", addr);
-        println!("📊 Repository management: http://{}/ui/", addr);
-        println!("🔌 API endpoint: http://{}/api/v1/", addr);
+        tracing::info!("🚀 TrustformeRS Hub UI server running on http://{}", addr);
+        tracing::info!("📊 Repository management: http://{}/ui/", addr);
+        tracing::info!("🔌 API endpoint: http://{}/api/v1/", addr);
 
         axum::serve(listener, self.router)
             .await

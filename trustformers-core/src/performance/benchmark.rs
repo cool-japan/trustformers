@@ -183,7 +183,7 @@ impl BenchmarkSuite {
     where
         M: Model<Input = ModelInput, Output = ModelOutput>,
     {
-        println!("Benchmarking {} inference...", model_name);
+        tracing::info!("Benchmarking {} inference...", model_name);
 
         for &batch_size in &self.config.batch_sizes {
             for &seq_len in &self.config.sequence_lengths {
@@ -207,7 +207,7 @@ impl BenchmarkSuite {
     where
         M: Model<Input = ModelInput, Output = ModelOutput>,
     {
-        println!("  Batch size: {}, Sequence length: {}", batch_size, seq_len);
+        tracing::info!("  Batch size: {}, Sequence length: {}", batch_size, seq_len);
 
         // Create dummy input
         let input_ids = Tensor::zeros(&[batch_size, seq_len])?;

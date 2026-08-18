@@ -438,7 +438,7 @@ impl Evaluator for GLUEEvaluator {
         let mut suite = crate::evaluation::EvaluationSuite::new();
 
         for &task in &self.tasks {
-            println!(
+            tracing::info!(
                 "Evaluating GLUE task: {} - {}",
                 task.name(),
                 task.description()
@@ -832,7 +832,7 @@ impl Evaluator for MMLUEvaluator {
         let mut suite = crate::evaluation::EvaluationSuite::new();
 
         for subject in &self.subjects {
-            println!("Evaluating MMLU subject: {}", subject.replace("_", " "));
+            tracing::info!("Evaluating MMLU subject: {}", subject.replace("_", " "));
             let result = self.evaluate_subject(model, subject, config)?;
             suite.add_result(result);
         }
@@ -933,7 +933,7 @@ impl Evaluator for HellaSwagEvaluator {
     ) -> Result<crate::evaluation::EvaluationSuite> {
         let mut suite = crate::evaluation::EvaluationSuite::new();
 
-        println!("Evaluating HellaSwag commonsense reasoning");
+        tracing::info!("Evaluating HellaSwag commonsense reasoning");
         let result = self.evaluate_single_task(model, "hellaswag", config)?;
         suite.add_result(result);
 
@@ -1096,7 +1096,7 @@ impl Evaluator for HumanEvalEvaluator {
     ) -> Result<crate::evaluation::EvaluationSuite> {
         let mut suite = crate::evaluation::EvaluationSuite::new();
 
-        println!("Evaluating HumanEval code generation");
+        tracing::info!("Evaluating HumanEval code generation");
         let result = self.evaluate_single_task(model, "humaneval", config)?;
         suite.add_result(result);
 

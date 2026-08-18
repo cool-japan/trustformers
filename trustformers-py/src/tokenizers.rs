@@ -480,21 +480,15 @@ impl PyWordPieceTokenizer {
         truncation: bool,
         return_tensors: Option<&str>,
     ) -> PyResult<PyObject> {
+        // A Rust `panic!` crossing the PyO3 boundary surfaces to Python as an
+        // uncatchable `pyo3_runtime.PanicException` with a Rust backtrace, not a
+        // `TypeError`. A mismatched `text_pair` is ordinary bad input from Python
+        // callers, so it must be a normal, catchable `PyResult` error instead --
+        // `resolve_single_text_pair`/`resolve_batch_text_pair` below are the pure
+        // (interpreter-free) logic behind that check, unit-tested directly.
         match text {
             TextInput::Single(s) => {
-                // A Rust `panic!` crossing the PyO3 boundary surfaces to Python as an
-                // uncatchable `pyo3_runtime.PanicException` with a Rust backtrace, not a
-                // `TypeError`. A mismatched `text_pair` is ordinary bad input from Python
-                // callers, so it must be a normal, catchable `PyResult` error instead.
-                let pair = match text_pair {
-                    Some(TextInput::Single(s)) => Some(s),
-                    Some(TextInput::Batch(_)) => {
-                        return Err(PyTypeError::new_err(
-                            "text_pair must be a string when text is a string",
-                        ))
-                    },
-                    None => None,
-                };
+                let pair = resolve_single_text_pair(text_pair).map_err(PyTypeError::new_err)?;
                 self.encode(
                     py,
                     &s,
@@ -507,17 +501,7 @@ impl PyWordPieceTokenizer {
                 )
             },
             TextInput::Batch(texts) => {
-                let pairs = match text_pair {
-                    Some(TextInput::Batch(pairs)) => {
-                        Some(pairs.into_iter().map(Some).collect())
-                    },
-                    Some(TextInput::Single(_)) => {
-                        return Err(PyTypeError::new_err(
-                            "text_pair must be a list when text is a list",
-                        ))
-                    },
-                    None => None,
-                };
+                let pairs = resolve_batch_text_pair(text_pair).map_err(PyTypeError::new_err)?;
                 self.batch_encode_plus(
                     py,
                     texts,
@@ -656,4 +640,111 @@ impl PyBPETokenizer {
 pub enum TextInput {
     Single(String),
     Batch(Vec<String>),
+}
+
+/// Pure-Rust core of [`PyWordPieceTokenizer::__call__`]'s `text_pair` type
+/// check for the `text: TextInput::Single` branch (`text` is one string, so
+/// `text_pair`, if given, must also be one string).
+///
+/// Split out from `__call__` so it is unit-testable without an initialized
+/// Python interpreter -- `TextInput` is a plain Rust enum (its
+/// `#[derive(FromPyObject)]` only matters when extracting *from* a Python
+/// object), so constructing values of it needs no GIL.
+///
+/// This used to be a `match` arm ending in `panic!("text_pair must be a
+/// string when text is a string")`: a bare Rust panic crossing the PyO3
+/// boundary surfaces to Python as an uncatchable `pyo3_runtime.PanicException`
+/// (not a `TypeError`, not catchable by `except TypeError`), printing a Rust
+/// backtrace. Returning `Err` here lets the PyO3 boundary turn it into a
+/// normal, catchable `PyTypeError` instead.
+fn resolve_single_text_pair(text_pair: Option<TextInput>) -> Result<Option<String>, &'static str> {
+    match text_pair {
+        Some(TextInput::Single(s)) => Ok(Some(s)),
+        Some(TextInput::Batch(_)) => Err("text_pair must be a string when text is a string"),
+        None => Ok(None),
+    }
+}
+
+/// Pure-Rust core of [`PyWordPieceTokenizer::__call__`]'s `text_pair` type
+/// check for the `text: TextInput::Batch` branch (`text` is a list of
+/// strings, so `text_pair`, if given, must also be a list).
+///
+/// See [`resolve_single_text_pair`] for why this is split out and what it
+/// replaces (the `TextInput::Single` arm's mirror-image `panic!`).
+#[allow(clippy::type_complexity)]
+fn resolve_batch_text_pair(
+    text_pair: Option<TextInput>,
+) -> Result<Option<Vec<Option<String>>>, &'static str> {
+    match text_pair {
+        Some(TextInput::Batch(pairs)) => Ok(Some(pairs.into_iter().map(Some).collect())),
+        Some(TextInput::Single(_)) => Err("text_pair must be a list when text is a list"),
+        None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod text_pair_tests {
+    use super::*;
+
+    // ---- resolve_single_text_pair ----
+
+    #[test]
+    fn single_text_pair_none_resolves_to_none() {
+        assert_eq!(resolve_single_text_pair(None), Ok(None));
+    }
+
+    #[test]
+    fn single_text_pair_single_resolves_to_the_string() {
+        let result = resolve_single_text_pair(Some(TextInput::Single("b".to_string())));
+        assert_eq!(result, Ok(Some("b".to_string())));
+    }
+
+    #[test]
+    fn single_text_with_batch_text_pair_is_a_type_error_not_a_panic() {
+        // Regression test for the P1 finding: `tok(text="a", text_pair=["b"])`
+        // used to reach `panic!("text_pair must be a string when text is a
+        // string")` -- an uncatchable `pyo3_runtime.PanicException` crossing
+        // the PyO3 boundary. Calling this pure function directly proves the
+        // mismatch is now an ordinary `Err`, never a Rust panic, with
+        // `std::panic::catch_unwind` as the independent proof of "no panic".
+        let outcome = std::panic::catch_unwind(|| {
+            resolve_single_text_pair(Some(TextInput::Batch(vec!["b".to_string()])))
+        });
+        match outcome {
+            Ok(result) => {
+                assert_eq!(result, Err("text_pair must be a string when text is a string"))
+            },
+            Err(_) => panic!("resolve_single_text_pair must return an Err, not unwind via panic!"),
+        }
+    }
+
+    // ---- resolve_batch_text_pair ----
+
+    #[test]
+    fn batch_text_pair_none_resolves_to_none() {
+        assert_eq!(resolve_batch_text_pair(None), Ok(None));
+    }
+
+    #[test]
+    fn batch_text_pair_batch_resolves_to_wrapped_options() {
+        let result = resolve_batch_text_pair(Some(TextInput::Batch(vec![
+            "b".to_string(),
+            "c".to_string(),
+        ])));
+        assert_eq!(result, Ok(Some(vec![Some("b".to_string()), Some("c".to_string())])));
+    }
+
+    #[test]
+    fn batch_text_with_single_text_pair_is_a_type_error_not_a_panic() {
+        // Regression test for the P1 finding's mirror-image case:
+        // `tok(text=["a"], text_pair="b")` used to reach
+        // `panic!("text_pair must be a list when text is a list")`.
+        let outcome = std::panic::catch_unwind(|| {
+            resolve_batch_text_pair(Some(TextInput::Single("b".to_string())))
+        });
+        match outcome {
+            Ok(result) => assert_eq!(result, Err("text_pair must be a list when text is a list")),
+            Err(_) => panic!("resolve_batch_text_pair must return an Err, not unwind via panic!"),
+        }
+    }
 }

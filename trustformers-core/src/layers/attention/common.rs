@@ -125,6 +125,57 @@ impl AttentionProjections {
     pub fn new(config: &AttentionConfig) -> Self {
         Self::new_with_device(config, Device::CPU)
     }
+
+    /// Append all four projections' parameters to `into`.
+    ///
+    /// `names` supplies the checkpoint sub-path of each projection in
+    /// `(query, key, value, out_proj)` order, because the spelling differs per
+    /// architecture (BERT's `attention.self.query` vs DistilBERT's
+    /// `attention.q_lin`). Each name is joined to `prefix` with a `.`, and each
+    /// projection then contributes `.weight` (plus `.bias` when it has one) via
+    /// [`Linear::collect_named_parameters`].
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        names: [&str; 4],
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        let layers = [&self.query, &self.key, &self.value, &self.out_proj];
+        for (layer, name) in layers.into_iter().zip(names) {
+            layer.collect_named_parameters(&join_name(prefix, name), into);
+        }
+    }
+
+    /// Mutable counterpart of [`AttentionProjections::collect_named_parameters`].
+    ///
+    /// The four projections are separate fields, so all four can be borrowed
+    /// mutably at once.
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        names: [&str; 4],
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        let layers = [
+            &mut self.query,
+            &mut self.key,
+            &mut self.value,
+            &mut self.out_proj,
+        ];
+        for (layer, name) in layers.into_iter().zip(names) {
+            layer.collect_named_parameters_mut(&join_name(prefix, name), into);
+        }
+    }
+}
+
+/// Join a checkpoint prefix and a relative name with a `.`, tolerating an empty
+/// prefix (a model whose parameters sit at the checkpoint root).
+pub fn join_name(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}.{name}")
+    }
 }
 
 /// Utilities for attention computation

@@ -225,9 +225,9 @@ impl<T: Optimizer> MultiNodeTrainer<T> {
 
         // Get node-local information
         let (local_rank, local_size) = mpi_utils::get_node_local_info()?;
-        println!("Multi-node environment initialized:");
-        println!("  Local rank: {}", local_rank);
-        println!("  Local size: {}", local_size);
+        tracing::info!("Multi-node environment initialized:");
+        tracing::info!("  Local rank: {}", local_rank);
+        tracing::info!("  Local size: {}", local_size);
 
         Ok(())
     }
@@ -242,12 +242,12 @@ impl<T: Optimizer> MultiNodeTrainer<T> {
             self.gradient_buffers.insert(name.clone(), GradientSyncBuffer::new());
         }
 
-        println!("Multi-node training initialized:");
-        println!("  Node rank: {}", self.config.node_rank);
-        println!("  Global rank: {}", self.config.global_rank);
-        println!("  World size: {}", self.config.world_size());
-        println!("  ZeRO stage: {:?}", self.zero_optimizer.get_stage());
-        println!("  Parameters: {}", parameters.len());
+        tracing::info!("Multi-node training initialized:");
+        tracing::info!("  Node rank: {}", self.config.node_rank);
+        tracing::info!("  Global rank: {}", self.config.global_rank);
+        tracing::info!("  World size: {}", self.config.world_size());
+        tracing::info!("  ZeRO stage: {:?}", self.zero_optimizer.get_stage());
+        tracing::info!("  Parameters: {}", parameters.len());
 
         Ok(())
     }
@@ -489,7 +489,7 @@ impl<T: Optimizer> MultiNodeTrainer<T> {
     pub fn finalize() -> Result<()> {
         MpiCommunicatorImpl::finalize()?;
 
-        println!("Multi-node training finalized");
+        tracing::info!("Multi-node training finalized");
         Ok(())
     }
 }

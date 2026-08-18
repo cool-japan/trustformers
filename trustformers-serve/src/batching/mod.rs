@@ -12,6 +12,8 @@ pub mod metrics;
 pub mod model_executor;
 pub mod processor;
 pub mod scheduler;
+/// Length-bucketed batching for generation requests with uneven prompt lengths.
+pub mod variable_length;
 
 pub use aggregator::{
     AdaptiveBatchingStrategy, AggregatorStats, BatchAggregator, BatchingStrategy,
@@ -36,6 +38,10 @@ pub use scheduler::{
 
 pub use metrics::{
     BatchSizeOptimizer, BatchingMetrics, LatencyTracker, MetricsCollector, ThroughputMonitor,
+};
+
+pub use variable_length::{
+    BatcherStats, PaddedBatch, SequenceItem, VariableLengthBatchConfig, VariableLengthBatcher,
 };
 
 pub use config::{
@@ -294,4 +300,82 @@ pub struct MetricsSummary {
     pub throughput_rps: f32,
     pub queue_depth: usize,
     pub optimization_suggestions: Vec<String>,
+}
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+    use crate::batching::aggregator::{ProcessingOutput, RequestInput};
+    use crate::batching::config::Priority;
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    fn text_request(text: &str) -> Request {
+        Request {
+            id: RequestId::new(),
+            input: RequestInput::Text {
+                text: text.to_string(),
+                max_length: Some(4),
+            },
+            priority: Priority::Normal,
+            submitted_at: Instant::now(),
+            deadline: None,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Regression: the model-less executor once answered every request with
+    /// `"Processed: {input}"`, an echo indistinguishable from a real completion.
+    ///
+    /// This closes the loop at the level a caller actually reaches:
+    /// [`DynamicBatchingService::new`] is the only public way to build the stack
+    /// without supplying an executor, and it must yield a structured
+    /// "no model configured" error rather than fabricated output.
+    #[tokio::test]
+    async fn service_without_a_model_reports_a_structured_error() {
+        let service = DynamicBatchingService::new(BatchingConfig::default());
+        assert!(!service.has_model());
+        service.start().await.expect("service starts");
+
+        let result = service
+            .submit_request(text_request("Hello, world!"))
+            .await
+            .expect("the caller must be answered, not left to time out");
+
+        match result.output {
+            ProcessingOutput::Error(message) => {
+                assert_eq!(message, NO_MODEL_CONFIGURED);
+            },
+            other => panic!("expected a structured error, got {other:?}"),
+        }
+    }
+
+    /// The same stack backed by a real (untrained) GPT-2 must produce genuine
+    /// decoded model output — proving the error above is a missing model, not a
+    /// missing code path.
+    #[tokio::test]
+    async fn service_with_a_real_model_produces_model_output() {
+        let executor = untrained_byte_gpt2_executor(1, 16, 4).expect("tiny GPT-2 must build");
+        let service = DynamicBatchingService::with_executor(
+            BatchingConfig::default(),
+            Arc::new(executor) as Arc<dyn BatchExecutor>,
+        );
+        assert!(service.has_model());
+        service.start().await.expect("service starts");
+
+        let result = service
+            .submit_request(text_request("Hi"))
+            .await
+            .expect("a model-backed service must answer");
+
+        match result.output {
+            ProcessingOutput::Text(text) => {
+                assert!(
+                    !text.starts_with("Processed: "),
+                    "the executor must not echo the prompt, got {text:?}"
+                );
+            },
+            other => panic!("expected decoded model output, got {other:?}"),
+        }
+    }
 }

@@ -103,6 +103,26 @@ impl Embedding {
         &mut self.weight
     }
 
+    /// Append the embedding table to `into` under `<prefix>.weight`.
+    ///
+    /// See [`crate::layers::Linear::collect_named_parameters`] for the rationale.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &self.weight));
+    }
+
+    /// Mutable counterpart of [`Embedding::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &mut self.weight));
+    }
+
     /// Number of rows in the embedding table (the vocabulary size).
     pub fn num_embeddings(&self) -> usize {
         self.num_embeddings

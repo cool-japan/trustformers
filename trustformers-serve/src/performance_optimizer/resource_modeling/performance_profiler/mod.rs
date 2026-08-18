@@ -24,3 +24,6 @@ pub mod types_profilers;
 // Re-export all types (types_profilers is re-exported via types.rs)
 pub use functions::*;
 pub use types::*;
+
+#[cfg(test)]
+mod types_profilers_tests;

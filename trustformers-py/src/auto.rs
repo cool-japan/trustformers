@@ -1,5 +1,5 @@
 use crate::models::{
-    PyBertModel, PyGPT2Model, PyLlamaModel, PyMambaModel, PyRwkvModel, PyT5Model,
+    PyBertModel, PyGPT2LMHeadModel, PyLlamaModel, PyMambaModel, PyRwkvModel, PyT5Model,
 };
 use crate::tokenizers::{PyBPETokenizer, PyWordPieceTokenizer};
 use pyo3::exceptions::PyValueError;
@@ -65,7 +65,11 @@ impl PyAutoModel {
                 model.into_py_any(py)
             },
             "gpt2" | "gpt-j" | "gpt-neo" => {
-                let model = PyGPT2Model::from_pretrained(
+                // `AutoModel`/`AutoModelForCausalLM` callers expect `.generate()` to
+                // work, which requires the language-modeling head; the headless
+                // `PyGPT2Model` deliberately has no `.generate()` (see its doc
+                // comment -- HuggingFace's own `GPT2Model` has none either).
+                let model = PyGPT2LMHeadModel::from_pretrained(
                     py,
                     pretrained_model_name_or_path,
                     kwargs.map(|k| k.as_any()), // Pass kwargs to model

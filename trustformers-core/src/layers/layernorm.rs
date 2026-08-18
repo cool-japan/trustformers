@@ -116,6 +116,41 @@ impl LayerNorm {
         &mut self.bias
     }
 
+    /// Append this layer's parameters to `into` under `<prefix>.weight` /
+    /// `<prefix>.bias` — the names PyTorch's `nn.LayerNorm` uses.
+    ///
+    /// See [`crate::layers::Linear::collect_named_parameters`] for the rationale.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &self.weight));
+        into.push((format!("{prefix}.bias"), &self.bias));
+    }
+
+    /// Mutable counterpart of [`LayerNorm::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        let (weight, bias) = self.parameters_mut();
+        into.push((format!("{prefix}.weight"), weight));
+        into.push((format!("{prefix}.bias"), bias));
+    }
+
+    /// Borrow the scale **and** the shift mutably at the same time.
+    ///
+    /// Two successive `*_mut()` calls each borrow all of `*self`, so only a
+    /// disjoint-field borrow inside this impl can hand out both at once — which
+    /// is what building a `Vec<(String, &mut Tensor)>` for
+    /// [`Model::named_tensors_mut`](crate::traits::Model::named_tensors_mut)
+    /// requires.
+    pub fn parameters_mut(&mut self) -> (&mut Tensor, &mut Tensor) {
+        (&mut self.weight, &mut self.bias)
+    }
+
     /// The shape the trailing dimensions are normalised over.
     pub fn normalized_shape(&self) -> &[usize] {
         &self.normalized_shape
@@ -816,6 +851,26 @@ impl RMSNorm {
     /// Returns a mutable reference to the elementwise scale.
     pub fn weight_mut(&mut self) -> &mut Tensor {
         &mut self.weight
+    }
+
+    /// Append this layer's single parameter to `into` under `<prefix>.weight`.
+    ///
+    /// RMSNorm has no shift term, so exactly one entry is produced.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &self.weight));
+    }
+
+    /// Mutable counterpart of [`RMSNorm::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        prefix: &str,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        into.push((format!("{prefix}.weight"), &mut self.weight));
     }
 
     /// The epsilon added inside the reciprocal square root.

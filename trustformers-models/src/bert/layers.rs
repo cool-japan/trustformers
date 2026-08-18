@@ -216,6 +216,46 @@ impl BertEmbeddings {
         }
         bind_layer_norm(binder, "embeddings.LayerNorm", hidden, &mut self.layer_norm)
     }
+
+    /// Append the embedding parameters under the names
+    /// [`BertEmbeddings::load_weights`] binds.
+    ///
+    /// `has_token_type_embeddings` must match the value passed to
+    /// `load_weights`: DistilBERT has no `token_type_embeddings`, and listing a
+    /// table its checkpoints never contain would make a round-trip through
+    /// `named_tensors` produce a file that no longer loads.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        has_token_type_embeddings: bool,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.word_embeddings
+            .collect_named_parameters("embeddings.word_embeddings", into);
+        self.position_embeddings
+            .collect_named_parameters("embeddings.position_embeddings", into);
+        if has_token_type_embeddings {
+            self.token_type_embeddings
+                .collect_named_parameters("embeddings.token_type_embeddings", into);
+        }
+        self.layer_norm.collect_named_parameters("embeddings.LayerNorm", into);
+    }
+
+    /// Mutable counterpart of [`BertEmbeddings::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        has_token_type_embeddings: bool,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.word_embeddings
+            .collect_named_parameters_mut("embeddings.word_embeddings", into);
+        self.position_embeddings
+            .collect_named_parameters_mut("embeddings.position_embeddings", into);
+        if has_token_type_embeddings {
+            self.token_type_embeddings
+                .collect_named_parameters_mut("embeddings.token_type_embeddings", into);
+        }
+        self.layer_norm.collect_named_parameters_mut("embeddings.LayerNorm", into);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -306,6 +346,44 @@ impl BertLayer {
             hidden,
             &mut self.output_layer_norm,
         )
+    }
+
+    /// Append this encoder layer's parameters, in the order
+    /// [`BertLayer::load_weights`] binds them.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        layer_prefix: &str,
+        names: &BertLayerNames,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.attention.collect_named_parameters(layer_prefix, names, into);
+        self.intermediate.collect_named_parameters(
+            layer_prefix.trim_end_matches('.'),
+            names.intermediate,
+            names.feed_forward_output,
+            into,
+        );
+        self.output_layer_norm
+            .collect_named_parameters(&format!("{layer_prefix}{}", names.output_norm), into);
+    }
+
+    /// Mutable counterpart of [`BertLayer::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        layer_prefix: &str,
+        names: &BertLayerNames,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        let feed_forward_prefix = layer_prefix.trim_end_matches('.').to_string();
+        let norm_name = format!("{layer_prefix}{}", names.output_norm);
+        self.attention.collect_named_parameters_mut(layer_prefix, names, into);
+        self.intermediate.collect_named_parameters_mut(
+            &feed_forward_prefix,
+            names.intermediate,
+            names.feed_forward_output,
+            into,
+        );
+        self.output_layer_norm.collect_named_parameters_mut(&norm_name, into);
     }
 }
 
@@ -443,6 +521,58 @@ impl BertAttention {
             &mut self.output_layer_norm,
         )
     }
+
+    /// Append the four projections and the post-attention norm, spelled with the
+    /// same [`BertLayerNames`] table [`BertAttention::load_weights`] uses.
+    ///
+    /// `layer_prefix` already ends in a `.` (`encoder.layer.3.`), matching the
+    /// loader's convention, so the sub-paths are concatenated directly.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        layer_prefix: &str,
+        names: &BertLayerNames,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        self.self_attention.projections().collect_named_parameters(
+            "",
+            [
+                &format!("{layer_prefix}{}", names.query),
+                &format!("{layer_prefix}{}", names.key),
+                &format!("{layer_prefix}{}", names.value),
+                &format!("{layer_prefix}{}", names.attention_output),
+            ],
+            into,
+        );
+        self.output_layer_norm
+            .collect_named_parameters(&format!("{layer_prefix}{}", names.attention_norm), into);
+    }
+
+    /// Mutable counterpart of [`BertAttention::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        layer_prefix: &str,
+        names: &BertLayerNames,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        let norm_name = format!("{layer_prefix}{}", names.attention_norm);
+        let projection_names = [
+            format!("{layer_prefix}{}", names.query),
+            format!("{layer_prefix}{}", names.key),
+            format!("{layer_prefix}{}", names.value),
+            format!("{layer_prefix}{}", names.attention_output),
+        ];
+        self.self_attention.projections_mut().collect_named_parameters_mut(
+            "",
+            [
+                &projection_names[0],
+                &projection_names[1],
+                &projection_names[2],
+                &projection_names[3],
+            ],
+            into,
+        );
+        self.output_layer_norm.collect_named_parameters_mut(&norm_name, into);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -504,6 +634,30 @@ impl BertEncoder {
         }
         Ok(())
     }
+
+    /// Append every encoder layer's parameters, in layer-index order.
+    pub fn collect_named_parameters<'a>(
+        &'a self,
+        names: &BertLayerNames,
+        into: &mut Vec<(String, &'a Tensor)>,
+    ) {
+        for (index, layer) in self.layers.iter().enumerate() {
+            let layer_prefix = format!("{}{index}.", names.layer_stack_prefix);
+            layer.collect_named_parameters(&layer_prefix, names, into);
+        }
+    }
+
+    /// Mutable counterpart of [`BertEncoder::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        names: &BertLayerNames,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            let layer_prefix = format!("{}{index}.", names.layer_stack_prefix);
+            layer.collect_named_parameters_mut(&layer_prefix, names, into);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -540,6 +694,19 @@ impl BertPooler {
     /// The pooler's dense projection.
     pub fn dense(&self) -> &trustformers_core::layers::Linear {
         &self.dense
+    }
+
+    /// Append the pooler projection under `pooler.dense.…`.
+    pub fn collect_named_parameters<'a>(&'a self, into: &mut Vec<(String, &'a Tensor)>) {
+        self.dense.collect_named_parameters("pooler.dense", into);
+    }
+
+    /// Mutable counterpart of [`BertPooler::collect_named_parameters`].
+    pub fn collect_named_parameters_mut<'a>(
+        &'a mut self,
+        into: &mut Vec<(String, &'a mut Tensor)>,
+    ) {
+        self.dense.collect_named_parameters_mut("pooler.dense", into);
     }
 
     /// Copy the pooler projection out of a checkpoint.

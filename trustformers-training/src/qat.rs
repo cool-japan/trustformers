@@ -276,11 +276,11 @@ impl QATConfig {
                     remaining_budget.saturating_sub(layer_size * affordable_bits as u64);
             }
 
-            println!(
+            tracing::info!(
                 "🎯 Optimized bit allocation under budget constraint: {} bits",
                 budget
             );
-            println!("📊 Remaining budget: {} bits", remaining_budget);
+            tracing::debug!("📊 Remaining budget: {} bits", remaining_budget);
         }
 
         Ok(())
@@ -721,7 +721,7 @@ impl ActivationQuantizer {
     pub fn quantize(&self, tensor: &Tensor) -> Result<Tensor> {
         if !self.calibrated {
             // If not calibrated, just pass through with warning
-            println!("⚠️ Warning: Activation quantizer not calibrated, using full precision");
+            tracing::warn!("⚠️ Warning: Activation quantizer not calibrated, using full precision");
             return Ok(tensor.clone());
         }
 
@@ -947,7 +947,7 @@ impl MixedBitQATTrainer {
             self.activation_quantizers.insert(layer_name.clone(), act_quantizer);
         }
 
-        println!(
+        tracing::info!(
             "🔧 Initialized mixed-bit QAT for layer: {} ({}bits)",
             layer_name,
             self.config.get_layer_bits(&layer_name, self.current_step)
@@ -961,7 +961,7 @@ impl MixedBitQATTrainer {
         &mut self,
         model_outputs: HashMap<String, Vec<Tensor>>,
     ) -> Result<()> {
-        println!("🔍 Performing layer sensitivity analysis for mixed-bit optimization...");
+        tracing::info!("🔍 Performing layer sensitivity analysis for mixed-bit optimization...");
 
         for (layer_name, outputs) in model_outputs {
             // Calculate sensitivity based on activation variance and gradient magnitudes
@@ -989,7 +989,7 @@ impl MixedBitQATTrainer {
 
             self.layer_sensitivities.insert(layer_name.clone(), sensitivity);
 
-            println!("📊 Layer {} sensitivity: {:.3}", layer_name, sensitivity);
+            tracing::debug!("📊 Layer {} sensitivity: {:.3}", layer_name, sensitivity);
         }
 
         // Auto-configure based on sensitivity analysis
@@ -1005,7 +1005,7 @@ impl MixedBitQATTrainer {
         // Optimize bit allocation if enabled
         if self.config.enable_mixed_bit_optimization {
             if let Err(e) = self.config.optimize_bit_allocation(self.model_size_info.clone()) {
-                println!("⚠️ Warning: Failed to optimize bit allocation: {}", e);
+                tracing::warn!("⚠️ Warning: Failed to optimize bit allocation: {}", e);
             }
         }
     }
@@ -1084,7 +1084,7 @@ impl MixedBitQATTrainer {
         if let MixedBitStrategy::Progressive { .. } = &self.config.mixed_bit_strategy {
             // Bit widths will be automatically updated via get_layer_bits
             if self.current_step.is_multiple_of(1000) {
-                println!(
+                tracing::info!(
                     "📈 Progressive quantization step {}: updating bit allocations",
                     self.current_step
                 );
@@ -1094,7 +1094,7 @@ impl MixedBitQATTrainer {
         // Freeze quantization parameters if specified
         if let Some(freeze_step) = self.config.freeze_step {
             if self.current_step == freeze_step {
-                println!(
+                tracing::info!(
                     "🔒 Freezing quantization parameters at step {}",
                     freeze_step
                 );

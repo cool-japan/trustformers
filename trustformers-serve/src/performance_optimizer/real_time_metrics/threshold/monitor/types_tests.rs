@@ -1,7 +1,7 @@
 //! Tests for threshold monitor types
 
 use super::*;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 struct Lcg {
     state: u64,
@@ -11,7 +11,8 @@ impl Lcg {
         Lcg { state: seed }
     }
     fn next(&mut self) -> u64 {
-        self.state = self.state
+        self.state = self
+            .state
             .wrapping_mul(6364136223846793005u64)
             .wrapping_add(1442695040888963407u64);
         self.state

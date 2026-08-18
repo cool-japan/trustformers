@@ -76,6 +76,13 @@ pub struct TrustformerServer {
     pub(crate) model_manager: Arc<ModelManager>,
     /// Requests observed by the HTTP layer, counted for `/admin/stats`.
     pub(crate) request_counter: Arc<AtomicU64>,
+    /// Routing for the OpenAI-compatible surface (`/v1/chat/completions`,
+    /// `/v1/completions`, `/v1/embeddings`, `/v1/models`).
+    ///
+    /// Built without an inference backend, so those endpoints report `503` until
+    /// one is installed with [`TrustformerServer::with_openai_backend`]. They are
+    /// never allowed to answer with placeholder text.
+    pub(crate) openai_router: crate::openai_compat::OpenAiApiRouter,
 }
 impl TrustformerServer {
     /// Get batching service
@@ -154,7 +161,31 @@ impl TrustformerServer {
             stream_store: Arc::new(StreamStore::new()),
             model_manager,
             request_counter: Arc::new(AtomicU64::new(0)),
+            openai_router: crate::openai_compat::OpenAiApiRouter::new(Vec::new()),
         }
+    }
+
+    /// Serve the OpenAI-compatible endpoints from `backend`.
+    ///
+    /// Until this is called, `/v1/chat/completions`, `/v1/completions` and
+    /// `/v1/embeddings` are registered but answer `503 Service Unavailable`:
+    /// the deployment is incomplete, and saying so is the only honest answer.
+    ///
+    /// `allowed_models` restricts which model identifiers clients may name; an
+    /// empty list accepts whatever the backend reports it can serve.
+    pub fn with_openai_backend(
+        mut self,
+        backend: Arc<dyn crate::openai_compat::OpenAiInferenceBackend>,
+        allowed_models: Vec<String>,
+    ) -> Self {
+        self.openai_router =
+            crate::openai_compat::OpenAiApiRouter::new(allowed_models).with_backend(backend);
+        self
+    }
+
+    /// Whether an OpenAI-compatible inference backend is installed.
+    pub fn has_openai_backend(&self) -> bool {
+        self.openai_router.has_backend()
     }
 
     /// Registry of async inference jobs.
@@ -257,8 +288,15 @@ impl TrustformerServer {
     /// Both the production router and the test router are built from this single
     /// table, so an endpoint can never be reachable in tests while returning 404
     /// in production.
-    fn routes() -> Router {
+    ///
+    /// `openai` supplies the OpenAI-compatible surface. It is merged here rather
+    /// than in the two callers so the two routers can never disagree about which
+    /// `/v1/...` endpoints exist. With no backend attached to it, those endpoints
+    /// answer `503` with an OpenAI-shaped error body — they are reachable and
+    /// honest, never absent and never fabricating a completion.
+    fn routes(openai: crate::openai_compat::OpenAiApiRouter) -> Router {
         Router::new()
+            .merge(crate::openai_compat::openai_compat_router(openai))
             .route("/health", get(health_check))
             .route("/health/detailed", get(detailed_health_check))
             .route("/health/readiness", get(readiness_check))
@@ -340,6 +378,10 @@ impl TrustformerServer {
             "/docs",
             "/auth/token",
             "/auth/login",
+            "/v1/chat/completions",
+            "/v1/completions",
+            "/v1/embeddings",
+            "/v1/models",
         ]
     }
 
@@ -348,8 +390,9 @@ impl TrustformerServer {
         if let Err(e) = self.batching_service.start().await {
             tracing::warn!("Failed to start batching service for tests: {}", e);
         }
+        let openai = self.openai_router.clone();
         let shared_state = Arc::new(self);
-        let mut router = Self::routes().route("/metrics", get(metrics_endpoint));
+        let mut router = Self::routes(openai).route("/metrics", get(metrics_endpoint));
 
         if shared_state.auth_service.is_some() {
             router = router.layer(axum::middleware::from_fn(auth_extension_middleware));
@@ -365,8 +408,9 @@ impl TrustformerServer {
     /// Serves exactly the same endpoints as [`TrustformerServer::create_test_router`];
     /// only the observability layers and the `/metrics` gate differ.
     async fn create_router(self) -> Router {
+        let openai = self.openai_router.clone();
         let shared_state = Arc::new(self);
-        let mut router = Self::routes();
+        let mut router = Self::routes(openai);
 
         if shared_state.config.enable_metrics {
             router = router.route("/metrics", get(metrics_endpoint));
@@ -600,6 +644,7 @@ mod router_tests {
             "/docs",
             "/graphql/playground",
             "/admin/gpu/status",
+            "/v1/models",
         ] {
             let response = router
                 .clone()
@@ -624,6 +669,9 @@ mod router_tests {
             "/inference/async",
             "/models/load",
             "/graphql",
+            "/v1/chat/completions",
+            "/v1/completions",
+            "/v1/embeddings",
         ] {
             let response = router
                 .clone()
@@ -674,6 +722,196 @@ mod router_tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    /// A tiny but genuine GPT-2 over a byte-level vocabulary, wired into an
+    /// OpenAI-compatible backend. Real architecture, real (untrained) weights,
+    /// real forward pass — no stand-in for inference anywhere.
+    #[cfg(test)]
+    fn tiny_openai_backend() -> Arc<dyn crate::openai_compat::OpenAiInferenceBackend> {
+        use crate::batching::processor::{BatchModel, EmbeddingModel};
+        use crate::batching::{ByteTokenizer, Gpt2BatchModel};
+        use crate::openai_compat::BatchExecutorBackend;
+        use trustformers_models::gpt2::Gpt2Config;
+
+        let config = Gpt2Config {
+            vocab_size: ByteTokenizer::VOCAB_SIZE,
+            n_positions: 64,
+            n_embd: 16,
+            n_layer: 1,
+            n_head: 2,
+            n_inner: Some(32),
+            resid_pdrop: 0.0,
+            embd_pdrop: 0.0,
+            attn_pdrop: 0.0,
+            bos_token_id: ByteTokenizer::EOT_ID,
+            eos_token_id: ByteTokenizer::EOT_ID,
+            ..Gpt2Config::default()
+        };
+        let model = Arc::new(Gpt2BatchModel::untrained(config).expect("tiny GPT-2 must build"));
+        Arc::new(
+            BatchExecutorBackend::new(
+                "tiny-gpt2",
+                Arc::clone(&model) as Arc<dyn BatchModel>,
+                Arc::new(ByteTokenizer),
+            )
+            .with_embedding_model(model as Arc<dyn EmbeddingModel>)
+            .with_default_max_tokens(4),
+        )
+    }
+
+    /// Regression: `openai_compat` was a fully built module registered on no
+    /// router at all, so every `/v1/chat/completions` request 404'd. It must now
+    /// be mounted and run a real forward pass end to end.
+    #[tokio::test]
+    async fn openai_chat_completions_runs_real_inference_through_the_server_router() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let router = TrustformerServer::new(ServerConfig::default())
+            .with_openai_backend(tiny_openai_backend(), vec!["tiny-gpt2".to_string()])
+            .create_test_router()
+            .await;
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"tiny-gpt2","messages":[{"role":"user","content":"Hello"}],"max_tokens":4}"#,
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router answers");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body readable");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(body["object"], serde_json::json!("chat.completion"));
+        assert_eq!(body["model"], serde_json::json!("tiny-gpt2"));
+        // The flattened chat prompt is "user: Hello\n" — twelve bytes, hence
+        // twelve byte-level tokens. This is the real tokenizer's count; the
+        // `len / 4` fallback used without a tokenizer would have said three.
+        assert_eq!(body["usage"]["prompt_tokens"], serde_json::json!(12));
+        assert!(body["choices"][0]["message"]["content"].is_string());
+    }
+
+    /// `/v1/completions` and `/v1/embeddings` must be reachable on the same
+    /// router and produce real model output.
+    #[tokio::test]
+    async fn openai_completions_and_embeddings_are_mounted() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let router = TrustformerServer::new(ServerConfig::default())
+            .with_openai_backend(tiny_openai_backend(), Vec::new())
+            .create_test_router()
+            .await;
+
+        let completion = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"tiny-gpt2","prompt":"abc","max_tokens":2}"#,
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router answers");
+        assert_eq!(completion.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(completion.into_body(), 1 << 20)
+            .await
+            .expect("body readable");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(body["object"], serde_json::json!("text_completion"));
+        assert_eq!(body["usage"]["prompt_tokens"], serde_json::json!(3));
+
+        let embeddings = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"tiny-gpt2","input":"alpha"}"#))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router answers");
+        assert_eq!(embeddings.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(embeddings.into_body(), 1 << 20)
+            .await
+            .expect("body readable");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        let vector = body["data"][0]["embedding"].as_array().expect("embedding array");
+        assert_eq!(vector.len(), 16, "the tiny model's hidden size");
+        assert!(
+            vector.iter().any(|v| v.as_f64().unwrap_or(0.0).abs() > f64::EPSILON),
+            "a real pooled hidden state must not be an all-zero vector"
+        );
+
+        let models = router
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router answers");
+        assert_eq!(models.status(), StatusCode::OK);
+    }
+
+    /// Regression: with no OpenAI backend installed the endpoints must still be
+    /// registered and must answer an honest 503 — never 404, never placeholder
+    /// text.
+    #[tokio::test]
+    async fn openai_endpoints_without_a_backend_are_service_unavailable() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let server = TrustformerServer::new(ServerConfig::default());
+        assert!(!server.has_openai_backend());
+        let router = server.create_test_router().await;
+
+        for (path, payload) in [
+            (
+                "/v1/chat/completions",
+                r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#,
+            ),
+            ("/v1/completions", r#"{"model":"m","prompt":"hi"}"#),
+            ("/v1/embeddings", r#"{"model":"m","input":"hi"}"#),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(payload))
+                        .expect("request builds"),
+                )
+                .await
+                .expect("router answers");
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path} must report an incomplete deployment honestly"
+            );
+        }
+    }
+
     /// Every documented path is actually registered.
     #[test]
     fn route_paths_are_declared_once() {
@@ -686,5 +924,10 @@ mod router_tests {
         assert!(paths.contains(&"/v1/inference"));
         assert!(paths.contains(&"/graphql"));
         assert!(paths.contains(&"/models/load"));
+        // The OpenAI-compatible surface is part of the documented route table.
+        assert!(paths.contains(&"/v1/chat/completions"));
+        assert!(paths.contains(&"/v1/completions"));
+        assert!(paths.contains(&"/v1/embeddings"));
+        assert!(paths.contains(&"/v1/models"));
     }
 }

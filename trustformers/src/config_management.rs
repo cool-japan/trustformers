@@ -449,24 +449,49 @@ impl ConfigValidator {
 
             // Check conditional requirements
             for conditional in &schema.conditional_requirements {
-                if self.evaluate_condition(&conditional.condition, config_map) {
-                    for required_field in &conditional.required_fields {
-                        if !config_map.contains_key(required_field) {
-                            result.errors.push(ValidationError {
-                                field: Some(required_field.clone()),
-                                error_type: ValidationErrorType::ConditionalRequirementNotMet,
-                                message: format!(
-                                    "Field '{}' is required when {}",
-                                    required_field, conditional.condition
-                                ),
-                                severity: ValidationSeverity::Error,
-                                suggestion: Some(
-                                    "Add the conditionally required field".to_string(),
-                                ),
-                            });
-                            result.is_valid = false;
+                match crate::config_condition::evaluate(&conditional.condition, config_map) {
+                    Ok(true) => {
+                        for required_field in &conditional.required_fields {
+                            if !config_map.contains_key(required_field) {
+                                result.errors.push(ValidationError {
+                                    field: Some(required_field.clone()),
+                                    error_type: ValidationErrorType::ConditionalRequirementNotMet,
+                                    message: format!(
+                                        "Field '{}' is required when {}",
+                                        required_field, conditional.condition
+                                    ),
+                                    severity: ValidationSeverity::Error,
+                                    suggestion: Some(
+                                        "Add the conditionally required field".to_string(),
+                                    ),
+                                });
+                                result.is_valid = false;
+                            }
                         }
-                    }
+                    },
+                    Ok(false) => {},
+                    Err(err) => {
+                        // A malformed condition is a schema authoring bug,
+                        // not "the condition is unmet" -- surfacing it as a
+                        // validation error means it gets caught the first
+                        // time the schema is exercised, rather than the
+                        // conditional requirement silently never firing.
+                        result.errors.push(ValidationError {
+                            field: None,
+                            error_type: ValidationErrorType::InvalidCondition,
+                            message: format!(
+                                "Conditional requirement has an invalid condition: {err}"
+                            ),
+                            severity: ValidationSeverity::Error,
+                            suggestion: Some(
+                                "Fix the `condition` string in the schema's \
+                                 `conditional_requirements` (see `config_condition` module docs \
+                                 for the supported grammar)"
+                                    .to_string(),
+                            ),
+                        });
+                        result.is_valid = false;
+                    },
                 }
             }
         } else {
@@ -589,29 +614,6 @@ impl ConfigValidator {
             },
         }
     }
-
-    fn evaluate_condition(
-        &self,
-        condition: &str,
-        config: &serde_json::Map<String, serde_json::Value>,
-    ) -> bool {
-        // Simplified condition evaluation - real implementation would have a proper parser
-        if condition.contains("==") {
-            let parts: Vec<&str> = condition.split("==").collect();
-            if parts.len() == 2 {
-                let field = parts[0].trim();
-                let expected_value = parts[1].trim().trim_matches('"');
-
-                if let Some(actual_value) = config.get(field) {
-                    if let Some(actual_str) = actual_value.as_str() {
-                        return actual_str == expected_value;
-                    }
-                }
-            }
-        }
-
-        false
-    }
 }
 
 /// Validation result
@@ -649,6 +651,11 @@ pub enum ValidationErrorType {
     ConditionalRequirementNotMet,
     InvalidFormat,
     UnknownConfigType,
+    /// A [`ConditionalRequirement::condition`] string failed to parse or
+    /// evaluate (see [`crate::config_condition`]) -- e.g. an unknown
+    /// operator, an unterminated string, or ordering a non-numeric value.
+    /// Surfaced instead of silently treating the condition as never met.
+    InvalidCondition,
 }
 
 /// Validation severity levels
@@ -1606,5 +1613,134 @@ mod tests {
             .errors
             .iter()
             .any(|e| matches!(e.error_type, ValidationErrorType::ConstraintViolation)));
+    }
+
+    // -------------------------------------------------------------------
+    // Conditional requirements driven by the real expression evaluator
+    // (`crate::config_condition`). Regression coverage for the bug where
+    // `evaluate_condition` only understood `==` on string fields and
+    // silently returned `false` for everything else, so conditional
+    // requirements built on `!=`/`<`/`&&`/etc. could never fire.
+    // -------------------------------------------------------------------
+
+    fn schema_with_condition(condition: &str) -> ConfigSchema {
+        ConfigSchema {
+            name: "conditional-test".to_string(),
+            version: "1.0.0".to_string(),
+            description: "schema exercising conditional_requirements".to_string(),
+            fields: HashMap::new(),
+            required_fields: HashSet::new(),
+            conditional_requirements: vec![ConditionalRequirement {
+                condition: condition.to_string(),
+                required_fields: vec!["api_key".to_string()],
+            }],
+        }
+    }
+
+    #[test]
+    fn test_conditional_requirement_fires_on_not_equal() {
+        // `!=` was entirely unsupported by the old evaluator.
+        let validator = ConfigValidator::new();
+        let schema = schema_with_condition("environment != \"local\"");
+        let config = serde_json::json!({ "environment": "production" });
+        let result = validator.validate(&config, &schema);
+        assert!(
+            !result.is_valid,
+            "missing api_key must be flagged when environment != local"
+        );
+        assert!(result.errors.iter().any(|e| matches!(
+            e.error_type,
+            ValidationErrorType::ConditionalRequirementNotMet
+        )));
+    }
+
+    #[test]
+    fn test_conditional_requirement_does_not_fire_when_condition_false() {
+        let validator = ConfigValidator::new();
+        let schema = schema_with_condition("environment != \"local\"");
+        let config = serde_json::json!({ "environment": "local" });
+        let result = validator.validate(&config, &schema);
+        assert!(
+            result.is_valid,
+            "condition is false, so the missing api_key must not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_conditional_requirement_fires_on_numeric_comparison() {
+        // `<`/`>`/etc. were entirely unsupported by the old evaluator.
+        let validator = ConfigValidator::new();
+        let schema = schema_with_condition("batch_size > 64");
+        let config = serde_json::json!({ "batch_size": 128 });
+        let result = validator.validate(&config, &schema);
+        assert!(!result.is_valid);
+    }
+
+    #[test]
+    fn test_conditional_requirement_fires_on_and_with_precedence() {
+        // Exercises `&&` binding tighter than `||`, end to end through
+        // `ConfigValidator::validate`, not just the standalone evaluator.
+        let validator = ConfigValidator::new();
+        let schema = schema_with_condition("region == \"eu\" || tier == \"pro\" && strict == true");
+        let config = serde_json::json!({ "region": "us", "tier": "pro", "strict": true });
+        let result = validator.validate(&config, &schema);
+        assert!(
+            !result.is_valid,
+            "`tier == pro && strict == true` must fire even though `region == eu` is false"
+        );
+    }
+
+    #[test]
+    fn test_conditional_requirement_satisfied_field_present_is_valid() {
+        let validator = ConfigValidator::new();
+        let schema = schema_with_condition("environment != \"local\"");
+        let config = serde_json::json!({ "environment": "production", "api_key": "secret" });
+        let result = validator.validate(&config, &schema);
+        assert!(
+            result.is_valid,
+            "api_key is present, so the condition being true is fine"
+        );
+    }
+
+    #[test]
+    fn test_malformed_condition_is_structured_error_not_silent_pass() {
+        // Regression test for the exact bug: the old evaluator would treat
+        // any operator it didn't recognize as "condition not met" and
+        // silently return `false`, so a schema author's typo (`<>` instead
+        // of `!=`) would validate cleanly forever. The new evaluator must
+        // surface this as a validation error instead.
+        let validator = ConfigValidator::new();
+        let schema = schema_with_condition("environment <> \"local\"");
+        let config = serde_json::json!({ "environment": "production" });
+        let result = validator.validate(&config, &schema);
+        assert!(
+            !result.is_valid,
+            "a malformed condition must fail validation, not pass silently"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e.error_type, ValidationErrorType::InvalidCondition)),
+            "the malformed condition must be reported as InvalidCondition"
+        );
+    }
+
+    #[test]
+    fn test_malformed_condition_error_message_names_the_condition() {
+        let validator = ConfigValidator::new();
+        let schema = schema_with_condition("a <> b");
+        let config = serde_json::json!({});
+        let result = validator.validate(&config, &schema);
+        let invalid = result
+            .errors
+            .iter()
+            .find(|e| matches!(e.error_type, ValidationErrorType::InvalidCondition))
+            .expect("must report InvalidCondition");
+        assert!(
+            invalid.message.contains("a <> b"),
+            "error message should include the offending condition text: {}",
+            invalid.message
+        );
     }
 }

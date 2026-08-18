@@ -13,3 +13,6 @@ pub mod types_analysis;
 // Re-export all types (types_analysis is re-exported via types.rs)
 pub use functions::*;
 pub use types::*;
+
+#[cfg(test)]
+mod types_tests;

@@ -199,8 +199,18 @@ fn test_conflict_impact_analysis_creation() {
             network_degradation: 0.01,
             overall_degradation: 0.05,
         },
-        reliability_impact: ReliabilityImpact { error_rate_increase: 0.0, timeout_probability_increase: 0.0, flakiness_increase: 0.0, reliability_decrease: 0.0 },
-        efficiency_impact: EfficiencyImpact { utilization_efficiency_loss: 0.0, time_efficiency_loss: 0.0, cost_efficiency_impact: 0.0, overall_efficiency_loss: 0.0 },
+        reliability_impact: ReliabilityImpact {
+            error_rate_increase: 0.0,
+            timeout_probability_increase: 0.0,
+            flakiness_increase: 0.0,
+            reliability_decrease: 0.0,
+        },
+        efficiency_impact: EfficiencyImpact {
+            utilization_efficiency_loss: 0.0,
+            time_efficiency_loss: 0.0,
+            cost_efficiency_impact: 0.0,
+            overall_efficiency_loss: 0.0,
+        },
         execution_time_impact: ExecutionTimeImpact {
             individual_test_time_increase: 0.1,
             total_suite_time_increase: 0.05,

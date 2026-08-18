@@ -159,8 +159,8 @@ impl OpenClBackend {
             )
         })?;
 
-        println!("✓ OpenCL backend initialized");
-        println!("  Device: {}", device_name);
+        tracing::info!("✓ OpenCL backend initialized");
+        tracing::info!("  Device: {}", device_name);
 
         Ok(Self {
             context: Arc::new(context),

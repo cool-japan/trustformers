@@ -29,6 +29,7 @@ thiserror.workspace = true
 parking_lot.workspace = true
 num_cpus.workspace = true
 log.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

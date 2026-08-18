@@ -238,7 +238,7 @@ impl OptimizationPipeline {
 
         for pass in &self.passes {
             if pass.is_applicable(&self.config) {
-                println!("Applying optimization pass: {}", pass.name());
+                tracing::info!("Applying optimization pass: {}", pass.name());
 
                 let stats = pass.apply(model, &self.config)?;
                 total_stats.add_pass_stats(pass.name().to_string(), stats);

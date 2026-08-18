@@ -414,7 +414,7 @@ impl CompressionBenchmark {
     {
         // Would benchmark each technique
         for technique in &self.techniques {
-            println!("Benchmarking {}", technique);
+            tracing::info!("Benchmarking {}", technique);
             // Run compression and evaluation
             // Store results
         }

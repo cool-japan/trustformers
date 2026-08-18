@@ -13,14 +13,39 @@
 //! - [`directory_management`] - Temporary directory management and cleanup
 //! - [`gpu_manager`] - GPU resource allocation and monitoring
 //! - [`database_management`] - Database connection pool management
-
-// Allow dead code for resource management infrastructure under development
-#![allow(dead_code)]
 //! - [`custom_resources`] - Generic custom resource handling
 //! - [`monitoring`] - Resource monitoring and health checks
 //! - [`allocation`] - Resource allocation strategies and tracking
 //! - [`cleanup`] - Resource cleanup and garbage collection
 //! - [`statistics`] - Performance metrics and analytics
+//!
+//! ## Removed in 0.2.1: superseded orphan trees
+//!
+//! Three parallel implementations were deleted rather than mounted, because each
+//! duplicated a module that is already declared here and in use:
+//!
+//! * `port_manager.rs` and the `port_manager/` subtree (~6,000 lines). Neither
+//!   was ever declared, so neither had been compiled; `port_manager.rs` declared
+//!   a `port_manager` submodule whose file does not exist, so it could not have
+//!   compiled if it had been. [`port_management`] provides the
+//!   [`NetworkPortManager`] that [`manager::ResourceManagementSystem`] actually
+//!   allocates ports through.
+//! * `gpu_management.rs` (~770 lines), superseded by the declared and live
+//!   [`gpu_manager`] tree.
+//! * `temp_dir_manager_legacy.rs`, superseded by the declared and live
+//!   [`temp_dir_manager`] tree, and `types_data_tests.rs`, a test file for
+//!   [`types_data`] that was never included by any `mod` declaration and so had
+//!   never run.
+//!
+//! Keeping unreachable duplicates in a published crate is worse than removing
+//! them: they cannot be exercised by any test, they drift silently against the
+//! code that is live, and a reader cannot tell which of the two implementations
+//! is the real one.
+
+// Allow dead code for resource management infrastructure under development.
+// Placed after the module documentation: an inner attribute wedged between two
+// `//!` lines splits the rendered module doc in half.
+#![allow(dead_code)]
 
 pub mod allocation;
 pub mod cleanup;

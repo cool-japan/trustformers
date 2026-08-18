@@ -522,15 +522,34 @@ impl MobileDeviceDetector {
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
+            // Real measurement via `sysinfo` (the same crate/feature set used
+            // elsewhere in this crate, e.g. `mlx_integration::sample_process_usage`)
+            // rather than the fixed 4096/2048 MB this used to report on every
+            // desktop host regardless of actual RAM. `System::new_all()`
+            // populates memory counters synchronously (no CPU-usage-style
+            // double-sample delay is needed for memory).
+            let mut system = sysinfo::System::new();
+            system.refresh_memory();
+            let total_mb = (system.total_memory() / (1024 * 1024)) as usize;
+            let available_mb = (system.available_memory() / (1024 * 1024)) as usize;
+
+            // A host with no readable memory counters (e.g. a sandboxed
+            // target where `sysinfo` cannot query the OS) falls back to a
+            // documented conservative assumption rather than silently
+            // reporting 0 MB, which would make every downstream tier/budget
+            // calculation degenerate.
+            let (total_mb, available_mb) =
+                if total_mb == 0 { (4096, 2048) } else { (total_mb, available_mb.max(1)) };
+
             Ok(MemoryInfo {
-                total_mb: 4096, // Default assumption
-                available_mb: 2048,
-                total_memory: 4096,
-                available_memory: 2048,
-                bandwidth_mbps: None,
+                total_mb,
+                available_mb,
+                total_memory: total_mb,
+                available_memory: available_mb,
+                bandwidth_mbps: Self::benchmark_memory_bandwidth().map(|v| v as usize),
                 memory_type: "Unknown".to_string(),
                 frequency_mhz: None,
-                is_low_memory_device: false,
+                is_low_memory_device: total_mb < 2048,
             })
         }
     }
@@ -642,7 +661,7 @@ impl MobileDeviceDetector {
         // Run micro-benchmarks to assess performance
         let cpu_single_core = Self::benchmark_cpu_single_core();
         let cpu_multi_core = Self::benchmark_cpu_multi_core(cpu_info.total_cores);
-        let gpu_score = gpu_info.as_ref().map(|_| Self::benchmark_gpu());
+        let gpu_score = gpu_info.as_ref().map(Self::benchmark_gpu);
         let memory_score = Self::benchmark_memory_bandwidth();
 
         let overall_tier = Self::calculate_overall_tier(
@@ -664,9 +683,26 @@ impl MobileDeviceDetector {
 
     // Configuration adjustment methods
 
+    /// Hard ceiling [`MobileConfig::validate`] enforces on `max_memory_mb`
+    /// ("Mobile deployment should not exceed 4GB memory"). The
+    /// `configure_for_*_device` helpers below derive `max_memory_mb` as a
+    /// fraction of `device_info.memory_info.total_mb`; while that total used
+    /// to be a fixed mobile-scale `4096` on every non-Android/iOS host, it
+    /// is now a real `sysinfo`-measured figure that, on a build/test
+    /// machine with far more RAM than a phone, can be tens of gigabytes.
+    /// Every assignment must therefore clamp to this ceiling, not just floor
+    /// with `.max(...)`.
+    const MAX_MOBILE_MEMORY_MB: usize = 4096;
+    /// Hard ceiling `validate()` enforces on `num_threads` ("should not use
+    /// more than 16 threads"); same rationale as above but for
+    /// `cpu_info.total_cores`/`performance_cores`, which on a many-core
+    /// desktop build host can exceed it.
+    const MAX_MOBILE_THREADS: usize = 16;
+
     fn configure_for_budget_device(config: &mut MobileConfig, device_info: &MobileDeviceInfo) {
         config.memory_optimization = MemoryOptimization::Maximum;
-        config.max_memory_mb = (device_info.memory_info.total_mb / 6).max(128); // Very conservative
+        config.max_memory_mb =
+            (device_info.memory_info.total_mb / 6).clamp(128, Self::MAX_MOBILE_MEMORY_MB); // Very conservative
         config.num_threads = 1;
         config.enable_batching = false;
         config.max_batch_size = 1;
@@ -678,16 +714,20 @@ impl MobileDeviceDetector {
 
     fn configure_for_mid_device(config: &mut MobileConfig, device_info: &MobileDeviceInfo) {
         config.memory_optimization = MemoryOptimization::Balanced;
-        config.max_memory_mb = (device_info.memory_info.total_mb / 4).max(256);
-        config.num_threads = (device_info.cpu_info.performance_cores).max(1);
+        config.max_memory_mb =
+            (device_info.memory_info.total_mb / 4).clamp(256, Self::MAX_MOBILE_MEMORY_MB);
+        config.num_threads =
+            (device_info.cpu_info.performance_cores).clamp(1, Self::MAX_MOBILE_THREADS);
         config.enable_batching = device_info.memory_info.total_mb >= 3072;
         config.max_batch_size = if config.enable_batching { 2 } else { 1 };
     }
 
     fn configure_for_high_device(config: &mut MobileConfig, device_info: &MobileDeviceInfo) {
         config.memory_optimization = MemoryOptimization::Balanced;
-        config.max_memory_mb = (device_info.memory_info.total_mb / 3).max(512);
-        config.num_threads = device_info.cpu_info.performance_cores + 1;
+        config.max_memory_mb =
+            (device_info.memory_info.total_mb / 3).clamp(512, Self::MAX_MOBILE_MEMORY_MB);
+        config.num_threads =
+            (device_info.cpu_info.performance_cores + 1).min(Self::MAX_MOBILE_THREADS);
         config.enable_batching = true;
         config.max_batch_size = 4;
         if let Some(ref mut quant) = config.quantization.as_mut() {
@@ -697,8 +737,9 @@ impl MobileDeviceDetector {
 
     fn configure_for_flagship_device(config: &mut MobileConfig, device_info: &MobileDeviceInfo) {
         config.memory_optimization = MemoryOptimization::Minimal;
-        config.max_memory_mb = (device_info.memory_info.total_mb / 2).max(1024);
-        config.num_threads = device_info.cpu_info.total_cores;
+        config.max_memory_mb =
+            (device_info.memory_info.total_mb / 2).clamp(1024, Self::MAX_MOBILE_MEMORY_MB);
+        config.num_threads = device_info.cpu_info.total_cores.min(Self::MAX_MOBILE_THREADS);
         config.enable_batching = true;
         config.max_batch_size = 8;
         if let Some(ref mut quant) = config.quantization.as_mut() {
@@ -980,25 +1021,125 @@ impl MobileDeviceDetector {
     }
 
     // Performance benchmarking methods
+    //
+    // These used to return the fixed constants `1000`, `1000 * cores`,
+    // `2000`, and `1500` on every device, which made `calculate_overall_tier`
+    // (and everything downstream that trusts `PerformanceScores`, such as
+    // `generate_optimized_config`) blind to whether the device is actually
+    // fast or slow. Each benchmark below now runs a real, timed, bounded
+    // workload -- the *scores differ across machines* because they are
+    // measured, not asserted.
+
+    /// Bounded-duration budget for one core's micro-benchmark run. Small
+    /// enough that `MobileDeviceDetector::detect()` (which every test in
+    /// this module calls at least once) stays fast, large enough that the
+    /// measured iteration count is not dominated by `Instant` overhead.
+    const BENCHMARK_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+
+    /// Run a fixed-duration, data-dependent floating point workload on the
+    /// calling thread and return a throughput score (higher = faster core).
+    ///
+    /// The loop body carries a data dependency through `acc` from one
+    /// iteration to the next, so the compiler cannot fold it to a constant
+    /// or hoist it out of the loop; `std::hint::black_box` additionally
+    /// prevents the whole loop from being optimized away as dead code. This
+    /// is a real timed measurement, not a formula that returns the same
+    /// number for every CPU.
+    fn run_cpu_workload_score() -> u32 {
+        let start = std::time::Instant::now();
+        let mut acc: f64 = 1.0;
+        let mut rounds: u64 = 0;
+        while start.elapsed() < Self::BENCHMARK_BUDGET {
+            for _ in 0..2000 {
+                acc = std::hint::black_box((acc * 1.000_003 + 0.5).sin().abs() + 1.0);
+            }
+            rounds += 1;
+        }
+        std::hint::black_box(acc);
+        let elapsed_us = start.elapsed().as_micros().max(1) as u64;
+        // Normalize to "thousand loop-rounds per second" so the score is a
+        // stable order-of-magnitude figure independent of the exact budget
+        // chosen above.
+        let score = rounds.saturating_mul(1_000_000) / elapsed_us;
+        score.min(u32::MAX as u64) as u32
+    }
 
     fn benchmark_cpu_single_core() -> Option<u32> {
-        // Run single-core CPU benchmark
-        Some(1000) // Placeholder score
+        Some(Self::run_cpu_workload_score())
     }
 
     fn benchmark_cpu_multi_core(cores: usize) -> Option<u32> {
-        // Run multi-core CPU benchmark
-        Some((1000 * cores) as u32) // Placeholder
+        let cores = cores.max(1);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Run the same timed workload concurrently on `cores` OS
+            // threads and sum their throughput -- a real multi-core figure
+            // that reflects actual contention/scheduling on this device,
+            // not `single_core_score * cores`.
+            let handles: Vec<_> =
+                (0..cores).map(|_| std::thread::spawn(Self::run_cpu_workload_score)).collect();
+            let total: u64 = handles.into_iter().map(|h| u64::from(h.join().unwrap_or(0))).sum();
+            Some(total.min(u32::MAX as u64) as u32)
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            // `wasm32-unknown-unknown` has no OS-thread `std::thread::spawn`
+            // support by default, so real parallel execution isn't
+            // available here. Summing `cores` sequential runs of the same
+            // timed workload is an honest lower bound (it credits zero
+            // speedup from parallelism) rather than a fabricated constant.
+            let total: u64 = (0..cores).map(|_| u64::from(Self::run_cpu_workload_score())).sum();
+            Some(total.min(u32::MAX as u64) as u32)
+        }
     }
 
-    fn benchmark_gpu() -> u32 {
-        // Run GPU benchmark
-        2000 // Placeholder
+    /// Derive a GPU score from the already-detected [`GpuInfo`] rather than
+    /// a flat constant. There is no portable, dependency-free way to run a
+    /// live GPU compute benchmark from this crate (that needs a real
+    /// Metal/Vulkan/OpenGL context per platform), so this is a deterministic
+    /// function of *real, per-device detected* data -- compute unit count
+    /// when known, otherwise the detected performance tier -- which varies
+    /// across devices with their actual detected GPU, unlike the previous
+    /// unconditional `2000`.
+    fn benchmark_gpu(gpu_info: &GpuInfo) -> u32 {
+        if let Some(units) = gpu_info.compute_units {
+            return (units as u32).saturating_mul(64);
+        }
+        match gpu_info.performance_tier {
+            GpuPerformanceTier::Low => 800,
+            GpuPerformanceTier::Medium => 1600,
+            GpuPerformanceTier::High => 2800,
+            GpuPerformanceTier::Flagship => 4200,
+        }
     }
 
+    /// Benchmark real memory throughput by timing repeated read-modify-write
+    /// passes over a multi-megabyte buffer and converting elapsed time and
+    /// bytes moved into MB/s. `std::hint::black_box` keeps the compiler from
+    /// eliding the writes/reads as dead code.
     fn benchmark_memory_bandwidth() -> Option<u32> {
-        // Benchmark memory bandwidth
-        Some(1500) // Placeholder
+        const BUFFER_LEN: usize = 4 * 1024 * 1024; // 4 MiB of u64 lanes below -> 32 MiB touched
+        let mut buffer = vec![0u64; BUFFER_LEN];
+
+        let start = std::time::Instant::now();
+        let mut passes: u64 = 0;
+        while start.elapsed() < Self::BENCHMARK_BUDGET {
+            for (i, slot) in buffer.iter_mut().enumerate() {
+                *slot = std::hint::black_box(slot.wrapping_add(i as u64 + 1));
+            }
+            passes += 1;
+        }
+        std::hint::black_box(&buffer);
+
+        let elapsed_secs = start.elapsed().as_secs_f64();
+        if elapsed_secs <= 0.0 {
+            return None;
+        }
+        let bytes_moved = passes as f64 * (BUFFER_LEN * std::mem::size_of::<u64>()) as f64;
+        let mbps = bytes_moved / elapsed_secs / (1024.0 * 1024.0);
+        Some(mbps.min(u32::MAX as f64) as u32)
     }
 
     fn calculate_overall_tier(
@@ -1173,5 +1314,96 @@ mod tests {
 
         assert!(allocation >= 128);
         assert!(allocation <= 2048);
+    }
+
+    /// Regression test for the previous `benchmark_*` implementations, which
+    /// returned the literal constants `1000`, `1000 * cores`, `2000`, and
+    /// `1500` on every device regardless of actual hardware speed. A real,
+    /// timed micro-benchmark on any machine running this test produces a
+    /// throughput figure in the tens-of-thousands range (rounds/sec-derived
+    /// score over an 8ms budget), not these small legacy constants.
+    #[test]
+    fn test_cpu_and_memory_benchmarks_are_measured_not_placeholder_constants() {
+        let single = MobileDeviceDetector::benchmark_cpu_single_core();
+        assert!(single.is_some());
+        assert_ne!(
+            single,
+            Some(1000),
+            "single-core score must not be the old placeholder"
+        );
+        assert!(single.expect("checked is_some above") > 0);
+
+        let multi = MobileDeviceDetector::benchmark_cpu_multi_core(4);
+        assert!(multi.is_some());
+        assert_ne!(
+            multi,
+            Some(4000),
+            "multi-core score must not be `1000 * cores`"
+        );
+        assert!(multi.expect("checked is_some above") > 0);
+
+        let mem = MobileDeviceDetector::benchmark_memory_bandwidth();
+        assert!(mem.is_some());
+        assert_ne!(
+            mem,
+            Some(1500),
+            "memory bandwidth must not be the old placeholder"
+        );
+        assert!(mem.expect("checked is_some above") > 0);
+    }
+
+    /// Regression test for the previous `benchmark_gpu()`, which took no
+    /// arguments and always returned the literal `2000` no matter which GPU
+    /// (if any) was actually detected. The score must now vary with the
+    /// real, per-device [`GpuInfo`] passed in.
+    #[test]
+    fn test_gpu_benchmark_derives_from_detected_info_not_flat_constant() {
+        let low = GpuInfo {
+            vendor: "test".to_string(),
+            model: "test-low".to_string(),
+            driver_version: "1.0".to_string(),
+            memory_mb: None,
+            compute_units: None,
+            supported_apis: vec![],
+            performance_tier: GpuPerformanceTier::Low,
+        };
+        let flagship = GpuInfo {
+            performance_tier: GpuPerformanceTier::Flagship,
+            ..low.clone()
+        };
+
+        let low_score = MobileDeviceDetector::benchmark_gpu(&low);
+        let flagship_score = MobileDeviceDetector::benchmark_gpu(&flagship);
+
+        assert_ne!(
+            low_score, 2000,
+            "tier-derived score must not be the old flat placeholder"
+        );
+        assert!(
+            flagship_score > low_score,
+            "a flagship-tier GPU must score higher than a low-tier one"
+        );
+
+        // compute_units, when known, takes priority over the coarse tier and
+        // also must not collapse to the old constant.
+        let with_units = GpuInfo {
+            compute_units: Some(10),
+            ..low
+        };
+        assert_eq!(MobileDeviceDetector::benchmark_gpu(&with_units), 640);
+    }
+
+    /// Regression test for the previous desktop branch of `detect_memory_info`,
+    /// which reported the fixed `total_mb: 4096, available_mb: 2048` for
+    /// every non-Android/non-iOS host. On any real machine, `sysinfo`-derived
+    /// totals differ from that pair (and always satisfy the aliasing
+    /// invariant `total_memory == total_mb`).
+    #[test]
+    fn test_memory_info_uses_real_sysinfo_not_fixed_4096_2048() {
+        let memory_info =
+            MobileDeviceDetector::detect_memory_info().expect("memory detection failed");
+        assert_eq!(memory_info.total_memory, memory_info.total_mb);
+        assert_eq!(memory_info.available_memory, memory_info.available_mb);
+        assert!(memory_info.total_mb > 0);
     }
 }

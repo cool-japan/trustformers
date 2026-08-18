@@ -79,7 +79,7 @@ impl Clone for DistillationLoss {
             Self::Custom(_) => {
                 // Custom loss functions cannot be cloned due to closure limitations
                 // Return a sensible default (KL divergence is most common for distillation)
-                eprintln!(
+                tracing::warn!(
                     "Warning: Custom loss function cannot be cloned, falling back to KL divergence"
                 );
                 Self::KLDivergence

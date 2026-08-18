@@ -710,36 +710,63 @@ impl<T: Tokenizer + Clone> JaxTokenizer<T> {
 }
 
 /// XLA-compiled JAX tokenizer for high performance
+///
+/// Pure Rust has no XLA backend to compile against, so `compiled` does not
+/// mean "this went through XLA JIT compilation" — `encode_batch_compiled`
+/// runs the exact same interpreted [`JaxTokenizer::encode_batch_to_arrays`]
+/// logic as the uncompiled path. What `compiled` honestly tracks is whether
+/// the caller *requested* the compiled path via [`JaxConfig::use_xla`]: a
+/// tokenizer built from a config with `use_xla: false` reports
+/// `is_compiled() == false` and `encode_batch_compiled` refuses to run,
+/// rather than silently claiming a compilation that never happened.
 pub struct JaxCompiledTokenizer<T: Tokenizer> {
-    tokenizer: Arc<T>,
     config: JaxConfig,
     compiled: bool,
+    /// Built once here (not per call) so `encode_batch_compiled` does not
+    /// re-clone the wrapped tokenizer and re-wrap it in a fresh `Arc` on
+    /// every batch — the previous per-call `JaxTokenizer::new(...)` did
+    /// exactly that redundant work on every single invocation.
+    inner: JaxTokenizer<T>,
 }
 
 impl<T: Tokenizer + Clone> JaxCompiledTokenizer<T> {
-    /// Create a new compiled tokenizer
+    /// Create a new compiled tokenizer.
+    ///
+    /// `compiled` reflects `config.use_xla` rather than being unconditionally
+    /// `true`: see the type-level doc comment for why that is the honest
+    /// value here.
     pub fn new(tokenizer: Arc<T>, config: JaxConfig) -> Result<Self> {
-        // In real implementation, would compile with XLA
+        let compiled = config.use_xla;
+        let inner = JaxTokenizer::new((*tokenizer).clone(), config.clone());
         Ok(Self {
-            tokenizer,
             config,
-            compiled: true,
+            compiled,
+            inner,
         })
     }
 
     /// Encode batch with compiled function
     pub fn encode_batch_compiled(&self, texts: &[String]) -> Result<JaxBatch> {
         if !self.compiled {
-            return Err(anyhow!("Tokenizer not compiled"));
+            return Err(anyhow!(
+                "Tokenizer was built with use_xla: false, so the compiled path was never requested"
+            ));
         }
 
-        // Use the same logic as the regular tokenizer for now
-        // In real implementation, would use compiled XLA function
-        let jax_tokenizer = JaxTokenizer::new((*self.tokenizer).clone(), self.config.clone());
-        jax_tokenizer.encode_batch_to_arrays(texts)
+        self.inner.encode_batch_to_arrays(texts)
+    }
+
+    /// Get configuration
+    pub fn config(&self) -> &JaxConfig {
+        &self.config
     }
 
     /// Check if compiled
+    ///
+    /// Reports whether the compiled path was requested via
+    /// [`JaxConfig::use_xla`] at construction time, not whether real XLA JIT
+    /// compilation occurred (pure Rust has no XLA backend to compile
+    /// against). See the type-level doc comment.
     pub fn is_compiled(&self) -> bool {
         self.compiled
     }
@@ -1077,6 +1104,35 @@ mod tests {
         let texts = vec!["hello".to_string()];
         let batch = compiled.encode_batch_compiled(&texts).expect("Operation failed in test");
         assert_eq!(batch.batch_size(), 1);
+    }
+
+    /// Regression: `is_compiled()` used to be hardcoded `true` regardless of
+    /// the config passed to `JaxCompiledTokenizer::new`, so a tokenizer built
+    /// from `use_xla: false` still (falsely) reported itself as compiled and
+    /// `encode_batch_compiled` would run instead of refusing. This test would
+    /// fail against the old code, which asserted true unconditionally.
+    #[test]
+    fn test_compiled_tokenizer_is_honest_about_use_xla_false() {
+        let tokenizer = create_test_char_tokenizer();
+        let config = JaxConfig {
+            use_xla: false,
+            ..JaxConfig::default()
+        };
+        let jax_tokenizer = JaxTokenizer::from_tokenizer(tokenizer).with_config(config);
+
+        let compiled = jax_tokenizer.jit_compile().expect("Operation failed in test");
+        assert!(
+            !compiled.is_compiled(),
+            "a tokenizer built with use_xla: false must not report itself as compiled"
+        );
+        assert!(!compiled.config().use_xla);
+
+        let texts = vec!["hello".to_string()];
+        let result = compiled.encode_batch_compiled(&texts);
+        assert!(
+            result.is_err(),
+            "encode_batch_compiled must refuse to run the compiled path that was never requested"
+        );
     }
 
     #[test]

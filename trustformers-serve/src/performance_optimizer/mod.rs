@@ -17,6 +17,28 @@
 //! - [`recommendations`] - Optimization recommendation generation and scoring
 //! - [`real_time_metrics`] - Real-time metrics collection, monitoring, and alerting system (Phase 39 modular refactoring)
 //! - [`manager`] - Main PerformanceOptimizer orchestrating all components
+//!
+//! ## Removed in 0.2.1: the orphan `core/` subtree and refactoring debris
+//!
+//! `core/` (~2,000 lines across `mod.rs`, `types.rs`, `functions/`, and
+//! `simplelinearregression_traits.rs`) was deleted rather than mounted. It was
+//! never declared, so it had never been compiled, and it could not have
+//! compiled as written: `simplelinearregression_traits.rs` resolved
+//! `LearningAlgorithm`, `TrainingDataset` and `ModelState` through
+//! `use super::types::*`, and its `super::types` defines none of them. It also
+//! carried a `SimpleLinearRegression` whose `train` ignored the training set and
+//! returned `ModelState::default()`, leaving `predict` on the hard-coded
+//! `slope = 1.0, intercept = 0.0` it was constructed with — a "learning
+//! algorithm" that reports success without learning. The live prediction path
+//! is [`performance_modeling`]; the live `OptimizationResult` lives in
+//! [`test_characterization`].
+//!
+//! Two stale refactoring artefacts were removed with it —
+//! `test_characterization/types.rs.backup_v2` and
+//! `test_characterization/manager.rs.backup_refactored` — plus a
+//! `mod_imports_fix.txt` scratch note. They were not Rust modules but they sat
+//! under `src/`, so `cargo package` shipped them to crates.io as if they were
+//! part of the crate.
 
 // Allow dead code for this module as it contains extensive infrastructure that is being
 // incrementally implemented and integrated
@@ -74,3 +96,9 @@ pub use resource_modeling::{
 pub use system_models::{
     CpuModel, GpuModel, IoModel, MemoryModel, NetworkModel, SystemResourceModel,
 };
+
+#[cfg(test)]
+mod types_ml_tests;
+
+#[cfg(test)]
+mod types_tests;

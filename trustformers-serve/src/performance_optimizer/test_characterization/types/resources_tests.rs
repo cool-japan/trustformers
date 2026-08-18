@@ -1,4 +1,3 @@
-
 use super::*;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -400,6 +399,6 @@ fn test_lcg_generates_valid_range() {
     let mut rng = Lcg::new(99);
     for _ in 0..200 {
         let val = rng.next_f64();
-        assert!(val >= 0.0 && val < 1.0, "LCG value out of range: {}", val);
+        assert!((0.0..1.0).contains(&val), "LCG value out of range: {}", val);
     }
 }

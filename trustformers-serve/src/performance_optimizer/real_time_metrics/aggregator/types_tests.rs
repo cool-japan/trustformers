@@ -4,6 +4,9 @@
 //! window config, quality assessment, and aggregation window lifecycle.
 
 use super::*;
+// `DeliveryGuarantee` is defined by the collector module and only *used* by
+// `aggregator::types`, so the `use super::*` glob above does not bring it in.
+use crate::performance_optimizer::real_time_metrics::collector::DeliveryGuarantee;
 use chrono::Utc;
 use std::time::Duration;
 
@@ -17,7 +20,8 @@ impl Lcg {
     }
 
     fn next(&mut self) -> u64 {
-        self.state = self.state
+        self.state = self
+            .state
             .wrapping_mul(6364136223846793005u64)
             .wrapping_add(1442695040888963407u64);
         self.state
@@ -57,7 +61,10 @@ fn test_window_config_clone() {
         trend_sensitivity: 0.05,
     };
     let cloned = config.clone();
-    assert_eq!(cloned.enable_statistical_analysis, config.enable_statistical_analysis);
+    assert_eq!(
+        cloned.enable_statistical_analysis,
+        config.enable_statistical_analysis
+    );
     assert_eq!(cloned.max_data_points, config.max_data_points);
     assert!((cloned.statistical_confidence - config.statistical_confidence).abs() < f32::EPSILON);
 }
@@ -333,7 +340,7 @@ fn test_lcg_produces_bounded_values() {
     let mut rng = Lcg::new(42);
     for _ in 0..100 {
         let v = rng.next_f32();
-        assert!(v >= 0.0 && v < 1.0);
+        assert!((0.0..1.0).contains(&v));
     }
 }
 

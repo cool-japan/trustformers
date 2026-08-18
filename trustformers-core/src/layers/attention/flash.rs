@@ -111,6 +111,12 @@ impl FlashAttention {
     }
 
     /// Mutable counterpart of [`FlashAttention::projections`].
+    ///
+    /// The four projections are separate fields of [`AttentionProjections`], so a
+    /// caller can borrow each of them mutably at once through this single handle —
+    /// which is what building a `Vec<(String, &mut Tensor)>` for
+    /// [`Model::named_tensors_mut`](crate::traits::Model::named_tensors_mut)
+    /// requires.
     pub fn projections_mut(&mut self) -> &mut AttentionProjections {
         &mut self.projections
     }

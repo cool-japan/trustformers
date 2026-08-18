@@ -305,6 +305,88 @@ mod tests {
         );
     }
 
+    /// Regression test: invalidating the transpose cache must be *recoverable*.
+    ///
+    /// The cache is cleared through `&mut self` but can only be rebuilt inside
+    /// `forward_ref`, which has `&self`. An earlier revision stored it in a plain
+    /// `Option` that was only ever refilled by `set_weight`, so any path that
+    /// cleared it without going through `set_weight` — notably
+    /// `Model::named_tensors_mut`, which hands out `&mut Tensor` for every
+    /// parameter — left it empty *forever*, making every later forward pass pay a
+    /// full `[out, in]` transpose. That is invisible to a correctness test: the
+    /// numbers stay right while the layer silently gets slower.
+    ///
+    /// So this test asserts the cache state directly. It fails against the
+    /// `Option`-based implementation, where the second assertion finds the cache
+    /// still empty after a forward pass.
+    #[test]
+    fn the_transpose_cache_refills_itself_after_invalidation() {
+        let mut layer = deterministic_linear(4, 3, false);
+        let input = ramp(&[2, 4]);
+
+        // A fresh layer starts cold and warms on first use.
+        assert!(
+            layer.transposed_weight_cache_is_empty(),
+            "a freshly built layer should not have paid for a transpose yet"
+        );
+        let first = layer.forward_ref(&input).expect("first forward");
+        assert!(
+            !layer.transposed_weight_cache_is_empty(),
+            "the first forward pass must populate the transpose cache"
+        );
+
+        // Mutating through the parameter iterator invalidates it...
+        let (weight, _) = layer.parameters_mut();
+        let replacement = weight.clone();
+        *weight = replacement;
+        assert!(
+            layer.transposed_weight_cache_is_empty(),
+            "a write through parameters_mut must drop the stale transpose"
+        );
+
+        // ...and the very next forward pass must restore it, not run uncached
+        // from here to eternity.
+        let second = layer.forward_ref(&input).expect("second forward");
+        assert!(
+            !layer.transposed_weight_cache_is_empty(),
+            "the transpose cache must refill after invalidation, not stay empty forever"
+        );
+
+        // The weight was rewritten with an identical value, so results agree.
+        assert_eq!(
+            first.to_vec_f32().expect("f32"),
+            second.to_vec_f32().expect("f32")
+        );
+    }
+
+    /// `set_weight` must also leave the cache in a self-healing state, and the
+    /// rebuilt transpose must correspond to the *new* weight.
+    #[test]
+    fn set_weight_invalidates_then_the_cache_rebuilds_from_the_new_weight() {
+        let mut layer = deterministic_linear(3, 2, false);
+        let input = ramp(&[2, 3]);
+        let _ = layer.forward_ref(&input).expect("warm the cache");
+
+        let replacement = Tensor::from_vec(vec![2.0, -1.0, 0.5, 4.0, 0.25, -3.0], &[2, 3])
+            .expect("replacement shape");
+        layer.set_weight(replacement.clone()).expect("set_weight");
+        assert!(
+            layer.transposed_weight_cache_is_empty(),
+            "set_weight must drop the transpose of the previous weight"
+        );
+
+        let produced = layer.forward_ref(&input).expect("forward after set_weight");
+        assert!(!layer.transposed_weight_cache_is_empty());
+
+        let mut reference = Linear::new(3, 2, false);
+        reference.set_weight(replacement).expect("set_weight");
+        assert_eq!(
+            produced.to_vec_f32().expect("f32"),
+            reference.forward_ref(&input).expect("reference").to_vec_f32().expect("f32"),
+            "the rebuilt transpose must come from the new weight"
+        );
+    }
+
     /// `bias_mut` writes through to the live parameter, and stays `None` for a
     /// layer that was built without bias (a parameter iterator must not be able
     /// to conjure one into existence).

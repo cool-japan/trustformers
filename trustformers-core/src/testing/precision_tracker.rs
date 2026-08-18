@@ -473,7 +473,7 @@ impl PrecisionTracker {
 
     /// Generate alert for precision loss
     fn generate_alert(&self, data: &PrecisionData) {
-        eprintln!(
+        tracing::warn!(
             "⚠️  PRECISION LOSS ALERT: Operation '{}' lost {:.6} bits of precision ({:.2}% relative loss)",
             data.operation,
             data.precision_loss,
@@ -515,7 +515,7 @@ macro_rules! track_precision {
         if let Err(e) =
             $tracker.track_tensor_precision($op_name.to_string(), $input, $output, $op_type)
         {
-            eprintln!("Failed to track precision for {}: {}", $op_name, e);
+            tracing::warn!("Failed to track precision for {}: {}", $op_name, e);
         }
     };
 }

@@ -661,6 +661,12 @@ pub trait ExperimentTracker: Send + Sync {
 }
 
 /// WandB integration implementation
+///
+/// This tracker does not contact the Weights & Biases service: every method
+/// below only records a local `tracing` event describing what a real client
+/// would have sent. There is no HTTP call, no API key validation, and no
+/// network I/O anywhere in this type. Treat it as a structured local log of
+/// intended WandB activity, not as a working WandB client.
 pub struct WandBTracker {
     config: WandBConfig,
     run_id: Option<String>,
@@ -704,15 +710,17 @@ impl ExperimentTracker for WandBTracker {
 
     fn log_parameter(&mut self, name: &str, value: ParameterValue) -> Result<()> {
         // Log parameter to WandB
-        println!("WandB: Logging parameter {} = {:?}", name, value);
+        tracing::debug!("WandB: Logging parameter {} = {:?}", name, value);
         Ok(())
     }
 
     fn log_metric(&mut self, name: &str, value: f64, step: Option<usize>) -> Result<()> {
         // Log metric to WandB
-        println!(
+        tracing::debug!(
             "WandB: Logging metric {} = {} at step {:?}",
-            name, value, step
+            name,
+            value,
+            step
         );
         Ok(())
     }
@@ -726,34 +734,35 @@ impl ExperimentTracker for WandBTracker {
 
     fn log_artifact(&mut self, artifact: &ArtifactInfo) -> Result<()> {
         // Log artifact to WandB
-        println!("WandB: Logging artifact {}", artifact.name);
+        tracing::debug!("WandB: Logging artifact {}", artifact.name);
         Ok(())
     }
 
     fn log_model(&mut self, model_path: &PathBuf, metadata: HashMap<String, String>) -> Result<()> {
         // Log model to WandB
-        println!(
+        tracing::debug!(
             "WandB: Logging model at {:?} with metadata {:?}",
-            model_path, metadata
+            model_path,
+            metadata
         );
         Ok(())
     }
 
     fn log_system_info(&mut self, info: HashMap<String, String>) -> Result<()> {
         // Log system info to WandB
-        println!("WandB: Logging system info {:?}", info);
+        tracing::debug!("WandB: Logging system info {:?}", info);
         Ok(())
     }
 
     fn update_status(&mut self, status: ExperimentStatus) -> Result<()> {
         // Update run status
-        println!("WandB: Updating status to {:?}", status);
+        tracing::info!("WandB: Updating status to {:?}", status);
         Ok(())
     }
 
     fn end_experiment(&mut self) -> Result<()> {
         // Finish WandB run
-        println!("WandB: Ending experiment");
+        tracing::info!("WandB: Ending experiment");
         self.run_id = None;
         Ok(())
     }
@@ -764,12 +773,18 @@ impl ExperimentTracker for WandBTracker {
 
     fn sync(&mut self) -> Result<()> {
         // Sync with WandB servers
-        println!("WandB: Syncing with servers");
+        tracing::info!("WandB: Syncing with servers");
         Ok(())
     }
 }
 
 /// MLflow integration implementation
+///
+/// This tracker does not contact an MLflow tracking server: every method
+/// below only records a local `tracing` event describing what a real client
+/// would have sent. There is no HTTP call anywhere in this type. Treat it as
+/// a structured local log of intended MLflow activity, not as a working
+/// MLflow client.
 pub struct MLflowTracker {
     config: MLflowConfig,
     run_id: Option<String>,
@@ -805,14 +820,16 @@ impl ExperimentTracker for MLflowTracker {
     }
 
     fn log_parameter(&mut self, name: &str, value: ParameterValue) -> Result<()> {
-        println!("MLflow: Logging parameter {} = {:?}", name, value);
+        tracing::debug!("MLflow: Logging parameter {} = {:?}", name, value);
         Ok(())
     }
 
     fn log_metric(&mut self, name: &str, value: f64, step: Option<usize>) -> Result<()> {
-        println!(
+        tracing::debug!(
             "MLflow: Logging metric {} = {} at step {:?}",
-            name, value, step
+            name,
+            value,
+            step
         );
         Ok(())
     }
@@ -825,30 +842,31 @@ impl ExperimentTracker for MLflowTracker {
     }
 
     fn log_artifact(&mut self, artifact: &ArtifactInfo) -> Result<()> {
-        println!("MLflow: Logging artifact {}", artifact.name);
+        tracing::debug!("MLflow: Logging artifact {}", artifact.name);
         Ok(())
     }
 
     fn log_model(&mut self, model_path: &PathBuf, metadata: HashMap<String, String>) -> Result<()> {
-        println!(
+        tracing::debug!(
             "MLflow: Logging model at {:?} with metadata {:?}",
-            model_path, metadata
+            model_path,
+            metadata
         );
         Ok(())
     }
 
     fn log_system_info(&mut self, info: HashMap<String, String>) -> Result<()> {
-        println!("MLflow: Logging system info {:?}", info);
+        tracing::debug!("MLflow: Logging system info {:?}", info);
         Ok(())
     }
 
     fn update_status(&mut self, status: ExperimentStatus) -> Result<()> {
-        println!("MLflow: Updating status to {:?}", status);
+        tracing::info!("MLflow: Updating status to {:?}", status);
         Ok(())
     }
 
     fn end_experiment(&mut self) -> Result<()> {
-        println!("MLflow: Ending experiment");
+        tracing::info!("MLflow: Ending experiment");
         self.run_id = None;
         Ok(())
     }
@@ -858,12 +876,19 @@ impl ExperimentTracker for MLflowTracker {
     }
 
     fn sync(&mut self) -> Result<()> {
-        println!("MLflow: Syncing with tracking server");
+        tracing::info!("MLflow: Syncing with tracking server");
         Ok(())
     }
 }
 
 /// TensorBoard integration implementation
+///
+/// `initialize` does create `log_dir` on disk, but no method here writes an
+/// actual TensorBoard event file: scalar/histogram/artifact logging only
+/// records a local `tracing` event describing what a real writer would have
+/// recorded. `trustformers_debug::tensorboard_integration::TensorBoardWriter`
+/// implements the real binary event-file format and would be the right
+/// delegate for a working integration; this type does not call it.
 pub struct TensorBoardTracker {
     config: TensorBoardConfig,
     log_dir: PathBuf,
@@ -899,14 +924,16 @@ impl ExperimentTracker for TensorBoardTracker {
     }
 
     fn log_parameter(&mut self, name: &str, value: ParameterValue) -> Result<()> {
-        println!("TensorBoard: Logging parameter {} = {:?}", name, value);
+        tracing::debug!("TensorBoard: Logging parameter {} = {:?}", name, value);
         Ok(())
     }
 
     fn log_metric(&mut self, name: &str, value: f64, step: Option<usize>) -> Result<()> {
-        println!(
+        tracing::debug!(
             "TensorBoard: Logging metric {} = {} at step {:?}",
-            name, value, step
+            name,
+            value,
+            step
         );
         Ok(())
     }
@@ -919,30 +946,31 @@ impl ExperimentTracker for TensorBoardTracker {
     }
 
     fn log_artifact(&mut self, artifact: &ArtifactInfo) -> Result<()> {
-        println!("TensorBoard: Logging artifact {}", artifact.name);
+        tracing::debug!("TensorBoard: Logging artifact {}", artifact.name);
         Ok(())
     }
 
     fn log_model(&mut self, model_path: &PathBuf, metadata: HashMap<String, String>) -> Result<()> {
-        println!(
+        tracing::debug!(
             "TensorBoard: Logging model at {:?} with metadata {:?}",
-            model_path, metadata
+            model_path,
+            metadata
         );
         Ok(())
     }
 
     fn log_system_info(&mut self, info: HashMap<String, String>) -> Result<()> {
-        println!("TensorBoard: Logging system info {:?}", info);
+        tracing::debug!("TensorBoard: Logging system info {:?}", info);
         Ok(())
     }
 
     fn update_status(&mut self, status: ExperimentStatus) -> Result<()> {
-        println!("TensorBoard: Updating status to {:?}", status);
+        tracing::info!("TensorBoard: Updating status to {:?}", status);
         Ok(())
     }
 
     fn end_experiment(&mut self) -> Result<()> {
-        println!("TensorBoard: Ending experiment");
+        tracing::info!("TensorBoard: Ending experiment");
         Ok(())
     }
 
@@ -951,12 +979,17 @@ impl ExperimentTracker for TensorBoardTracker {
     }
 
     fn sync(&mut self) -> Result<()> {
-        println!("TensorBoard: Flushing logs to disk");
+        tracing::info!("TensorBoard: Flushing logs to disk");
         Ok(())
     }
 }
 
 /// Neptune.ai experiment tracker
+///
+/// This tracker does not contact Neptune.ai: every method below only records
+/// a local `tracing` event describing what a real client would have sent.
+/// There is no HTTP call anywhere in this type. Treat it as a structured
+/// local log of intended Neptune activity, not as a working Neptune client.
 pub struct NeptuneTracker {
     config: NeptuneConfig,
     run_id: Option<String>,
@@ -975,7 +1008,7 @@ impl NeptuneTracker {
 
 impl ExperimentTracker for NeptuneTracker {
     fn initialize(&mut self) -> Result<()> {
-        println!(
+        tracing::info!(
             "Neptune: Initializing connection to project: {}",
             self.config.project
         );
@@ -991,9 +1024,10 @@ impl ExperimentTracker for NeptuneTracker {
         let run_id = format!("neptune_run_{}", metadata.experiment_id);
         self.run_id = Some(run_id.clone());
 
-        println!(
+        tracing::info!(
             "Neptune: Starting experiment {} with run ID: {}",
-            metadata.experiment_id, run_id
+            metadata.experiment_id,
+            run_id
         );
 
         // Log initial metadata
@@ -1003,21 +1037,23 @@ impl ExperimentTracker for NeptuneTracker {
 
         // Log tags
         for tag in &self.config.tags {
-            println!("Neptune: Adding tag: {}", tag);
+            tracing::info!("Neptune: Adding tag: {}", tag);
         }
 
         Ok(run_id)
     }
 
     fn log_parameter(&mut self, name: &str, value: ParameterValue) -> Result<()> {
-        println!("Neptune: Logging parameter {} = {:?}", name, value);
+        tracing::debug!("Neptune: Logging parameter {} = {:?}", name, value);
         Ok(())
     }
 
     fn log_metric(&mut self, name: &str, value: f64, step: Option<usize>) -> Result<()> {
-        println!(
+        tracing::debug!(
             "Neptune: Logging metric {} = {} at step {:?}",
-            name, value, step
+            name,
+            value,
+            step
         );
         Ok(())
     }
@@ -1030,39 +1066,40 @@ impl ExperimentTracker for NeptuneTracker {
     }
 
     fn log_artifact(&mut self, artifact: &ArtifactInfo) -> Result<()> {
-        println!(
+        tracing::debug!(
             "Neptune: Logging artifact: {} ({})",
-            artifact.name, artifact.artifact_type
+            artifact.name,
+            artifact.artifact_type
         );
         Ok(())
     }
 
     fn log_model(&mut self, model_path: &PathBuf, metadata: HashMap<String, String>) -> Result<()> {
-        println!("Neptune: Logging model from path: {:?}", model_path);
+        tracing::debug!("Neptune: Logging model from path: {:?}", model_path);
         for (key, value) in metadata {
-            println!("Neptune: Model metadata - {}: {}", key, value);
+            tracing::debug!("Neptune: Model metadata - {}: {}", key, value);
         }
         Ok(())
     }
 
     fn log_system_info(&mut self, info: HashMap<String, String>) -> Result<()> {
-        println!("Neptune: Logging system information");
+        tracing::debug!("Neptune: Logging system information");
         for (key, value) in info {
-            println!("Neptune: System info - {}: {}", key, value);
+            tracing::debug!("Neptune: System info - {}: {}", key, value);
         }
         Ok(())
     }
 
     fn update_status(&mut self, status: ExperimentStatus) -> Result<()> {
-        println!("Neptune: Updating experiment status to {:?}", status);
+        tracing::info!("Neptune: Updating experiment status to {:?}", status);
         Ok(())
     }
 
     fn end_experiment(&mut self) -> Result<()> {
         if let Some(run_id) = &self.run_id {
-            println!("Neptune: Ending experiment with run ID: {}", run_id);
+            tracing::info!("Neptune: Ending experiment with run ID: {}", run_id);
         } else {
-            println!("Neptune: Ending experiment (no active run)");
+            tracing::info!("Neptune: Ending experiment (no active run)");
         }
         self.run_id = None;
         Ok(())
@@ -1073,12 +1110,18 @@ impl ExperimentTracker for NeptuneTracker {
     }
 
     fn sync(&mut self) -> Result<()> {
-        println!("Neptune: Syncing with Neptune.ai servers");
+        tracing::info!("Neptune: Syncing with Neptune.ai servers");
         Ok(())
     }
 }
 
 /// ClearML experiment tracker
+///
+/// This tracker does not contact a ClearML server: every method below only
+/// records a local `tracing` event describing what a real client would have
+/// sent. There is no HTTP call anywhere in this type. Treat it as a
+/// structured local log of intended ClearML activity, not as a working
+/// ClearML client.
 pub struct ClearMLTracker {
     config: ClearMLConfig,
     task_id: Option<String>,
@@ -1097,7 +1140,7 @@ impl ClearMLTracker {
 
 impl ExperimentTracker for ClearMLTracker {
     fn initialize(&mut self) -> Result<()> {
-        println!(
+        tracing::info!(
             "ClearML: Initializing connection to project: {}",
             self.config.project_name
         );
@@ -1113,9 +1156,11 @@ impl ExperimentTracker for ClearMLTracker {
         let task_id = format!("clearml_task_{}", metadata.experiment_id);
         self.task_id = Some(task_id.clone());
 
-        println!(
+        tracing::info!(
             "ClearML: Starting task {} of type {:?} with task ID: {}",
-            self.config.task_name, self.config.task_type, task_id
+            self.config.task_name,
+            self.config.task_type,
+            task_id
         );
 
         // Log initial metadata
@@ -1127,14 +1172,16 @@ impl ExperimentTracker for ClearMLTracker {
     }
 
     fn log_parameter(&mut self, name: &str, value: ParameterValue) -> Result<()> {
-        println!("ClearML: Logging parameter {} = {:?}", name, value);
+        tracing::debug!("ClearML: Logging parameter {} = {:?}", name, value);
         Ok(())
     }
 
     fn log_metric(&mut self, name: &str, value: f64, step: Option<usize>) -> Result<()> {
-        println!(
+        tracing::debug!(
             "ClearML: Logging metric {} = {} at step {:?}",
-            name, value, step
+            name,
+            value,
+            step
         );
         Ok(())
     }
@@ -1147,9 +1194,10 @@ impl ExperimentTracker for ClearMLTracker {
     }
 
     fn log_artifact(&mut self, artifact: &ArtifactInfo) -> Result<()> {
-        println!(
+        tracing::debug!(
             "ClearML: Logging artifact: {} ({})",
-            artifact.name, artifact.artifact_type
+            artifact.name,
+            artifact.artifact_type
         );
         if self
             .config
@@ -1157,37 +1205,37 @@ impl ExperimentTracker for ClearMLTracker {
             .tracked_types
             .contains(&artifact.artifact_type.to_string())
         {
-            println!("ClearML: Auto-tracking {} artifact", artifact.artifact_type);
+            tracing::debug!("ClearML: Auto-tracking {} artifact", artifact.artifact_type);
         }
         Ok(())
     }
 
     fn log_model(&mut self, model_path: &PathBuf, metadata: HashMap<String, String>) -> Result<()> {
-        println!("ClearML: Logging model from path: {:?}", model_path);
+        tracing::debug!("ClearML: Logging model from path: {:?}", model_path);
         for (key, value) in metadata {
-            println!("ClearML: Model metadata - {}: {}", key, value);
+            tracing::debug!("ClearML: Model metadata - {}: {}", key, value);
         }
         Ok(())
     }
 
     fn log_system_info(&mut self, info: HashMap<String, String>) -> Result<()> {
-        println!("ClearML: Logging system information");
+        tracing::debug!("ClearML: Logging system information");
         for (key, value) in info {
-            println!("ClearML: System info - {}: {}", key, value);
+            tracing::debug!("ClearML: System info - {}: {}", key, value);
         }
         Ok(())
     }
 
     fn update_status(&mut self, status: ExperimentStatus) -> Result<()> {
-        println!("ClearML: Updating task status to {:?}", status);
+        tracing::info!("ClearML: Updating task status to {:?}", status);
         Ok(())
     }
 
     fn end_experiment(&mut self) -> Result<()> {
         if let Some(task_id) = &self.task_id {
-            println!("ClearML: Completing task with ID: {}", task_id);
+            tracing::info!("ClearML: Completing task with ID: {}", task_id);
         } else {
-            println!("ClearML: Completing task (no active task)");
+            tracing::info!("ClearML: Completing task (no active task)");
         }
         self.task_id = None;
         Ok(())
@@ -1198,7 +1246,7 @@ impl ExperimentTracker for ClearMLTracker {
     }
 
     fn sync(&mut self) -> Result<()> {
-        println!("ClearML: Syncing with ClearML servers");
+        tracing::info!("ClearML: Syncing with ClearML servers");
         Ok(())
     }
 }

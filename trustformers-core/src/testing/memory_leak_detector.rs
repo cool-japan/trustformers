@@ -226,14 +226,14 @@ impl MemoryLeakDetector {
 
                 // Log warnings if thresholds are approaching
                 if current_memory > config.max_leaked_bytes / 2 {
-                    eprintln!(
+                    tracing::warn!(
                         "Warning: Memory usage approaching threshold: {} bytes",
                         current_memory
                     );
                 }
 
                 if allocations.len() > config.max_leaked_allocations / 2 {
-                    eprintln!(
+                    tracing::warn!(
                         "Warning: Allocation count approaching threshold: {} allocations",
                         allocations.len()
                     );
@@ -322,7 +322,7 @@ impl Drop for MonitoringHandle {
                 },
                 Err(_) => {
                     // Thread panicked, but that's okay for our use case
-                    eprintln!("Monitoring thread panicked during shutdown");
+                    tracing::error!("Monitoring thread panicked during shutdown");
                 },
             }
         }

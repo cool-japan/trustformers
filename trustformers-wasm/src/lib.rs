@@ -73,6 +73,12 @@
 use std::string::ToString;
 use std::vec::Vec;
 
+// Installs the `dlmalloc` global allocator on wasm32 when the
+// `dlmalloc-alloc` feature is enabled (see `allocator.rs` for why this
+// `mod` declaration - previously absent - is what actually activates the
+// `#[global_allocator]` attribute).
+pub mod allocator;
+
 pub mod layers;
 pub mod models;
 #[cfg(feature = "web-workers")]

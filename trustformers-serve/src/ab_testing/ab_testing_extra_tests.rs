@@ -1,6 +1,9 @@
 /// Extended tests for the A/B testing module.
+///
+/// Declared from `ab_testing/mod.rs`, so `super::super` is the `ab_testing`
+/// module itself.
 #[cfg(test)]
-mod ab_testing_extra_tests {
+mod tests {
     use super::super::*;
 
     fn even_split() -> TrafficSplit {
@@ -52,7 +55,10 @@ mod ab_testing_extra_tests {
         let known = ["control", "treatment"];
         for hash in 0u64..20 {
             let v = split.select_variant(hash);
-            assert!(known.contains(&v), "variant '{v}' must be one of the known variants");
+            assert!(
+                known.contains(&v),
+                "variant '{v}' must be one of the known variants"
+            );
         }
     }
 
@@ -115,7 +121,10 @@ mod ab_testing_extra_tests {
         stats.record_request(50.0, false);
         stats.record_request(50.0, false);
         let rate = stats.error_rate();
-        assert!((rate - 0.25).abs() < 1e-6, "error rate should be 0.25, got {rate}");
+        assert!(
+            (rate - 0.25).abs() < 1e-6,
+            "error rate should be 0.25, got {rate}"
+        );
     }
 
     // ── 45. ExperimentVariantStats::record_metric — accumulates values ────────
@@ -125,7 +134,10 @@ mod ab_testing_extra_tests {
         stats.record_metric("throughput", 10.0);
         stats.record_metric("throughput", 15.0);
         let val = stats.custom_metrics.get("throughput").copied().unwrap_or(0.0);
-        assert!((val - 25.0).abs() < 1e-9, "accumulated metric should be 25.0, got {val}");
+        assert!(
+            (val - 25.0).abs() < 1e-9,
+            "accumulated metric should be 25.0, got {val}"
+        );
     }
 
     // ── 46. ExperimentConfig::new — status is Draft ──────────────────────────
@@ -167,7 +179,10 @@ mod ab_testing_extra_tests {
     #[test]
     fn test_z_test_positive_when_mean1_greater() {
         let z = StatisticalTest::two_sample_z_test(100, 20.0, 5.0, 100, 15.0, 5.0);
-        assert!(z > 0.0, "z-score must be positive when mean1 > mean2, got {z}");
+        assert!(
+            z > 0.0,
+            "z-score must be positive when mean1 > mean2, got {z}"
+        );
     }
 
     // ── 52. StatisticalTest::is_significant — high z-score is significant ─────

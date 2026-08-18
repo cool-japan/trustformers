@@ -8,13 +8,6 @@
 #![allow(unexpected_cfgs)]
 // Allow ambiguous glob re-exports (intentional design for convenience API)
 #![allow(ambiguous_glob_reexports)]
-// Allow dead code, unused variables, unused imports, and unused assignments in incomplete experimental features
-#![allow(dead_code)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-#![allow(unused_assignments)]
-// Allow private types in public APIs for incomplete features
-#![allow(private_interfaces)]
 // Allow large error types in Result (TrustformersError is large by design for detailed error info)
 #![allow(clippy::result_large_err)]
 // Allow common patterns in complex integration code
@@ -43,6 +36,7 @@ pub mod auto_classes;
 pub mod automodel;
 pub mod automodel_tasks;
 pub mod cache;
+pub mod config_condition;
 pub mod config_management;
 pub mod diagnostics;
 pub mod enhanced_profiler;
@@ -94,6 +88,7 @@ pub use error::{RecoveryAction, RecoveryContext, Result};
 
 pub use processor::{AutoProcessor, Modality, ProcessingResult, ProcessorConfig, ValidationResult};
 
+pub use config_condition::ConditionError;
 pub use config_management::{
     ConfigComparison, ConfigDiffer, ConfigFormat, ConfigPreset, ConfigRecommendation,
     ConfigRecommender, ConfigSchema, ConfigValidator, ConfigurationManager, FieldConstraint,
