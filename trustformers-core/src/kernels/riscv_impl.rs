@@ -18,7 +18,6 @@
 //! bookkeeping this module performs).
 
 #![allow(dead_code)] // RISC-V backend implementation with architecture-specific features
-#![allow(unused_variables)] // Backend implementation with reserved parameters
 
 use crate::errors::compute_error;
 use crate::hardware::{DataType, HardwareCapabilities, HardwareMetrics, HardwareResult};
@@ -486,12 +485,28 @@ impl RiscVBackend {
         let inputs = vec![a.clone(), b.clone()];
         let outputs = self.execute_vector_operation(&op_id, &inputs)?;
 
-        outputs.into_iter().next().ok_or_else(|| {
+        let result = outputs.into_iter().next().ok_or_else(|| {
             TrustformersError::hardware_error(
                 "Vector operation produced no outputs",
                 "RiscvVectorBackend::execute_vector_matmul",
             )
-        })
+        })?;
+
+        // `m`/`n`/`k` were computed for this check and then never read: a bug
+        // in `execute_vector_operation`'s simulated GEMM could have handed
+        // back a wrong-shaped tensor and the caller would never find out.
+        let expected_shape = [m, n];
+        if result.shape() != expected_shape {
+            return Err(TrustformersError::hardware_error(
+                &format!(
+                    "vector matmul produced shape {:?}, expected {expected_shape:?} for a \
+                     [{m}, {k}] x [{k}, {n}] product",
+                    result.shape()
+                ),
+                "RiscvVectorBackend::execute_vector_matmul",
+            ));
+        }
+        Ok(result)
     }
 
     /// Execute vector convolution
@@ -537,12 +552,25 @@ impl RiscVBackend {
         let inputs = vec![input.clone(), kernel.clone()];
         let outputs = self.execute_vector_operation(&op_id, &inputs)?;
 
-        outputs.into_iter().next().ok_or_else(|| {
+        let result = outputs.into_iter().next().ok_or_else(|| {
             TrustformersError::hardware_error(
                 "Vector operation produced no outputs",
-                "RiscvVectorBackend::execute_vector_matmul",
+                "RiscvVectorBackend::execute_vector_conv2d",
             )
-        })
+        })?;
+
+        // `output_shape` was computed from the convolution's own geometry and
+        // then never checked against what came back.
+        if result.shape() != output_shape {
+            return Err(TrustformersError::hardware_error(
+                &format!(
+                    "vector conv2d produced shape {:?}, expected {output_shape:?}",
+                    result.shape()
+                ),
+                "RiscvVectorBackend::execute_vector_conv2d",
+            ));
+        }
+        Ok(result)
     }
 
     /// Get backend capabilities
@@ -560,7 +588,6 @@ impl RiscVBackend {
             DataType::Bool,
         ];
 
-        let memory_bandwidth = Self::get_memory_bandwidth(&self.config.target_vlen);
         let compute_units = self.config.target_vlen / 64; // Estimated based on VLEN
         let power_consumption = match self.config.target_vlen {
             128 => 15.0,  // Low-power embedded
@@ -848,7 +875,15 @@ impl RiscVBackend {
         operation: &VectorizedOperation,
         inputs: &[Tensor],
     ) -> HardwareResult<Vec<Tensor>> {
-        let output_shape = inputs[0].shape().to_vec();
+        // Elementwise ops (add/mul) produce a result shaped like their
+        // operands; gemm overrides this below with its real `[M, N]` output
+        // shape. Before that override existed, gemm's *data* was computed
+        // correctly (see the loop below) but wrapped in `inputs[0]`'s `[M,
+        // K]` shape regardless - `Tensor::from_vec` then either errored on a
+        // length mismatch (non-square M/K/N) or, worse, silently mislabeled
+        // an `M*N`-element result as `[M, K]` whenever `M == K` by
+        // coincidence rather than by a shape that was ever actually checked.
+        let mut output_shape = inputs[0].shape().to_vec();
         let output_data = match operation.name.as_str() {
             "add" => {
                 let a = &inputs[0];
@@ -870,6 +905,7 @@ impl RiscVBackend {
                 let b = &inputs[1];
                 let a_shape = a.shape();
                 let b_shape = b.shape();
+                output_shape = vec![a_shape[0], b_shape[1]];
                 let mut result = vec![0.0f32; a_shape[0] * b_shape[1]];
 
                 for i in 0..a_shape[0] {
@@ -1090,6 +1126,7 @@ pub mod utils {
         format!(
             r#"
 vector_loop_{:?}:
+    // {} elements/iteration at e{} width (256-bit VLEN assumption above)
     li t0, {}
     vsetvli t1, t0, e{},m1,ta,ma
 
@@ -1114,6 +1151,8 @@ vector_loop_{:?}:
     ret
 "#,
             operation,
+            elements_per_iteration,
+            element_width,
             vector_length,
             element_width,
             element_width,
@@ -1226,6 +1265,22 @@ mod tests {
         let data = result.data().expect("read result");
         // [[1,2],[3,4]] * [[5,6],[7,8]] = [[19,22],[43,50]]
         assert_eq!(data, vec![19.0, 22.0, 43.0, 50.0]);
+    }
+
+    /// `execute_vector_matmul` computes `m`/`n`/`k` and now checks the result
+    /// against them; a non-square, non-2x2 shape exercises that check with a
+    /// case the fixed-size test above cannot distinguish from a transposed or
+    /// otherwise reshaped result.
+    #[test]
+    fn test_execute_vector_matmul_output_shape_matches_m_and_n() {
+        let mut backend =
+            RiscVBackend::new(RiscVConfig::default()).expect("backend construction failed");
+
+        let a = Tensor::from_vec(vec![1.0f32; 2 * 3], &[2, 3]).expect("tensor a");
+        let b = Tensor::from_vec(vec![1.0f32; 3 * 4], &[3, 4]).expect("tensor b");
+
+        let result = backend.execute_vector_matmul(&a, &b).expect("matmul should succeed");
+        assert_eq!(result.shape(), vec![2, 4]);
     }
 
     /// Regression test: before the fix, `simulate_vector_execution`'s `_`

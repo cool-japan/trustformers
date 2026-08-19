@@ -3,8 +3,6 @@
 //! This module provides GPU-accelerated operations using Intel oneAPI/DPC++.
 //! It supports Intel Arc GPUs, Intel Xe integrated graphics, and Intel Data Center GPU Max Series.
 
-#![allow(unused_variables)] // Placeholder implementation with reserved parameters
-
 use crate::errors::{hardware_error, Result};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
@@ -215,6 +213,18 @@ impl IntelKernel {
         context: &IntelContext,
         device: &IntelDevice,
     ) -> Result<IntelCommandQueue> {
+        // A command queue only makes sense bound to the device its context was
+        // created for; catching a mismatch here is the one real check this
+        // simulated (no FFI binding) constructor can still make.
+        if device.id != context.device_id {
+            return Err(hardware_error(
+                format!("intel device {}", device.id),
+                format!(
+                    "command queue device does not match the context's device {}",
+                    context.device_id
+                ),
+            ));
+        }
         // In a real implementation, this would create a oneAPI command queue
         Ok(IntelCommandQueue {
             handle: None,
@@ -283,7 +293,7 @@ impl IntelKernel {
         // 5. Copy results back to CPU
 
         // For now, fall back to CPU implementation
-        self.gemm_cpu_fallback(a, b, c, alpha, beta)
+        Self::gemm_cpu_fallback(a, b, c, alpha, beta)
     }
 
     /// Generate optimized GEMM kernel source code
@@ -392,7 +402,7 @@ void gemm_kernel(
 
         // Execute kernel (simulated)
         // For now, fall back to CPU implementation
-        self.layer_norm_cpu_fallback(input, weight, bias, output, eps)
+        Self::layer_norm_cpu_fallback(input, weight, bias, output, eps)
     }
 
     /// Generate optimized layer normalization kernel
@@ -535,7 +545,7 @@ void layer_norm_kernel(
 
         // Execute kernel (simulated)
         // For now, fall back to CPU implementation
-        self.attention_cpu_fallback(query, key, value, output, scale)
+        Self::attention_cpu_fallback(query, key, value, output, scale)
     }
 
     /// Generate optimized attention kernel
@@ -691,41 +701,89 @@ void flash_attention_kernel(
         })
     }
 
-    /// CPU fallback implementations
+    /// CPU fallback implementations.
+    ///
+    /// These are reached on every call: `gemm`/`layer_norm`/`attention` above
+    /// only ever "compile" a kernel source string and then immediately call
+    /// straight through to these, since the `intel` feature has no real
+    /// oneAPI/Level-Zero FFI binding to dispatch to instead (see
+    /// [`Self::detect_device`]). They used to be empty `Ok(())` bodies that
+    /// left `c`/`output` completely untouched while reporting success - every
+    /// caller silently got back whatever garbage was already in its output
+    /// tensor. `alpha`/`beta`/`eps`/`scale` were computed and threaded all the
+    /// way down here and then never read. Not "optimized" (no BLAS, no SIMD
+    /// intrinsics), but a real, correct computation on the CPU, which is what
+    /// a function named `_cpu_fallback` promises.
     fn gemm_cpu_fallback(
-        &self,
         a: &Tensor,
         b: &Tensor,
         c: &mut Tensor,
         alpha: f32,
         beta: f32,
     ) -> Result<()> {
-        // Simple CPU GEMM implementation
-        // This would be replaced with actual optimized CPU BLAS calls
+        // C = alpha * (A @ B) + beta * C
+        let product = a.matmul(b)?;
+        let scaled_product = product.mul_scalar(alpha)?;
+        *c = if beta == 0.0 {
+            scaled_product
+        } else {
+            scaled_product.add(&c.mul_scalar(beta)?)?
+        };
         Ok(())
     }
 
     fn layer_norm_cpu_fallback(
-        &self,
         input: &Tensor,
         weight: &Tensor,
         bias: Option<&Tensor>,
         output: &mut Tensor,
         eps: f32,
     ) -> Result<()> {
-        // Simple CPU layer norm implementation
+        // Normalize over the last (feature) axis, then apply the learned
+        // affine transform: out = normalize(input) * weight + bias.
+        let normalized = input.layer_norm(-1, eps)?;
+        let scaled = normalized.mul(weight)?;
+        *output = match bias {
+            Some(b) => scaled.add(b)?,
+            None => scaled,
+        };
         Ok(())
     }
 
     fn attention_cpu_fallback(
-        &self,
         query: &Tensor,
         key: &Tensor,
         value: &Tensor,
         output: &mut Tensor,
         scale: f32,
     ) -> Result<()> {
-        // Simple CPU attention implementation
+        // softmax(scale * Q K^T) V over [batch, seq, head_dim] tensors; `scale`
+        // is computed by the caller (see `IntelImpl::flash_attention`) rather
+        // than re-derived here.
+        let q_shape = query.shape();
+        if q_shape.len() != 3 {
+            return Err(hardware_error(
+                "intel attention",
+                format!("expected a 3-D [batch, seq, head_dim] query, got {q_shape:?}"),
+            ));
+        }
+        for (name, tensor) in [("key", key), ("value", value)] {
+            if tensor.shape() != q_shape {
+                return Err(hardware_error(
+                    "intel attention",
+                    format!(
+                        "{name} shape {:?} must match query shape {q_shape:?}",
+                        tensor.shape()
+                    ),
+                ));
+            }
+        }
+
+        let key_transposed = key.transpose(1, 2)?;
+        let scores = query.matmul(&key_transposed)?;
+        let scaled_scores = scores.mul_scalar(scale)?;
+        let attention_weights = scaled_scores.softmax(2)?;
+        *output = attention_weights.matmul(value)?;
         Ok(())
     }
 }
@@ -888,5 +946,97 @@ mod tests {
             IntelUtils::get_recommended_precision(&device),
             IntelPrecision::FP16
         );
+    }
+
+    /// Regression test: `gemm_cpu_fallback` used to be an empty `Ok(())` body
+    /// under the file's now-removed blanket `#![allow(unused_variables)]`, so
+    /// it left `c` completely untouched. `c` starts at a garbage sentinel
+    /// value that is not the correct product, so the old code (which returns
+    /// `c` unchanged) would have failed this assertion.
+    #[test]
+    fn gemm_cpu_fallback_actually_computes_the_product() -> Result<()> {
+        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+        let b = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2])?;
+        let mut c = Tensor::from_vec(vec![99.0, 99.0, 99.0, 99.0], &[2, 2])?;
+
+        IntelKernel::gemm_cpu_fallback(&a, &b, &mut c, 1.0, 0.0)?;
+        assert_eq!(c.data()?, vec![19.0, 22.0, 43.0, 50.0]);
+
+        // beta != 0 must blend in the previous contents of `c`, not just
+        // overwrite them again with the same product.
+        let mut c_with_beta = Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0], &[2, 2])?;
+        IntelKernel::gemm_cpu_fallback(&a, &b, &mut c_with_beta, 2.0, 1.0)?;
+        assert_eq!(c_with_beta.data()?, vec![39.0, 45.0, 87.0, 101.0]);
+        Ok(())
+    }
+
+    /// Regression test: `layer_norm_cpu_fallback` used to be an empty
+    /// `Ok(())` body, leaving `output` at its garbage sentinel value instead
+    /// of the normalized-and-scaled result.
+    #[test]
+    fn layer_norm_cpu_fallback_actually_normalizes() -> Result<()> {
+        // All-zero input normalizes to all-zero (mean subtracted from itself),
+        // so the affine transform's output is exactly `bias` regardless of
+        // `weight` - a numerically exact expectation with no floating-point
+        // approximation to tolerate.
+        let input = Tensor::from_vec(vec![0.0; 4], &[1, 4])?;
+        let weight = Tensor::from_vec(vec![3.0; 4], &[4])?;
+        let bias = Tensor::from_vec(vec![5.0; 4], &[4])?;
+        let mut output = Tensor::from_vec(vec![99.0; 4], &[1, 4])?;
+
+        IntelKernel::layer_norm_cpu_fallback(&input, &weight, Some(&bias), &mut output, 1e-5)?;
+        assert_eq!(output.data()?, vec![5.0, 5.0, 5.0, 5.0]);
+        Ok(())
+    }
+
+    /// Regression test: `attention_cpu_fallback` used to be an empty
+    /// `Ok(())` body, leaving `output` at its garbage sentinel value.
+    /// `value` is constant across the sequence, so any convex combination of
+    /// its rows (i.e. any valid softmax-weighted sum) reproduces that same
+    /// row exactly - an exact expectation that does not depend on the actual
+    /// attention weights `query`/`key` produce.
+    #[test]
+    fn attention_cpu_fallback_actually_computes_attention() -> Result<()> {
+        let query = Tensor::from_vec(vec![0.3, -0.1, 0.7, 0.2], &[1, 2, 2])?;
+        let key = Tensor::from_vec(vec![-0.4, 0.5, 0.1, -0.2], &[1, 2, 2])?;
+        let value = Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0], &[1, 2, 2])?;
+        let mut output = Tensor::from_vec(vec![99.0; 4], &[1, 2, 2])?;
+
+        IntelKernel::attention_cpu_fallback(&query, &key, &value, &mut output, 0.5)?;
+        let data = output.data()?;
+        for v in data {
+            assert!((v - 1.0).abs() < 1e-5, "expected 1.0, got {v}");
+        }
+        Ok(())
+    }
+
+    /// `create_command_queue` used to ignore `device` entirely; it must now
+    /// reject a queue request for a device that does not match the context
+    /// it was created for.
+    #[test]
+    fn create_command_queue_rejects_a_device_context_mismatch() {
+        let context = IntelContext {
+            handle: None,
+            device_id: 0,
+        };
+        let mismatched_device = IntelDevice {
+            id: 1,
+            name: "Intel Arc A770".to_string(),
+            vendor: "Intel Corporation".to_string(),
+            driver_version: "31.0.101.4146".to_string(),
+            device_type: IntelDeviceType::Arc,
+            compute_units: 32,
+            max_clock_frequency: 2400,
+            local_memory_size: 65536,
+            global_memory_size: 16 * 1024 * 1024 * 1024,
+            max_workgroup_size: 1024,
+            sub_group_sizes: vec![8, 16, 32],
+            extensions: vec![],
+            supports_fp16: true,
+            supports_dpas: true,
+            supports_systolic_arrays: true,
+        };
+
+        assert!(IntelKernel::create_command_queue(&context, &mismatched_device).is_err());
     }
 }

@@ -7,7 +7,6 @@
 //! supporting DPC++ (SYCL), oneDNN, oneMKL, and Intel GPU/CPU optimization.
 
 #![allow(dead_code)] // oneAPI backend implementation with FFI bindings
-#![allow(unused_variables)] // Backend implementation with reserved parameters
 
 use crate::errors::compute_error;
 use crate::hardware::{DataType, HardwareCapabilities, HardwareMetrics, HardwareResult};
@@ -15,7 +14,7 @@ use crate::tensor::Tensor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Intel oneAPI backend for unified CPU/GPU compute
 #[derive(Debug)]
@@ -697,19 +696,17 @@ impl OneApiBackend {
         ]
     }
 
-    fn update_execution_metrics(
-        &mut self,
-        execution_time: Duration,
-        metadata: &OneApiCompilationMetadata,
-    ) {
-        let mut metrics = self.metrics.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let execution_ms = execution_time.as_millis() as f64;
-
-        // Simplified metrics update
-        metrics.latency = execution_ms;
-        metrics.throughput = 1000.0 / execution_ms; // Operations per second
-        metrics.utilization = 0.8; // Estimated utilization
-    }
+    // `update_execution_metrics` (execution_time, metadata) used to live
+    // here: unreachable (nothing on this backend can succeed - see `new`
+    // above), and its body fabricated `utilization = 0.8` from nothing while
+    // ignoring `metadata` entirely - a hardcoded number with no real signal
+    // behind it and no caller to receive it. Unlike `create_output_tensors`
+    // above, there was no honest replacement to give it (there is no real
+    // GPU occupancy signal to derive `utilization` from without a runtime,
+    // and `HardwareMetrics::utilization` is a plain `f64`, not an
+    // `Option<f64>`, on a struct shared by every backend, so it cannot
+    // honestly report "unknown" either), so it was deleted rather than kept
+    // fabricating a number.
 }
 
 impl OneApiMemoryManager {
@@ -815,9 +812,16 @@ pub mod utils {
         Vec::new()
     }
 
-    /// Generate optimized DPC++ kernel for matrix multiplication
+    /// Generate optimized DPC++ kernel for matrix multiplication.
+    ///
+    /// `M`/`N`/`K` are runtime parameters of the emitted kernel, not
+    /// compile-time constants baked into its body, so `m`/`n`/`k` do not
+    /// change the generated arithmetic - but they document, in the source
+    /// itself, which problem size this particular kernel text was generated
+    /// for, rather than silently discarding the caller's stated shape.
     pub fn generate_gemm_kernel(m: usize, n: usize, k: usize) -> String {
-        r#"
+        format!("\n// Generated for M={m}, N={n}, K={k}.")
+            + r#"
 #include <sycl/sycl.hpp>
 
 class GemmKernel;
@@ -844,16 +848,25 @@ void gemm_kernel(sycl::queue& q, const float* A, const float* B, float* C,
     ).wait();
 }
 "#
-        .to_string()
     }
 
-    /// Generate optimized DPC++ kernel for convolution
+    /// Generate optimized DPC++ kernel for convolution.
+    ///
+    /// As with [`Self::generate_gemm_kernel`], the channel counts and kernel
+    /// size are runtime parameters of the emitted kernel rather than
+    /// compile-time constants, so `input_channels`/`output_channels`/
+    /// `kernel_size` do not change the generated arithmetic - but they
+    /// document, in the source itself, which configuration this kernel text
+    /// was generated for.
     pub fn generate_conv2d_kernel(
         input_channels: usize,
         output_channels: usize,
         kernel_size: usize,
     ) -> String {
-        r#"
+        format!(
+            "\n// Generated for input_channels={input_channels}, \
+             output_channels={output_channels}, kernel_size={kernel_size}."
+        ) + r#"
 #include <sycl/sycl.hpp>
 
 class Conv2dKernel;
@@ -893,7 +906,7 @@ void conv2d_kernel(sycl::queue& q, const float* input, const float* weights,
         }
     ).wait();
 }
-"#.to_string()
+"#
     }
 }
 
@@ -948,6 +961,31 @@ mod tests {
         let conv_kernel = utils::generate_conv2d_kernel(64, 128, 3);
         assert!(conv_kernel.contains("Conv2dKernel"));
         assert!(conv_kernel.contains("nd_range<3>"));
+    }
+
+    /// Regression test: `m`/`n`/`k` (and the conv2d channel/kernel-size
+    /// parameters) used to be accepted and then completely ignored, so two
+    /// calls with different problem sizes produced byte-identical source
+    /// text. They must now show up in the generated source.
+    #[test]
+    fn test_kernel_generation_reflects_its_own_arguments() {
+        let small = utils::generate_gemm_kernel(4, 8, 16);
+        let large = utils::generate_gemm_kernel(400, 800, 1600);
+        assert_ne!(
+            small, large,
+            "different M/N/K must produce different source text"
+        );
+        assert!(small.contains("M=4, N=8, K=16"));
+        assert!(large.contains("M=400, N=800, K=1600"));
+
+        let small_conv = utils::generate_conv2d_kernel(3, 16, 3);
+        let large_conv = utils::generate_conv2d_kernel(64, 128, 5);
+        assert_ne!(
+            small_conv, large_conv,
+            "different channel/kernel-size arguments must produce different source text"
+        );
+        assert!(small_conv.contains("input_channels=3, output_channels=16, kernel_size=3"));
+        assert!(large_conv.contains("input_channels=64, output_channels=128, kernel_size=5"));
     }
 
     /// Regression test: `OneApiBackend::new()` used to "succeed" by calling

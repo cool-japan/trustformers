@@ -50,7 +50,6 @@ use crate::pipeline::{BasePipeline, Pipeline};
 use async_stream;
 use async_trait::async_trait;
 use futures::Stream;
-use futures::StreamExt;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -89,6 +88,15 @@ use trustformers_models::common_patterns::{
 ///
 /// This pipeline is designed to be thread-safe and can handle concurrent conversations
 /// through internal use of `Arc<RwLock<>>` for shared state management.
+/// Short (<= 60 characters), non-empty user messages are quoted back in
+/// conversation-repair prompts so they reference what was actually said
+/// rather than a wholly generic template; longer or empty messages fall back
+/// to a generic phrasing (`None`) rather than echoing an unwieldy quote.
+fn repair_short_quote(message: &str) -> Option<String> {
+    let trimmed = message.trim();
+    (trimmed.chars().count() <= 60 && !trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 pub struct ConversationalPipeline<M, T> {
     /// Base pipeline handling model and tokenizer operations
     base: BasePipeline<M, T>,
@@ -474,9 +482,11 @@ where
         context: &str,
         config: &ConversationalConfig,
     ) -> Result<String> {
-        // Tokenize the context
-        let tokenized = (*self.base.tokenizer).encode(context)?;
-        let input_ids = tokenized.input_ids;
+        // Validate the context tokenizes before spending compute on
+        // generation: `model.generate` below takes the raw string and
+        // re-tokenizes internally, so this discards the token ids and keeps
+        // only the fail-fast, tokenizer-specific error it surfaces.
+        let _ = (*self.base.tokenizer).encode(context)?;
 
         // Create generation config based on conversation config
         let mut gen_config = config.generation_config.clone();
@@ -615,9 +625,13 @@ where
         let repair_response = if state.health.repair_attempts
             <= config.repair_config.max_repair_attempts
         {
+            let short_quote = repair_short_quote(&input.message);
             match config.repair_config.repair_strategies.first() {
-                Some(RepairStrategy::Clarification) => {
-                    "I want to make sure I understand you correctly. Could you help me by rephrasing or providing more context?".to_string()
+                Some(RepairStrategy::Clarification) => match &short_quote {
+                    Some(quote) => format!(
+                        "I want to make sure I understand \"{quote}\" correctly. Could you help me by rephrasing or providing more context?"
+                    ),
+                    None => "I want to make sure I understand you correctly. Could you help me by rephrasing or providing more context?".to_string(),
                 },
                 Some(RepairStrategy::Rephrase) => {
                     "Let me try a different approach. What specific aspect would you like me to focus on?".to_string()
@@ -1128,6 +1142,36 @@ pub async fn streaming_conversational_pipeline(
 mod tests {
     use super::*;
 
+    /// Regression test for `repair_short_quote` / conversation-repair
+    /// prompts: `attempt_conversation_repair` used to ignore its `input`
+    /// argument entirely, so the clarification message never referenced
+    /// what the user actually said.
+    #[test]
+    fn test_repair_short_quote_quotes_short_messages_only() {
+        assert_eq!(
+            repair_short_quote("what do you mean"),
+            Some("what do you mean".to_string())
+        );
+        assert_eq!(
+            repair_short_quote("   "),
+            None,
+            "empty/whitespace-only message"
+        );
+        assert_eq!(repair_short_quote(""), None, "empty message");
+        let long_message = "x".repeat(61);
+        assert_eq!(
+            repair_short_quote(&long_message),
+            None,
+            "over the 60-char cutoff"
+        );
+        let boundary_message = "x".repeat(60);
+        assert_eq!(
+            repair_short_quote(&boundary_message),
+            Some(boundary_message),
+            "exactly at the 60-char cutoff must still be quoted"
+        );
+    }
+
     #[test]
     fn test_conversation_state_creation() {
         let state = ConversationState::new("test-123".to_string());
@@ -1381,7 +1425,6 @@ mod tests {
     #[test]
     #[ignore] // Temporarily ignored - requires actual model loading
     fn test_input_validation() {
-        let config = ConversationalConfig::default();
         let model = crate::AutoModel::from_pretrained("microsoft/DialoGPT-medium")
             .expect("operation failed in test");
         let tokenizer = crate::AutoTokenizer::from_pretrained("microsoft/DialoGPT-medium")
@@ -1420,7 +1463,6 @@ mod tests {
     #[tokio::test]
     #[ignore] // Temporarily ignored due to nested runtime issues with from_pretrained
     async fn test_conversation_backup_restore() {
-        let config = ConversationalConfig::default();
         let model = crate::AutoModel::from_pretrained("microsoft/DialoGPT-medium")
             .expect("operation failed in test");
         let tokenizer = crate::AutoTokenizer::from_pretrained("microsoft/DialoGPT-medium")
@@ -1457,7 +1499,6 @@ mod tests {
     #[tokio::test]
     #[ignore] // Temporarily ignored due to nested runtime issues with from_pretrained
     async fn test_health_status() {
-        let config = ConversationalConfig::default();
         let model = crate::AutoModel::from_pretrained("microsoft/DialoGPT-medium")
             .expect("operation failed in test");
         let tokenizer = crate::AutoTokenizer::from_pretrained("microsoft/DialoGPT-medium")

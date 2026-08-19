@@ -112,13 +112,19 @@ pub struct EarlyExitPredictor {
     context_analyzer: ContextAnalyzer,
 }
 
+/// Per-layer early-exit performance stats, returned by
+/// [`EarlyExitPredictor::get_performance_stats`].
 #[derive(Debug, Clone)]
-struct PerformanceStats {
-    total_exits: u64,
-    successful_exits: u64,
-    average_confidence: f32,
-    average_computation_time: f64,
-    accuracy_loss: f32,
+pub struct PerformanceStats {
+    pub total_exits: u64,
+    pub successful_exits: u64,
+    pub average_confidence: f32,
+    pub average_computation_time: f64,
+    /// Running estimate of accuracy lost by exiting early, approximated from
+    /// exit-time confidence (ground-truth accuracy isn't available at
+    /// inference time — see [`EarlyExitPredictor`]'s
+    /// `update_performance_stats`).
+    pub accuracy_loss: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -311,8 +317,14 @@ impl EarlyExitPredictor {
     }
 
     fn calculate_consistency_score(&self, layer_output: &LayerOutput) -> Result<f32> {
+        // The current layer's own representation stability: a real signal
+        // (rather than a fixed fallback) even before there's enough exit
+        // history to compare against.
+        let current_stability =
+            1.0 / (1.0 + self.calculate_hidden_state_variance(&layer_output.hidden_states));
+
         if self.exit_history.len() < 2 {
-            return Ok(0.5); // Not enough history
+            return Ok(current_stability);
         }
 
         // Compare with previous layer predictions
@@ -320,15 +332,18 @@ impl EarlyExitPredictor {
             self.exit_history.iter().rev().take(3).map(|ep| ep.confidence_score).collect();
 
         if recent_confidences.len() < 2 {
-            return Ok(0.5);
+            return Ok(current_stability);
         }
 
         // Calculate consistency as inverse of variance in recent confidences
         let mean = recent_confidences.iter().sum::<f32>() / recent_confidences.len() as f32;
         let variance = recent_confidences.iter().map(|&x| (x - mean).powi(2)).sum::<f32>()
             / recent_confidences.len() as f32;
+        let historical_consistency = 1.0 / (1.0 + variance);
 
-        Ok(1.0 / (1.0 + variance))
+        // Blend historical confidence-consistency with the current layer's
+        // own representation stability.
+        Ok((historical_consistency + current_stability) / 2.0)
     }
 
     fn calculate_hidden_state_variance(&self, hidden_states: &[f32]) -> f32 {
@@ -415,6 +430,12 @@ impl EarlyExitPredictor {
         if let Some(&adaptive_threshold) = self.adaptive_thresholds.get(strategy_type) {
             adjusted = (adjusted + adaptive_threshold) / 2.0;
         }
+
+        // Blend in the domain-specific reference threshold, with a smaller
+        // influence than the learned per-strategy adaptive threshold above
+        // since it's a static configuration value rather than one tuned
+        // from observed exit history.
+        adjusted = adjusted * 0.9 + self.context_analyzer.domain_specific_threshold * 0.1;
 
         adjusted.clamp(0.1, 0.99)
     }
@@ -605,6 +626,12 @@ impl EarlyExitPredictor {
             stats.average_confidence * (1.0 - alpha) + exit_point.confidence_score * alpha;
         stats.average_computation_time = stats.average_computation_time * (1.0 - alpha as f64)
             + exit_point.computation_time_ms as f64 * alpha as f64;
+        // Ground-truth accuracy isn't available at inference time, so this
+        // approximates per-exit accuracy loss from how far below full
+        // confidence the exit point was: exiting at low confidence risks
+        // more accuracy loss than exiting at high confidence.
+        let estimated_accuracy_loss = (1.0 - exit_point.confidence_score).clamp(0.0, 1.0);
+        stats.accuracy_loss = stats.accuracy_loss * (1.0 - alpha) + estimated_accuracy_loss * alpha;
     }
 
     pub fn get_performance_stats(&self) -> &HashMap<usize, PerformanceStats> {
@@ -1333,8 +1360,70 @@ mod tests {
         let output = make_layer_output(5, Some(vec![1.0, 2.0]), vec![0.1; 5]);
         let _ = predictor.should_exit(&output);
         predictor.reset();
-        // After reset, exit_history is empty so consistency falls back to 0.5
+        // After reset, exit_history is empty so consistency falls back to
+        // the current layer's own representation stability.
         let ep2 = predictor.create_base_exit_point(&output).expect("create_base_exit_point ok");
         assert!(ep2.consistency_score > 0.0);
+    }
+
+    /// Regression test: with fewer than 2 exit-history entries,
+    /// `calculate_consistency_score` used to return a fixed `0.5` regardless
+    /// of the current layer's actual hidden states. It must now reflect real
+    /// per-layer representation stability, differing between a stable
+    /// (near-constant) and an unstable (highly varying) hidden state.
+    #[test]
+    fn test_consistency_score_reflects_hidden_state_stability_before_history_exists() {
+        let config = EarlyExitConfig {
+            min_layers: 0,
+            max_layers: 10,
+            ..Default::default()
+        };
+        let predictor = EarlyExitPredictor::new(config);
+
+        let stable = make_layer_output(0, None, vec![0.5; 32]);
+        let unstable = make_layer_output(0, None, vec![-10.0, 10.0, -8.0, 9.0, -12.0, 11.0]);
+
+        let stable_score = predictor
+            .calculate_consistency_score(&stable)
+            .expect("consistency score for stable hidden states");
+        let unstable_score = predictor
+            .calculate_consistency_score(&unstable)
+            .expect("consistency score for unstable hidden states");
+
+        assert!(
+            stable_score > unstable_score,
+            "near-constant hidden states ({stable_score}) must score more consistent than \
+             wildly varying ones ({unstable_score})"
+        );
+    }
+
+    /// Regression test: `accuracy_loss` in `PerformanceStats` used to be
+    /// initialized to `0.0` and never updated by
+    /// `update_performance_stats`'s running-average logic (unlike
+    /// `average_confidence`, which was). A low-confidence exit must now
+    /// raise the tracked `accuracy_loss` above zero.
+    #[test]
+    fn test_performance_stats_track_accuracy_loss_from_low_confidence_exits() {
+        let config = EarlyExitConfig {
+            min_layers: 0,
+            max_layers: 10,
+            strategy: ExitStrategy::ConfidenceThreshold(0.0), // always exits
+            ..Default::default()
+        };
+        let mut predictor = EarlyExitPredictor::new(config);
+        // Flat, low-magnitude logits -> low confidence exit.
+        let output = make_layer_output(3, Some(vec![0.01, 0.01, 0.01]), vec![1.0; 8]);
+        let _ = predictor.should_exit(&output).expect("should_exit should succeed");
+
+        let stats = predictor
+            .get_performance_stats()
+            .get(&3)
+            .expect("layer 3 should have recorded performance stats");
+        assert!(
+            stats.accuracy_loss > 0.0,
+            "a low-confidence exit must raise the tracked accuracy_loss above its 0.0 initial \
+             value, got {}",
+            stats.accuracy_loss
+        );
     }
 }

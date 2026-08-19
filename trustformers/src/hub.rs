@@ -1,16 +1,23 @@
 use crate::error::{Result, TrustformersError};
+#[cfg(feature = "hub")]
 use futures::stream::{self, StreamExt};
+#[cfg(feature = "hub")]
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 #[cfg(feature = "hub")]
 use reqwest::{blocking::Client, Client as AsyncClient};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "hub")]
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
+#[cfg(feature = "hub")]
+use std::fs::{File, OpenOptions};
+#[cfg(feature = "hub")]
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "hub")]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+#[cfg(feature = "hub")]
 use tokio::sync::Semaphore;
 use trustformers_core::errors::TrustformersError as CoreTrustformersError;
 
@@ -288,13 +295,19 @@ pub fn is_cached(model_id: &str, revision: Option<&str>) -> Result<bool> {
 }
 
 /// Enhanced download manager with parallel and resumable downloads
+///
+/// Note: this does not yet route through [`CdnConfig`] or persist
+/// [`ResumeInfo`] — real resumable downloads work off the on-disk file's own
+/// `fs::metadata().len()` in `download_single_file_async`, and `RepoFile`
+/// URLs are used as-is rather than being routed through a CDN's
+/// primary/fallback host list. `HubOptions::use_cdn` therefore does not yet
+/// change request routing; both types remain available (`CdnConfig`,
+/// `ResumeInfo`) for a future CDN-routing/resume-persistence implementation.
 #[cfg(feature = "hub")]
 pub struct DownloadManager {
     config: DownloadConfig,
-    cdn_config: CdnConfig,
     cache_config: SmartCacheConfig,
     client: AsyncClient,
-    resume_db: HashMap<String, ResumeInfo>,
     stats: DownloadStats,
 }
 
@@ -308,10 +321,8 @@ impl DownloadManager {
 
         Self {
             config,
-            cdn_config: CdnConfig::default(),
             cache_config: SmartCacheConfig::default(),
             client,
-            resume_db: HashMap::new(),
             stats: DownloadStats::default(),
         }
     }
@@ -739,6 +750,10 @@ impl DownloadManager {
 
         let target_size = (max_size as f64 * 0.8) as u64; // Clean to 80% of max
         let mut current_size = usage.total_size;
+        tracing::info!(
+            "{}",
+            format_cache_cleanup_start_message(cache_dir, current_size, target_size)
+        );
 
         for file_info in files {
             if current_size <= target_size {
@@ -753,6 +768,24 @@ impl DownloadManager {
 
         Ok(())
     }
+}
+
+/// Format the diagnostic logged when smart-cache cleanup starts.
+///
+/// Pulled out of `DownloadManager::cleanup_cache` so the message content
+/// (which directory is being cleaned, and to what target) is unit-testable
+/// without capturing `tracing` output.
+fn format_cache_cleanup_start_message(
+    cache_dir: &Path,
+    current_size: u64,
+    target_size: u64,
+) -> String {
+    format!(
+        "Cleaning cache directory {}: {} bytes -> target {} bytes",
+        cache_dir.display(),
+        current_size,
+        target_size
+    )
 }
 
 /// Download task definition
@@ -1270,6 +1303,7 @@ pub async fn get_download_stats(
 }
 
 /// Check if a file is essential for model operation
+#[cfg(feature = "hub")]
 fn is_essential_file(filename: &str) -> bool {
     let essential_files = [
         "config.json",
@@ -1286,6 +1320,7 @@ fn is_essential_file(filename: &str) -> bool {
 }
 
 /// Estimate download time based on file size
+#[cfg(feature = "hub")]
 fn estimate_download_time(total_size: u64) -> Duration {
     // Assume average download speed of 10 MB/s
     let average_speed_mbps = 10.0 * 1024.0 * 1024.0;
@@ -1548,6 +1583,17 @@ mod tests {
     fn test_is_cached() {
         let result = is_cached("bert-base-uncased", None);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_format_cache_cleanup_start_message_reports_directory_and_sizes() {
+        // Regression test: `cleanup_cache`'s `cache_dir` parameter used to be
+        // computed and passed in but never read. Guard against that regressing.
+        let message =
+            format_cache_cleanup_start_message(Path::new("/tmp/trustformers-cache"), 1_000, 800);
+        assert!(message.contains("/tmp/trustformers-cache"));
+        assert!(message.contains("1000 bytes"));
+        assert!(message.contains("target 800 bytes"));
     }
 
     #[test]

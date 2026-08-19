@@ -1,7 +1,7 @@
 // Custom Backend API for TrustformeRS
 // Provides an extensible framework for implementing custom inference backends
 
-use crate::core::traits::{Model, Tokenizer};
+use crate::core::traits::Tokenizer;
 use crate::error::{Result, TrustformersError};
 use crate::pipeline::{Device, PaddingStrategy, PipelineOptions};
 use serde::{Deserialize, Serialize};
@@ -490,6 +490,11 @@ impl CustomBackendPipeline {
     /// Get pipeline configuration
     pub fn config(&self) -> &BackendConfig {
         &self.config
+    }
+
+    /// Get pipeline options (device placement, batching, padding, ...)
+    pub fn options(&self) -> &PipelineOptions {
+        &self.options
     }
 
     /// Warm up the pipeline

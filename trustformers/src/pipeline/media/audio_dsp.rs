@@ -920,7 +920,7 @@ mod tests {
         assert_eq!(mel[0].len(), 80);
 
         // Average over the middle frames to avoid the padded edges.
-        let mut avg = vec![0.0f32; 80];
+        let mut avg = [0.0f32; 80];
         for frame in &mel[20..80] {
             for (a, v) in avg.iter_mut().zip(frame.iter()) {
                 *a += v / 60.0;
@@ -964,7 +964,7 @@ mod tests {
         let high = log_mel_spectrogram(&sine(3000.0, 16_000, 16_000), 16_000, MelConfig::default())
             .expect("mel high");
         let band = |m: &[Vec<f32>]| {
-            let mut avg = vec![0.0f32; 80];
+            let mut avg = [0.0f32; 80];
             for frame in &m[20..80] {
                 for (a, v) in avg.iter_mut().zip(frame.iter()) {
                     *a += v / 60.0;

@@ -208,20 +208,26 @@ pub enum SamplingStrategy {
     Typical { p: f32 },
 }
 
-/// Helper struct for managing generation state
-pub struct GenerationState {
+/// Helper struct for managing generation state.
+///
+/// Not used by [`TextGenerationPipeline::generate`] / `generate_stream`,
+/// which delegate the whole incremental decode loop (including KV-cache
+/// bookkeeping) to `model.generate_token_ids` / `model.step_once` instead of
+/// managing it here — this predates that design and is kept `#[cfg(test)]`
+/// as a coverage check on the bookkeeping logic itself.
+#[cfg(test)]
+struct GenerationState {
     input_ids: Vec<u32>,
-    past_key_values: Option<Vec<crate::Tensor>>,
     attention_mask: Vec<u32>,
     position: usize,
 }
 
+#[cfg(test)]
 impl GenerationState {
     fn new(input_ids: Vec<u32>) -> Self {
         let len = input_ids.len();
         Self {
             input_ids,
-            past_key_values: None,
             attention_mask: vec![1; len],
             position: len,
         }

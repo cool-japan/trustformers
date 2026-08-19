@@ -78,23 +78,24 @@ pub struct SummarizationResult {
     pub processing_time_ms: f64,
 }
 
-/// Weights for importance scoring
+/// Weights for importance scoring, set via
+/// [`ContextSummarizer::with_importance_weights`].
 #[derive(Debug, Clone)]
-struct ImportanceWeights {
+pub struct ImportanceWeights {
     /// Weight for questions in importance calculation
-    question_weight: f32,
+    pub question_weight: f32,
     /// Weight for personal information
-    personal_info_weight: f32,
+    pub personal_info_weight: f32,
     /// Weight for topical relevance
-    topic_relevance_weight: f32,
+    pub topic_relevance_weight: f32,
     /// Weight for emotional content
-    emotional_weight: f32,
+    pub emotional_weight: f32,
     /// Weight for reasoning chains
-    reasoning_weight: f32,
+    pub reasoning_weight: f32,
     /// Weight for engagement level
-    engagement_weight: f32,
+    pub engagement_weight: f32,
     /// Weight for recency (more recent = more important)
-    recency_weight: f32,
+    pub recency_weight: f32,
 }
 
 impl Default for ImportanceWeights {
@@ -111,17 +112,20 @@ impl Default for ImportanceWeights {
     }
 }
 
-/// Thresholds for quality assessment
+/// Thresholds for quality assessment, set via
+/// [`ContextSummarizer::with_quality_thresholds`]. A summary that falls
+/// outside these bounds is still returned (summarization never fails purely
+/// on quality), but is logged via `tracing::warn!`.
 #[derive(Debug, Clone)]
-struct QualityThresholds {
+pub struct QualityThresholds {
     /// Minimum quality score for acceptable summaries
-    min_quality_score: f32,
+    pub min_quality_score: f32,
     /// Minimum compression ratio to be worthwhile
-    min_compression_ratio: f32,
+    pub min_compression_ratio: f32,
     /// Maximum allowable information loss
-    max_information_loss: f32,
+    pub max_information_loss: f32,
     /// Minimum coherence score
-    min_coherence_score: f32,
+    pub min_coherence_score: f32,
 }
 
 impl Default for QualityThresholds {
@@ -345,6 +349,7 @@ impl ContextSummarizer {
 
         // Assess summary quality
         let quality_assessment = self.assess_summary_quality(&summary, turns, compression_ratio);
+        self.warn_if_below_quality_thresholds(&quality_assessment, compression_ratio);
 
         // Extract preserved information
         let preserved_topics = self.extract_preserved_topics(&summary, turns);
@@ -387,9 +392,20 @@ impl ContextSummarizer {
 
         // Select sentences from most important clusters first
         for cluster in sorted_clusters {
+            tracing::trace!(
+                topic = %cluster.topic,
+                cluster_score = cluster.cluster_score,
+                representative = cluster.representative_sentence.as_deref().unwrap_or(""),
+                "considering topic cluster for extractive summary"
+            );
             for sentence_score in cluster.sentences {
                 let sentence_tokens = self.count_tokens(&sentence_score.sentence);
                 if current_tokens + sentence_tokens <= target_tokens {
+                    tracing::trace!(
+                        entity_count = sentence_score.entities.len(),
+                        score = sentence_score.score,
+                        "selecting sentence for extractive summary"
+                    );
                     selected_sentences.push(sentence_score);
                     current_tokens += sentence_tokens;
                 } else if selected_sentences.is_empty() {
@@ -1186,6 +1202,52 @@ impl ContextSummarizer {
         QualityAssessment {
             quality_score: quality_score.min(1.0).max(0.0),
             confidence: confidence.min(1.0).max(0.0),
+            coherence_score,
+        }
+    }
+
+    /// Logs a warning for every dimension of `assessment`/`compression_ratio`
+    /// that falls outside `self.quality_thresholds`. This doesn't change
+    /// `summarize`'s return value (a poor-quality summary is still a real,
+    /// honestly-labeled result, not an error), but it makes the configured
+    /// thresholds — previously dead configuration nobody consulted —
+    /// actually observable.
+    fn warn_if_below_quality_thresholds(
+        &self,
+        assessment: &QualityAssessment,
+        compression_ratio: f32,
+    ) {
+        let thresholds = &self.quality_thresholds;
+        if assessment.quality_score < thresholds.min_quality_score {
+            tracing::warn!(
+                quality_score = assessment.quality_score,
+                min_quality_score = thresholds.min_quality_score,
+                "summarization quality below configured threshold"
+            );
+        }
+        if compression_ratio < thresholds.min_compression_ratio {
+            tracing::warn!(
+                compression_ratio,
+                min_compression_ratio = thresholds.min_compression_ratio,
+                "summarization compression ratio below configured threshold"
+            );
+        }
+        if assessment.coherence_score < thresholds.min_coherence_score {
+            tracing::warn!(
+                coherence_score = assessment.coherence_score,
+                min_coherence_score = thresholds.min_coherence_score,
+                "summarization coherence below configured threshold"
+            );
+        }
+        // Fraction of tokens removed by compression, as a proxy for how much
+        // content was cut; not a semantic information-loss measure.
+        let information_loss = 1.0 - compression_ratio.clamp(0.0, 1.0);
+        if information_loss > thresholds.max_information_loss {
+            tracing::warn!(
+                information_loss,
+                max_information_loss = thresholds.max_information_loss,
+                "summarization information loss above configured threshold"
+            );
         }
     }
 
@@ -1456,6 +1518,7 @@ impl ContextSummarizer {
 struct QualityAssessment {
     quality_score: f32,
     confidence: f32,
+    coherence_score: f32,
 }
 
 // ================================================================================================

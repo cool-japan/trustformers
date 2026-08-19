@@ -664,8 +664,24 @@ impl PipelineJitCompiler {
             optimizations.push(OptimizationType::Vectorization);
         }
 
-        if self.config.enable_memory_optimization {
+        // A caller-supplied memory budget hint opts a request into memory
+        // layout optimization even when the global config default has it
+        // off, since the caller is explicitly memory-constrained.
+        if self.config.enable_memory_optimization
+            || request.optimization_hints.memory_budget.is_some()
+        {
             optimizations.push(OptimizationType::MemoryLayout);
+        }
+
+        // High/critical priority requests get vectorization even if the
+        // global config default has it off, since the caller explicitly
+        // asked for a fast compile.
+        if matches!(
+            request.priority,
+            CompilationPriority::High | CompilationPriority::Critical
+        ) && !optimizations.contains(&OptimizationType::Vectorization)
+        {
+            optimizations.push(OptimizationType::Vectorization);
         }
 
         // Add more optimization based on request characteristics
@@ -679,6 +695,11 @@ impl PipelineJitCompiler {
     pub fn get_compilation_stats(&self) -> HashMap<String, ExecutionStats> {
         let stats = self.execution_stats.lock().unwrap_or_else(|p| p.into_inner());
         stats.clone()
+    }
+
+    /// Number of compilation requests currently queued.
+    pub fn pending_compilations(&self) -> usize {
+        self.compilation_queue.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Get performance metrics

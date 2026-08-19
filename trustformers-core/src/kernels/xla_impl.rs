@@ -7,8 +7,6 @@
 //! execution of tensor operations across various hardware backends including
 //! CPUs, GPUs, and TPUs.
 
-#![allow(unused_variables)] // XLA backend implementation
-
 use crate::errors::compute_error;
 use crate::hardware::{DataType, HardwareCapabilities, HardwareMetrics, HardwareResult};
 use crate::tensor::Tensor;

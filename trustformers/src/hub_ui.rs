@@ -16,7 +16,6 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -365,6 +364,11 @@ impl HubUiState {
     pub fn list_repositories(&self) -> Vec<ModelRepository> {
         let repos = self.repositories.lock().unwrap_or_else(|p| p.into_inner());
         repos.values().cloned().collect()
+    }
+
+    /// Local directory where downloaded model files are cached.
+    pub fn cache_dir(&self) -> &std::path::Path {
+        &self.cache_dir
     }
 
     /// Add a version to a repository
@@ -825,6 +829,13 @@ async fn create_version(
     Path((model_id, version)): Path<(String, String)>,
     Json(payload): Json<ModelVersion>,
 ) -> Result<Json<ModelVersion>, StatusCode> {
+    // The URL's `:version` segment must match the request body's `version`
+    // field: without this check, POSTing to `.../versions/v1` with a body
+    // claiming to be `v2` silently created `v2` instead, ignoring the URL
+    // entirely.
+    if payload.version != version {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     state
         .add_version(&model_id, payload.clone())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -869,10 +880,18 @@ async fn download_version(
     State(state): State<HubUiState>,
     Path((model_id, version)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Implementation would trigger download and return status
-    Ok(Json(
-        json!({"status": "download_started", "model_id": model_id, "version": version}),
-    ))
+    // Validate the model and version actually exist, using real repository
+    // state, before claiming anything about them.
+    let repo = state.get_repository(&model_id).ok_or(StatusCode::NOT_FOUND)?;
+    if repo.get_version(&version).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Actually triggering a download (fetching the real model weight files
+    // via `hub::download_model` et al.) is not wired into this endpoint
+    // yet; honestly report that instead of claiming a download started that
+    // never did.
+    Err(StatusCode::NOT_IMPLEMENTED)
 }
 
 // UI route handlers
@@ -1693,6 +1712,90 @@ mod tests {
         assert_eq!(version.version, "v1.0.0");
         assert_eq!(version.status, VersionStatus::Stable);
         assert!(version.name.is_some());
+    }
+
+    fn test_version(version: &str) -> ModelVersion {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
+        ModelVersion {
+            version: version.to_string(),
+            name: None,
+            description: None,
+            created_at: now,
+            modified_at: now,
+            author: None,
+            tags: Vec::new(),
+            metrics: None,
+            changes: Vec::new(),
+            parent_version: None,
+            download_stats: None,
+            size_bytes: 0,
+            checksum: None,
+            status: VersionStatus::Stable,
+            compatibility: CompatibilityInfo {
+                framework_version: None,
+                python_version: None,
+                cuda_version: None,
+                hardware_requirements: Vec::new(),
+                breaking_changes: Vec::new(),
+                migration_notes: None,
+            },
+        }
+    }
+
+    /// Regression test: `create_version` used to ignore the URL's
+    /// `:version` path segment entirely, so POSTing to `.../versions/v1`
+    /// with a body claiming to be `v2` silently created `v2` instead of
+    /// rejecting the mismatch.
+    #[tokio::test]
+    async fn test_create_version_rejects_url_body_version_mismatch() {
+        let state = HubUiState::new(HubUiConfig::default(), std::env::temp_dir());
+        state
+            .add_repository(ModelRepository::new(
+                "test/model".to_string(),
+                "test_user".to_string(),
+            ))
+            .expect("add_repository should succeed");
+
+        let result = create_version(
+            State(state.clone()),
+            Path(("test/model".to_string(), "v1".to_string())),
+            Json(test_version("v2")),
+        )
+        .await;
+
+        assert_eq!(result.err(), Some(StatusCode::BAD_REQUEST));
+        // Confirm nothing was actually created under either name.
+        let repo = state.get_repository("test/model").expect("repository should still exist");
+        assert!(repo.get_version("v1").is_none());
+        assert!(repo.get_version("v2").is_none());
+    }
+
+    /// Regression test: with a matching URL/body version, `create_version`
+    /// must still succeed (the mismatch check above must not be overly
+    /// strict).
+    #[tokio::test]
+    async fn test_create_version_accepts_matching_url_and_body_version() {
+        let state = HubUiState::new(HubUiConfig::default(), std::env::temp_dir());
+        state
+            .add_repository(ModelRepository::new(
+                "test/model".to_string(),
+                "test_user".to_string(),
+            ))
+            .expect("add_repository should succeed");
+
+        let result = create_version(
+            State(state.clone()),
+            Path(("test/model".to_string(), "v1".to_string())),
+            Json(test_version("v1")),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let repo = state.get_repository("test/model").expect("repository should still exist");
+        assert!(repo.get_version("v1").is_some());
     }
 
     #[test]

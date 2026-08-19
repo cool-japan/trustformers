@@ -1,12 +1,43 @@
 // Optimized Rotary Position Embedding (RoPE) implementation with vectorization
 
-#![allow(unused_variables)] // Optimized implementation with architecture-specific code paths
-
 use crate::tensor::Tensor;
 use anyhow::Result;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
+
+/// Checks that `x` (`[batch, seq_len, hidden]`) and `position_ids`
+/// (`[batch, seq_len]`) have ranks `Tensor::mul`'s elementwise broadcast can
+/// actually work with, and that their leading dims are broadcast-compatible
+/// (equal, or one of them `1` - the same rule [`Tensor::mul`] itself uses).
+///
+/// Before this check, `batch_size`/`seq_len` were computed from `x.shape()`
+/// and then never used, so nothing here caught a rank mismatch before it hit
+/// `x.shape()[2]` a few lines further down - a 2-D or 1-D `x` panicked on
+/// that out-of-bounds index instead of returning a clean error. Rank-3/2
+/// shapes with genuinely incompatible batch or sequence lengths were already
+/// caught later, inside `Tensor::mul`, just with a more opaque message and
+/// after the wasted work of computing `get_cos_sin_embeddings` first.
+fn check_rope_input_shapes(x_shape: &[usize], position_ids_shape: &[usize]) -> Result<()> {
+    if x_shape.len() != 3 {
+        anyhow::bail!("RoPE input must be a 3-D [batch, seq_len, hidden] tensor, got {x_shape:?}");
+    }
+    if position_ids_shape.len() != 2 {
+        anyhow::bail!(
+            "RoPE position_ids must be a 2-D [batch, seq_len] tensor, got {position_ids_shape:?}"
+        );
+    }
+    let broadcastable = |a: usize, b: usize| a == b || a == 1 || b == 1;
+    if !broadcastable(x_shape[0], position_ids_shape[0])
+        || !broadcastable(x_shape[1], position_ids_shape[1])
+    {
+        anyhow::bail!(
+            "RoPE position_ids shape {position_ids_shape:?} does not broadcast against input batch/seq_len {:?}",
+            &x_shape[..2]
+        );
+    }
+    Ok(())
+}
 
 /// Vectorized RoPE implementation for improved performance
 pub struct VectorizedRoPE {
@@ -52,8 +83,7 @@ impl VectorizedRoPE {
 
     fn forward_standard(&self, x: &Tensor, position_ids: &Tensor) -> Result<Tensor> {
         // Standard RoPE implementation without SIMD optimization
-        let batch_size = x.shape()[0];
-        let seq_len = x.shape()[1];
+        check_rope_input_shapes(&x.shape(), &position_ids.shape())?;
         let hidden_size = x.shape()[2];
 
         // Get precomputed cos/sin embeddings
@@ -153,10 +183,17 @@ impl VectorizedRoPE {
         }
     }
 
+    /// Rotation via the same elementwise `Tensor` ops as [`Self::forward_standard`].
+    ///
+    /// This does **not** dispatch to [`Self::forward_simd_inner`] below: that
+    /// hand-written AVX2 kernel takes a `[batch, seq, num_heads, head_dim]`
+    /// layout this struct never captures (no `num_heads` field), so it cannot
+    /// be called from here without a design change. Whatever speed this path
+    /// has over [`Self::forward_standard`] comes from the compiler
+    /// auto-vectorizing the same scalar tensor ops, not from `forward_simd_inner`.
     fn forward_simd(&self, x: &Tensor, position_ids: &Tensor) -> Result<Tensor> {
         // Enhanced SIMD-optimized RoPE implementation
-        let batch_size = x.shape()[0];
-        let seq_len = x.shape()[1];
+        check_rope_input_shapes(&x.shape(), &position_ids.shape())?;
         let hidden_size = x.shape()[2];
 
         // Get precomputed cos/sin embeddings
@@ -184,9 +221,24 @@ impl VectorizedRoPE {
     }
 
     fn get_cos_sin_embeddings(&self, position_ids: &Tensor) -> Result<Tensor> {
-        // Enhanced cos/sin embedding computation
-        let batch_size = position_ids.shape()[0];
-        let seq_len = position_ids.shape()[1];
+        // Enhanced cos/sin embedding computation.
+        //
+        // `position_ids.shape()[0]`/`[1]` used to be indexed straight into
+        // `batch_size`/`seq_len` locals that nothing downstream read, so a
+        // rank-0 or rank-1 `position_ids` tensor panicked on the out-of-bounds
+        // index instead of returning a clean error, and a broadcast bug in the
+        // unsqueeze/mul chain below had no check to catch it. Both are real
+        // checks now: an upfront rank guard replaces the panic, and the two
+        // values are used again at the end to confirm the concatenated output
+        // actually has the shape this function's contract promises.
+        let position_shape = position_ids.shape();
+        if position_shape.len() != 2 {
+            anyhow::bail!(
+                "RoPE position_ids must be a 2-D [batch, seq_len] tensor, got {position_shape:?}"
+            );
+        }
+        let batch_size = position_shape[0];
+        let seq_len = position_shape[1];
         let half_dim = self.dim / 2;
 
         // Create frequency tensor: 1 / (base^(2i/dim)) for i in range(dim/2)
@@ -216,7 +268,15 @@ impl VectorizedRoPE {
         let cos_expanded = cos_embed.unsqueeze(cos_embed.shape().len())?;
         let sin_expanded = sin_embed.unsqueeze(sin_embed.shape().len())?;
 
-        Ok(Tensor::concat(&[cos_expanded, sin_expanded], 3)?)
+        let result = Tensor::concat(&[cos_expanded, sin_expanded], 3)?;
+        let expected_shape = vec![batch_size, seq_len, half_dim, 2];
+        if result.shape() != expected_shape {
+            anyhow::bail!(
+                "RoPE cos/sin embedding shape {:?} does not match the expected {expected_shape:?}",
+                result.shape()
+            );
+        }
+        Ok(result)
     }
 }
 
@@ -529,6 +589,80 @@ mod tests {
             "output does not vary with position_ids"
         );
 
+        Ok(())
+    }
+
+    /// Regression test: `forward_standard`/`forward_simd` used to compute
+    /// `batch_size`/`seq_len` from `x.shape()` under a file-level
+    /// `#![allow(unused_variables)]` and then never read them, so nothing
+    /// checked `x`'s rank before indexing `x.shape()[2]` for `hidden_size` a
+    /// few lines later. A rank-2 `x` panicked there instead of returning a
+    /// `Result::Err`; a panicking `#[test]` fails, so this test would have
+    /// failed against the old code.
+    #[test]
+    fn forward_rejects_a_rank_mismatched_input() -> Result<()> {
+        let rope = VectorizedRoPE::new(8, 16, 10000.0)?;
+        let flat_x = Tensor::from_vec(vec![0.0f32; 4 * 8], &[4, 8])?;
+        let position_ids = Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0], &[1, 4])?;
+
+        assert!(
+            rope.forward(&flat_x, &position_ids).is_err(),
+            "a 2-D input must be rejected, not panic on the missing hidden dim"
+        );
+        Ok(())
+    }
+
+    /// Regression test: `get_cos_sin_embeddings` used to index
+    /// `position_ids.shape()[0]` / `[1]` straight into now-provably-unused
+    /// `batch_size`/`seq_len` locals, so a rank-1 `position_ids` panicked on
+    /// the out-of-bounds `[1]` index instead of returning an error. Called
+    /// directly (bypassing `forward`'s own now-added rank guard) to pin the
+    /// inner function's own check.
+    #[test]
+    fn get_cos_sin_embeddings_rejects_a_rank_mismatched_position_ids() -> Result<()> {
+        let rope = VectorizedRoPE::new(8, 16, 10000.0)?;
+        let flat_positions = Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0], &[4])?;
+
+        assert!(
+            rope.get_cos_sin_embeddings(&flat_positions).is_err(),
+            "a 1-D position_ids must be rejected, not panic on the missing seq_len dim"
+        );
+        Ok(())
+    }
+
+    /// A `position_ids` batch of `1` must still broadcast against a larger
+    /// `x` batch (the same rule `Tensor::mul` applies downstream) - the new
+    /// shape guard must not turn this previously-working call into an error.
+    #[test]
+    fn forward_still_broadcasts_a_shared_position_ids_batch() -> Result<()> {
+        let rope = VectorizedRoPE::new(8, 16, 10000.0)?;
+        let x = Tensor::from_vec(vec![0.1f32; 2 * 4 * 8], &[2, 4, 8])?;
+        let shared_positions = Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0], &[1, 4])?;
+
+        assert!(
+            rope.forward(&x, &shared_positions).is_ok(),
+            "a broadcastable batch-1 position_ids must still be accepted"
+        );
+        Ok(())
+    }
+
+    /// A genuinely incompatible batch (neither side is `1`, and they differ)
+    /// must be rejected with a clear error rather than reaching
+    /// `Tensor::mul`'s own, less specific broadcast failure.
+    #[test]
+    fn forward_rejects_a_non_broadcastable_batch_mismatch() -> Result<()> {
+        let rope = VectorizedRoPE::new(8, 16, 10000.0)?;
+        let x = Tensor::from_vec(vec![0.1f32; 2 * 4 * 8], &[2, 4, 8])?;
+        // batch 3 vs x's batch 2: neither is 1, so this cannot broadcast.
+        let mismatched_positions = Tensor::from_vec(vec![0.0f32; 3 * 4], &[3, 4])?;
+
+        let err = rope
+            .forward(&x, &mismatched_positions)
+            .expect_err("a non-broadcastable batch mismatch must be rejected");
+        assert!(
+            err.to_string().contains("position_ids"),
+            "error should name position_ids as the cause, got: {err}"
+        );
         Ok(())
     }
 }

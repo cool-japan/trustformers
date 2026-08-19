@@ -2,22 +2,32 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use crate::error::{Result, TrustformersError};
-use crate::pipeline::{Pipeline, PipelineOptions, PipelineOutput};
-use std::sync::{Arc, Mutex};
+// This module's only non-test content is the `use` statements below: every
+// symbol they bring in is consumed exclusively by `mod tests`. They are
+// `#[cfg(test)]`-gated (rather than living at plain module scope) so a
+// non-test build of this crate does not carry unused-import warnings for
+// imports that only the test harness needs.
+#[cfg(test)]
+use crate::pipeline::{Pipeline, PipelineOutput};
+#[cfg(test)]
+use std::sync::Arc;
 
+#[cfg(test)]
 use super::functions::{
     create_adaptive_voting_ensemble, create_cascade_ensemble, create_dynamic_routing_ensemble,
     create_efficient_ensemble, create_high_performance_ensemble, create_quality_latency_ensemble,
-    create_resource_aware_ensemble, create_uncertainty_ensemble, GatingNetwork, Router,
+    create_resource_aware_ensemble, create_uncertainty_ensemble,
 };
+#[cfg(test)]
 use super::types::{
     EmbeddingCosineRouter, HashRoutingGate, KeywordRouter, ModelSelectionInfo,
     ModelSelectionStrategy, ModelWeight,
 };
+#[cfg(test)]
 use super::types_3::EnsemblePipeline;
+#[cfg(test)]
 use super::types_4::{
-    EnsembleConfig, EnsembleStrategy, InputCharacteristics, SoftmaxEmbeddingGate,
+    EnsembleConfig, EnsembleModel, EnsembleStrategy, InputCharacteristics, SoftmaxEmbeddingGate,
 };
 
 #[cfg(test)]
@@ -601,5 +611,98 @@ mod tests {
             stats.variance >= 0.0,
             "bootstrap variance must be non-negative"
         );
+    }
+
+    /// Regression test for `EnsemblePipeline::calculate_dynamic_weights`
+    /// (previously dead code: `EnsembleStrategy::DynamicWeighting` computed
+    /// weights from this call's raw confidence alone, in `Pipeline::__call__`,
+    /// completely ignoring each model's tracked accuracy/performance
+    /// history). Two models report *equal* confidence for this call but
+    /// have different track records; the model with the stronger history
+    /// must now receive strictly more weight.
+    #[test]
+    fn test_dynamic_weighting_uses_model_performance_history() {
+        let mut config = EnsembleConfig::default();
+        config.strategy = EnsembleStrategy::DynamicWeighting;
+        let mut ensemble = EnsemblePipeline::new(config);
+
+        ensemble.models.push(EnsembleModel {
+            model_id: "good".to_string(),
+            pipeline: Box::new(TimedMockPipeline {
+                label: "A".to_string(),
+                delay_ms: 0,
+            }),
+            weight: ModelWeight::new("good".to_string(), 1.0),
+            performance_history: vec![0.95, 0.95],
+            last_prediction_time_ms: 0,
+            total_predictions: 10,
+            successful_predictions: 10,
+        });
+        ensemble.models.push(EnsembleModel {
+            model_id: "weak".to_string(),
+            pipeline: Box::new(TimedMockPipeline {
+                label: "A".to_string(),
+                delay_ms: 0,
+            }),
+            weight: ModelWeight::new("weak".to_string(), 1.0),
+            performance_history: vec![0.1, 0.1],
+            last_prediction_time_ms: 0,
+            total_predictions: 10,
+            successful_predictions: 2,
+        });
+
+        // Both models report the identical confidence (0.9) for this call.
+        let predictions: Vec<(String, PipelineOutput, u64)> =
+            make_classification_preds(&["A", "A"], 0.9)
+                .into_iter()
+                .zip(["good", "weak"])
+                .map(|((_, output, dur), id)| (id.to_string(), output, dur))
+                .collect();
+
+        let weights = ensemble.calculate_dynamic_weights(&predictions);
+        assert_eq!(weights.len(), 2);
+        assert!(
+            weights[0] > weights[1],
+            "model with a stronger performance history must get more weight, got {:?}",
+            weights
+        );
+        let sum: f32 = weights.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-4,
+            "weights must be normalized, got {:?}",
+            weights
+        );
+    }
+
+    /// Regression test for `calibration_samples`/`record_calibration_samples`
+    /// (previously a write-only dead field that always stayed empty).
+    /// Recording must be gated on `config.enable_calibration`, mirroring the
+    /// flag every `create_*_ensemble` factory that turns it on expects to be
+    /// honored.
+    #[test]
+    fn test_calibration_samples_respects_enable_calibration_flag() {
+        let preds = make_classification_preds(&["A"], 0.5);
+
+        let disabled = EnsemblePipeline::new(EnsembleConfig::default());
+        assert!(disabled.calibration_samples().is_empty());
+        disabled.record_calibration_samples(&preds);
+        assert!(
+            disabled.calibration_samples().is_empty(),
+            "must not record when enable_calibration is false"
+        );
+
+        let mut enabled_config = EnsembleConfig::default();
+        enabled_config.enable_calibration = true;
+        let enabled = EnsemblePipeline::new(enabled_config);
+        enabled.record_calibration_samples(&preds);
+        let samples = enabled.calibration_samples();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].0, "model_0");
+
+        // Bounded: recording well past the cap must evict the oldest entries.
+        for _ in 0..1500 {
+            enabled.record_calibration_samples(&preds);
+        }
+        assert_eq!(enabled.calibration_samples().len(), 1000);
     }
 }

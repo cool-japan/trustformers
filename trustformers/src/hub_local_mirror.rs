@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
@@ -663,10 +662,14 @@ impl HubMirror {
                 {
                     if remote_model.latest_version != cached_model.version {
                         tracing::info!(
-                            "Update available for {}: {} -> {}",
-                            cached_model.model_id,
-                            cached_model.version,
-                            remote_model.latest_version
+                            "{}",
+                            format_update_available_message(
+                                &cached_model.model_id,
+                                &cached_model.version,
+                                &remote_model.latest_version,
+                                remote_model.size_mb,
+                                &remote_model.updated_at,
+                            )
                         );
                         updates_found += 1;
                     }
@@ -914,6 +917,23 @@ impl HubMirror {
     }
 }
 
+/// Format the "update available" diagnostic surfaced during background sync.
+///
+/// Pulled out of `sync_with_remote` so the message content (including the
+/// remote's reported size and last-updated timestamp) is unit-testable
+/// without needing to capture `tracing` output.
+fn format_update_available_message(
+    model_id: &str,
+    cached_version: &str,
+    latest_version: &str,
+    size_mb: f64,
+    updated_at: &str,
+) -> String {
+    format!(
+        "Update available for {model_id}: {cached_version} -> {latest_version} ({size_mb:.2} MB, updated {updated_at})"
+    )
+}
+
 #[derive(Debug, Deserialize)]
 struct RemoteModelInfo {
     model_id: String,
@@ -960,6 +980,24 @@ pub async fn get_model_from_mirror(model_id: &str, version: Option<&str>) -> Res
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_format_update_available_message_includes_remote_size_and_timestamp() {
+        // Regression test: `RemoteModelInfo::size_mb`/`updated_at` used to be
+        // deserialized from the sync response and then never read, so this
+        // diagnostic never mentioned them. Guard against that regressing.
+        let message = format_update_available_message(
+            "bert-base-uncased",
+            "1.0.0",
+            "1.1.0",
+            438.5,
+            "2026-01-15T00:00:00Z",
+        );
+        assert!(message.contains("bert-base-uncased"));
+        assert!(message.contains("1.0.0 -> 1.1.0"));
+        assert!(message.contains("438.50 MB"));
+        assert!(message.contains("2026-01-15T00:00:00Z"));
+    }
 
     #[tokio::test]
     async fn test_mirror_creation() {

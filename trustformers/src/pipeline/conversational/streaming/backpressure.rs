@@ -553,14 +553,32 @@ impl BackpressureController {
                 actions.push(FlowAction::BufferDrain);
                 actions.push(FlowAction::QualityAdjustment(0.3)); // Significant quality reduction
 
-                // Activate load balancing for critical situations
-                actions.push(FlowAction::LoadBalance(LoadBalanceAction::DropLowPriority));
+                // Honor the emergency strategy's own load-shedding preference:
+                // a `Dropping` strategy configured to preserve priority sheds
+                // low-priority load first; otherwise fall back to fair
+                // sharing. Other strategy choices keep the previous
+                // unconditional `DropLowPriority`, since it's still a
+                // reasonable default under emergency conditions.
+                let load_balance_action = match strategy {
+                    BackpressureStrategy::Dropping {
+                        priority_preservation: false,
+                        ..
+                    } => LoadBalanceAction::FairShare,
+                    _ => LoadBalanceAction::DropLowPriority,
+                };
+                actions.push(FlowAction::LoadBalance(load_balance_action));
             },
             PressureLevel::High => {
                 // Aggressive but controlled response
                 let reduction_factor =
                     self.calculate_adaptive_reduction_factor(&flow_state, buffer_state).await;
-                let reduction = flow_state.flow_rate * reduction_factor;
+                let mut reduction = flow_state.flow_rate * reduction_factor;
+                // A `RateLimiting` strategy's `max_rate` is a hard cap: make
+                // sure the reduction brings the flow rate down to at least
+                // that, even if the adaptive factor alone would not.
+                if let BackpressureStrategy::RateLimiting { max_rate, .. } = strategy {
+                    reduction = reduction.max(flow_state.flow_rate - max_rate).max(0.0);
+                }
                 actions.push(FlowAction::DecreaseRate(reduction));
                 actions.push(FlowAction::QualityAdjustment(0.6));
                 actions.push(FlowAction::AdaptiveThrottle(0.7));
@@ -1159,7 +1177,6 @@ mod tests {
             "an unmeasured metric must be left untouched, not replaced by 30.0"
         );
     }
-    use std::time::Instant;
 
     fn make_config() -> AdvancedStreamingConfig {
         AdvancedStreamingConfig::default()

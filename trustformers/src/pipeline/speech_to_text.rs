@@ -37,6 +37,7 @@ use crate::{AutoModel, AutoTokenizer};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+#[cfg(feature = "whisper")]
 use std::sync::Arc;
 
 /// Architectures this pipeline can actually execute.
@@ -402,11 +403,20 @@ impl SpeechToTextPipeline {
     /// Run the attached backend on the extracted features.
     fn run_backend(&self, features: &AudioFeatures) -> Result<SpeechToTextOutput> {
         match &self.backend {
-            SpeechToTextBackend::Unavailable => Err(unsupported_model(
-                "speech-to-text",
-                "AutoModel (no speech architecture attached)",
-                SUPPORTED_ARCHITECTURES,
-            )),
+            SpeechToTextBackend::Unavailable => {
+                use trustformers_core::traits::Tokenizer as _;
+                tracing::trace!(
+                    duration_s = features.duration_s,
+                    tokenizer_vocab_size = self.base.tokenizer.vocab_size(),
+                    "no speech architecture attached; refusing rather than fabricating a \
+                     transcript"
+                );
+                Err(unsupported_model(
+                    "speech-to-text",
+                    "AutoModel (no speech architecture attached)",
+                    SUPPORTED_ARCHITECTURES,
+                ))
+            },
             #[cfg(feature = "whisper")]
             SpeechToTextBackend::Whisper(task) => self.run_whisper(task, features),
         }

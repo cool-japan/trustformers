@@ -555,9 +555,7 @@ pub trait FeatureExtractorConfig: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auto::types::{
-        AudioMetadata, DocumentFormat, DocumentMetadata, FeatureInput, ImageFormat, ImageMetadata,
-    };
+    use crate::auto::types::{AudioMetadata, FeatureInput, ImageFormat, ImageMetadata};
     use crate::error::TrustformersError;
 
     #[test]

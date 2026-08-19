@@ -55,6 +55,7 @@ use crate::pipeline::media::image_proc;
 use crate::pipeline::media::unsupported_model;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "vit")]
 use std::sync::Arc;
 use trustformers_core::tensor::Tensor;
 
@@ -332,6 +333,13 @@ fn cubic_weight(t: f32) -> f32 {
 ///
 /// Returns an error when the buffer does not match `src_w × src_h × 3` or any
 /// dimension is zero.
+///
+/// Not currently called from production code (`ClassificationState::preprocess_rgb`
+/// goes straight from bytes to a normalised `Tensor` via `preprocess_image`,
+/// never materializing a resized byte buffer) — kept `#[cfg(test)]` as a
+/// correctness check on the underlying `image_proc::resize_bilinear` this
+/// module depends on.
+#[cfg(test)]
 fn resize_rgb_bilinear(data: &[u8], src_w: u32, src_h: u32, target: u32) -> Result<Vec<u8>> {
     let image = bytes_to_rgb_image(data, src_w, src_h)?;
     let resized = image_proc::resize_bilinear(&image, target as usize, target as usize)?;
@@ -700,11 +708,17 @@ impl ImageClassificationPipeline {
     /// Run the attached backbone on real preprocessed features.
     fn run_inference(&self, features: &Tensor) -> Result<Vec<ImageClassificationResult>> {
         match &self.backend {
-            ImageClassificationBackend::Unavailable => Err(unsupported_model(
-                "image-classification",
-                &self.state.config.model_name,
-                SUPPORTED_ARCHITECTURES,
-            )),
+            ImageClassificationBackend::Unavailable => {
+                tracing::trace!(
+                    feature_shape = ?features.shape(),
+                    "no vision backbone attached; refusing rather than fabricating labels"
+                );
+                Err(unsupported_model(
+                    "image-classification",
+                    &self.state.config.model_name,
+                    SUPPORTED_ARCHITECTURES,
+                ))
+            },
             #[cfg(feature = "vit")]
             ImageClassificationBackend::Vit(model) => {
                 let logits = run_vit(model, features)?;

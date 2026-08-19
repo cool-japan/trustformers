@@ -12,6 +12,20 @@ use crate::pipeline::conversational::types::*;
 /// Configuration merger for combining configurations
 pub struct ConfigurationMerger;
 
+/// Field-level merge for the non-`Option` sub-configs: none of their fields
+/// have a distinct "unset" representation, so a field is treated as
+/// explicitly overridden when it differs from the *struct's* default for
+/// that field (`default_value`), and the base value is kept otherwise. This
+/// can't distinguish "explicitly set to the default" from "never touched",
+/// the same inherent limitation any zero-value-means-unset config merge has.
+fn pick<T: PartialEq>(base: T, override_value: T, default_value: &T) -> T {
+    if &override_value == default_value {
+        base
+    } else {
+        override_value
+    }
+}
+
 impl ConfigurationMerger {
     /// Merge two configurations, with 'override_config' taking precedence
     pub fn merge(
@@ -65,57 +79,125 @@ impl ConfigurationMerger {
         Ok(merged)
     }
 
-    /// Merge summarization configurations
+    /// Merge summarization configurations: a field takes `override_config`'s
+    /// value when it differs from [`SummarizationConfig::default`], and
+    /// `base`'s value otherwise (see [`pick`]).
     fn merge_summarization_config(
         base: &SummarizationConfig,
         override_config: &SummarizationConfig,
     ) -> Result<SummarizationConfig> {
+        let default = SummarizationConfig::default();
         Ok(SummarizationConfig {
-            enabled: override_config.enabled,
-            trigger_threshold: override_config.trigger_threshold,
-            target_length: override_config.target_length,
-            strategy: override_config.strategy.clone(),
-            preserve_recent_turns: override_config.preserve_recent_turns,
+            enabled: pick(base.enabled, override_config.enabled, &default.enabled),
+            trigger_threshold: pick(
+                base.trigger_threshold,
+                override_config.trigger_threshold,
+                &default.trigger_threshold,
+            ),
+            target_length: pick(
+                base.target_length,
+                override_config.target_length,
+                &default.target_length,
+            ),
+            strategy: pick(
+                base.strategy.clone(),
+                override_config.strategy.clone(),
+                &default.strategy,
+            ),
+            preserve_recent_turns: pick(
+                base.preserve_recent_turns,
+                override_config.preserve_recent_turns,
+                &default.preserve_recent_turns,
+            ),
         })
     }
 
-    /// Merge memory configurations
+    /// Merge memory configurations: a field takes `override_config`'s value
+    /// when it differs from [`MemoryConfig::default`], and `base`'s value
+    /// otherwise (see [`pick`]).
     fn merge_memory_config(
         base: &MemoryConfig,
         override_config: &MemoryConfig,
     ) -> Result<MemoryConfig> {
+        let default = MemoryConfig::default();
         Ok(MemoryConfig {
-            enabled: override_config.enabled,
-            compression_threshold: override_config.compression_threshold,
-            persist_important_memories: override_config.persist_important_memories,
-            decay_rate: override_config.decay_rate,
-            max_memories: override_config.max_memories,
+            enabled: pick(base.enabled, override_config.enabled, &default.enabled),
+            compression_threshold: pick(
+                base.compression_threshold,
+                override_config.compression_threshold,
+                &default.compression_threshold,
+            ),
+            persist_important_memories: pick(
+                base.persist_important_memories,
+                override_config.persist_important_memories,
+                &default.persist_important_memories,
+            ),
+            decay_rate: pick(
+                base.decay_rate,
+                override_config.decay_rate,
+                &default.decay_rate,
+            ),
+            max_memories: pick(
+                base.max_memories,
+                override_config.max_memories,
+                &default.max_memories,
+            ),
         })
     }
 
-    /// Merge repair configurations
+    /// Merge repair configurations: a field takes `override_config`'s value
+    /// when it differs from [`RepairConfig::default`], and `base`'s value
+    /// otherwise (see [`pick`]).
     fn merge_repair_config(
         base: &RepairConfig,
         override_config: &RepairConfig,
     ) -> Result<RepairConfig> {
+        let default = RepairConfig::default();
         Ok(RepairConfig {
-            enabled: override_config.enabled,
-            detect_breakdowns: override_config.detect_breakdowns,
-            max_repair_attempts: override_config.max_repair_attempts,
-            repair_strategies: override_config.repair_strategies.clone(),
+            enabled: pick(base.enabled, override_config.enabled, &default.enabled),
+            detect_breakdowns: pick(
+                base.detect_breakdowns,
+                override_config.detect_breakdowns,
+                &default.detect_breakdowns,
+            ),
+            max_repair_attempts: pick(
+                base.max_repair_attempts,
+                override_config.max_repair_attempts,
+                &default.max_repair_attempts,
+            ),
+            repair_strategies: pick(
+                base.repair_strategies.clone(),
+                override_config.repair_strategies.clone(),
+                &default.repair_strategies,
+            ),
         })
     }
 
-    /// Merge streaming configurations
+    /// Merge streaming configurations: a field takes `override_config`'s
+    /// value when it differs from [`StreamingConfig::default`], and `base`'s
+    /// value otherwise (see [`pick`]).
     fn merge_streaming_config(
         base: &StreamingConfig,
         override_config: &StreamingConfig,
     ) -> Result<StreamingConfig> {
+        let default = StreamingConfig::default();
         Ok(StreamingConfig {
-            enabled: override_config.enabled,
-            chunk_size: override_config.chunk_size,
-            buffer_size: override_config.buffer_size,
-            typing_delay_ms: override_config.typing_delay_ms,
+            enabled: pick(base.enabled, override_config.enabled, &default.enabled),
+            chunk_size: pick(
+                base.chunk_size,
+                override_config.chunk_size,
+                &default.chunk_size,
+            ),
+            buffer_size: pick(
+                base.buffer_size,
+                override_config.buffer_size,
+                &default.buffer_size,
+            ),
+            typing_delay_ms: pick(
+                base.typing_delay_ms,
+                override_config.typing_delay_ms,
+                &default.typing_delay_ms,
+            ),
         })
     }
 }
@@ -221,6 +303,45 @@ mod tests {
             assert_eq!(merged.repair_config.max_repair_attempts, 5);
             assert!(!merged.repair_config.enabled);
         }
+    }
+
+    /// Regression test: the sub-config merge functions (summarization,
+    /// memory, repair, streaming) used to ignore `base` entirely and always
+    /// return a clone of `override_config`, even for fields the override
+    /// left at their default (i.e. never touched). A `base` customization
+    /// must now survive being merged against an all-default override.
+    #[test]
+    fn test_merge_sub_configs_preserve_base_when_override_is_default() {
+        let mut base = make_base_config();
+        base.summarization_config.target_length = 999;
+        base.memory_config.max_memories = 12345;
+        base.repair_config.max_repair_attempts = 42;
+        base.streaming_config.buffer_size = 900;
+        base.streaming_config.chunk_size = 77;
+
+        // An override that never touches these sub-configs, so every field
+        // is at `T::default()`.
+        let override_cfg = make_base_config();
+
+        let merged = ConfigurationMerger::merge(&base, &override_cfg)
+            .expect("merging two default-shaped configs must succeed");
+
+        assert_eq!(
+            merged.summarization_config.target_length, 999,
+            "base's non-default summarization target_length must survive an all-default override"
+        );
+        assert_eq!(
+            merged.memory_config.max_memories, 12345,
+            "base's non-default memory max_memories must survive an all-default override"
+        );
+        assert_eq!(
+            merged.repair_config.max_repair_attempts, 42,
+            "base's non-default repair max_repair_attempts must survive an all-default override"
+        );
+        assert_eq!(
+            merged.streaming_config.chunk_size, 77,
+            "base's non-default streaming chunk_size must survive an all-default override"
+        );
     }
 
     #[test]

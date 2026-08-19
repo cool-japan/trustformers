@@ -488,6 +488,35 @@ impl FeatureExtractor for DocumentFeatureExtractor {
                     "format".to_string(),
                     serde_json::Value::String(format!("{:?}", format)),
                 );
+                // Surface caller-supplied document metadata (mirrors the
+                // Image/Audio extractors so callers can recover it from the
+                // output instead of it being silently dropped).
+                if let Some(meta) = metadata {
+                    if let Some(page_count) = meta.page_count {
+                        output_metadata.insert(
+                            "page_count".to_string(),
+                            serde_json::Value::Number(page_count.into()),
+                        );
+                    }
+                    if let Some(author) = &meta.author {
+                        output_metadata.insert(
+                            "author".to_string(),
+                            serde_json::Value::String(author.clone()),
+                        );
+                    }
+                    if let Some(title) = &meta.title {
+                        output_metadata.insert(
+                            "title".to_string(),
+                            serde_json::Value::String(title.clone()),
+                        );
+                    }
+                    if let Some(creation_date) = &meta.creation_date {
+                        output_metadata.insert(
+                            "creation_date".to_string(),
+                            serde_json::Value::String(creation_date.clone()),
+                        );
+                    }
+                }
 
                 Ok(FeatureOutput {
                     features,
@@ -826,6 +855,22 @@ mod tests {
         assert_eq!(output.shape, vec![512, 768]);
         assert!(output.attention_mask.is_some());
         assert_eq!(output.special_tokens.len(), 2);
+
+        // Caller-supplied document metadata must be surfaced on the output,
+        // not silently discarded.
+        assert_eq!(
+            output.metadata.get("author"),
+            Some(&serde_json::Value::String("Test Author".to_string()))
+        );
+        assert_eq!(
+            output.metadata.get("title"),
+            Some(&serde_json::Value::String("Test Document".to_string()))
+        );
+        assert_eq!(
+            output.metadata.get("page_count"),
+            Some(&serde_json::Value::Number(1.into()))
+        );
+        assert!(!output.metadata.contains_key("creation_date"));
     }
 
     #[test]

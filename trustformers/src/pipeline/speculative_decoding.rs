@@ -697,7 +697,6 @@ impl DraftModel for MockDraftModel {
         _temperature: f32,
     ) -> TrustformersResult<SpeculationTree> {
         let mut nodes = Vec::new();
-        let mut node_id = 0;
 
         // Create root
         nodes.push(SpeculationNode {
@@ -708,9 +707,10 @@ impl DraftModel for MockDraftModel {
             depth: 0,
             cumulative_probability: 1.0,
         });
-        node_id += 1;
 
-        // Create tree structure
+        // Create tree structure. `parent`/`children` reference other nodes
+        // by their index in `nodes`, which doubles as each node's implicit
+        // id -- there is no separate id field or counter to maintain.
         for d in 1..=depth {
             for b in 0..branches {
                 let parent_id = if d == 1 { 0 } else { (d - 2) * branches + b + 1 };
@@ -722,7 +722,6 @@ impl DraftModel for MockDraftModel {
                     depth: d,
                     cumulative_probability: 0.8_f32.powi(d as i32) / branches as f32,
                 });
-                node_id += 1;
             }
         }
 

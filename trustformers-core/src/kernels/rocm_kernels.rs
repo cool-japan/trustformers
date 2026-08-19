@@ -16,8 +16,6 @@
 //! [`TrustformersError::hardware_error`] instead of fabricating GPU
 //! hardware or silently leaving its output tensor untouched.
 
-#![allow(unused_variables)] // Operation shapes with reserved parameters for the future real backend
-
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
@@ -165,6 +163,40 @@ impl RocmKernel {
         Ok(Vec::new())
     }
 
+    /// Reject a launch configuration no real HIP kernel could run with.
+    ///
+    /// `config` used to be threaded into every operation below and never
+    /// read, so a caller could pass a zero-sized grid or block (nonsensical
+    /// for any real kernel launch) and it would go unnoticed all the way
+    /// down to the "no device" error - or, once a real backend lands here,
+    /// straight into a HIP launch call. `None` means "use the operation's
+    /// own default config" and is always accepted.
+    fn validate_kernel_config(config: Option<&KernelConfig>) -> Result<()> {
+        let Some(config) = config else {
+            return Ok(());
+        };
+        let dims_nonzero = |d: (u32, u32, u32)| d.0 > 0 && d.1 > 0 && d.2 > 0;
+        if !dims_nonzero(config.grid_size) {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "grid_size {:?} must have every dimension > 0",
+                    config.grid_size
+                ),
+                "RocmKernels::validate_kernel_config",
+            ));
+        }
+        if !dims_nonzero(config.block_size) {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "block_size {:?} must have every dimension > 0",
+                    config.block_size
+                ),
+                "RocmKernels::validate_kernel_config",
+            ));
+        }
+        Ok(())
+    }
+
     /// Return an error if no real ROCm device is available. Called first
     /// by every operation below so a caller gets a clear, structured
     /// failure instead of a fabricated result.
@@ -190,6 +222,7 @@ impl RocmKernel {
         c: &mut Tensor,
         config: Option<KernelConfig>,
     ) -> Result<()> {
+        Self::validate_kernel_config(config.as_ref())?;
         let a_shape = a.shape();
         let b_shape = b.shape();
         let c_shape = c.shape();
@@ -228,6 +261,7 @@ impl RocmKernel {
         output: &mut Tensor,
         config: Option<KernelConfig>,
     ) -> Result<()> {
+        Self::validate_kernel_config(config.as_ref())?;
         let q_shape = query.shape();
         let k_shape = key.shape();
         let v_shape = value.shape();
@@ -246,6 +280,16 @@ impl RocmKernel {
             ));
         }
 
+        if output.shape() != q_shape {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "output shape {:?} must match query shape {q_shape:?}",
+                    output.shape()
+                ),
+                "RocmKernels::flash_attention",
+            ));
+        }
+
         self.ensure_device_available()
     }
 
@@ -260,6 +304,42 @@ impl RocmKernel {
         epsilon: f32,
         config: Option<KernelConfig>,
     ) -> Result<()> {
+        Self::validate_kernel_config(config.as_ref())?;
+        if epsilon <= 0.0 || !epsilon.is_finite() {
+            return Err(TrustformersError::tensor_op_error(
+                &format!("epsilon {epsilon} must be a finite positive number"),
+                "RocmKernels::layer_norm",
+            ));
+        }
+        let input_shape = input.shape();
+        if output.shape() != input_shape {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "output shape {:?} must match input shape {input_shape:?}",
+                    output.shape()
+                ),
+                "RocmKernels::layer_norm",
+            ));
+        }
+        let Some(&feature_dim) = input_shape.last() else {
+            return Err(TrustformersError::tensor_op_error(
+                "input must have at least one dimension",
+                "RocmKernels::layer_norm",
+            ));
+        };
+        for (name, tensor) in [("gamma", gamma), ("beta", beta)] {
+            if tensor.shape() != [feature_dim] {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!(
+                        "{name} shape {:?} must be a 1-D tensor of length {feature_dim} \
+                         (input's last dimension)",
+                        tensor.shape()
+                    ),
+                    "RocmKernels::layer_norm",
+                ));
+            }
+        }
+
         self.ensure_device_available()
     }
 
@@ -271,6 +351,18 @@ impl RocmKernel {
         output: &mut Tensor,
         config: Option<KernelConfig>,
     ) -> Result<()> {
+        Self::validate_kernel_config(config.as_ref())?;
+        if output.shape() != input.shape() {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "output shape {:?} must match input shape {:?}",
+                    output.shape(),
+                    input.shape()
+                ),
+                "RocmKernels::fused_gelu",
+            ));
+        }
+
         self.ensure_device_available()
     }
 
@@ -283,6 +375,36 @@ impl RocmKernel {
         dim: usize,
         config: Option<KernelConfig>,
     ) -> Result<()> {
+        Self::validate_kernel_config(config.as_ref())?;
+        let input_shape = input.shape();
+        if dim >= input_shape.len() {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "reduction dim {dim} is out of bounds for a {}-D input",
+                    input_shape.len()
+                ),
+                "RocmKernels::reduce_sum",
+            ));
+        }
+        // `Tensor::sum_axes` (the real reduction this operation models)
+        // removes the reduced axis rather than keeping it as size 1.
+        let expected_shape: Vec<usize> = input_shape
+            .iter()
+            .enumerate()
+            .filter(|(axis, _)| *axis != dim)
+            .map(|(_, &size)| size)
+            .collect();
+        if output.shape() != expected_shape {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "output shape {:?} must be {expected_shape:?} (input {input_shape:?} with \
+                     dim {dim} reduced away)",
+                    output.shape()
+                ),
+                "RocmKernels::reduce_sum",
+            ));
+        }
+
         self.ensure_device_available()
     }
 
@@ -400,5 +522,118 @@ mod tests {
         assert_eq!(config.grid_size, (1, 1, 1));
         assert_eq!(config.block_size, (256, 1, 1));
         assert_eq!(config.shared_memory_size, 0);
+    }
+
+    /// Regression test: `layer_norm` used to be `self.ensure_device_available()`
+    /// alone, with `input`/`gamma`/`beta`/`output`/`epsilon` computed by the
+    /// caller and never read. It must now catch a `gamma` shape mismatch with
+    /// its own error, not just fall through to the generic "no device" one.
+    #[test]
+    fn layer_norm_rejects_a_gamma_shape_mismatch() {
+        let mut kernel = RocmKernel::new().expect("operation failed in test");
+        let input = Tensor::ones(&[2, 8]).expect("tensor creation failed");
+        let wrong_gamma = Tensor::ones(&[4]).expect("tensor creation failed"); // should be [8]
+        let beta = Tensor::zeros(&[8]).expect("tensor creation failed");
+        let mut output = Tensor::zeros(&[2, 8]).expect("tensor creation failed");
+
+        let err = kernel
+            .layer_norm(&input, &wrong_gamma, &beta, &mut output, 1e-5, None)
+            .expect_err("mismatched gamma must be rejected");
+        assert!(
+            err.to_string().contains("gamma"),
+            "error should name gamma as the cause, got: {err}"
+        );
+    }
+
+    #[test]
+    fn layer_norm_rejects_a_non_finite_epsilon() {
+        let mut kernel = RocmKernel::new().expect("operation failed in test");
+        let input = Tensor::ones(&[2, 8]).expect("tensor creation failed");
+        let gamma = Tensor::ones(&[8]).expect("tensor creation failed");
+        let beta = Tensor::zeros(&[8]).expect("tensor creation failed");
+        let mut output = Tensor::zeros(&[2, 8]).expect("tensor creation failed");
+
+        let err = kernel
+            .layer_norm(&input, &gamma, &beta, &mut output, f32::NAN, None)
+            .expect_err("a NaN epsilon must be rejected");
+        assert!(
+            err.to_string().contains("epsilon"),
+            "error should name epsilon as the cause, got: {err}"
+        );
+    }
+
+    /// Regression test: `fused_gelu`'s `input`/`output` used to go unread.
+    #[test]
+    fn fused_gelu_rejects_an_output_shape_mismatch() {
+        let mut kernel = RocmKernel::new().expect("operation failed in test");
+        let input = Tensor::ones(&[2, 8]).expect("tensor creation failed");
+        let mut wrong_output = Tensor::zeros(&[2, 4]).expect("tensor creation failed");
+
+        let err = kernel
+            .fused_gelu(&input, &mut wrong_output, None)
+            .expect_err("a mismatched output shape must be rejected");
+        assert!(
+            err.to_string().contains("output shape"),
+            "error should name the output shape as the cause, got: {err}"
+        );
+    }
+
+    /// Regression test: `reduce_sum`'s `dim`/`output` used to go unread, so
+    /// an out-of-bounds `dim` was never caught here.
+    #[test]
+    fn reduce_sum_rejects_an_out_of_bounds_dim() {
+        let mut kernel = RocmKernel::new().expect("operation failed in test");
+        let input = Tensor::ones(&[2, 8]).expect("tensor creation failed");
+        let mut output = Tensor::zeros(&[2]).expect("tensor creation failed");
+
+        let err = kernel
+            .reduce_sum(&input, &mut output, 5, None)
+            .expect_err("an out-of-bounds dim must be rejected");
+        assert!(
+            err.to_string().contains("out of bounds"),
+            "error should name the bounds violation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn reduce_sum_rejects_a_wrong_output_shape() {
+        let mut kernel = RocmKernel::new().expect("operation failed in test");
+        let input = Tensor::ones(&[2, 8]).expect("tensor creation failed");
+        // Reducing dim 1 of a [2, 8] input must produce a [2] output, not [8].
+        let mut wrong_output = Tensor::zeros(&[8]).expect("tensor creation failed");
+
+        let err = kernel
+            .reduce_sum(&input, &mut wrong_output, 1, None)
+            .expect_err("a wrong output shape must be rejected");
+        assert!(
+            err.to_string().contains("output shape"),
+            "error should name the output shape as the cause, got: {err}"
+        );
+    }
+
+    /// Regression test: `config` used to be threaded through every operation
+    /// above and never read, so a zero-sized grid/block went unnoticed.
+    #[test]
+    fn validate_kernel_config_rejects_a_zero_sized_grid() {
+        let zero_grid = KernelConfig {
+            grid_size: (0, 1, 1),
+            ..KernelConfig::default()
+        };
+        assert!(RocmKernel::validate_kernel_config(Some(&zero_grid)).is_err());
+
+        let zero_block = KernelConfig {
+            block_size: (1, 0, 1),
+            ..KernelConfig::default()
+        };
+        assert!(RocmKernel::validate_kernel_config(Some(&zero_block)).is_err());
+
+        assert!(
+            RocmKernel::validate_kernel_config(Some(&KernelConfig::default())).is_ok(),
+            "the default config must remain valid"
+        );
+        assert!(
+            RocmKernel::validate_kernel_config(None).is_ok(),
+            "no config at all must remain valid"
+        );
     }
 }

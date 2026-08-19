@@ -6,8 +6,6 @@
 
 use super::*;
 
-use super::*;
-
 #[test]
 fn config_defaults_are_fp32_shared() {
     let config = MetalBackendConfig::default();

@@ -31,44 +31,16 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-/// Convert IEEE 754 half-precision (F16) to single-precision (F32)
+/// Convert IEEE 754 half-precision (F16) to single-precision (F32).
+///
+/// Delegates to `half::f16`, the same shared dtype helper used by
+/// [`crate::quantization::ggml_advanced`] and
+/// [`crate::quantization::gguf_k_quants`], instead of a third hand-rolled
+/// bit-twiddling implementation. The previous version here duplicated (and
+/// could silently drift from) the other two.
+#[inline]
 fn f16_to_f32(bits: u16) -> f32 {
-    let sign = (bits >> 15) & 0x1;
-    let exponent = (bits >> 10) & 0x1f;
-    let fraction = bits & 0x3ff;
-
-    // Handle special cases
-    if exponent == 0 {
-        if fraction == 0 {
-            // Zero
-            return if sign == 1 { -0.0 } else { 0.0 };
-        } else {
-            // Subnormal number
-            let f = (fraction as f32) / 1024.0;
-            let result = f * 2.0f32.powi(-14);
-            return if sign == 1 { -result } else { result };
-        }
-    } else if exponent == 31 {
-        // Infinity or NaN
-        return if fraction == 0 {
-            if sign == 1 {
-                f32::NEG_INFINITY
-            } else {
-                f32::INFINITY
-            }
-        } else {
-            f32::NAN
-        };
-    }
-
-    // Normal number
-    let f = 1.0 + (fraction as f32) / 1024.0;
-    let result = f * 2.0f32.powi((exponent as i32) - 15);
-    if sign == 1 {
-        -result
-    } else {
-        result
-    }
+    half::f16::from_bits(bits).to_f32()
 }
 
 pub struct SafeTensorsReader {
@@ -701,5 +673,43 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&unknown);
+    }
+
+    /// `f16_to_f32` now delegates to `half::f16` instead of a third hand-rolled
+    /// bit-twiddler (the other two live in `quantization/ggml_advanced.rs` and
+    /// `quantization/gguf_k_quants.rs`). The old version already got every
+    /// *finite* value right, but for NaN it always returned the canonical
+    /// `f32::NAN` bit pattern, discarding the half-precision sign and payload.
+    /// `half::f16` performs a real bit-correct widening (payload shifted into
+    /// the wider mantissa, sign preserved), which the hand-rolled version
+    /// could never reproduce.
+    #[test]
+    fn f16_to_f32_matches_the_shared_half_precision_decoder() {
+        // Representative finite values.
+        assert_eq!(f16_to_f32(0x0000), 0.0);
+        assert!(
+            f16_to_f32(0x8000).is_sign_negative(),
+            "negative zero must keep its sign"
+        );
+        assert_eq!(f16_to_f32(0x3C00), 1.0);
+        assert_eq!(f16_to_f32(0xC000), -2.0);
+        // Smallest positive subnormal half value: 2^-24.
+        assert_eq!(f16_to_f32(0x0001), 2.0f32.powi(-24));
+        assert_eq!(f16_to_f32(0x7C00), f32::INFINITY);
+        assert_eq!(f16_to_f32(0xFC00), f32::NEG_INFINITY);
+
+        // The bit the old hand-rolled decoder got wrong: a negative,
+        // payload-carrying NaN (sign=1, exponent=0x1F, mantissa=0x123) must
+        // keep its sign after widening to f32. The previous implementation
+        // ignored the input entirely for any NaN and always produced the
+        // canonical *positive* `f32::NAN`, so this assertion would have
+        // failed against the old code.
+        let negative_nan_bits: u16 = 0xFD23;
+        let widened = f16_to_f32(negative_nan_bits);
+        assert!(widened.is_nan(), "must still decode to a NaN");
+        assert!(
+            widened.is_sign_negative(),
+            "half::f16 preserves the sign bit through NaN widening"
+        );
     }
 }

@@ -15,7 +15,7 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use crate::error::{Result, TrustformersError};
-use crate::pipeline::{Pipeline, PipelineOptions, PipelineOutput};
+use crate::pipeline::Pipeline;
 
 use super::functions::{GatingNetwork, Router};
 use super::types::{
@@ -132,19 +132,12 @@ impl Pipeline for EnsemblePipeline {
         let start_time = std::time::Instant::now();
         let input_characteristics = self.analyze_input_characteristics(&input);
         let predictions = self.predict_individual_models(&input)?;
+        self.record_calibration_samples(&predictions);
         let weights = match &self.config.strategy {
-            EnsembleStrategy::DynamicWeighting => {
-                let confidence_weights: Vec<f32> = predictions
-                    .iter()
-                    .map(|(_, output, _)| self.extract_confidence(output))
-                    .collect();
-                let sum: f32 = confidence_weights.iter().sum();
-                if sum > 0.0 {
-                    confidence_weights.iter().map(|w| w / sum).collect()
-                } else {
-                    vec![1.0 / predictions.len() as f32; predictions.len()]
-                }
-            },
+            // Combines this call's live confidence with each model's tracked
+            // accuracy/performance history (see `calculate_dynamic_weights`),
+            // rather than confidence alone.
+            EnsembleStrategy::DynamicWeighting => self.calculate_dynamic_weights(&predictions),
             EnsembleStrategy::WeightedAverage(custom_weights) => {
                 if custom_weights.len() == predictions.len() {
                     custom_weights.clone()

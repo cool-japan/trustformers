@@ -494,14 +494,23 @@ impl TrustformersError {
         message: &str,
         pipeline_type: &str,
     ) -> (String, Vec<RecoveryAction>) {
-        let suggestion = match pipeline_type {
-            "text-generation" => "Try reducing max_length or batch_size parameters".to_string(),
-            "text-classification" => {
-                "Ensure input text is properly formatted and not empty".to_string()
-            },
-            "image-to-text" => "Verify image format is supported (JPEG, PNG, WebP)".to_string(),
-            "question-answering" => "Check that both question and context are provided".to_string(),
-            _ => "Review pipeline configuration and input parameters".to_string(),
+        let suggestion = if message.contains("memory") || message.contains("OOM") {
+            "Pipeline ran out of memory. Try reducing batch_size or using a smaller model."
+                .to_string()
+        } else if message.contains("timeout") {
+            "Pipeline timed out. Try reducing input size or increasing the timeout.".to_string()
+        } else {
+            match pipeline_type {
+                "text-generation" => "Try reducing max_length or batch_size parameters".to_string(),
+                "text-classification" => {
+                    "Ensure input text is properly formatted and not empty".to_string()
+                },
+                "image-to-text" => "Verify image format is supported (JPEG, PNG, WebP)".to_string(),
+                "question-answering" => {
+                    "Check that both question and context are provided".to_string()
+                },
+                _ => "Review pipeline configuration and input parameters".to_string(),
+            }
         };
 
         let recovery_actions = vec![
@@ -613,20 +622,27 @@ impl TrustformersError {
         message: &str,
         resource_type: &str,
     ) -> (String, Vec<RecoveryAction>) {
-        let suggestion = match resource_type {
-            "memory" => {
-                "Insufficient memory. Try reducing batch size or using a smaller model.".to_string()
-            },
-            "gpu_memory" => {
-                "GPU memory exhausted. Consider using CPU or reducing model precision.".to_string()
-            },
-            "disk" => {
-                "Insufficient disk space for model cache. Clear cache or use streaming.".to_string()
-            },
-            _ => format!(
-                "Resource '{}' exhausted. Review usage and optimize.",
-                resource_type
-            ),
+        let suggestion = if message.contains("critical") || message.contains("exhausted") {
+            format!(
+                "Critical resource shortage ({resource_type}): {message}. Immediate action required."
+            )
+        } else {
+            match resource_type {
+                "memory" => {
+                    "Insufficient memory. Try reducing batch size or using a smaller model."
+                        .to_string()
+                },
+                "gpu_memory" => {
+                    "GPU memory exhausted. Consider using CPU or reducing model precision."
+                        .to_string()
+                },
+                "disk" => "Insufficient disk space for model cache. Clear cache or use streaming."
+                    .to_string(),
+                _ => format!(
+                    "Resource '{}' exhausted. Review usage and optimize.",
+                    resource_type
+                ),
+            }
         };
 
         let recovery_actions = match resource_type {
@@ -663,6 +679,8 @@ impl TrustformersError {
                 "Parameter '{}' is invalid. Please check the documentation for valid values.",
                 param
             )
+        } else if !message.trim().is_empty() {
+            format!("Input validation failed: {message}. Please review the provided parameters.")
         } else {
             "Input validation failed. Please review the provided parameters.".to_string()
         }
@@ -684,14 +702,38 @@ impl TrustformersError {
     }
 
     fn convert_core_recovery_actions(core_err: &CoreTrustformersError) -> Vec<RecoveryAction> {
-        // Convert core error recovery actions to high-level recovery actions
-        vec![
-            RecoveryAction::FallbackToCpu,
-            RecoveryAction::ReduceMemoryUsage {
-                reduction_factor: 0.7,
+        // Convert the core error's actual `kind` into targeted high-level
+        // recovery actions, rather than always returning the same fixed set
+        // regardless of what actually went wrong.
+        use trustformers_core::errors::ErrorKind;
+        match &core_err.kind {
+            ErrorKind::OutOfMemory { .. } | ErrorKind::MemoryError { .. } => vec![
+                RecoveryAction::ReduceBatchSize { factor: 0.5 },
+                RecoveryAction::ReduceMemoryUsage {
+                    reduction_factor: 0.7,
+                },
+                RecoveryAction::FallbackToCpu,
+            ],
+            ErrorKind::DeviceError { .. } | ErrorKind::HardwareError { .. } => {
+                vec![RecoveryAction::FallbackToCpu]
             },
-            RecoveryAction::ClearCache,
-        ]
+            ErrorKind::ModelNotFound { .. } | ErrorKind::WeightLoadingError { .. } => {
+                vec![RecoveryAction::RedownloadModel, RecoveryAction::ClearCache]
+            },
+            ErrorKind::QuantizationError { .. } => vec![RecoveryAction::ReducePrecision {
+                target_precision: "fp32".to_string(),
+            }],
+            ErrorKind::InvalidConfiguration { .. } | ErrorKind::TokenizationError { .. } => {
+                vec![]
+            },
+            _ => vec![
+                RecoveryAction::FallbackToCpu,
+                RecoveryAction::ReduceMemoryUsage {
+                    reduction_factor: 0.7,
+                },
+                RecoveryAction::ClearCache,
+            ],
+        }
     }
 }
 
@@ -1459,6 +1501,65 @@ mod tests {
         assert_eq!(
             TrustformersError::suggest_alternative_model("bert-large-uncased"),
             "bert-base-uncased"
+        );
+    }
+
+    /// Regression test for `convert_core_recovery_actions`: it used to
+    /// return the same fixed `[FallbackToCpu, ReduceMemoryUsage, ClearCache]`
+    /// set for every `TrustformersError::Core(_)`, regardless of what the
+    /// wrapped core error actually was. Different core error kinds must now
+    /// produce different, targeted recovery actions.
+    #[test]
+    fn test_core_error_recovery_actions_reflect_error_kind() {
+        use trustformers_core::errors::{ErrorKind, TrustformersError as CoreError};
+
+        let oom = TrustformersError::Core(CoreError::new(ErrorKind::OutOfMemory {
+            required: 100,
+            available: 10,
+        }));
+        let oom_actions = oom.get_recovery_actions();
+        assert!(oom_actions
+            .iter()
+            .any(|a| matches!(a, RecoveryAction::ReduceMemoryUsage { .. })));
+        assert!(oom_actions.iter().any(|a| matches!(a, RecoveryAction::FallbackToCpu)));
+
+        let model_not_found = TrustformersError::Core(CoreError::new(ErrorKind::ModelNotFound {
+            name: "gpt2".to_string(),
+        }));
+        let model_actions = model_not_found.get_recovery_actions();
+        assert!(model_actions.iter().any(|a| matches!(a, RecoveryAction::RedownloadModel)));
+        assert!(
+            !model_actions
+                .iter()
+                .any(|a| matches!(a, RecoveryAction::ReduceMemoryUsage { .. })),
+            "a model-not-found error should not suggest reducing memory usage: {model_actions:?}"
+        );
+
+        let invalid_config =
+            TrustformersError::Core(CoreError::new(ErrorKind::InvalidConfiguration {
+                field: "batch_size".to_string(),
+                reason: "must be positive".to_string(),
+            }));
+        assert!(
+            invalid_config.get_recovery_actions().is_empty(),
+            "an invalid-configuration error has no automatic fix"
+        );
+    }
+
+    /// Regression test: `generate_pipeline_suggestions` used to ignore the
+    /// error message entirely and pick a suggestion from `pipeline_type`
+    /// alone. A memory-related message must now be recognized regardless of
+    /// pipeline type.
+    #[test]
+    fn test_pipeline_error_suggestion_reflects_message() {
+        let err = TrustformersError::pipeline("ran out of memory during forward pass", "custom");
+        let TrustformersError::Pipeline { suggestion, .. } = err else {
+            panic!("expected a Pipeline error");
+        };
+        let suggestion = suggestion.expect("pipeline errors always carry a suggestion");
+        assert!(
+            suggestion.to_lowercase().contains("memory"),
+            "suggestion should mention memory: {suggestion}"
         );
     }
 }

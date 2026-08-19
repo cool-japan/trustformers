@@ -1,5 +1,3 @@
-#![allow(unused_variables)] // Placeholder implementation with reserved parameters
-
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use std::collections::HashMap;
@@ -522,6 +520,17 @@ impl VulkanKernel {
             ));
         }
 
+        let expected_result_shape = [a_shape[0], b_shape[1]];
+        if result.shape() != expected_result_shape {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "result shape {:?} must be {expected_result_shape:?}",
+                    result.shape()
+                ),
+                "VulkanKernels::gemm",
+            ));
+        }
+
         self.instance.as_ref().ok_or_else(|| {
             TrustformersError::tensor_op_error("Vulkan not initialized", "VulkanKernels::gemm")
         })?;
@@ -554,6 +563,17 @@ impl VulkanKernel {
                 "VulkanKernels::flash_attention",
             ));
         }
+        for (name, tensor) in [("key", key), ("value", value), ("output", &*output)] {
+            if tensor.shape() != q_shape {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!(
+                        "{name} shape {:?} must match query shape {q_shape:?}",
+                        tensor.shape()
+                    ),
+                    "VulkanKernels::flash_attention",
+                ));
+            }
+        }
 
         Err(TrustformersError::not_implemented(
             "VulkanKernel::flash_attention: no real compute pipeline is wired up in this module"
@@ -571,8 +591,52 @@ impl VulkanKernel {
         beta: Option<&Tensor>,
         output: &mut Tensor,
         epsilon: f32,
-        precision: VulkanPrecision,
+        // Reserved for the real backend's shader-variant selection. There is
+        // no invariant to check without conflating precision (a compute
+        // mode) with dtype (the tensor's storage format) - INT8 precision
+        // computed from an F32-stored tensor is quantization, a legitimate,
+        // common call, not a mismatch.
+        _precision: VulkanPrecision,
     ) -> Result<()> {
+        if epsilon <= 0.0 || !epsilon.is_finite() {
+            return Err(TrustformersError::tensor_op_error(
+                &format!("epsilon {epsilon} must be a finite positive number"),
+                "VulkanKernels::layer_norm",
+            ));
+        }
+        let input_shape = input.shape();
+        if output.shape() != input_shape {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "output shape {:?} must match input shape {input_shape:?}",
+                    output.shape()
+                ),
+                "VulkanKernels::layer_norm",
+            ));
+        }
+        let Some(&feature_dim) = input_shape.last() else {
+            return Err(TrustformersError::tensor_op_error(
+                "input must have at least one dimension",
+                "VulkanKernels::layer_norm",
+            ));
+        };
+        let mut affine_params = vec![("gamma", gamma)];
+        if let Some(beta) = beta {
+            affine_params.push(("beta", beta));
+        }
+        for (name, tensor) in affine_params {
+            if tensor.shape() != [feature_dim] {
+                return Err(TrustformersError::tensor_op_error(
+                    &format!(
+                        "{name} shape {:?} must be a 1-D tensor of length {feature_dim} \
+                         (input's last dimension)",
+                        tensor.shape()
+                    ),
+                    "VulkanKernels::layer_norm",
+                ));
+            }
+        }
+
         Err(TrustformersError::not_implemented(
             "VulkanKernel::layer_norm: no real compute pipeline is wired up in this module"
                 .to_string(),
@@ -589,6 +653,17 @@ impl VulkanKernel {
         config: Option<VulkanKernelConfig>,
     ) -> Result<()> {
         let _ = config.unwrap_or_default();
+
+        if output.shape() != input.shape() {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "output shape {:?} must match input shape {:?}",
+                    output.shape(),
+                    input.shape()
+                ),
+                "VulkanKernels::gelu",
+            ));
+        }
 
         Err(TrustformersError::not_implemented(
             "VulkanKernel::gelu: no real compute pipeline is wired up in this module".to_string(),
@@ -611,6 +686,22 @@ impl VulkanKernel {
         if dim >= input_shape.len() {
             return Err(TrustformersError::tensor_op_error(
                 "Reduction dimension out of bounds",
+                "VulkanKernels::reduce",
+            ));
+        }
+        let expected_shape: Vec<usize> = input_shape
+            .iter()
+            .enumerate()
+            .filter(|(axis, _)| *axis != dim)
+            .map(|(_, &size)| size)
+            .collect();
+        if output.shape() != expected_shape {
+            return Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "output shape {:?} must be {expected_shape:?} (input {input_shape:?} with \
+                     dim {dim} reduced away)",
+                    output.shape()
+                ),
                 "VulkanKernels::reduce",
             ));
         }
@@ -728,10 +819,17 @@ mod tests {
         let stats = kernel.get_memory_stats(0);
         assert!(stats.is_ok());
 
+        // No pool is ever registered for a device without a real backing
+        // Vulkan device, so the honest answer is all-zero stats, not a
+        // fabricated nonzero pool. `total`/`peak`/`free` are `u64`, so the
+        // commented-out `>= 0` checks this replaces were always vacuously
+        // true and asserted nothing.
         let (total, peak, free) = stats.expect("operation failed in test");
-        // assert!(total >= 0);
-        // assert!(peak >= 0);
-        // assert!(free >= 0);
+        assert_eq!(
+            (total, peak, free),
+            (0, 0, 0),
+            "no memory pool was ever registered for device 0 on this host"
+        );
     }
 
     #[test]
@@ -762,5 +860,139 @@ mod tests {
         assert!(features.shader_float16);
         assert!(features.subgroup_vote);
         assert!(!features.storage_buffer_8bit_access);
+    }
+
+    /// Regression test: `matmul`'s new `result` shape check used to be an
+    /// unread `result` parameter under the file's blanket
+    /// `#![allow(unused_variables)]`. A wrong-shaped `result` must be
+    /// rejected with a message naming the shape mismatch, distinct from
+    /// both the pre-existing dimension checks and the generic "not
+    /// initialized"/"not implemented" errors that follow it.
+    #[test]
+    fn matmul_rejects_a_wrong_result_shape() {
+        let mut kernel = VulkanKernel::new().expect("operation failed in test");
+        let a = Tensor::ones(&[2, 3]).expect("tensor creation failed");
+        let b = Tensor::ones(&[3, 4]).expect("tensor creation failed");
+        // Correct product shape is [2, 4]; this is deliberately wrong.
+        let mut wrong_result = Tensor::zeros(&[2, 5]).expect("tensor creation failed");
+
+        let err = kernel
+            .matmul(&a, &b, &mut wrong_result, None)
+            .expect_err("a mismatched result shape must be rejected");
+        assert!(
+            err.to_string().contains("result shape"),
+            "error should name the result shape as the cause, got: {err}"
+        );
+    }
+
+    /// Regression test: `flash_attention`'s `key`/`value`/`output` shape
+    /// check used to be dead code - the parameters were threaded in and
+    /// never read before falling straight through to the unconditional
+    /// "not implemented" error. A shape mismatch must now be rejected with
+    /// its own message rather than being silently accepted only to hit the
+    /// same generic error a well-formed call would also hit.
+    #[test]
+    fn flash_attention_distinguishes_shape_errors_from_not_implemented() {
+        let mut kernel = VulkanKernel::new().expect("operation failed in test");
+        let query = Tensor::ones(&[1, 2, 4]).expect("tensor creation failed");
+        let mismatched_key = Tensor::ones(&[1, 3, 4]).expect("tensor creation failed");
+        let value = Tensor::ones(&[1, 2, 4]).expect("tensor creation failed");
+        let mut output = Tensor::zeros(&[1, 2, 4]).expect("tensor creation failed");
+
+        let shape_err = kernel
+            .flash_attention(&query, &mismatched_key, &value, &mut output, None)
+            .expect_err("a mismatched key shape must be rejected");
+        assert!(
+            shape_err.to_string().contains("key shape"),
+            "error should name key's shape as the cause, got: {shape_err}"
+        );
+
+        // A well-formed call has nothing left to reject except the honestly
+        // unimplemented compute pipeline.
+        let matching_key = Tensor::ones(&[1, 2, 4]).expect("tensor creation failed");
+        let not_implemented_err = kernel
+            .flash_attention(&query, &matching_key, &value, &mut output, None)
+            .expect_err("no compute pipeline is wired up yet");
+        assert!(
+            not_implemented_err.to_string().contains("wired up"),
+            "a shape-correct call should fail on the unimplemented pipeline, not a shape check, \
+             got: {not_implemented_err}"
+        );
+    }
+
+    /// Regression test: `layer_norm`'s `epsilon`/`gamma`/`output` checks
+    /// used to be dead code for the same reason as `flash_attention`
+    /// above.
+    #[test]
+    fn layer_norm_rejects_bad_epsilon_and_gamma_shape() {
+        let mut kernel = VulkanKernel::new().expect("operation failed in test");
+        let input = Tensor::ones(&[2, 8]).expect("tensor creation failed");
+        let gamma = Tensor::ones(&[8]).expect("tensor creation failed");
+        let mut output = Tensor::zeros(&[2, 8]).expect("tensor creation failed");
+
+        let eps_err = kernel
+            .layer_norm(
+                &input,
+                &gamma,
+                None,
+                &mut output,
+                0.0,
+                VulkanPrecision::FP32,
+            )
+            .expect_err("a zero epsilon must be rejected");
+        assert!(
+            eps_err.to_string().contains("epsilon"),
+            "error should name epsilon as the cause, got: {eps_err}"
+        );
+
+        let wrong_gamma = Tensor::ones(&[4]).expect("tensor creation failed"); // should be [8]
+        let gamma_err = kernel
+            .layer_norm(
+                &input,
+                &wrong_gamma,
+                None,
+                &mut output,
+                1e-5,
+                VulkanPrecision::FP32,
+            )
+            .expect_err("a mismatched gamma shape must be rejected");
+        assert!(
+            gamma_err.to_string().contains("gamma"),
+            "error should name gamma as the cause, got: {gamma_err}"
+        );
+    }
+
+    /// Regression test: `gelu`'s `output` shape check used to be dead code
+    /// for the same reason as `flash_attention` above.
+    #[test]
+    fn gelu_rejects_an_output_shape_mismatch() {
+        let mut kernel = VulkanKernel::new().expect("operation failed in test");
+        let input = Tensor::ones(&[2, 8]).expect("tensor creation failed");
+        let mut wrong_output = Tensor::zeros(&[2, 4]).expect("tensor creation failed");
+
+        let err = kernel
+            .gelu(&input, &mut wrong_output, None)
+            .expect_err("a mismatched output shape must be rejected");
+        assert!(
+            err.to_string().contains("output shape"),
+            "error should name the output shape as the cause, got: {err}"
+        );
+    }
+
+    /// Regression test: `reduce_sum`'s `output` shape check used to be dead
+    /// code for the same reason as `flash_attention` above.
+    #[test]
+    fn reduce_sum_rejects_an_output_shape_mismatch() {
+        let mut kernel = VulkanKernel::new().expect("operation failed in test");
+        let input = Tensor::ones(&[2, 8]).expect("tensor creation failed");
+        let mut wrong_output = Tensor::zeros(&[8]).expect("tensor creation failed"); // should be [2]
+
+        let err = kernel
+            .reduce_sum(&input, &mut wrong_output, 1, None)
+            .expect_err("a mismatched output shape must be rejected");
+        assert!(
+            err.to_string().contains("output shape"),
+            "error should name the output shape as the cause, got: {err}"
+        );
     }
 }

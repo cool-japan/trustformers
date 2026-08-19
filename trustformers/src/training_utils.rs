@@ -7,7 +7,9 @@
 use crate::auto::metrics::AutoMetric;
 use crate::error::Result;
 use trustformers_core::traits::Model;
-use trustformers_training::{Trainer, TrainingArguments};
+use trustformers_training::Trainer;
+#[cfg(test)]
+use trustformers_training::TrainingArguments;
 
 /// Extension trait that adds auto-metric wiring to the training-crate Trainer.
 ///

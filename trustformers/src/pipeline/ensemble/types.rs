@@ -2,9 +2,9 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use crate::pipeline::{Pipeline, PipelineOptions, PipelineOutput};
+use crate::pipeline::PipelineOutput;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelSelectionInfo {

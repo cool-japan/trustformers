@@ -145,19 +145,24 @@ where
 
     pub fn new_from_pipeline<P>(pipeline: P, config: StreamConfig) -> StreamProcessor<I, O, String>
     where
-        P: Clone + Send + Sync + 'static,
+        P: super::Pipeline<Input = I, Output = O> + Clone + Send + Sync + 'static,
         I: Send + Sync + 'static,
         O: Send + Sync + 'static,
     {
-        // Create a mock streaming pipeline wrapper
-        struct MockStreamingPipeline<P, I, O> {
+        // Bridges a plain synchronous `Pipeline` into the `StreamingPipeline`
+        // interface by driving its real `__call__` per item. It has no
+        // incremental/intermediate output of its own (a synchronous
+        // `Pipeline` doesn't produce any), so `process_with_intermediate`
+        // honestly reports an empty intermediate list rather than fabricating
+        // one.
+        struct SyncPipelineStreamAdapter<P, I, O> {
             inner: P,
             _phantom: std::marker::PhantomData<(I, O)>,
         }
 
-        impl<P, I, O> StreamingPipeline for MockStreamingPipeline<P, I, O>
+        impl<P, I, O> StreamingPipeline for SyncPipelineStreamAdapter<P, I, O>
         where
-            P: Clone + Send + Sync + 'static,
+            P: super::Pipeline<Input = I, Output = O> + Clone + Send + Sync + 'static,
             I: Send + Sync + 'static,
             O: Send + Sync + 'static,
         {
@@ -167,24 +172,16 @@ where
 
             fn process_item(
                 &self,
-                _input: Self::Input,
+                input: Self::Input,
             ) -> Pin<Box<dyn std::future::Future<Output = Result<Self::Output>> + Send + '_>>
             {
-                Box::pin(async move {
-                    // This is a mock implementation
-                    Err(crate::error::TrustformersError::InvalidInput {
-                        message: "Mock streaming pipeline process_item not implemented".to_string(),
-                        parameter: None,
-                        expected: None,
-                        received: None,
-                        suggestion: None,
-                    })
-                })
+                let result = self.inner.__call__(input);
+                Box::pin(async move { result })
             }
 
             fn process_with_intermediate(
                 &self,
-                _input: Self::Input,
+                input: Self::Input,
             ) -> Pin<
                 Box<
                     dyn std::future::Future<
@@ -193,26 +190,17 @@ where
                         + '_,
                 >,
             > {
-                Box::pin(async move {
-                    Err(crate::error::TrustformersError::InvalidInput {
-                        message:
-                            "Mock streaming pipeline process_with_intermediate not implemented"
-                                .to_string(),
-                        parameter: None,
-                        expected: None,
-                        received: None,
-                        suggestion: None,
-                    })
-                })
+                let result = self.inner.__call__(input).map(|output| (output, Vec::new()));
+                Box::pin(async move { result })
             }
         }
 
-        let mock_pipeline = MockStreamingPipeline {
+        let adapter = SyncPipelineStreamAdapter {
             inner: pipeline,
             _phantom: std::marker::PhantomData,
         };
 
-        StreamProcessor::new(mock_pipeline, config)
+        StreamProcessor::new(adapter, config)
     }
 
     /// Process a stream of inputs with backpressure handling
@@ -245,11 +233,19 @@ where
         let flush_interval = Duration::from_millis(self.config.flush_interval_ms);
 
         while let Some(input) = input_stream.next().await {
-            // Check backpressure
-            if self.backpressure_controller.should_throttle() {
+            // Wait out any backpressure window on *this* item rather than
+            // dropping it: re-sample the real channel-fullness signal each
+            // pass so the wait ends as soon as the consumer catches up.
+            loop {
+                let channel_load =
+                    channel_load_fraction(output_tx.capacity(), self.config.buffer_size);
+                self.backpressure_controller.update_load(channel_load);
+
+                if !self.backpressure_controller.should_throttle() {
+                    break;
+                }
                 self.update_stats(|stats| stats.backpressure_events += 1);
                 sleep(Duration::from_millis(10)).await;
-                continue;
             }
 
             // Add to batch if batching is enabled
@@ -616,31 +612,82 @@ where
     }
 }
 
+/// Fraction (0.0 to 1.0) of `buffer_size` currently occupied, given the
+/// output channel's remaining spare `capacity`.
+///
+/// Pulled out of `StreamProcessor::process_stream_internal` so the formula
+/// backing the real backpressure signal is unit-testable without racing a
+/// live `mpsc` channel.
+fn channel_load_fraction(capacity: usize, buffer_size: usize) -> f64 {
+    let buffer_size = buffer_size.max(1) as f64;
+    (1.0 - (capacity as f64 / buffer_size)).clamp(0.0, 1.0)
+}
+
 /// Backpressure controller
 #[derive(Clone)]
 pub struct BackpressureController {
     threshold: f64,
+    stale_window: Duration,
     current_load: Arc<Mutex<f64>>,
-    measurement_window: VecDeque<Instant>,
+    /// Timestamps of recent `update_load` calls, pruned to the last
+    /// `stale_window`. An empty (or fully stale) window means no load
+    /// signal has arrived recently, so `should_throttle` treats the
+    /// possibly-outdated EMA in `current_load` as untrustworthy rather than
+    /// blocking traffic on stale information.
+    measurement_window: Arc<Mutex<VecDeque<Instant>>>,
 }
 
 impl BackpressureController {
+    /// Default staleness window: how long a load measurement stays "current"
+    /// before `should_throttle` stops trusting it.
+    const DEFAULT_STALE_WINDOW: Duration = Duration::from_secs(10);
+    /// Hard cap on retained timestamps, independent of the time-based prune,
+    /// so a caller invoking `update_load` faster than `stale_window` can't
+    /// grow the window unboundedly.
+    const MAX_SAMPLES: usize = 1024;
+
     pub fn new(threshold: f64) -> Self {
+        Self::with_stale_window(threshold, Self::DEFAULT_STALE_WINDOW)
+    }
+
+    /// Like [`Self::new`], but with an explicit staleness window instead of
+    /// the 10-second default. Exposed mainly so tests can exercise staleness
+    /// behavior without a real multi-second sleep.
+    pub fn with_stale_window(threshold: f64, stale_window: Duration) -> Self {
         Self {
             threshold,
+            stale_window,
             current_load: Arc::new(Mutex::new(0.0)),
-            measurement_window: VecDeque::new(),
+            measurement_window: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
     pub fn should_throttle(&self) -> bool {
+        let has_recent_measurement = {
+            let window = self.measurement_window.lock().unwrap_or_else(|p| p.into_inner());
+            window.back().is_some_and(|latest| latest.elapsed() <= self.stale_window)
+        };
+        if !has_recent_measurement {
+            return false;
+        }
+
         let load = *self.current_load.lock().unwrap_or_else(|p| p.into_inner());
         load > self.threshold
     }
 
-    pub fn update_load(&mut self, new_measurement: f64) {
+    pub fn update_load(&self, new_measurement: f64) {
         let mut load = self.current_load.lock().unwrap_or_else(|p| p.into_inner());
         *load = (*load * 0.9) + (new_measurement * 0.1); // Exponential moving average
+        drop(load);
+
+        let mut window = self.measurement_window.lock().unwrap_or_else(|p| p.into_inner());
+        window.push_back(Instant::now());
+        while window.len() > Self::MAX_SAMPLES {
+            window.pop_front();
+        }
+        while window.front().is_some_and(|oldest| oldest.elapsed() > self.stale_window) {
+            window.pop_front();
+        }
     }
 }
 
@@ -895,7 +942,7 @@ mod tests {
 
         fn process_with_intermediate(
             &self,
-            input: Self::Input,
+            _input: Self::Input,
         ) -> Pin<
             Box<
                 dyn std::future::Future<Output = Result<(Self::Output, Vec<Self::Intermediate>)>>
@@ -1049,8 +1096,8 @@ mod tests {
 
     #[test]
     fn test_backpressure_controller_throttles_after_high_load() {
-        let mut controller = BackpressureController::new(0.1); // very low threshold
-                                                               // Apply very high load repeatedly via EMA
+        let controller = BackpressureController::new(0.1); // very low threshold
+                                                           // Apply very high load repeatedly via EMA
         for _ in 0..20 {
             controller.update_load(1.0);
         }
@@ -1062,7 +1109,7 @@ mod tests {
 
     #[test]
     fn test_backpressure_controller_ema_update() {
-        let mut controller = BackpressureController::new(0.8);
+        let controller = BackpressureController::new(0.8);
         controller.update_load(0.9);
         // After one update, EMA load is 0 * 0.9 + 0.9 * 0.1 = 0.09 — still below 0.8
         assert!(
@@ -1071,11 +1118,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_backpressure_controller_ignores_stale_measurement() {
+        // Regression test: `measurement_window` used to be populated nowhere
+        // (dead field), so `should_throttle` had no way to distinguish a
+        // fresh high-load reading from a stale one. With a near-zero
+        // staleness window, a high-load measurement taken slightly in the
+        // past must no longer be trusted.
+        // Single `update_load(1.0)` call: EMA = 0.0 * 0.9 + 1.0 * 0.1 = 0.1,
+        // comfortably above the 0.05 threshold used here.
+        let controller = BackpressureController::with_stale_window(0.05, Duration::from_millis(1));
+        controller.update_load(1.0);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(
+            !controller.should_throttle(),
+            "a load measurement older than the staleness window must not drive throttling"
+        );
+    }
+
+    #[test]
+    fn test_backpressure_controller_trusts_fresh_measurement() {
+        let controller =
+            BackpressureController::with_stale_window(0.05, Duration::from_millis(500));
+        controller.update_load(1.0);
+        assert!(
+            controller.should_throttle(),
+            "a load measurement within the staleness window must still drive throttling"
+        );
+    }
+
+    #[test]
+    fn test_channel_load_fraction() {
+        // Regression test for the formula that now feeds
+        // `BackpressureController::update_load` from real channel state
+        // (`process_stream_internal` previously never called `update_load`
+        // at all).
+        assert_eq!(
+            channel_load_fraction(1000, 1000),
+            0.0,
+            "empty channel: no load"
+        );
+        assert_eq!(
+            channel_load_fraction(0, 1000),
+            1.0,
+            "full channel: max load"
+        );
+        assert_eq!(channel_load_fraction(500, 1000), 0.5, "half-full channel");
+        // Defensive: a zero-configured buffer size must not divide by zero
+        // (treated as a single-slot buffer that is currently full).
+        assert_eq!(channel_load_fraction(0, 0), 1.0);
+    }
+
     // ── Stream resume / backpressure recovery ────────────────────────────────
 
     #[test]
     fn test_backpressure_recovers_after_low_load() {
-        let mut controller = BackpressureController::new(0.05); // very low threshold
+        let controller = BackpressureController::new(0.05); // very low threshold
         for _ in 0..30 {
             controller.update_load(1.0); // Build up load
         }
@@ -1090,6 +1188,67 @@ mod tests {
             !controller.should_throttle(),
             "should stop throttling after sustained low load"
         );
+    }
+
+    #[tokio::test]
+    async fn test_process_stream_drops_no_items_under_backpressure() {
+        // Regression test: wiring a real load signal into
+        // `process_stream_internal` made the throttle branch reachable in
+        // production for the first time. The old `continue` there discarded
+        // whatever item had just been pulled off `input_stream` instead of
+        // retrying it. Force the branch deterministically: a 1-slot output
+        // channel plus a consumer that is deliberately paused guarantees the
+        // producer observes a full channel (and therefore throttles) on the
+        // second item, rather than relying on scheduling luck.
+        let pipeline = TestPipeline;
+        let config = StreamConfig {
+            buffer_size: 1,
+            batch_size: None,
+            // Deliberately very low (see the `BackpressureController` unit
+            // tests above for the same pattern): the EMA in `update_load`
+            // heavily smooths a single "channel full" reading (0.0 -> 0.1),
+            // so a realistic threshold would never trip on the very first
+            // observation.
+            backpressure_threshold: 0.05,
+            ..StreamConfig::default()
+        };
+        let processor = pipeline.create_stream_processor(config);
+
+        const N: usize = 5;
+        let inputs: Vec<String> = (0..N).map(|i| i.to_string()).collect();
+        let input_stream = iter(inputs.clone());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let producer = processor.clone();
+        let handle = tokio::spawn(async move {
+            producer.process_stream_internal(input_stream, tx).await;
+        });
+
+        // Don't drain yet: let the producer fill the single slot and start
+        // retrying the throttle wait on the next item.
+        sleep(Duration::from_millis(80)).await;
+        assert!(
+            processor.get_stats().backpressure_events > 0,
+            "a paused consumer with a 1-slot buffer must have triggered at least one throttle wait"
+        );
+
+        let mut seen = Vec::new();
+        while let Some(result) = rx.recv().await {
+            match result.expect("stream item should not error") {
+                StreamResult::Complete { output, .. } => seen.push(output),
+                other => panic!("unexpected result variant: {other:?}"),
+            }
+        }
+        handle.await.expect("producer task should not panic");
+
+        assert_eq!(seen.len(), N, "every produced item must reach the consumer");
+        for input in &inputs {
+            let expected = format!("processed: {input}");
+            assert!(
+                seen.contains(&expected),
+                "missing result for input {input}: got {seen:?}"
+            );
+        }
     }
 
     // ── RealTimeProcessor ────────────────────────────────────────────────────

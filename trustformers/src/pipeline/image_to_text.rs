@@ -1,18 +1,32 @@
+#[cfg(feature = "vision")]
 use crate::core::traits::Tokenizer;
+#[cfg(feature = "vision")]
 use crate::error::{Result, TrustformersError};
+#[cfg(feature = "vision")]
 use crate::pipeline::{BasePipeline, Pipeline, PipelineOutput};
+#[cfg(feature = "vision")]
 use crate::AutoModel;
+#[cfg(feature = "vision")]
 use crate::AutoTokenizer;
 
 #[cfg(feature = "vision")]
 use image::DynamicImage;
 #[cfg(feature = "vision")]
 use std::path::Path;
+#[cfg(feature = "vision")]
 use trustformers_core::cache::CacheKeyBuilder;
+#[cfg(feature = "vision")]
 use trustformers_core::tensor::Tensor;
 
 #[cfg(feature = "vision")]
-/// Pipeline for image-to-text tasks (image captioning, VQA)
+/// Pipeline for image-to-text tasks (image captioning, VQA).
+///
+/// [`Self::process_image`] does real decoding/resize/normalization work, but
+/// turning those pixels into text needs a trained vision-language decoder,
+/// which this workspace does not have wired in — see
+/// [`Self::generate_caption`] / [`Self::generate_with_prompt`], which
+/// honestly return [`TrustformersError::FeatureUnavailable`] rather than a
+/// fabricated caption.
 #[derive(Clone)]
 pub struct ImageToTextPipeline {
     base: BasePipeline<AutoModel, AutoTokenizer>,
@@ -131,39 +145,48 @@ impl ImageToTextPipeline {
         Ok(tensor)
     }
 
-    /// Generate caption for image
+    /// Generate caption for image.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`TrustformersError::FeatureUnavailable`]: captioning
+    /// needs a trained vision-language decoder to turn `image_features` into
+    /// text, which this workspace does not have wired in (see the struct
+    /// docs). This honestly refuses rather than returning the same
+    /// hardcoded sentence for every image.
     fn generate_caption(&self, image_features: &Tensor) -> Result<String> {
-        // In a real implementation, this would:
-        // 1. Pass image features through a vision encoder
-        // 2. Use a decoder model to generate text
-        // 3. Apply beam search or sampling for generation
-
-        // For now, return a placeholder caption
-        Ok("A photo showing various objects and scenes.".to_string())
+        Err(TrustformersError::feature_unavailable(
+            format!(
+                "image captioning needs a trained vision-language decoder to turn a {:?}-shaped \
+                 feature tensor into text, which this workspace does not have wired in",
+                image_features.shape()
+            ),
+            "image-to-text",
+        ))
     }
 
-    /// Generate text with a prompt (for VQA or guided generation)
+    /// Generate text with a prompt (for VQA or guided generation).
+    ///
+    /// # Errors
+    ///
+    /// Whatever the tokenizer returns for an unencodable `prompt`, otherwise
+    /// always [`TrustformersError::FeatureUnavailable`] — same reason as
+    /// [`Self::generate_caption`]: no trained vision-language decoder is
+    /// wired in, so this cannot honestly answer even a well-formed prompt
+    /// about `image_features`, and refuses rather than pattern-matching
+    /// keywords in the prompt into a canned response.
     fn generate_with_prompt(&self, image_features: &Tensor, prompt: &str) -> Result<String> {
-        // Tokenize the text prompt
         let prompt_tokens = self.base.tokenizer.encode(prompt)?;
-
-        // In a real implementation:
-        // 1. Combine image features with text prompt
-        // 2. Use multimodal model to generate response
-        // 3. Apply appropriate decoding strategy
-
-        // For now, return a contextual response
-        let response = if prompt.to_lowercase().contains("what") {
-            "This appears to be an image containing various visual elements."
-        } else if prompt.to_lowercase().contains("where") {
-            "This scene appears to be taken in an indoor/outdoor setting."
-        } else if prompt.to_lowercase().contains("how many") {
-            "There appear to be several items in the image."
-        } else {
-            "Based on the image content, this appears to be a relevant response to your question."
-        };
-
-        Ok(response.to_string())
+        Err(TrustformersError::feature_unavailable(
+            format!(
+                "visual question answering needs a trained vision-language decoder to combine \
+                 a {:?}-shaped feature tensor with a {}-token prompt, which this workspace does \
+                 not have wired in",
+                image_features.shape(),
+                prompt_tokens.input_ids.len(),
+            ),
+            "image-to-text",
+        ))
     }
 }
 
@@ -240,7 +263,7 @@ pub struct ImageToTextOutput {
 #[cfg(all(test, feature = "vision"))]
 mod tests {
     use super::*;
-    use image::{Rgb, RgbImage};
+    use image::RgbImage;
 
     #[test]
     fn test_image_to_text_input_creation() {

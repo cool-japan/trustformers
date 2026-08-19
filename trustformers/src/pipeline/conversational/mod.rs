@@ -69,7 +69,8 @@ pub use streaming::{
     StreamingManager, StreamingMetrics, TypingSimulator,
 };
 pub use summarization::{
-    ContextSummarizer, SummarizationEngine, SummarizationMetadata, SummarizationResult,
+    ContextSummarizer, ImportanceWeights, QualityThresholds, SummarizationEngine,
+    SummarizationMetadata, SummarizationResult,
 };
 pub use utils::{
     ConversationFormatter, ConversationHealthTracker, ConversationSerializer,
@@ -383,18 +384,11 @@ mod tests {
 
     #[test]
     fn test_module_integration() {
-        // Test that all modules can be imported
-        use super::analysis::*;
-        use super::config::*;
-        use super::generation::*;
-        use super::memory::*;
-        use super::safety::*;
-        use super::streaming::*;
-        use super::summarization::*;
-        use super::types::*;
-        use super::utils::*;
-
-        // Basic integration test
+        // Every submodule's public API is already re-exported through
+        // `use super::*` above (see the `pub use` block at the top of this
+        // file), which is what actually exercises "all modules can be
+        // imported" here: if any submodule failed to compile or its
+        // re-export path broke, this whole test module would fail to build.
         let config = ConversationalConfig::default();
         assert_eq!(config.conversation_mode, ConversationMode::Chat);
     }

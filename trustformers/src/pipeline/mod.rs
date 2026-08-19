@@ -834,11 +834,33 @@ where
 }
 
 /// Wrapper to make VisualQuestionAnswering pipeline compatible with the unified Pipeline trait
+///
+/// `Pipeline::__call__` below can never actually drive the wrapped pipeline:
+/// VQA needs `VisualQuestionAnsweringInput` (image bytes plus a question),
+/// which a plain `String` cannot carry, so every call through the unified
+/// `Pipeline<Input = String>` trait object reports that and directs the
+/// caller to `visual_question_answering_pipeline()` for the real typed API.
+/// The wrapped pipeline is still reachable, though: `Deref` exposes it to
+/// any caller holding the concrete wrapper type (rather than the
+/// `Box<dyn Pipeline>` returned by `pipeline()`).
 #[cfg(feature = "vision")]
 pub struct VisualQuestionAnsweringPipelineWrapper<M, T>(VisualQuestionAnsweringPipeline<M, T>)
 where
     M: crate::core::traits::Model + Clone + Send + Sync + 'static,
     T: crate::core::traits::Tokenizer + Clone + Send + Sync + 'static;
+
+#[cfg(feature = "vision")]
+impl<M, T> std::ops::Deref for VisualQuestionAnsweringPipelineWrapper<M, T>
+where
+    M: crate::core::traits::Model + Clone + Send + Sync + 'static,
+    T: crate::core::traits::Tokenizer + Clone + Send + Sync + 'static,
+{
+    type Target = VisualQuestionAnsweringPipeline<M, T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[cfg(feature = "vision")]
 impl<M, T> Pipeline for VisualQuestionAnsweringPipelineWrapper<M, T>
@@ -849,9 +871,10 @@ where
     type Input = String;
     type Output = PipelineOutput;
 
-    fn __call__(&self, input: Self::Input) -> Result<Self::Output> {
-        // VQA requires both image and question, but we only have string input
-        // Return an error indicating this pipeline needs proper input
+    // `_input`: required by the `Pipeline` trait signature, but VQA needs
+    // both image and question data that a `String` cannot carry (see the
+    // struct doc above), so it is never actually consulted.
+    fn __call__(&self, _input: Self::Input) -> Result<Self::Output> {
         Err(TrustformersError::invalid_input_simple(
             "VisualQuestionAnswering pipeline requires VisualQuestionAnsweringInput with image and question data, not string input".to_string()
         ))

@@ -35,6 +35,7 @@ use crate::core::error::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use std::time::Instant;
 use thiserror::Error;
 
@@ -324,10 +325,13 @@ pub struct SafetyFilter {
     violence_patterns: Vec<Regex>,
     harassment_patterns: Vec<Regex>,
     bias_keywords: HashSet<String>,
-    /// Result cache for performance optimization
-    assessment_cache: HashMap<String, (EnhancedSafetyAssessment, Instant)>,
-    /// Violation history for tracking patterns
-    violation_history: Vec<EnhancedSafetyViolation>,
+    /// Result cache for performance optimization. `Mutex`-wrapped so
+    /// `assess_content_safety_enhanced(&self, ...)` can actually populate it
+    /// on a cache miss, not just read it.
+    assessment_cache: Mutex<HashMap<String, (EnhancedSafetyAssessment, Instant)>>,
+    /// Violation history for tracking patterns. `Mutex`-wrapped so
+    /// `handle_violation(&self, ...)` can append to it, not just read it.
+    violation_history: Mutex<Vec<EnhancedSafetyViolation>>,
 }
 
 impl SafetyFilter {
@@ -350,8 +354,8 @@ impl SafetyFilter {
             violence_patterns: Vec::new(),
             harassment_patterns: Vec::new(),
             bias_keywords: HashSet::new(),
-            assessment_cache: HashMap::new(),
-            violation_history: Vec::new(),
+            assessment_cache: Mutex::new(HashMap::new()),
+            violation_history: Mutex::new(Vec::new()),
         };
 
         filter.initialize_patterns();
@@ -556,7 +560,8 @@ impl SafetyFilter {
 
         // Check cache first if enabled
         if self.extended_config.performance_settings.enable_caching {
-            if let Some((cached_assessment, cache_time)) = self.assessment_cache.get(content) {
+            let cache = self.assessment_cache.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some((cached_assessment, cache_time)) = cache.get(content) {
                 let cache_age = start_time.duration_since(*cache_time);
                 if cache_age.as_secs()
                     < self.extended_config.performance_settings.cache_expiry_seconds
@@ -625,14 +630,37 @@ impl SafetyFilter {
 
         let processing_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
-        EnhancedSafetyAssessment {
+        let assessment = EnhancedSafetyAssessment {
             base_analysis,
             category_scores,
             enhanced_violations,
             confidence,
             timestamp: chrono::Utc::now(),
             processing_time_ms,
+        };
+
+        // Populate the cache on a miss, bounded by `cache_size_limit`
+        // (oldest-inserted entries evicted first) so a long-running process
+        // doesn't grow it unboundedly.
+        if self.extended_config.performance_settings.enable_caching {
+            let mut cache = self.assessment_cache.lock().unwrap_or_else(|p| p.into_inner());
+            let limit = self.extended_config.performance_settings.cache_size_limit;
+            if limit > 0 {
+                while cache.len() >= limit {
+                    let Some(oldest_key) = cache
+                        .iter()
+                        .min_by_key(|(_, (_, inserted_at))| *inserted_at)
+                        .map(|(key, _)| key.clone())
+                    else {
+                        break;
+                    };
+                    cache.remove(&oldest_key);
+                }
+                cache.insert(content.to_string(), (assessment.clone(), start_time));
+            }
         }
+
+        assessment
     }
 
     /// Filter input content and return safe version
@@ -1081,6 +1109,14 @@ impl SafetyFilter {
         assessment: &EnhancedSafetyAssessment,
         content: &str,
     ) -> Result<String> {
+        // Record every violation this assessment found, so
+        // `get_violation_history` reflects real history instead of always
+        // being empty.
+        if !assessment.enhanced_violations.is_empty() {
+            let mut history = self.violation_history.lock().unwrap_or_else(|p| p.into_inner());
+            history.extend(assessment.enhanced_violations.iter().cloned());
+        }
+
         // Use the base analysis recommended action
         match assessment.base_analysis.recommended_action {
             SafetyAction::Block => {
@@ -1143,7 +1179,7 @@ impl SafetyFilter {
         self.initialize_patterns();
 
         // Clear cache when configuration changes
-        self.assessment_cache.clear();
+        self.assessment_cache.get_mut().unwrap_or_else(|p| p.into_inner()).clear();
     }
 
     /// Get current extended configuration
@@ -1153,17 +1189,17 @@ impl SafetyFilter {
 
     /// Clear assessment cache
     pub fn clear_cache(&mut self) {
-        self.assessment_cache.clear();
+        self.assessment_cache.get_mut().unwrap_or_else(|p| p.into_inner()).clear();
     }
 
-    /// Get violation history
-    pub fn get_violation_history(&self) -> &[EnhancedSafetyViolation] {
-        &self.violation_history
+    /// Get violation history recorded so far by [`Self::handle_violation`].
+    pub fn get_violation_history(&self) -> Vec<EnhancedSafetyViolation> {
+        self.violation_history.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Clear violation history
     pub fn clear_violation_history(&mut self) {
-        self.violation_history.clear();
+        self.violation_history.get_mut().unwrap_or_else(|p| p.into_inner()).clear();
     }
 
     /// Add custom safety pattern
@@ -1357,6 +1393,15 @@ impl SafetyFilter {
         violations: &[SafetyViolation],
         risk_level: RiskLevel,
     ) -> SafetyAction {
+        // A single Critical-severity violation forces blocking regardless of
+        // the aggregate risk level: averaging it against otherwise-mild
+        // signals could otherwise dilute it down to only `Modify`.
+        let has_critical_violation =
+            violations.iter().any(|v| matches!(v.severity, SafetySeverity::Critical));
+        if has_critical_violation {
+            return SafetyAction::Block;
+        }
+
         match risk_level {
             RiskLevel::None => SafetyAction::Log,
             RiskLevel::Low => SafetyAction::Warn,
@@ -1730,28 +1775,49 @@ mod tests {
         );
     }
 
+    /// Regression test: `assessment_cache` used to be checked on every call
+    /// but never written back to (the field was a plain, non-`Mutex`
+    /// `HashMap` behind `&self`, so nothing could ever insert into it),
+    /// meaning every call recomputed the assessment from scratch and always
+    /// missed the cache. `assessment2`'s `timestamp` — generated fresh via
+    /// `chrono::Utc::now()` on a cache miss, but carried over unchanged on a
+    /// cache hit — must now match `assessment1`'s, proving the second call
+    /// actually returned the cached result rather than recomputing.
     #[test]
     fn test_assessment_caching() {
         let filter = SafetyFilter::new();
         let content = "Hello world";
 
-        // First assessment
-        let start1 = Instant::now();
         let assessment1 = filter.assess_content_safety_enhanced(content);
-        let duration1 = start1.elapsed();
-
-        // Second assessment (should use cache if enabled)
-        let start2 = Instant::now();
         let assessment2 = filter.assess_content_safety_enhanced(content);
-        let duration2 = start2.elapsed();
 
-        // Both assessments should complete without error
-        // (durations are always >= 0 for std::time::Duration)
-
-        // Assessments should be consistent
+        assert_eq!(
+            assessment1.timestamp, assessment2.timestamp,
+            "the second call must return the cached assessment (identical timestamp), not \
+             recompute a fresh one"
+        );
         assert_eq!(
             assessment1.category_scores.toxicity,
             assessment2.category_scores.toxicity
+        );
+    }
+
+    /// Regression test: `handle_violation` used to never write to
+    /// `violation_history` (same non-`Mutex`-behind-`&self` problem as the
+    /// cache above), so `get_violation_history` always returned empty. A
+    /// blocked/modified violation must now actually be recorded.
+    #[test]
+    fn test_violation_history_records_detected_violations() {
+        let filter = SafetyFilter::new();
+        assert!(filter.get_violation_history().is_empty());
+
+        // Same input `test_content_filtering` already relies on to trigger
+        // a real violation.
+        let _ = filter.filter_input("I hate you");
+
+        assert!(
+            !filter.get_violation_history().is_empty(),
+            "a detected violation must be recorded in violation_history"
         );
     }
 

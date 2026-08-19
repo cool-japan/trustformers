@@ -296,8 +296,11 @@ where
     /// incrementally for true streaming. This current implementation generates
     /// the full response first for simplicity.
     async fn generate_full_response(&self, context: &str) -> Result<String> {
-        // Tokenize context
-        let tokenized = self.tokenizer.encode(context)?;
+        // Validate the context tokenizes before spending compute on
+        // generation: `model.generate` below takes the raw string and
+        // re-tokenizes internally, so this discards the token ids and keeps
+        // only the fail-fast, tokenizer-specific error it surfaces.
+        let _ = self.tokenizer.encode(context)?;
 
         // Create generation config
         let gen_config = ModelsGenerationConfig {
@@ -418,18 +421,7 @@ where
         response: &str,
         _input: &ConversationalInput,
     ) -> ConversationMetadata {
-        // Simple metadata analysis
-        ConversationMetadata {
-            sentiment: Some("neutral".to_string()),
-            intent: Some("response".to_string()),
-            confidence: 0.8,
-            topics: vec!["conversation".to_string()],
-            safety_flags: Vec::new(),
-            entities: Vec::new(),
-            quality_score: 0.8,
-            engagement_level: EngagementLevel::Medium,
-            reasoning_type: None,
-        }
+        analyze_response_metadata_heuristic(response)
     }
 
     /// Creates the actual streaming implementation from response chunks.
@@ -672,6 +664,59 @@ where
     }
 }
 
+/// Heuristic, non-ML analysis of a generated response's text. Still a
+/// simplified implementation (real sentiment analysis, intent
+/// classification, entity extraction, topic modelling, safety analysis and
+/// learned quality assessment are all future enhancements) — but it reflects
+/// the actual `response` instead of returning fixed constants regardless of
+/// what was generated. Fields with no heuristic behind them yet (sentiment,
+/// topics) are left honestly unknown/empty rather than filled with a
+/// fabricated placeholder. Free function (rather than a method) so it's
+/// testable without a full `ConversationalStreamingPipeline<M, T>` instance.
+fn analyze_response_metadata_heuristic(response: &str) -> ConversationMetadata {
+    let trimmed = response.trim();
+    let word_count = trimmed.split_whitespace().count();
+    let is_question = trimmed.ends_with('?');
+    let has_apology = {
+        let lower = trimmed.to_lowercase();
+        lower.contains("sorry") || lower.contains("apolog")
+    };
+
+    let intent = if is_question {
+        Some("question".to_string())
+    } else if has_apology {
+        Some("apology".to_string())
+    } else {
+        None
+    };
+
+    // A properly terminated, non-trivial response reads as more likely
+    // to be a complete answer; a coarse proxy, not a learned model.
+    let well_formed = trimmed.ends_with(['.', '!', '?']) && word_count >= 3;
+    let quality_score: f32 = if well_formed { 0.7 } else { 0.4 };
+    let confidence = if word_count == 0 { 0.0 } else { quality_score };
+
+    let engagement_level = if is_question || trimmed.contains('!') {
+        EngagementLevel::High
+    } else if word_count < 3 {
+        EngagementLevel::Low
+    } else {
+        EngagementLevel::Medium
+    };
+
+    ConversationMetadata {
+        sentiment: None,
+        intent,
+        confidence,
+        topics: Vec::new(),
+        safety_flags: Vec::new(),
+        entities: Vec::new(),
+        quality_score,
+        engagement_level,
+        reasoning_type: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,9 +724,7 @@ mod tests {
     use crate::pipeline::conversational::streaming::types::{
         AdvancedStreamingConfig, ChunkingStrategy, StreamingQuality,
     };
-    use crate::pipeline::conversational::types::{
-        ConversationMetadata, ConversationRole, ConversationTurn, EngagementLevel,
-    };
+    use crate::pipeline::conversational::types::{ConversationMetadata, EngagementLevel};
 
     fn default_adv_config() -> AdvancedStreamingConfig {
         AdvancedStreamingConfig::default()
@@ -920,5 +963,60 @@ mod tests {
             .expect("session 2 must succeed");
         let sessions = coord.get_sessions_by_conversation("conv-a").await;
         assert_eq!(sessions.len(), 2, "two sessions for conv-a must be found");
+    }
+
+    // --- analyze_response_metadata_heuristic tests ---
+    //
+    // Regression tests: `analyze_response_metadata` used to ignore its
+    // `response` argument entirely and return fixed constants
+    // (sentiment "neutral", intent "response", topics ["conversation"],
+    // confidence/quality_score 0.8, engagement Medium) for every call. These
+    // would have failed against the old code, which produced identical
+    // metadata for all four inputs below regardless of their content.
+
+    #[test]
+    fn test_analyze_response_metadata_detects_question_intent_and_high_engagement() {
+        let metadata = analyze_response_metadata_heuristic("Would you like some tea?");
+        assert_eq!(metadata.intent, Some("question".to_string()));
+        assert_eq!(metadata.engagement_level, EngagementLevel::High);
+    }
+
+    #[test]
+    fn test_analyze_response_metadata_detects_apology_intent() {
+        let metadata = analyze_response_metadata_heuristic("I'm sorry, I can't help with that.");
+        assert_eq!(metadata.intent, Some("apology".to_string()));
+    }
+
+    #[test]
+    fn test_analyze_response_metadata_well_formed_response_scores_higher() {
+        let well_formed =
+            analyze_response_metadata_heuristic("Here is a complete, properly punctuated reply.");
+        let terse = analyze_response_metadata_heuristic("ok");
+        assert!(
+            well_formed.quality_score > terse.quality_score,
+            "a complete sentence ({}) must score higher than a two-letter reply ({})",
+            well_formed.quality_score,
+            terse.quality_score
+        );
+        assert_eq!(terse.engagement_level, EngagementLevel::Low);
+    }
+
+    #[test]
+    fn test_analyze_response_metadata_empty_response_has_zero_confidence() {
+        let metadata = analyze_response_metadata_heuristic("   ");
+        assert_eq!(metadata.confidence, 0.0);
+        assert_eq!(metadata.intent, None);
+    }
+
+    #[test]
+    fn test_analyze_response_metadata_never_fabricates_sentiment_or_topics() {
+        // No real sentiment/topic model is wired in: both must stay honestly
+        // empty/unknown rather than reporting a made-up "neutral" sentiment
+        // or a placeholder "conversation" topic, regardless of input.
+        for input in ["Hello!", "Why not?", "I'm sorry.", "", "A normal reply."] {
+            let metadata = analyze_response_metadata_heuristic(input);
+            assert_eq!(metadata.sentiment, None, "input: {input:?}");
+            assert!(metadata.topics.is_empty(), "input: {input:?}");
+        }
     }
 }

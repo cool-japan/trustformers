@@ -1,7 +1,6 @@
 use crate::core::traits::TokenizedInput;
 use crate::error::{Result, TrustformersError};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read as IoRead;
 use std::path::Path;
@@ -139,8 +138,14 @@ impl AutoConfig {
             AutoConfig::GptNeo(config) => config.max_position_embeddings as u32,
             #[cfg(feature = "gpt_j")]
             AutoConfig::GptJ(config) => config.n_positions as u32,
+            // T5 uses relative-position attention buckets (see
+            // `T5Config::relative_attention_max_distance`), not an absolute
+            // position embedding table, so there is no config field bounding
+            // sequence length the way `max_position_embeddings`/`n_positions`
+            // do for the other architectures above; 512 is the commonly used
+            // operating length for pretrained T5 checkpoints.
             #[cfg(feature = "t5")]
-            AutoConfig::T5(config) => 512, // T5 typical default
+            AutoConfig::T5(_) => 512,
             #[cfg(feature = "albert")]
             AutoConfig::Albert(config) => config.max_position_embeddings as u32,
             // reason: catch-all is unreachable when model features are enabled, but
@@ -778,10 +783,11 @@ impl AutoTokenizer {
     ) -> Result<Self> {
         let base_path = Path::new(model_name_or_path);
 
-        // Try to detect tokenizer type from available files
+        // Try to detect tokenizer type from available files. Each tokenizer
+        // type below derives its own vocab/merges path (extensions differ:
+        // vocab.txt for BERT-style WordPiece, vocab.json for GPT2/RoBERTa
+        // BPE), so there is no single vocab/merges path to precompute here.
         let tokenizer_path = base_path.join("tokenizer.json");
-        let vocab_path = base_path.join("vocab.txt");
-        let merges_path = base_path.join("merges.txt");
         let tokenizer_config_path = base_path.join("tokenizer_config.json");
 
         // Check for tokenizer config to understand the tokenizer type
@@ -1461,6 +1467,40 @@ mod generation_honesty_tests {
         assert!(
             message.contains("language-modelling head"),
             "the error should explain why generation is impossible: {message}"
+        );
+    }
+
+    /// With none of `gpt2`/`gpt_neo`/`gpt_j`/`t5` compiled in (this crate's
+    /// plain default features), `generate` must say so explicitly rather
+    /// than reusing the generic "no language-modelling head" wording that
+    /// implies the checkpoint's *architecture* is the problem. Before this
+    /// existed, `generate_token_ids`'s `config`/`prompt_len` locals were
+    /// unused dead code in exactly this build configuration because every
+    /// match arm that read them was feature-gated out.
+    #[cfg(not(any(
+        feature = "gpt2",
+        feature = "gpt_neo",
+        feature = "gpt_j",
+        feature = "t5"
+    )))]
+    #[cfg(feature = "bert")]
+    #[test]
+    fn generation_without_any_compiled_generative_feature_names_the_missing_features() {
+        let model = AutoModel::from_config(AutoConfig::Bert(tiny_bert_config()))
+            .expect("tiny bert should build")
+            .with_tokenizer(tiny_tokenizer());
+
+        let Err(err) = model.generate("hello world", &GenerationConfig::default()) else {
+            panic!("no generative feature is compiled in, so generation must fail");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("gpt2") && message.contains("t5"),
+            "the error should name the generative features that would need enabling: {message}"
+        );
+        assert!(
+            !message.contains("Prompt:"),
+            "the error must not echo the prompt back as if it were output: {message}"
         );
     }
 

@@ -186,7 +186,11 @@ impl ReasoningEngine {
             description: "Applied mathematical reasoning".to_string(),
             inputs: math_expressions,
             output,
-            confidence: 0.9,
+            // Blend this step's own (high, since math extraction/solving is
+            // deterministic) confidence with the reasoning chain's
+            // accumulated confidence so far, rather than ignoring the
+            // running context entirely.
+            confidence: (0.9 * 0.7 + context.confidence * 0.3).clamp(0.0, 1.0),
         })
     }
 
@@ -203,7 +207,10 @@ impl ReasoningEngine {
             description: "Applied emotional reasoning and empathy".to_string(),
             inputs: vec![input.to_string()],
             output: empathetic_response,
-            confidence: 0.8,
+            // Blend this step's own confidence with the reasoning chain's
+            // accumulated confidence so far, rather than ignoring the
+            // running context entirely.
+            confidence: (0.8 * 0.7 + context.confidence * 0.3).clamp(0.0, 1.0),
         })
     }
 
@@ -416,11 +423,20 @@ impl ReasoningEngine {
             return Ok(format!("Applied creative analysis to: {}", input));
         }
 
-        Ok(format!(
-            "Creative exploration of '{}' focusing on: {}",
-            input,
-            elements.join(", ")
-        ))
+        // Tie the response back to the conversation's stated goal, when the
+        // reasoning context has one, instead of ignoring it.
+        Ok(match &context.current_goal {
+            Some(goal) => format!(
+                "Creative exploration of '{}' (in service of '{goal}') focusing on: {}",
+                input,
+                elements.join(", ")
+            ),
+            None => format!(
+                "Creative exploration of '{}' focusing on: {}",
+                input,
+                elements.join(", ")
+            ),
+        })
     }
 
     fn extract_mathematical_expressions(&self, input: &str) -> Result<Vec<String>> {

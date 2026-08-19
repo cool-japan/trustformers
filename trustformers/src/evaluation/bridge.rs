@@ -25,7 +25,7 @@ use trustformers_training::metrics::{
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NlpMetricKind {
+pub(crate) enum NlpMetricKind {
     Bleu { max_n: usize, smooth: bool },
     RougeN { n: usize },
     RougeL,

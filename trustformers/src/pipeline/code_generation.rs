@@ -622,12 +622,15 @@ impl CodeGenerationPipeline {
     /// This is not a prediction; it exists to exercise the extraction and
     /// stop-sequence machinery without a checkpoint.
     fn template_stub(&self, input: &CodeGenerationInput) -> String {
-        let prompt = String::new();
-        self.render_template(&prompt, input)
+        self.render_template(input)
     }
 
     /// Render the language template for `input`.
-    fn render_template(&self, prompt: &str, input: &CodeGenerationInput) -> String {
+    ///
+    /// `input` alone is sufficient: each `CodeGenerationInput` variant already
+    /// carries its own prompt/task/prefix text, so this takes no separate raw
+    /// prompt string.
+    fn render_template(&self, input: &CodeGenerationInput) -> String {
         let lang = self.config.language.as_deref().unwrap_or("python");
         let indent = match &self.config.indent_style {
             IndentStyle::Spaces(n) => " ".repeat(*n),

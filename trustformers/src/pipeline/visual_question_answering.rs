@@ -463,7 +463,6 @@ where
 
         // Process image
         let image_tensor = self.image_processor.process_image(&input.image)?;
-        let image_features = self.extract_image_features(&image_tensor)?;
 
         // Process question
         let question_tokens = self.base.tokenizer.encode(&input.question)?;
@@ -474,6 +473,13 @@ where
 
         // Fuse vision and text features (real arithmetic over the real tensors).
         let _fused_features = self.fusion_module.fuse(&image_tensor, &question_tensor)?;
+
+        // Attempt real structured feature extraction (object detection,
+        // scene description, ...) last, not first: `extract_image_features`
+        // always errors (see its doc comment), so calling it before the
+        // tokenization/fusion above -- as this used to -- meant they never
+        // actually ran despite the comment below claiming they did.
+        self.extract_image_features(&image_tensor)?;
 
         // There is no vision-language model to answer with. Everything above ran
         // for real; this is where the pipeline honestly stops.
@@ -1133,6 +1139,15 @@ impl VisualQaPipeline {
             config,
             processor: VqaProcessor::new(),
         })
+    }
+
+    /// This pipeline's [`VqaProcessor`], for callers following the doc
+    /// advice on [`Self::answer`]: build your own model's inputs with
+    /// [`VqaProcessor::encode_question`] / `encode_image_features` on this
+    /// instance, run your model, then rank its logits with
+    /// [`Self::score_answers`].
+    pub fn processor(&self) -> &VqaProcessor {
+        &self.processor
     }
 
     /// Score logits against an answer vocabulary and return ranked `VqaResult`s.
@@ -1896,7 +1911,7 @@ mod tests {
     #[test]
     fn test_process_tensor_data_validates_length() {
         let processor = small_processor();
-        assert!(processor.process_tensor_data(&vec![0.5f32; 3 * 8 * 8]).is_ok());
+        assert!(processor.process_tensor_data(&[0.5f32; 3 * 8 * 8]).is_ok());
         assert!(processor.process_tensor_data(&[0.5f32; 10]).is_err());
     }
 

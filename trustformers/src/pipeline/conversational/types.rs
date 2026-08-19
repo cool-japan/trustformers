@@ -613,7 +613,7 @@ pub enum SummarizationStrategy {
 }
 
 /// Strategies for repairing conversation flow
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepairStrategy {
     /// Ask clarifying questions
     Clarification,

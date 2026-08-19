@@ -1277,7 +1277,7 @@ mod tests {
     #[test]
     fn test_pitch_track_is_empty_for_silence() {
         let analyzer = ProsodyAnalyzer::new();
-        assert!(analyzer.pitch_track(&vec![0.0f32; 16_000], 16_000).is_empty());
+        assert!(analyzer.pitch_track(&[0.0f32; 16_000], 16_000).is_empty());
     }
 
     #[test]

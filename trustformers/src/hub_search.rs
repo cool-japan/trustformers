@@ -16,6 +16,7 @@
 use crate::error::{Result, TrustformersError};
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(test, feature = "hub"))]
 const HF_HUB_URL: &str = "https://huggingface.co";
 
 /// One row of a Hub model search result.
@@ -39,6 +40,7 @@ pub enum ModelSearchSort {
 }
 
 impl ModelSearchSort {
+    #[cfg(any(test, feature = "hub"))]
     fn as_query_value(self) -> &'static str {
         match self {
             ModelSearchSort::Downloads => "downloads",
@@ -107,6 +109,7 @@ impl ModelSearchQuery {
 /// Build the full `GET /api/models` request URL for `query`, percent-encoding
 /// every value through `url::form_urlencoded` rather than hand-rolled string
 /// concatenation.
+#[cfg(any(test, feature = "hub"))]
 fn build_search_url(query: &ModelSearchQuery) -> String {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     if let Some(search) = &query.search {
@@ -143,6 +146,7 @@ fn build_search_url(query: &ModelSearchQuery) -> String {
 /// Pure JSON -> struct mapping for one entry of the `/api/models` search
 /// response, kept separate from the HTTP call so it can be unit-tested
 /// without a network connection.
+#[cfg(any(test, feature = "hub"))]
 fn model_search_result_from_json(json: &serde_json::Value) -> ModelSearchResult {
     let model_id = json
         .get("id")

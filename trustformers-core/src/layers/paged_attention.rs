@@ -828,9 +828,11 @@ impl Layer for PagedAttention {
             _ => hidden_states,
         };
 
-        // Compute Q, K, V projections
-        let query_states = self.query.forward(hidden_states.clone())?;
-        let key_states = self.key.forward(hidden_states.clone())?;
+        // Compute Q, K, V projections. Query and key borrow the shared hidden
+        // states through `Layer::forward_ref` instead of paying for a deep
+        // clone each; value is the last consumer so it takes ownership.
+        let query_states = self.query.forward_ref(&hidden_states)?;
+        let key_states = self.key.forward_ref(&hidden_states)?;
         let value_states = self.value.forward(hidden_states)?;
 
         // Split into attention heads
@@ -931,6 +933,13 @@ mod tests {
 
     fn max_abs_diff(a: &ArrayD<f32>, b: &ArrayD<f32>) -> f32 {
         a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+    }
+
+    /// Same comparison as [`max_abs_diff`], flattened over `Tensor::to_vec_f32`
+    /// output so it can compare full layer outputs without unpacking `Tensor`.
+    fn max_abs_difference(a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(a.len(), b.len(), "output length mismatch");
+        a.iter().zip(b.iter()).fold(0.0f32, |acc, (x, y)| acc.max((x - y).abs()))
     }
 
     #[test]
@@ -1035,6 +1044,84 @@ mod tests {
         let output = output.expect("Forward pass failed");
         assert_eq!(output.shape(), vec![1, 64, 256]);
         assert_eq!(paged_attn.sequence_length(1).expect("lock"), 64);
+    }
+
+    /// `forward` feeds the query and key projections through
+    /// [`Layer::forward_ref`] instead of handing each one a deep clone of
+    /// `hidden_states`.
+    ///
+    /// The previous revision spelled this as
+    /// `self.query.forward(hidden_states.clone())` /
+    /// `self.key.forward(hidden_states.clone())`. This test rebuilds that
+    /// exact cloning pipeline by hand — under a different sequence id so it
+    /// writes to its own cache pages instead of the production call's — and
+    /// checks it is *bit-identical* to the production `forward()` output,
+    /// mirroring the equivalent test in `flash_attention.rs`. A `forward_ref`
+    /// that ever diverged from `forward` would silently change the output of
+    /// every model built on `PagedAttention`, and only this assertion would
+    /// notice.
+    #[test]
+    fn projected_attention_borrows_without_changing_its_result() {
+        let heads = 2;
+        let head_dim = 4;
+        let hidden = heads * head_dim;
+        let attention =
+            PagedAttention::new(hidden, heads, 0.0, true, 8, 16).expect("construct PagedAttention");
+
+        let hidden_states = Tensor::F32(ramp(&[1, 5, hidden], 0.01, 0.013));
+        let original_hidden_states = hidden_states.to_vec_f32().expect("f32");
+
+        // Production pipeline: `forward` now borrows `hidden_states` for the
+        // query and key projections via `forward_ref`.
+        let produced = attention
+            .forward(PagedAttentionInput {
+                hidden_states: hidden_states.clone(),
+                sequence_id: 1,
+                position: 0,
+                attention_mask: None,
+            })
+            .expect("production forward must run");
+
+        // The pre-fix pipeline, spelled out with the owning `forward` and an
+        // explicit `.clone()` per projection.
+        let reference = {
+            let query_states =
+                attention.query.forward(hidden_states.clone()).expect("query projection");
+            let key_states = attention.key.forward(hidden_states.clone()).expect("key projection");
+            let value_states =
+                attention.value.forward(hidden_states.clone()).expect("value projection");
+            let query_states = attention.split_heads(&query_states).expect("split query heads");
+            let key_states = attention.split_heads(&key_states).expect("split key heads");
+            let value_states = attention.split_heads(&value_states).expect("split value heads");
+            let context = attention
+                .paged_attention_forward_masked(
+                    &query_states,
+                    &key_states,
+                    &value_states,
+                    2,
+                    0,
+                    None,
+                )
+                .expect("attention");
+            let context = attention.merge_heads(&context).expect("merge heads");
+            attention.out_proj.forward(context).expect("output projection")
+        };
+
+        assert_eq!(
+            max_abs_difference(
+                &produced.to_vec_f32().expect("f32"),
+                &reference.to_vec_f32().expect("f32")
+            ),
+            0.0,
+            "borrowing hidden_states for query/key must be bit-identical to cloning it"
+        );
+
+        // The caller still owns an untouched tensor.
+        assert_eq!(
+            hidden_states.to_vec_f32().expect("f32"),
+            original_hidden_states,
+            "forward_ref must not mutate the caller's tensor"
+        );
     }
 
     #[test]

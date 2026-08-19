@@ -383,13 +383,14 @@ pub struct MemoryPool {
 unsafe impl Send for MemoryPool {}
 unsafe impl Sync for MemoryPool {}
 
+/// Memory pool allocation statistics, returned by [`MemoryPool::get_stats`].
 #[derive(Debug, Default, Clone)]
-struct AllocationStats {
-    total_allocations: u64,
-    total_deallocations: u64,
-    peak_memory_usage: usize,
-    current_memory_usage: usize,
-    allocation_failures: u64,
+pub struct AllocationStats {
+    pub total_allocations: u64,
+    pub total_deallocations: u64,
+    pub peak_memory_usage: usize,
+    pub current_memory_usage: usize,
+    pub allocation_failures: u64,
 }
 
 impl MemoryPool {

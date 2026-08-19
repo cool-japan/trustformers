@@ -4,12 +4,11 @@
 //! 2000-line limit. Everything here operates on the same `AutoModel` type; as a
 //! child module it can reach the parent's private fields.
 
-use super::{AutoConfig, AutoModel, AutoModelType};
+use super::{AutoModel, AutoModelType};
 use crate::core::traits::{Config, Model, TokenizedInput};
 use crate::error::{Result, TrustformersError};
 use std::borrow::Cow;
 use trustformers_core::tensor::Tensor;
-use trustformers_core::traits::Tokenizer;
 use trustformers_models::common_patterns::{GenerationConfig, GenerativeModel};
 
 impl AutoModel {
@@ -71,9 +70,32 @@ impl AutoModel {
         prompt: &str,
         config: &GenerationConfig,
     ) -> Result<GeneratedSequence> {
+        // Tokenizer validity is checked unconditionally (and first) so an
+        // absent tokenizer is always the reported cause, regardless of which
+        // generative-model features this build has compiled in.
         let input_ids = self.encode_prompt(prompt)?;
         let prompt_len = input_ids.len();
 
+        #[cfg(not(any(
+            feature = "gpt2",
+            feature = "gpt_neo",
+            feature = "gpt_j",
+            feature = "t5"
+        )))]
+        {
+            Err(Self::no_generative_backend_error(
+                self.architecture_name(),
+                config,
+                format!("{prompt_len}-token prompt"),
+            ))
+        }
+
+        #[cfg(any(
+            feature = "gpt2",
+            feature = "gpt_neo",
+            feature = "gpt_j",
+            feature = "t5"
+        ))]
         match &self.model_type {
             #[cfg(feature = "gpt2")]
             AutoModelType::Gpt2LMHead(model) => {
@@ -192,6 +214,36 @@ impl AutoModel {
         )
     }
 
+    /// Error returned by the generation entry points when this build has
+    /// none of the `gpt2`/`gpt_neo`/`gpt_j`/`t5` features compiled in, so no
+    /// architecture-specific branch in the dispatch below could ever run —
+    /// distinct from [`Self::not_generative_error`], which fires when
+    /// generative features *are* compiled in but this particular checkpoint
+    /// isn't one of the generative architectures.
+    #[cfg(not(any(
+        feature = "gpt2",
+        feature = "gpt_neo",
+        feature = "gpt_j",
+        feature = "t5"
+    )))]
+    fn no_generative_backend_error(
+        architecture: &str,
+        config: &GenerationConfig,
+        context: impl std::fmt::Display,
+    ) -> TrustformersError {
+        TrustformersError::feature_unavailable(
+            format!(
+                "no generative model feature (gpt2/gpt_neo/gpt_j/t5) is compiled into this \
+                 build, so architecture `{architecture}` cannot generate up to {} new tokens \
+                 ({context}). Checkpoints with a language-modelling head (GPT-2/GPT-Neo/GPT-J \
+                 *LMHead, T5 ForConditionalGeneration) need the matching feature enabled; other \
+                 architectures cannot generate regardless of features.",
+                config.max_new_tokens.max(1),
+            ),
+            "text-generation",
+        )
+    }
+
     /// Produce exactly one more token given the tokens decoded so far.
     ///
     /// `prompt_ids` are the encoder/prompt tokens; `decoded` are the tokens the
@@ -202,6 +254,37 @@ impl AutoModel {
         decoded: &[u32],
         config: &GenerationConfig,
     ) -> Result<Option<u32>> {
+        // In practice this is unreachable without a generative feature: the
+        // only caller (`AutoModelTokenStream::new`) refuses to construct a
+        // stream unless `is_generative()` is true, which is unconditionally
+        // false in that configuration. Still handled explicitly (rather than
+        // cfg'd away) because `Iterator::next` calls this method
+        // unconditionally, so it must exist and type-check in every feature
+        // configuration.
+        #[cfg(not(any(
+            feature = "gpt2",
+            feature = "gpt_neo",
+            feature = "gpt_j",
+            feature = "t5"
+        )))]
+        {
+            Err(Self::no_generative_backend_error(
+                self.architecture_name(),
+                config,
+                format!(
+                    "{} prompt + {} decoded tokens",
+                    prompt_ids.len(),
+                    decoded.len()
+                ),
+            ))
+        }
+
+        #[cfg(any(
+            feature = "gpt2",
+            feature = "gpt_neo",
+            feature = "gpt_j",
+            feature = "t5"
+        ))]
         match &self.model_type {
             #[cfg(feature = "gpt2")]
             AutoModelType::Gpt2LMHead(model) => {
@@ -450,6 +533,9 @@ pub struct GeneratedSequence {
 }
 
 impl GeneratedSequence {
+    /// Only called from the decoder-only (GPT-2 / GPT-Neo / GPT-J) arms of
+    /// `generate_token_ids_with_backend`; T5 builds `Self` directly instead.
+    #[cfg(any(feature = "gpt2", feature = "gpt_neo", feature = "gpt_j"))]
     fn decoder_only(sequence: Vec<u32>, prompt_len: usize, config: &GenerationConfig) -> Self {
         let finished_by_eos = match config.eos_token_id {
             Some(eos) => sequence.last().is_some_and(|&last| last == eos),

@@ -24,14 +24,15 @@
 //! the public `HubUploader` API stays fully synchronous.
 
 use super::{HubError, RepoType};
+#[cfg(feature = "hub")]
 use serde::Deserialize;
-use std::time::Duration;
 
 /// Files at or above this size need real Git-LFS object storage, which this
 /// module does not implement (see the module doc comment).
 pub(super) const LFS_INLINE_THRESHOLD_BYTES: u64 = 10 * 1024 * 1024;
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(feature = "hub")]
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Run `future` to completion on a fresh, single-threaded Tokio runtime.
 ///
@@ -107,6 +108,7 @@ pub(super) async fn repo_exists(
     Err(feature_unavailable())
 }
 
+#[cfg(feature = "hub")]
 #[derive(Debug, Deserialize)]
 struct RepoUrlResponse {
     url: Option<String>,
@@ -188,6 +190,7 @@ pub(super) struct CommitOutcome {
     pub commit_oid: Option<String>,
 }
 
+#[cfg(feature = "hub")]
 #[derive(Debug, Deserialize, Default)]
 struct CommitResponse {
     #[serde(rename = "commitUrl")]
@@ -299,13 +302,27 @@ pub(super) async fn commit(
     _repo_id: &str,
     _revision: &str,
     _commit_message: &str,
-    _files: &[CommitFile],
+    files: &[CommitFile],
     _deletions: &[String],
     _token: &str,
 ) -> std::result::Result<CommitOutcome, HubError> {
-    Err(feature_unavailable())
+    // Report what was actually prepared (real paths/sizes, computed before
+    // this feature-gate check) rather than a generic message, even though
+    // nothing gets sent without the `hub` feature.
+    let total_bytes: u64 = files.iter().map(|f| f.content.len() as u64).sum();
+    let paths: Vec<&str> = files.iter().map(|f| f.repo_path.as_str()).collect();
+    Err(HubError::FeatureUnavailable {
+        message: format!(
+            "Hub networking is disabled: rebuild with the `hub` feature (e.g. `--features \
+             hub`) to upload to the Hugging Face Hub ({} file(s) totaling {total_bytes} bytes \
+             were prepared but not sent: {})",
+            files.len(),
+            paths.join(", "),
+        ),
+    })
 }
 
+#[cfg(not(feature = "hub"))]
 fn feature_unavailable() -> HubError {
     HubError::FeatureUnavailable {
         message: "Hub networking is disabled: rebuild with the `hub` feature (e.g. `--features \
@@ -317,6 +334,7 @@ fn feature_unavailable() -> HubError {
 /// Split `"owner/name"` into `(Some("owner"), "name")`, or `"name"` into
 /// `(None, "name")` — matching how the real Hub `/api/repos/create` endpoint
 /// distinguishes an explicit namespace from "the token owner's namespace".
+#[cfg(any(test, feature = "hub"))]
 fn split_repo_id(repo_id: &str) -> (Option<&str>, &str) {
     match repo_id.split_once('/') {
         Some((namespace, name)) => (Some(namespace), name),
@@ -328,6 +346,7 @@ fn split_repo_id(repo_id: &str) -> (Option<&str>, &str) {
 /// ref/revision name). Deliberately not `url::form_urlencoded`, which encodes
 /// space as `+` — correct for a query string or form body, wrong in a path,
 /// where a literal `+` would not be decoded back to space by the server.
+#[cfg(any(test, feature = "hub"))]
 fn urlencode_ref(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {

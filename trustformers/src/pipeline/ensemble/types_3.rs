@@ -7,7 +7,7 @@ use crate::pipeline::{Pipeline, PipelineOptions, PipelineOutput};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use super::functions::{GatingNetwork, Router};
+use super::functions::Router;
 use super::types::{BootstrapStats, KeywordRouter, ModelWeight};
 use super::types_4::{
     EnsembleConfig, EnsembleModel, EnsemblePrediction, EnsembleStrategy, InputCharacteristics,
@@ -18,7 +18,10 @@ pub struct EnsemblePipeline {
     pub(super) config: EnsembleConfig,
     pub(super) models: Vec<EnsembleModel>,
     meta_learner: Option<Box<dyn Pipeline<Input = String, Output = PipelineOutput>>>,
-    calibration_data: Vec<(String, PipelineOutput)>,
+    /// Rolling log of (model_id, output) pairs from recent `__call__`
+    /// invocations, for later confidence-calibration analysis. See
+    /// `record_calibration_samples` / `calibration_samples`.
+    calibration_data: Arc<Mutex<Vec<(String, PipelineOutput)>>>,
     performance_tracker: HashMap<String, Vec<f32>>,
     /// Ordered list of model IDs (mirrors self.models[i].model_id), used by the router
     model_ids: Vec<String>,
@@ -33,7 +36,7 @@ impl EnsemblePipeline {
             config,
             models: Vec::new(),
             meta_learner: None,
-            calibration_data: Vec::new(),
+            calibration_data: Arc::new(Mutex::new(Vec::new())),
             performance_tracker: HashMap::new(),
             model_ids: Vec::new(),
             load_balance_stats: Arc::new(Mutex::new(None)),
@@ -47,6 +50,29 @@ impl EnsemblePipeline {
     /// Returns the bootstrap resampling stats from the most recent Bagging call (None otherwise)
     pub fn last_bagging_stats(&self) -> Option<BootstrapStats> {
         self.bagging_stats.lock().ok().and_then(|g| g.clone())
+    }
+    /// Returns the rolling log of (model_id, output) pairs recorded across
+    /// recent `__call__` invocations, oldest first, bounded to the most
+    /// recent `MAX_CALIBRATION_SAMPLES` entries. Empty until the pipeline
+    /// has been called at least once.
+    pub fn calibration_samples(&self) -> Vec<(String, PipelineOutput)> {
+        self.calibration_data.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+    /// Appends this call's (model_id, output) pairs to the rolling
+    /// calibration sample log when `config.enable_calibration` is set,
+    /// evicting the oldest entries once it exceeds `MAX_CALIBRATION_SAMPLES`.
+    pub(super) fn record_calibration_samples(&self, predictions: &[(String, PipelineOutput, u64)]) {
+        const MAX_CALIBRATION_SAMPLES: usize = 1000;
+        if !self.config.enable_calibration {
+            return;
+        }
+        if let Ok(mut samples) = self.calibration_data.lock() {
+            samples.extend(predictions.iter().map(|(id, output, _)| (id.clone(), output.clone())));
+            let len = samples.len();
+            if len > MAX_CALIBRATION_SAMPLES {
+                samples.drain(0..len - MAX_CALIBRATION_SAMPLES);
+            }
+        }
     }
     pub fn add_model(
         &mut self,
@@ -146,24 +172,33 @@ impl EnsemblePipeline {
             Ok(predictions)
         }
     }
-    fn calculate_dynamic_weights(
-        &mut self,
+    /// Computes per-model ensemble weights for `EnsembleStrategy::DynamicWeighting`,
+    /// combining this call's live prediction confidence with each model's
+    /// tracked `accuracy()` and `average_performance()` history via
+    /// `ModelWeight::total_weight()`. Read-only (`&self`, required by the
+    /// `Pipeline::__call__(&self, ...)` contract this feeds into), so unlike
+    /// a stateful weight tracker it recomputes each model's confidence/
+    /// accuracy/dynamic components fresh per call rather than persisting
+    /// them back onto `EnsembleModel::weight`.
+    pub(super) fn calculate_dynamic_weights(
+        &self,
         predictions: &[(String, PipelineOutput, u64)],
     ) -> Vec<f32> {
         let mut weights = Vec::new();
         for (model_id, output, _) in predictions {
             let confidence = self.extract_confidence(output);
-            if let Some(model) = self.models.iter_mut().find(|m| m.model_id == *model_id) {
-                model.weight.confidence_weight = confidence;
-                model.weight.accuracy_weight = model.accuracy();
-                let recent_performance = model.average_performance();
-                model.weight.dynamic_weight = (recent_performance + confidence) / 2.0;
-            }
             let model_weight = self
                 .models
                 .iter()
                 .find(|m| m.model_id == *model_id)
-                .map(|m| m.weight.total_weight())
+                .map(|m| {
+                    let recent_performance = m.average_performance();
+                    let mut w = m.weight.clone();
+                    w.confidence_weight = confidence;
+                    w.accuracy_weight = m.accuracy();
+                    w.dynamic_weight = (recent_performance + confidence) / 2.0;
+                    w.total_weight()
+                })
                 .unwrap_or(1.0);
             weights.push(model_weight);
         }

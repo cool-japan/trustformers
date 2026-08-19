@@ -45,16 +45,40 @@
 //! default retained-references mode), so dropping the last CPU-side reference
 //! while a dispatch is still in flight is safe.
 //!
-//! ## Known limitation (cross-crate follow-up)
+//! ## Known limitation (cross-crate follow-up, evaluated and deliberately deferred)
 //!
 //! Because `Live` entries are never auto-reclaimed, a buffer whose id the caller
 //! simply forgets still occupies the cache until `clear_buffer_cache`. The composite
 //! ops in this module release their own intermediates, so the hot attention path no
-//! longer accumulates; the remaining case is `Linear::forward`, whose output id is
-//! stored in a `Tensor::Metal`. Closing that needs `MetalTensorData` to hold a
-//! [`MetalBufferHandle`] instead of a `BufferId` - the same change
-//! `gpu_ops::cuda::BufferHandle` already got in `CudaTensorData` - which touches
-//! `tensor/mod.rs` and `layers/linear.rs`.
+//! longer accumulates; the remaining case is every op that stores its GPU result id
+//! straight into a `Tensor::Metal`. Closing that needs [`MetalTensorData`]
+//! (`tensor/mod.rs`) to hold a [`MetalBufferHandle`] instead of a bare `BufferId` -
+//! the same change `gpu_ops::cuda::BufferHandle` already got in `CudaTensorData` -
+//! obtained through
+//! [`MetalBackend::retain_buffer`](crate::gpu_ops::metal::MetalBackend::retain_buffer),
+//! which already exists and is ready to be called; only the adoption is missing.
+//!
+//! That adoption was scoped out of this pass: `MetalTensorData::buffer_id` is a public
+//! field, constructed with a plain `BufferId` at every GPU-result call site, so the
+//! field-type change is all-or-nothing across every file that builds or reads one -
+//! there is no incremental path that leaves the rest compiling. As of this writing that
+//! is, beyond this module's own `metalbackend_lifecycle_group.rs` and `types.rs`:
+//!
+//! * `tensor/mod.rs` - the `MetalTensorData` struct definition itself (`pub buffer_id`
+//!   field and its `Clone` impl).
+//! * `layers/linear.rs` - `Linear::forward`'s GPU-to-GPU matmul and bias-add results
+//!   (the case this note originally called out).
+//! * `layers/layernorm.rs` - three separate `layernorm_gpu_to_gpu` result sites.
+//! * `ops/activations.rs` and `tensor/activations.rs` - `gelu_gpu_to_gpu` results.
+//! * `tensor/math_ops/arithmetic.rs` - `add_gpu_to_gpu` results.
+//! * `tensor/utils.rs` - `to_device_enum`'s persistent-buffer construction and the
+//!   `Hash` impl that reads `buffer_id`.
+//! * `generation/core.rs` - a `download_buffer_to_vec` call keyed on `buffer_id`.
+//!
+//! Every one of those needs its `MetalTensorData { buffer_id: raw_id, .. }` literal
+//! turned into `retain_buffer(&raw_id)?` plus a `.buffer.id()`-style accessor at every
+//! read, mirroring `CudaTensorData::buffer_id()`. None of that work can land from
+//! inside this module alone.
 
 #[allow(unused_imports)]
 use super::common::*;

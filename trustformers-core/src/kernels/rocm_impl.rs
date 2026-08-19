@@ -9,7 +9,6 @@
 //! Note: Uses dynamic loading via libloading to avoid requiring ROCm at compile time.
 
 #![allow(dead_code)] // FFI bindings and backend implementation with reserved features
-#![allow(unused_variables)] // Backend implementation with reserved parameters
 
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;

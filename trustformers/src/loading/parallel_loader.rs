@@ -28,7 +28,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use trustformers_core::traits::WeightReader as _;
 use trustformers_core::utils::weight_loading::PyTorchReader;
 use trustformers_models::{GGUFLoader, WeightLoader as _};

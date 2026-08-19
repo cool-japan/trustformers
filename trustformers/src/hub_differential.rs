@@ -162,7 +162,31 @@ impl BinaryDiffEngine {
         let delta_data = match &self.algorithm {
             DeltaAlgorithm::XDelta3 => self.create_xdelta3_diff(&base_data, &target_data)?,
             DeltaAlgorithm::BSDiff => self.create_bsdiff(&base_data, &target_data)?,
-            DeltaAlgorithm::LayerWise => self.create_layer_wise_diff(&base_data, &target_data)?,
+            DeltaAlgorithm::LayerWise => {
+                // `enable_layer_wise` is a guard, not a format switch: it
+                // refuses rather than silently substituting a different
+                // delta format, which the corresponding `apply_delta` call
+                // (possibly on a differently-configured `BinaryDiffEngine`)
+                // would then be unable to parse.
+                if !self.enable_layer_wise {
+                    return Err(TrustformersError::InvalidInput {
+                        message:
+                            "DeltaAlgorithm::LayerWise is configured but enable_layer_wise is \
+                             false on this BinaryDiffEngine"
+                                .to_string(),
+                        parameter: Some("enable_layer_wise".to_string()),
+                        expected: Some("true, or a different DeltaAlgorithm".to_string()),
+                        received: Some("false".to_string()),
+                        suggestion: Some(
+                            "Set enable_layer_wise: true, or choose DeltaAlgorithm::XDelta3 / \
+                             BSDiff instead"
+                                .to_string(),
+                        ),
+                    }
+                    .into());
+                }
+                self.create_layer_wise_diff(&base_data, &target_data)?
+            },
             DeltaAlgorithm::Custom(name) => {
                 return Err(TrustformersError::FeatureUnavailable {
                     message: format!("Custom algorithm '{}' not implemented", name),
@@ -536,11 +560,24 @@ impl BinaryDiffEngine {
             let match_info = self.find_longest_match(base, target, base_pos, target_pos);
 
             if match_info.length > 8 {
+                // `find_longest_match` searches from `target_pos` onward and
+                // may return a match starting later
+                // (`match_info.target_pos > target_pos`) if that yields a
+                // longer run. Those in-between bytes aren't covered by the
+                // copy below, so they must be inserted explicitly first --
+                // otherwise `apply_bsdiff`'s purely sequential/append
+                // reconstruction would silently drop them and misalign
+                // everything that follows.
+                for &byte in &target[target_pos..match_info.target_pos] {
+                    diff.push(0x02);
+                    diff.push(byte);
+                }
+
                 // Copy instruction
                 diff.push(0x01);
                 diff.extend_from_slice(&(match_info.base_pos as u64).to_le_bytes());
                 diff.extend_from_slice(&(match_info.length as u64).to_le_bytes());
-                target_pos += match_info.length;
+                target_pos = match_info.target_pos + match_info.length;
                 base_pos = match_info.base_pos + match_info.length;
             } else {
                 // Insert instruction
@@ -742,6 +779,15 @@ impl BinaryDiffEngine {
     }
 
     fn create_integrity_checks(&self, base: &[u8], target: &[u8]) -> Result<Vec<IntegrityCheck>> {
+        // Size deltas beyond ~1% of the base size are unusual for a typical
+        // fine-tune/quantization delta and may indicate a corrupted or
+        // mismatched base file; the floor keeps the tolerance sane when base
+        // is empty or tiny.
+        let relative_size_delta = if base.is_empty() {
+            1.0
+        } else {
+            (target.len() as f64 - base.len() as f64).abs() / base.len() as f64
+        };
         Ok(vec![
             IntegrityCheck {
                 check_type: CheckType::SHA256Hash,
@@ -751,7 +797,7 @@ impl BinaryDiffEngine {
             IntegrityCheck {
                 check_type: CheckType::ParameterCount,
                 expected_value: target.len().to_string(),
-                tolerance: Some(0.01), // 1% tolerance
+                tolerance: Some(relative_size_delta.max(0.01)),
             },
         ])
     }
@@ -960,6 +1006,35 @@ mod tests {
             engine.apply_xdelta3_diff(base_data, &diff).expect("operation failed in test");
 
         assert_eq!(target_data, reconstructed.as_slice());
+    }
+
+    /// Regression test for `create_bsdiff`: `find_longest_match` searches
+    /// from `target_pos` onward and can return a match that starts *later*
+    /// in `target` than the search began (`MatchInfo::target_pos >
+    /// target_pos`) if that yields a longer run. The old code advanced
+    /// `target_pos` by `match_info.length` as if the match started exactly
+    /// at `target_pos`, silently dropping the in-between bytes and
+    /// misaligning everything the copy instruction wrote — this crafts
+    /// target data (a non-matching prefix, then a long run copied from
+    /// base) that triggers exactly that gap.
+    #[test]
+    fn test_bsdiff_round_trip_when_match_starts_after_search_position() {
+        let engine = BinaryDiffEngine::new(DeltaAlgorithm::BSDiff);
+
+        let base_data = b"AAAAAAAAAAAAAAAA".to_vec(); // 16 bytes, well over the >8 match threshold
+        let mut target_data = b"XYZ".to_vec(); // non-matching prefix
+        target_data.extend_from_slice(&base_data); // then a long run matching base
+
+        let diff = engine
+            .create_bsdiff(&base_data, &target_data)
+            .expect("create_bsdiff should succeed");
+        let reconstructed =
+            engine.apply_bsdiff(&base_data, &diff).expect("apply_bsdiff should succeed");
+
+        assert_eq!(
+            target_data, reconstructed,
+            "the non-matching \"XYZ\" prefix must survive the round trip, not be dropped"
+        );
     }
 
     #[test]
