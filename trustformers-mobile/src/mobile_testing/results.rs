@@ -49,10 +49,16 @@ pub struct BenchmarkResult {
     pub throughput_fps: f32,
     /// Memory usage during inference in MB
     pub memory_usage_mb: usize,
-    /// Accuracy metrics
-    pub accuracy_metrics: AccuracyMetrics,
-    /// Power consumption statistics
-    pub power_stats: PowerConsumptionStats,
+    /// Accuracy metrics for this configuration.
+    ///
+    /// `None` unless the benchmark was run against a labelled evaluation set:
+    /// a latency benchmark measures no accuracy, so there is nothing to report.
+    pub accuracy_metrics: Option<AccuracyMetrics>,
+    /// Per-component power consumption during the benchmark.
+    ///
+    /// `None` unless a power source that breaks draw down by component was
+    /// available on the running device.
+    pub power_stats: Option<PowerConsumptionStats>,
 }
 
 /// Battery test result
@@ -116,12 +122,17 @@ pub struct MemoryTestResult {
     pub avg_memory_usage_mb: usize,
     /// Memory leaks detected
     pub memory_leaks_detected: usize,
-    /// Memory usage statistics
-    pub memory_stats: MemoryUsageStats,
-    /// Garbage collection statistics (Android only)
+    /// Allocator-level statistics.
+    ///
+    /// `None` unless the running platform exposes allocator introspection
+    /// (fragmentation, allocation counts); the Rust global allocator does not.
+    pub memory_stats: Option<MemoryUsageStats>,
+    /// Garbage collection statistics (Android only). `None` off Android, and
+    /// `None` on Android until the ART GC counters are actually queried.
     pub gc_stats: Option<HashMap<String, f32>>,
-    /// Memory allocation success rate
-    pub allocation_success_rate: f32,
+    /// Fraction of attempted allocations that succeeded during the test, or
+    /// `None` when the test performed no tracked allocations.
+    pub allocation_success_rate: Option<f32>,
 }
 
 /// Stress test types
@@ -312,12 +323,15 @@ pub struct AggregatedMetrics {
     pub avg_latency_ms: f32,
     /// Standard deviation of latency
     pub latency_std_dev: f32,
-    /// Average throughput
-    pub avg_throughput_fps: f32,
-    /// Average memory usage
-    pub avg_memory_usage_mb: f32,
-    /// Average power consumption
-    pub avg_power_consumption_mw: f32,
+    /// Average throughput across the benchmark results that carried one, or
+    /// `None` when no device reported a benchmark.
+    pub avg_throughput_fps: Option<f32>,
+    /// Average memory usage across the benchmark results that carried one, or
+    /// `None` when no device reported a benchmark.
+    pub avg_memory_usage_mb: Option<f32>,
+    /// Average power draw across the battery results that carried one, or
+    /// `None` when no device measured power.
+    pub avg_power_consumption_mw: Option<f32>,
     /// Statistical summary
     pub statistical_summary: StatisticalSummary,
 }
@@ -398,32 +412,56 @@ pub struct ExecutionSummary {
 }
 
 impl BenchmarkResult {
-    /// Calculate performance score based on multiple factors
+    /// Composite performance score in `0.0..=1.0`, weighted over the
+    /// components this result actually carries.
+    ///
+    /// Latency, throughput and memory are always measured. Accuracy and power
+    /// efficiency are folded in only when [`Self::accuracy_metrics`] /
+    /// [`Self::power_stats`] are present; when they are absent their weight is
+    /// dropped and the remaining weights are renormalised, so a missing
+    /// measurement never scores as a zero (which would read as "terrible") or
+    /// as a full mark (which would read as "perfect").
     pub fn performance_score(&self) -> f32 {
-        let latency_score = 1.0 - (self.avg_latency_ms / 1000.0).min(1.0);
-        let throughput_score = (self.throughput_fps / 100.0).min(1.0);
-        let memory_score = 1.0 - (self.memory_usage_mb as f32 / 1024.0).min(1.0);
-        let accuracy_score = self.accuracy_metrics.top1_accuracy / 100.0;
-        let power_score = self.power_stats.efficiency_score;
+        let mut weighted_sum = 0.0f32;
+        let mut total_weight = 0.0f32;
+        let mut fold = |score: f32, weight: f32| {
+            weighted_sum += score.clamp(0.0, 1.0) * weight;
+            total_weight += weight;
+        };
 
-        (latency_score * 0.25
-            + throughput_score * 0.25
-            + memory_score * 0.2
-            + accuracy_score * 0.2
-            + power_score * 0.1)
-            .max(0.0)
-            .min(1.0)
+        fold(1.0 - (self.avg_latency_ms / 1000.0).min(1.0), 0.25);
+        fold((self.throughput_fps / 100.0).min(1.0), 0.25);
+        fold(1.0 - (self.memory_usage_mb as f32 / 1024.0).min(1.0), 0.2);
+        if let Some(accuracy) = self.accuracy_metrics.as_ref() {
+            fold(accuracy.top1_accuracy / 100.0, 0.2);
+        }
+        if let Some(power) = self.power_stats.as_ref() {
+            fold(power.efficiency_score, 0.1);
+        }
+
+        if total_weight > 0.0 {
+            (weighted_sum / total_weight).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 
-    /// Check if result meets target metrics
+    /// Whether this result meets the supplied targets.
+    ///
+    /// `None` when the accuracy target cannot be checked because the benchmark
+    /// carries no accuracy measurement -- an unverifiable target is neither a
+    /// pass nor a failure.
     pub fn meets_targets(
         &self,
         target_latency_ms: f32,
         target_throughput_fps: f32,
         target_accuracy: f32,
-    ) -> bool {
-        self.avg_latency_ms <= target_latency_ms
-            && self.throughput_fps >= target_throughput_fps
-            && self.accuracy_metrics.top1_accuracy >= target_accuracy
+    ) -> Option<bool> {
+        let accuracy = self.accuracy_metrics.as_ref()?;
+        Some(
+            self.avg_latency_ms <= target_latency_ms
+                && self.throughput_fps >= target_throughput_fps
+                && accuracy.top1_accuracy >= target_accuracy,
+        )
     }
 }

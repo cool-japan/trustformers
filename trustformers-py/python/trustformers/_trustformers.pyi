@@ -323,46 +323,84 @@ class AutoModelForMaskedLM:
     ) -> PreTrainedModel: ...
 
 # Pipelines
+#
+# `TextGenerationPipeline` and `TextClassificationPipeline` resolve their model
+# and tokenizer at construction, so a model without the head the task needs is a
+# TypeError from `__init__`, not a surprise at call time. Both reject keyword
+# arguments they cannot honour rather than ignoring them.
 class TextGenerationPipeline:
-    """Pipeline for text generation tasks."""
-    
+    """Text generation over a real GPT-2 language-model head."""
+
     def __init__(
         self,
-        model: PreTrainedModel,
+        model: GPT2LMHeadModel,
         tokenizer: Union[WordPieceTokenizer, BPETokenizer],
-        **kwargs: Any,
+        device: Optional[str] = None,
     ) -> None: ...
-    
+
+    # `top_k` / `top_p` default to None, not to HuggingFace's 50 / 1.0: the
+    # decoder applies one truncation strategy per step, so setting both raises.
+    # A single `str` returns List[Dict]; a list of `str` returns List[List[Dict]].
     def __call__(
         self,
-        text: str,
+        text_inputs: Union[str, List[str]],
         max_length: int = 50,
-        num_return_sequences: int = 1,
-        temperature: float = 1.0,
+        min_length: int = 0,
         do_sample: bool = True,
-        **kwargs: Any,
-    ) -> List[Dict[str, str]]: ...
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        num_return_sequences: int = 1,
+    ) -> Union[List[Dict[str, str]], List[List[Dict[str, str]]]]: ...
 
 class TextClassificationPipeline:
-    """Pipeline for text classification tasks."""
-    
+    """Sequence classification over a real BERT classification head."""
+
     def __init__(
         self,
-        model: PreTrainedModel,
+        model: BertForSequenceClassification,
         tokenizer: Union[WordPieceTokenizer, BPETokenizer],
-        **kwargs: Any,
+        device: Optional[str] = None,
     ) -> None: ...
-    
+
+    # Returns every class ranked best-first (scores are a real softmax and sum
+    # to 1); `top_k` keeps only the leading classes.
     def __call__(
         self,
-        text: str,
-        **kwargs: Any,
-    ) -> List[Dict[str, Union[str, float]]]: ...
+        text_inputs: Union[str, List[str]],
+        top_k: Optional[int] = None,
+    ) -> Union[
+        List[Dict[str, Union[str, float]]],
+        List[List[Dict[str, Union[str, float]]]],
+    ]: ...
 
+class TokenClassificationPipeline:
+    """Not available: construction always raises NotImplementedError.
+
+    `trustformers_models::bert::BertForTokenClassification` is real, but this
+    package exposes no Python wrapper for it, and HuggingFace's character-level
+    `start` / `end` keys cannot be filled because the tokenizers do not produce
+    an offset mapping yet.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+class QuestionAnsweringPipeline:
+    """Not available: construction always raises NotImplementedError.
+
+    See `TokenClassificationPipeline` for the two missing pieces.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+# `model` and `tokenizer` are model/tokenizer *objects*, not names. When either
+# is omitted it is loaded from a default checkpoint path, which must resolve
+# locally: this package has no Hugging Face Hub downloader.
 def pipeline(
     task: str,
-    model: Optional[str] = None,
-    tokenizer: Optional[str] = None,
+    model: Optional[Any] = None,
+    tokenizer: Optional[Any] = None,
+    device: Optional[str] = None,
     **kwargs: Any,
 ) -> Union[TextGenerationPipeline, TextClassificationPipeline]: ...
 

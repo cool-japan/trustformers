@@ -1,5 +1,7 @@
 # Migrating from SentencePiece to TrustformeRS
 
+> **Accuracy note (2026-08-24):** the `migration/tiktoken-migration.md` guide in this same directory was found to describe roughly 30 methods/types that don't exist on the real `TiktokenTokenizer` and was rewritten from the real source to fix it. A same-pattern grep of this file (not a full method-by-method audit) turns up about 9 hits of the same kind — API calls, config structs, or helper types below that were not individually checked against `trustformers-tokenizers/src/`. Verify any specific method name you plan to depend on against the source before relying on it; do not assume the presence of a name here means it exists in the crate.
+
 This comprehensive guide will help you migrate from Google's SentencePiece library to TrustformeRS Tokenizers while maintaining full compatibility with SentencePiece models and gaining significant performance improvements.
 
 ## Why Migrate from SentencePiece?

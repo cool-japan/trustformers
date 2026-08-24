@@ -267,9 +267,9 @@ let result = client.train_local_model(&local_examples)?;
   - Turbo Module / JSI plumbing on the Rust side
   - Fabric renderer integration points
 
-- ⚠️ **Packaging gap**: `react-native-plugin/` in this repository contains only `example/TrustformersCompleteExample.tsx` — there is no `package.json` or module source here, so `npm install trustformers-react-native` (or `@trustformers/react-native`, the name actually used by the example's imports) is **not** installable from this repo today
+- ⚠️ **Packaging gap**: `react-native-example/` in this repository contains only `TrustformersCompleteExample.tsx` (plus a README stating the same) — there is no `package.json` or module source here, so `npm install trustformers-react-native` (or `@trustformers/react-native`, the name actually used by the example's imports) is **not** installable from this repo today. Renamed from `react-native-plugin/` on 2026-08-24 so the directory name no longer reads as a publishable package.
 
-**Verified example** (from `react-native-plugin/example/TrustformersCompleteExample.tsx`):
+**Verified example** (from `react-native-example/TrustformersCompleteExample.tsx`):
 ```typescript
 import { TrustformersEngine } from '@trustformers/react-native';
 
@@ -456,6 +456,30 @@ let recommendations = battery_mgr.get_optimization_recommendations();
 
 ## Known Limitations
 
+### Resolved 2026-08-24 (mobile_performance_profiler / battery honesty audit)
+
+- `mobile_performance_profiler/` had never been audited. It now reports real measurements or explicit absence:
+  - `collector.rs`: one real `sysinfo`-backed collector replaces the `IOSCollector`/`AndroidCollector`/`GenericCollector` split, which returned three different sets of invented constants (iOS "128 MB heap / 30% CPU / 55% GPU", Android "96 MB / 35% / 60%", generic "64 MB / 25% / 20%") with no platform call behind any of them. Network metrics no longer report a fixed 1 MB sent / 45 ms / 25 Mbps reading.
+  - `MobileMetricsSnapshot`'s `memory`, `cpu`, `gpu`, `network`, `thermal` and `battery` are now `Option<..>` — **breaking field-type change**. A family with no source, or disabled by configuration, is absent; it is no longer a zeroed struct that downstream code scored as "idle and healthy".
+  - `BottleneckDetector`, `AlertManager` and `PerformanceAnalyzer` evaluate real threshold rules against real snapshots. All three previously constructed empty rule lists that nothing populated, so `detect_bottlenecks()` / `get_active_alerts()` could only ever return empty and `get_current_health()` always returned exactly 85.0 for CPU from a branch that was unreachable.
+  - The profiler now uses the real `optimization::OptimizationEngine` (rules + ranking) instead of a same-named placeholder; the engine's `LowCacheHitRate` rule reads the tracker's measured hit rate instead of comparing a constant 50.0, and suggestions report the measurement that tripped the rule instead of a predicted "% improvement" derived from a fixed 30.0 base.
+  - Deleted, all proved never compiled (no `mod` declaration anywhere — verified with a `compile_error!` probe): `mobile_performance_profiler/{core,bottleneck,realtime,profiler_split}/` (~3,900 lines). The real rule logic in `bottleneck/detector.rs` and `realtime/monitor.rs` was ported into the live components before deletion.
+  - Deleted `mobile_performance_profiler/metrics.rs` (871 lines, 25 tests): an unreferenced duplicate of `collector.rs` that re-declared `MobileMetricsCollector`, `MobileMetricsSnapshot`, `ThermalMetrics`, `BatteryMetrics` and `PlatformMetrics`, and whose every collector returned `Default::default()` or an invented iOS/Android constant.
+- `battery.rs`: real `power_supply` sysfs reads on Linux/Android, honest `None` everywhere else. `power_consumption_mw` is no longer `Some(2500.0)`/`Some(2200.0)`/`Some(1800.0)`; `estimate_time_remaining` no longer returns `Some(120)`; `get_current_battery_level` returns `Option<f32>` and no longer guesses 0.85/0.75/0.65/0.5 from charging status; `predict_consumption` extrapolates measured readings instead of a fixed 2.5 W base.
+- `mobile_testing/`: `framework.rs` no longer estimates power as `450 + random*100` mW or memory as `256 + random*256` MB (real `sysinfo` RSS now), and no longer reports a memory leak on a 10% coin flip (sustained-RSS-growth heuristic over real samples). Its local `mod rand` and `mod num_cpus` shims (the latter shadowing the real crate with a fixed 4 cores) are gone. `device_farm.rs` no longer invents AWS/Firebase device catalogues or a complete cross-device report (`success_rate: 0.95`, `avg_latency_ms: 50.0`, `best_device: "aws-iphone-14"`) for tests that never ran. `device_farm_tests.rs` had no `mod` declaration and had never been compiled; it is now wired in.
+- `inference_visualizer.rs`: attention maps render the caller's real weight tensor instead of a uniform 0.5 matrix; `inference_duration` is `None` rather than a simulated 50 ms; the invented thermal forecast ("+5 C in 60 s at 0.7 confidence") and the four fixed-strength performance trends are gone.
+- `training.rs`: LoRA `A` is scaled by `1/sqrt(fan_in)` (the reference LoRA initialization). Unscaled unit-variance init made the loss-reduction tests fail on unlucky draws.
+- `simd_analytics.rs`: three functions claimed algorithms they did not implement and were renamed to what they compute — `compute_mutual_information` → `gaussian_mutual_information` (exact only under a bivariate-Gaussian assumption), `compute_simd_isolation_scores` → `compute_simd_standardized_deviation_scores` (no isolation forest is built), `compute_simd_lof_scores` → `compute_simd_inverse_local_density` (not the LOF density *ratio*). `AnomalyScore`'s `isolation_scores`/`lof_scores` and `CrossMetricRelationship`'s `mutual_information` fields were renamed to match — **breaking field renames**.
+- `inference_visualizer.rs`: `RealTimeVisualizationMonitor::get_current_state` measures frame rate and mean render time from the buffered frames instead of reporting a fixed 30 fps / 16 ms / 0 dropped / 0.9 quality; `RenderPerformance`'s fields are now `Option` so "not observable" is distinguishable from a measured zero.
+
+### Still open in this area
+
+- `mobile_performance_profiler` has two `#[ignore]`d tests (`collector.rs`, `profiler/profiler_components.rs`) marked `FIXME: 60+ second delays (likely thread/deadlock issue)`. Both files were substantially rewritten in this pass and the suspected deadlock was not investigated; the skipped count is unchanged at 4.
+- `ProfilingSummary::battery_consumed_mah` is `sum(mW) / 1000`, which is not milliamp-hours. It is always `None` today (no battery source reaches the profiler), so nothing consumes the wrong unit, but the field name and the formula still disagree.
+- `mobile_testing/framework.rs` still constructs `MemoryUsageStats`-free results; `BenchmarkResult::accuracy_metrics`/`power_stats` and `MemoryTestResult::memory_stats`/`allocation_success_rate` are now `Option` and always `None`, because this framework evaluates no labelled data, reads no per-component power rail and has no allocator introspection. Making any of them real needs an evaluation harness and platform allocator hooks that do not exist yet.
+- `DeviceFarmManager` cannot execute anything: `run_test_on_device` reports the missing device channel. Real farm support needs an AWS Device Farm / Firebase Test Lab client (neither is a dependency) or a local ADB/`xcrun` driver.
+
+
 - Core ML Neural Engine requires iOS 16+ for latest features
 - NNAPI varies significantly across Android devices
 - Large models require quantization for mobile deployment
@@ -463,7 +487,7 @@ let recommendations = battery_mgr.get_optimization_recommendations();
 - ARKit requires iPhone XS or newer
 - Some features iOS 16+/Android 12+ only
 - ⚠️ **Updated 2026-08-18**: `advanced_security.rs` implements real post-quantum KEM/signatures (ML-KEM-768/ML-DSA-65/SLH-DSA-SHAKE-128f, FIPS 203/204/205, via `ml-kem`/`ml-dsa`/`slh-dsa`), real Paillier homomorphic encryption, and real Shamir secret sharing — not mock reference code. The remaining caveat is narrower than before: the underlying RustCrypto PQC crates state they haven't been independently audited, and the Paillier/Schnorr code's `num-bigint`-based `modpow` isn't constant-time (a local-timing-attacker concern, not a correctness one).
-- ⚠️ `react-native-plugin/` ships an example only — no installable npm package source is present in this repository
+- ⚠️ `react-native-example/` ships an example only — no installable npm package source is present in this repository
 - ⚠️ Flutter/Unity/iOS/Android sub-packages version independently at `1.0.0` and do not track the workspace `0.2.1` release
 - ⚠️ **Newly found 2026-07-09**: `tflite_nnapi_delegate.rs` is fully written (real `#[cfg(feature = "tflite-nnapi")]` gates internally) but has no `pub mod` declaration in `lib.rs` — the `tflite-nnapi` Cargo feature currently gates nothing. Not yet triaged; see [Future Enhancements](#future-enhancements).
 
@@ -540,7 +564,7 @@ Two workspace-wide tracks land in 0.2.0: **OxiCUDA GPU migration** (scirs2-core 
 - [ ] Cross-platform: Kotlin Multiplatform Mobile (KMM) module
 - [ ] Real-time collaboration
   - **Refinement needed:** protocol (WebRTC? CRDT? operational transform?), transport, use-case definition.
-- [ ] Publish `react-native-plugin` as an actual npm package (currently example-only; see Known Limitations)
+- [ ] Publish a real npm package for the React Native bridge (`react-native-example/` is example-only; see Known Limitations)
 - [x] Remove 3 inert Cargo features (ios, android, mobile-optimized) (planned 2026-07-05)
   - Goal: these features either do something or don't exist — currently they gate nothing.
   - Design: remove all 3 from [features]; change `default = ["mobile-optimized"]` to `default = []` (mandatory — Cargo hard-errors on a default pointing at a removed feature). Update example build commands and Known-Limitations/Feature-Flags sections in TODO.md/README.md.

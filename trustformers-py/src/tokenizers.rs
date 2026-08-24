@@ -6,17 +6,222 @@ use std::collections::HashMap;
 /// Owned Python reference alias (pyo3 0.28 removed the `PyObject` type alias from
 /// the crate root; it is equivalent to `Py<PyAny>`).
 type PyObject = Py<PyAny>;
-// use trustformers::hub::{download_file_from_hub, HubOptions}; // Commented out - main trustformers crate not available
 
-// Stub implementation for missing hub function
-fn download_file_from_hub(
-    _model_name: &str,
-    _filename: &str,
-    _options: Option<()>,
-) -> Result<String, Box<dyn std::error::Error>> {
-    // Return empty string as stub - tokenizers will use default vocab
-    Ok(String::new())
+/// Write `files` (relative name -> contents) into `save_directory`, creating it
+/// if needed.
+fn write_tokenizer_files(save_directory: &str, files: &[(&str, String)]) -> PyResult<()> {
+    let save_path = Path::new(save_directory);
+    std::fs::create_dir_all(save_path).map_err(|e| {
+        pyo3::exceptions::PyIOError::new_err(format!(
+            "Failed to create {save_directory}: {e}"
+        ))
+    })?;
+    for (name, contents) in files {
+        let path = save_path.join(name);
+        std::fs::write(&path, contents).map_err(|e| {
+            pyo3::exceptions::PyIOError::new_err(format!("Failed to write {}: {e}", path.display()))
+        })?;
+    }
+    Ok(())
 }
+
+/// Pretty-print a JSON value for a tokenizer asset file.
+fn tokenizer_json(value: &serde_json::Value) -> PyResult<String> {
+    serde_json::to_string_pretty(value)
+        .map_err(|e| PyValueError::new_err(format!("Failed to serialize tokenizer file: {e}")))
+}
+
+/// Locate a tokenizer asset (`vocab.txt`, `vocab.json`, `tokenizer_config.json`)
+/// belonging to a local model path.
+///
+/// This crate has no Hugging Face Hub downloader, so `model_name_or_path` must
+/// already be local: a directory holding the asset, or a file (e.g. a
+/// `config.json` or a checkpoint) sitting next to it. Returns `None` when the
+/// asset is simply not there.
+///
+/// This replaces a `download_file_from_hub` stub that unconditionally returned
+/// `Ok("")` -- the empty *path*, not an empty file. Every caller then did
+/// `std::fs::read_to_string("")`, so `WordPieceTokenizer.from_pretrained` could
+/// only ever fail, with "Failed to read vocab.txt: No such file or directory",
+/// no matter how complete the local checkpoint directory was.
+fn find_local_tokenizer_file(model_name_or_path: &str, filename: &str) -> Option<PathBuf> {
+    let path = Path::new(model_name_or_path);
+    let candidate = if path.is_dir() {
+        path.join(filename)
+    } else {
+        path.parent()?.join(filename)
+    };
+    candidate.is_file().then_some(candidate)
+}
+
+/// Parse a WordPiece `vocab.txt`: one token per line, the id is the line index.
+///
+/// Blank lines still consume an id, exactly as HuggingFace's reader does --
+/// skipping them would shift every subsequent token's id and silently
+/// mis-tokenize the whole vocabulary.
+fn parse_vocab_txt(content: &str) -> HashMap<String, u32> {
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let token = line.trim_end_matches(['\r', '\n']);
+            (!token.is_empty()).then(|| (token.to_string(), index as u32))
+        })
+        .collect()
+}
+
+/// Parse a `vocab.json` mapping of token -> id.
+///
+/// # Errors
+///
+/// Fails when the document is not JSON, is not an object, or holds an entry
+/// whose value is not a vocabulary index -- all of which the previous
+/// implementation dropped silently via `filter_map` / `unwrap_or_default`,
+/// yielding a partial vocabulary that tokenizes to `[UNK]` without saying why.
+fn parse_vocab_json(content: &str) -> Result<HashMap<String, u32>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(content).map_err(|e| format!("vocab.json is not valid JSON: {e}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "vocab.json must be a JSON object mapping tokens to ids".to_string())?;
+
+    let mut vocab = HashMap::with_capacity(object.len());
+    for (token, id) in object {
+        let id = id
+            .as_u64()
+            .and_then(|id| u32::try_from(id).ok())
+            .ok_or_else(|| format!("vocab.json entry '{token}' has a non-index value: {id}"))?;
+        vocab.insert(token.clone(), id);
+    }
+    Ok(vocab)
+}
+
+/// The special-token names a `tokenizer_config.json` may override, with the
+/// WordPiece defaults used when it does not.
+fn special_tokens_from_config(config: Option<&serde_json::Value>) -> SpecialTokens {
+    let read = |key: &str, fallback: &str| -> String {
+        config
+            .and_then(|config| config.get(key))
+            .and_then(|value| value.as_str())
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    SpecialTokens {
+        pad: read("pad_token", "[PAD]"),
+        unk: read("unk_token", "[UNK]"),
+        cls: read("cls_token", "[CLS]"),
+        sep: read("sep_token", "[SEP]"),
+        mask: read("mask_token", "[MASK]"),
+    }
+}
+
+/// Parse a BPE `merges.txt`: one space-separated symbol pair per line, in
+/// merge-priority order.
+///
+/// The leading `#version:` comment HuggingFace writes is skipped; every other
+/// line must be exactly two symbols, because merge *order* is the whole
+/// content of the file -- silently dropping a malformed line would shift the
+/// priority of every merge after it and change how the vocabulary tokenizes.
+///
+/// # Errors
+///
+/// Fails on any non-comment line that does not hold exactly two symbols.
+fn parse_merges_txt(content: &str) -> Result<Vec<(String, String)>, String> {
+    let mut merges = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() || line.starts_with("#version:") {
+            continue;
+        }
+        let mut symbols = line.split(' ');
+        match (symbols.next(), symbols.next(), symbols.next()) {
+            (Some(left), Some(right), None) if !left.is_empty() && !right.is_empty() => {
+                merges.push((left.to_string(), right.to_string()));
+            },
+            _ => {
+                return Err(format!(
+                    "merges.txt line {} is not a pair of symbols: {line:?}",
+                    index + 1
+                ))
+            },
+        }
+    }
+    Ok(merges)
+}
+
+/// A token -> id vocabulary rendered as a `vocab.txt` body.
+///
+/// Ids are line numbers in this format, so an id with no token is written as a
+/// blank line to keep every later token on its own id -- which is exactly what
+/// [`parse_vocab_txt`] reads back, making the pair an exact round trip.
+///
+/// # Errors
+///
+/// Fails on an empty vocabulary, and on two tokens claiming the same id: the
+/// format has one line per id, so one of them would have to be dropped
+/// silently.
+fn vocab_txt_body(vocab: &HashMap<String, u32>) -> Result<String, String> {
+    if vocab.is_empty() {
+        return Err("the tokenizer has an empty vocabulary".to_string());
+    }
+    let highest = vocab.values().copied().max().unwrap_or(0);
+    let slots = usize::try_from(highest)
+        .map_err(|_| format!("vocabulary id {highest} does not fit in this platform's usize"))?
+        + 1;
+
+    let mut by_id: Vec<Option<&str>> = vec![None; slots];
+    for (token, &id) in vocab {
+        let index = id as usize;
+        if let Some(existing) = by_id[index] {
+            return Err(format!(
+                "tokens {existing:?} and {token:?} both claim id {id}; vocab.txt has one line per \
+                 id, so one of them would be lost"
+            ));
+        }
+        by_id[index] = Some(token);
+    }
+
+    let mut body = String::new();
+    for token in by_id {
+        body.push_str(token.unwrap_or(""));
+        body.push('\n');
+    }
+    Ok(body)
+}
+
+/// Serialise a merge table back to the `merges.txt` format, header included.
+fn merges_txt_body(merges: &[(String, String)]) -> String {
+    let mut body = String::from("#version: 0.2\n");
+    for (left, right) in merges {
+        body.push_str(left);
+        body.push(' ');
+        body.push_str(right);
+        body.push('\n');
+    }
+    body
+}
+
+/// The `special_tokens_map.json` body for a set of special tokens.
+fn special_tokens_map_json(special: &SpecialTokens) -> serde_json::Value {
+    serde_json::json!({
+        "pad_token": special.pad,
+        "unk_token": special.unk,
+        "cls_token": special.cls,
+        "sep_token": special.sep,
+        "mask_token": special.mask,
+    })
+}
+
+/// The five special tokens the Python tokenizer classes expose.
+struct SpecialTokens {
+    pad: String,
+    unk: String,
+    cls: String,
+    sep: String,
+    mask: String,
+}
+
+use std::path::{Path, PathBuf};
 
 use trustformers_core::traits::Tokenizer;
 use trustformers_tokenizers::{bpe::BPETokenizer, wordpiece::WordPieceTokenizer};
@@ -38,79 +243,30 @@ pub struct PyPreTrainedTokenizer {
 
 #[pymethods]
 impl PyPreTrainedTokenizer {
-    /// Save tokenizer to directory
+    /// Save tokenizer to directory.
+    ///
+    /// `PreTrainedTokenizer` itself holds only the five special-token names and
+    /// their ids, never a vocabulary -- every concrete tokenizer class
+    /// (`WordPieceTokenizer`, `BPETokenizer`) overrides this with an
+    /// implementation that also exports the vocabulary (and, for BPE, the merge
+    /// table). Reaching this base implementation means there is no vocabulary to
+    /// write, so it refuses instead of producing a directory that *looks* like a
+    /// saved tokenizer.
+    ///
+    /// The previous implementation wrote a `tokenizer_config.json` containing
+    /// `"tokenizer_class": "PreTrainedTokenizer"` and a hardcoded
+    /// `"vocab_size": 30522` (BERT's, whatever the actual tokenizer was) plus a
+    /// `special_tokens_map.json`, and stopped there -- a comment noted that
+    /// `vocab.txt` / `merges.txt` were skipped as "a basic implementation for
+    /// demonstration purposes". The result loaded back as an error at best and
+    /// as a different tokenizer at worst.
     pub fn save_pretrained(&self, save_directory: &str) -> PyResult<()> {
-        use std::fs;
-        use std::path::Path;
-
-        // Create directory if it doesn't exist
-        let save_path = Path::new(save_directory);
-        if !save_path.exists() {
-            fs::create_dir_all(save_path).map_err(|e| {
-                pyo3::exceptions::PyIOError::new_err(format!("Failed to create directory: {}", e))
-            })?;
-        }
-
-        // Save tokenizer config
-        let config = serde_json::json!({
-            "tokenizer_class": "PreTrainedTokenizer",
-            "model_max_length": 512,
-            "special_tokens_map": {
-                "pad_token": self.pad_token,
-                "unk_token": self.unk_token,
-                "cls_token": self.cls_token,
-                "sep_token": self.sep_token,
-                "mask_token": self.mask_token
-            },
-            "vocab_size": 30522  // Default BERT vocab size
-        });
-
-        let config_path = save_path.join("tokenizer_config.json");
-        fs::write(
-            &config_path,
-            serde_json::to_string_pretty(&config).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "Failed to serialize config: {}",
-                    e
-                ))
-            })?,
-        )
-        .map_err(|e| {
-            pyo3::exceptions::PyIOError::new_err(format!("Failed to write config file: {}", e))
-        })?;
-
-        // Save special tokens map
-        let special_tokens = serde_json::json!({
-            "pad_token": self.pad_token,
-            "unk_token": self.unk_token,
-            "cls_token": self.cls_token,
-            "sep_token": self.sep_token,
-            "mask_token": self.mask_token
-        });
-
-        let special_tokens_path = save_path.join("special_tokens_map.json");
-        fs::write(
-            &special_tokens_path,
-            serde_json::to_string_pretty(&special_tokens).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "Failed to serialize special tokens: {}",
-                    e
-                ))
-            })?,
-        )
-        .map_err(|e| {
-            pyo3::exceptions::PyIOError::new_err(format!(
-                "Failed to write special tokens file: {}",
-                e
-            ))
-        })?;
-
-        // Note: For a complete implementation, we would also save:
-        // - vocab.txt (for WordPiece) or vocab.json (for BPE)
-        // - merges.txt (for BPE tokenizers)
-        // This is a basic implementation for demonstration purposes
-
-        Ok(())
+        let _ = save_directory;
+        Err(PyValueError::new_err(
+            "PreTrainedTokenizer.save_pretrained() has no vocabulary to save (this is the base \
+             class): call save_pretrained on a concrete tokenizer subclass such as \
+             WordPieceTokenizer or BPETokenizer instead.",
+        ))
     }
 
     /// Get special tokens
@@ -130,6 +286,13 @@ impl PyPreTrainedTokenizer {
 #[pyclass(name = "WordPieceTokenizer", module = "trustformers", extends = PyPreTrainedTokenizer)]
 pub struct PyWordPieceTokenizer {
     inner: WordPieceTokenizer,
+}
+
+impl PyWordPieceTokenizer {
+    /// The wrapped Rust tokenizer, for the task pipelines.
+    pub(crate) fn tokenizer(&self) -> &WordPieceTokenizer {
+        &self.inner
+    }
 }
 
 #[pymethods]
@@ -173,7 +336,19 @@ impl PyWordPieceTokenizer {
         Ok((PyWordPieceTokenizer { inner: tokenizer }, base))
     }
 
-    /// Load from pretrained tokenizer
+    /// Load a WordPiece tokenizer from a local model directory.
+    ///
+    /// `model_name_or_path` must be local -- a directory holding `vocab.txt`
+    /// (or `vocab.json`), or a file sitting next to one. This crate has no
+    /// Hugging Face Hub downloader, so a bare model name is refused outright.
+    ///
+    /// Refusing is the point: the previous implementation could only ever
+    /// raise "Failed to read vocab.txt: No such file or directory" (its
+    /// `download_file_from_hub` stub returned the empty *path* for every
+    /// request), and its unreachable else-branch would have fallen back to a
+    /// five-entry `[PAD]/[UNK]/[CLS]/[SEP]/[MASK]` vocabulary -- under which
+    /// every real word tokenizes to `[UNK]` and any downstream classification
+    /// score is meaningless.
     #[staticmethod]
     #[pyo3(signature = (model_name_or_path, **_kwargs))]
     pub fn from_pretrained(
@@ -181,116 +356,79 @@ impl PyWordPieceTokenizer {
         model_name_or_path: &str,
         _kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyWordPieceTokenizer>> {
-        // Try to load vocabulary from hub
-        let vocab_u32 = if let Ok(vocab_path) =
-            download_file_from_hub(model_name_or_path, "vocab.txt", None)
-        {
-            // Load vocab.txt format (one token per line with implicit IDs)
-            let vocab_content = std::fs::read_to_string(&vocab_path)
-                .map_err(|e| PyValueError::new_err(format!("Failed to read vocab.txt: {}", e)))?;
-
-            let mut vocab = HashMap::new();
-            for (id, line) in vocab_content.lines().enumerate() {
-                let token = line.trim();
-                if !token.is_empty() {
-                    vocab.insert(token.to_string(), id as u32);
-                }
-            }
-            vocab
-        } else if let Ok(vocab_path) =
-            download_file_from_hub(model_name_or_path, "vocab.json", None)
-        {
-            // Load vocab.json format
-            let vocab_content = std::fs::read_to_string(&vocab_path)
-                .map_err(|e| PyValueError::new_err(format!("Failed to read vocab.json: {}", e)))?;
-
-            let vocab_json: serde_json::Value = serde_json::from_str(&vocab_content)
-                .map_err(|e| PyValueError::new_err(format!("Failed to parse vocab.json: {}", e)))?;
-
-            let vocab: HashMap<String, u32> = vocab_json
-                .as_object()
-                .map(|obj| {
-                    obj.iter()
-                        .filter_map(|(token, id)| {
-                            id.as_u64().map(|id_num| (token.clone(), id_num as u32))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            vocab
-        } else {
-            // Fallback to default vocabulary if no vocab file found
-            [
-                ("[PAD]".to_string(), 0),
-                ("[UNK]".to_string(), 1),
-                ("[CLS]".to_string(), 2),
-                ("[SEP]".to_string(), 3),
-                ("[MASK]".to_string(), 4),
-            ]
-            .into_iter()
-            .collect()
+        let read = |path: &std::path::Path| -> PyResult<String> {
+            std::fs::read_to_string(path).map_err(|e| {
+                PyValueError::new_err(format!("Failed to read {}: {e}", path.display()))
+            })
         };
 
-        // Try to load tokenizer config for special tokens
-        let (pad_token, unk_token, cls_token, sep_token, mask_token) = if let Ok(config_path) =
-            download_file_from_hub(model_name_or_path, "tokenizer_config.json", None)
-        {
-            let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
-            if let Ok(config_json) = serde_json::from_str::<serde_json::Value>(&config_content) {
-                let pad = config_json.get("pad_token").and_then(|v| v.as_str()).unwrap_or("[PAD]");
-                let unk = config_json.get("unk_token").and_then(|v| v.as_str()).unwrap_or("[UNK]");
-                let cls = config_json.get("cls_token").and_then(|v| v.as_str()).unwrap_or("[CLS]");
-                let sep = config_json.get("sep_token").and_then(|v| v.as_str()).unwrap_or("[SEP]");
-                let mask =
-                    config_json.get("mask_token").and_then(|v| v.as_str()).unwrap_or("[MASK]");
-                (
-                    pad.to_string(),
-                    unk.to_string(),
-                    cls.to_string(),
-                    sep.to_string(),
-                    mask.to_string(),
-                )
-            } else {
-                (
-                    "[PAD]".to_string(),
-                    "[UNK]".to_string(),
-                    "[CLS]".to_string(),
-                    "[SEP]".to_string(),
-                    "[MASK]".to_string(),
-                )
-            }
+        let vocab = if let Some(path) = find_local_tokenizer_file(model_name_or_path, "vocab.txt") {
+            parse_vocab_txt(&read(&path)?)
+        } else if let Some(path) = find_local_tokenizer_file(model_name_or_path, "vocab.json") {
+            parse_vocab_json(&read(&path)?).map_err(PyValueError::new_err)?
         } else {
-            (
-                "[PAD]".to_string(),
-                "[UNK]".to_string(),
-                "[CLS]".to_string(),
-                "[SEP]".to_string(),
-                "[MASK]".to_string(),
-            )
+            return Err(PyValueError::new_err(format!(
+                "no vocab.txt or vocab.json found for '{model_name_or_path}'. This crate has no \
+                 Hugging Face Hub downloader, so the path must be a local directory holding the \
+                 tokenizer files (or a file next to them)."
+            )));
         };
 
-        let tokenizer = WordPieceTokenizer::new(vocab_u32.clone(), true);
+        if vocab.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "the vocabulary file for '{model_name_or_path}' is empty"
+            )));
+        }
 
-        // Get token IDs from vocab
-        let pad_token_id = vocab_u32.get(&pad_token).copied().unwrap_or(0) as usize;
-        let unk_token_id = vocab_u32.get(&unk_token).copied().unwrap_or(1) as usize;
-        let cls_token_id = vocab_u32.get(&cls_token).copied().unwrap_or(2) as usize;
-        let sep_token_id = vocab_u32.get(&sep_token).copied().unwrap_or(3) as usize;
-        let mask_token_id = vocab_u32.get(&mask_token).copied().unwrap_or(4) as usize;
+        // `tokenizer_config.json` is genuinely optional: its absence means the
+        // WordPiece defaults apply, which are real defaults rather than
+        // invented data.
+        let config = match find_local_tokenizer_file(model_name_or_path, "tokenizer_config.json") {
+            Some(path) => Some(
+                serde_json::from_str::<serde_json::Value>(&read(&path)?).map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "Failed to parse {}: {e}",
+                        path.display()
+                    ))
+                })?,
+            ),
+            None => None,
+        };
+        let special = special_tokens_from_config(config.as_ref());
 
+        // Special-token ids come from the vocabulary itself. A checkpoint whose
+        // vocabulary does not contain its own declared special tokens is
+        // broken, and reporting an id that is not in the vocabulary (as the
+        // previous `unwrap_or(0..4)` defaults did) would corrupt every encoding
+        // built from it.
+        let token_id = |token: &str| -> PyResult<usize> {
+            vocab.get(token).map(|&id| id as usize).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "special token '{token}' is not present in the vocabulary of \
+                     '{model_name_or_path}'"
+                ))
+            })
+        };
         let base = PyPreTrainedTokenizer {
-            pad_token,
-            unk_token,
-            cls_token,
-            sep_token,
-            mask_token,
-            pad_token_id,
-            unk_token_id,
-            cls_token_id,
-            sep_token_id,
-            mask_token_id,
+            pad_token_id: token_id(&special.pad)?,
+            unk_token_id: token_id(&special.unk)?,
+            cls_token_id: token_id(&special.cls)?,
+            sep_token_id: token_id(&special.sep)?,
+            mask_token_id: token_id(&special.mask)?,
+            pad_token: special.pad,
+            unk_token: special.unk,
+            cls_token: special.cls,
+            sep_token: special.sep,
+            mask_token: special.mask,
         };
 
+        let do_lower_case = config
+            .as_ref()
+            .and_then(|config| config.get("do_lower_case"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+
+        let tokenizer = WordPieceTokenizer::new(vocab, do_lower_case);
         Py::new(py, (PyWordPieceTokenizer { inner: tokenizer }, base))
     }
 
@@ -516,6 +654,48 @@ impl PyWordPieceTokenizer {
         }
     }
 
+    /// Save this tokenizer to `save_directory` in the format
+    /// [`PyWordPieceTokenizer::from_pretrained`] reads back.
+    ///
+    /// Writes a real `vocab.txt` (one token per line, id = line number), a
+    /// `tokenizer_config.json` carrying this tokenizer's *actual* vocabulary
+    /// size and `do_lower_case` setting, and a `special_tokens_map.json`. The
+    /// base-class implementation this overrides wrote no vocabulary at all and
+    /// a hardcoded `"vocab_size": 30522`.
+    pub fn save_pretrained(slf: PyRef<'_, Self>, save_directory: &str) -> PyResult<()> {
+        let vocab = vocab_txt_body(&slf.inner.get_vocab()).map_err(PyValueError::new_err)?;
+        let base = slf.as_super();
+        let special = SpecialTokens {
+            pad: base.pad_token.clone(),
+            unk: base.unk_token.clone(),
+            cls: base.cls_token.clone(),
+            sep: base.sep_token.clone(),
+            mask: base.mask_token.clone(),
+        };
+        let config = serde_json::json!({
+            "tokenizer_class": "WordPieceTokenizer",
+            "do_lower_case": slf.inner.do_lower_case(),
+            "vocab_size": slf.inner.vocab_size(),
+            "pad_token": special.pad,
+            "unk_token": special.unk,
+            "cls_token": special.cls,
+            "sep_token": special.sep,
+            "mask_token": special.mask,
+        });
+
+        write_tokenizer_files(
+            save_directory,
+            &[
+                ("vocab.txt", vocab),
+                ("tokenizer_config.json", tokenizer_json(&config)?),
+                (
+                    "special_tokens_map.json",
+                    tokenizer_json(&special_tokens_map_json(&special))?,
+                ),
+            ],
+        )
+    }
+
     /// Get vocabulary size
     #[getter]
     pub fn vocab_size(&self) -> usize {
@@ -527,6 +707,13 @@ impl PyWordPieceTokenizer {
 #[pyclass(name = "BPETokenizer", module = "trustformers", extends = PyPreTrainedTokenizer)]
 pub struct PyBPETokenizer {
     inner: BPETokenizer,
+}
+
+impl PyBPETokenizer {
+    /// The wrapped Rust tokenizer, for the task pipelines.
+    pub(crate) fn tokenizer(&self) -> &BPETokenizer {
+        &self.inner
+    }
 }
 
 #[pymethods]
@@ -561,6 +748,103 @@ impl PyBPETokenizer {
         };
 
         Ok((PyBPETokenizer { inner: tokenizer }, base))
+    }
+
+    /// Load a BPE tokenizer from a local model directory.
+    ///
+    /// Reads `vocab.json` and `merges.txt` -- both required, because a BPE
+    /// tokenizer without its merge table cannot reproduce the vocabulary it
+    /// was trained with. `model_name_or_path` must be local; this crate has no
+    /// Hugging Face Hub downloader.
+    ///
+    /// This class previously had no `from_pretrained` at all, so
+    /// `AutoTokenizer.from_pretrained("gpt2")` handed back a
+    /// `BPETokenizer::new(empty_vocab, no_merges)` and reported success.
+    #[staticmethod]
+    #[pyo3(signature = (model_name_or_path, **_kwargs))]
+    pub fn from_pretrained(
+        py: Python<'_>,
+        model_name_or_path: &str,
+        _kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyBPETokenizer>> {
+        let read = |path: &std::path::Path| -> PyResult<String> {
+            std::fs::read_to_string(path).map_err(|e| {
+                PyValueError::new_err(format!("Failed to read {}: {e}", path.display()))
+            })
+        };
+        let require = |filename: &str| -> PyResult<PathBuf> {
+            find_local_tokenizer_file(model_name_or_path, filename).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "no {filename} found for '{model_name_or_path}'. This crate has no Hugging \
+                     Face Hub downloader, so the path must be a local directory holding the \
+                     tokenizer files (or a file next to them)."
+                ))
+            })
+        };
+
+        let vocab = parse_vocab_json(&read(&require("vocab.json")?)?)
+            .map_err(PyValueError::new_err)?;
+        if vocab.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "the vocab.json for '{model_name_or_path}' is empty"
+            )));
+        }
+        let merges =
+            parse_merges_txt(&read(&require("merges.txt")?)?).map_err(PyValueError::new_err)?;
+
+        let config = match find_local_tokenizer_file(model_name_or_path, "tokenizer_config.json") {
+            Some(path) => Some(
+                serde_json::from_str::<serde_json::Value>(&read(&path)?).map_err(|e| {
+                    PyValueError::new_err(format!("Failed to parse {}: {e}", path.display()))
+                })?,
+            ),
+            None => None,
+        };
+        // GPT-2-family defaults, overridable by tokenizer_config.json.
+        let read_token = |key: &str, fallback: &str| -> String {
+            config
+                .as_ref()
+                .and_then(|config| config.get(key))
+                .and_then(|value| value.as_str())
+                .unwrap_or(fallback)
+                .to_string()
+        };
+        let pad_token = read_token("pad_token", "<|endoftext|>");
+        let unk_token = read_token("unk_token", "<|endoftext|>");
+        let cls_token = read_token("cls_token", "<|endoftext|>");
+        let sep_token = read_token("sep_token", "<|endoftext|>");
+        let mask_token = read_token("mask_token", "<|endoftext|>");
+
+        let token_id = |token: &str| -> PyResult<usize> {
+            vocab.get(token).map(|&id| id as usize).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "special token '{token}' is not present in the vocabulary of \
+                     '{model_name_or_path}'"
+                ))
+            })
+        };
+        let base = PyPreTrainedTokenizer {
+            pad_token_id: token_id(&pad_token)?,
+            unk_token_id: token_id(&unk_token)?,
+            cls_token_id: token_id(&cls_token)?,
+            sep_token_id: token_id(&sep_token)?,
+            mask_token_id: token_id(&mask_token)?,
+            pad_token,
+            unk_token,
+            cls_token,
+            sep_token,
+            mask_token,
+        };
+
+        Py::new(
+            py,
+            (
+                PyBPETokenizer {
+                    inner: BPETokenizer::new(vocab, merges),
+                },
+                base,
+            ),
+        )
     }
 
     /// Tokenize text (using encode then converting back to tokens)
@@ -628,6 +912,55 @@ impl PyBPETokenizer {
             .map_err(|e| PyValueError::new_err(format!("Decoding failed: {}", e)))
     }
 
+    /// Save this tokenizer to `save_directory` in the format
+    /// [`PyBPETokenizer::from_pretrained`] reads back.
+    ///
+    /// Writes a real `vocab.json` and `merges.txt` (merge order preserved,
+    /// `#version: 0.2` header included) alongside the config files. Without the
+    /// merge table a BPE tokenizer cannot reproduce its own tokenization, which
+    /// is why the base-class implementation this overrides -- which wrote
+    /// neither -- could not round-trip.
+    pub fn save_pretrained(slf: PyRef<'_, Self>, save_directory: &str) -> PyResult<()> {
+        let vocab = slf.inner.get_vocab_map();
+        if vocab.is_empty() {
+            return Err(PyValueError::new_err(
+                "this BPETokenizer has an empty vocabulary, so there is nothing to save",
+            ));
+        }
+        let base = slf.as_super();
+        let special = SpecialTokens {
+            pad: base.pad_token.clone(),
+            unk: base.unk_token.clone(),
+            cls: base.cls_token.clone(),
+            sep: base.sep_token.clone(),
+            mask: base.mask_token.clone(),
+        };
+        let vocab_json = serde_json::to_value(vocab)
+            .map_err(|e| PyValueError::new_err(format!("Failed to serialize vocab.json: {e}")))?;
+        let config = serde_json::json!({
+            "tokenizer_class": "BPETokenizer",
+            "vocab_size": slf.inner.vocab_size(),
+            "pad_token": special.pad,
+            "unk_token": special.unk,
+            "cls_token": special.cls,
+            "sep_token": special.sep,
+            "mask_token": special.mask,
+        });
+
+        write_tokenizer_files(
+            save_directory,
+            &[
+                ("vocab.json", tokenizer_json(&vocab_json)?),
+                ("merges.txt", merges_txt_body(slf.inner.get_merge_rules())),
+                ("tokenizer_config.json", tokenizer_json(&config)?),
+                (
+                    "special_tokens_map.json",
+                    tokenizer_json(&special_tokens_map_json(&special))?,
+                ),
+            ],
+        )
+    }
+
     /// Get vocabulary size
     #[getter]
     pub fn vocab_size(&self) -> usize {
@@ -679,6 +1012,282 @@ fn resolve_batch_text_pair(
         Some(TextInput::Batch(pairs)) => Ok(Some(pairs.into_iter().map(Some).collect())),
         Some(TextInput::Single(_)) => Err("text_pair must be a list when text is a list"),
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod local_asset_tests {
+    use super::*;
+    use std::fs;
+
+    /// Unique temporary directory under `std::env::temp_dir()`, per the
+    /// workspace's test-file policy.
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = format!(
+            "trustformers-py-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir is creatable");
+        dir
+    }
+
+    // ---- find_local_tokenizer_file ----
+
+    /// The replaced `download_file_from_hub` stub returned `Ok("")` for every
+    /// request, so no asset was ever found however complete the directory was.
+    #[test]
+    fn finds_an_asset_in_a_model_directory() {
+        let dir = temp_dir("find-dir");
+        fs::write(dir.join("vocab.txt"), "[PAD]\n").expect("write vocab");
+        let found = find_local_tokenizer_file(
+            dir.to_str().expect("utf-8 temp path"),
+            "vocab.txt",
+        );
+        assert_eq!(found.as_deref(), Some(dir.join("vocab.txt").as_path()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finds_an_asset_beside_a_file_path() {
+        let dir = temp_dir("find-sibling");
+        fs::write(dir.join("vocab.txt"), "[PAD]\n").expect("write vocab");
+        fs::write(dir.join("config.json"), "{}").expect("write config");
+        let config = dir.join("config.json");
+        let found = find_local_tokenizer_file(
+            config.to_str().expect("utf-8 temp path"),
+            "vocab.txt",
+        );
+        assert_eq!(found.as_deref(), Some(dir.join("vocab.txt").as_path()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reports_a_missing_asset_as_absent() {
+        let dir = temp_dir("find-missing");
+        assert!(
+            find_local_tokenizer_file(dir.to_str().expect("utf-8 temp path"), "vocab.txt")
+                .is_none()
+        );
+        assert!(find_local_tokenizer_file("bert-base-uncased", "vocab.txt").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- parse_vocab_txt ----
+
+    #[test]
+    fn vocab_txt_ids_are_line_indices() {
+        let vocab = parse_vocab_txt("[PAD]\n[UNK]\nhello\nworld\n");
+        assert_eq!(vocab.get("[PAD]"), Some(&0));
+        assert_eq!(vocab.get("[UNK]"), Some(&1));
+        assert_eq!(vocab.get("hello"), Some(&2));
+        assert_eq!(vocab.get("world"), Some(&3));
+    }
+
+    /// A blank line still consumes an id in HuggingFace's reader. Skipping it
+    /// would shift every later token by one and silently mis-tokenize the
+    /// whole vocabulary.
+    #[test]
+    fn a_blank_line_still_consumes_an_id() {
+        let vocab = parse_vocab_txt("[PAD]\n\nhello\n");
+        assert_eq!(vocab.get("[PAD]"), Some(&0));
+        assert_eq!(vocab.get("hello"), Some(&2));
+        assert_eq!(vocab.len(), 2);
+    }
+
+    /// Tokens may legitimately contain leading whitespace (SentencePiece-style
+    /// pieces); only the line terminator is stripped.
+    #[test]
+    fn only_line_endings_are_stripped() {
+        let vocab = parse_vocab_txt("a\r\n b\n");
+        assert_eq!(vocab.get("a"), Some(&0));
+        assert_eq!(vocab.get(" b"), Some(&1));
+    }
+
+    // ---- parse_vocab_json ----
+
+    #[test]
+    fn parses_a_vocab_json_object() {
+        let vocab = parse_vocab_json(r#"{"[PAD]": 0, "hello": 7}"#).expect("valid vocab.json");
+        assert_eq!(vocab.get("[PAD]"), Some(&0));
+        assert_eq!(vocab.get("hello"), Some(&7));
+    }
+
+    /// The replaced reader used `filter_map(..).unwrap_or_default()`, so a
+    /// malformed document produced a silently partial (or empty) vocabulary
+    /// instead of an error.
+    #[test]
+    fn rejects_malformed_vocab_json() {
+        assert!(parse_vocab_json("not json").is_err());
+        assert!(parse_vocab_json("[1, 2, 3]").is_err());
+        assert!(parse_vocab_json(r#"{"hello": "seven"}"#).is_err());
+        assert!(parse_vocab_json(r#"{"hello": -1}"#).is_err());
+    }
+
+    // ---- parse_merges_txt ----
+
+    #[test]
+    fn parses_merges_in_priority_order() {
+        let merges = parse_merges_txt("#version: 0.2\nt h\nth e\n").expect("valid merges.txt");
+        assert_eq!(
+            merges,
+            vec![
+                ("t".to_string(), "h".to_string()),
+                ("th".to_string(), "e".to_string())
+            ]
+        );
+    }
+
+    /// Merge *order* is the content of the file, so a malformed line cannot be
+    /// skipped: doing so would shift the priority of every merge after it.
+    #[test]
+    fn rejects_a_malformed_merges_line() {
+        assert!(parse_merges_txt("t h\nonlyone\n").is_err());
+        assert!(parse_merges_txt("a b c\n").is_err());
+    }
+
+    #[test]
+    fn blank_lines_and_the_version_header_are_skipped() {
+        let merges = parse_merges_txt("#version: 0.2\n\na b\n\n").expect("valid merges.txt");
+        assert_eq!(merges, vec![("a".to_string(), "b".to_string())]);
+    }
+
+    // ---- vocab_txt_body / merges_txt_body: the save -> load round trip ----
+
+    /// `save_pretrained` must write exactly what `from_pretrained` reads back;
+    /// the base-class implementation this replaces wrote no vocabulary at all.
+    #[test]
+    fn wordpiece_vocab_round_trips_through_the_file_format() {
+        let vocab: HashMap<String, u32> = [
+            ("[PAD]".to_string(), 0u32),
+            ("[UNK]".to_string(), 1),
+            ("hello".to_string(), 2),
+            ("##world".to_string(), 3),
+        ]
+        .into_iter()
+        .collect();
+        let tokenizer = WordPieceTokenizer::new(vocab.clone(), true);
+
+        let body = vocab_txt_body(&tokenizer.get_vocab()).expect("dense vocabulary exports");
+        assert_eq!(parse_vocab_txt(&body), vocab);
+    }
+
+    /// Ids are line numbers, so an id with no token is a blank line. That
+    /// keeps every later token on its own id, and round-trips exactly.
+    #[test]
+    fn a_sparse_vocabulary_round_trips_through_blank_lines() {
+        let vocab: HashMap<String, u32> =
+            [("[PAD]".to_string(), 0u32), ("hello".to_string(), 5)].into_iter().collect();
+        let body = vocab_txt_body(&vocab).expect("sparse vocabulary exports");
+        assert_eq!(body.lines().count(), 6);
+        assert_eq!(parse_vocab_txt(&body), vocab);
+    }
+
+    /// Two tokens on one id cannot both survive a format with one line per id.
+    #[test]
+    fn duplicate_ids_are_refused() {
+        let vocab: HashMap<String, u32> =
+            [("a".to_string(), 0u32), ("b".to_string(), 0)].into_iter().collect();
+        assert!(vocab_txt_body(&vocab).is_err());
+    }
+
+    #[test]
+    fn an_empty_vocabulary_is_refused() {
+        assert!(vocab_txt_body(&HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn merges_round_trip_through_the_file_format() {
+        let merges = vec![
+            ("t".to_string(), "h".to_string()),
+            ("th".to_string(), "e".to_string()),
+        ];
+        let body = merges_txt_body(&merges);
+        assert!(body.starts_with("#version: 0.2\n"));
+        assert_eq!(parse_merges_txt(&body).expect("valid merges"), merges);
+    }
+
+    #[test]
+    fn an_empty_merge_table_still_writes_a_valid_file() {
+        let body = merges_txt_body(&[]);
+        assert_eq!(parse_merges_txt(&body).expect("valid merges"), Vec::new());
+    }
+
+    /// The BPE save path serialises the vocabulary with `serde_json::to_value`
+    /// and the merges with [`merges_txt_body`]; both must be readable back by
+    /// the exact readers `BPETokenizer::from_pretrained` uses. Without the
+    /// merge table a BPE tokenizer cannot reproduce its own tokenization, so
+    /// the round trip has to cover both files, not just the vocabulary.
+    #[test]
+    fn bpe_vocab_and_merges_round_trip_through_the_file_format() {
+        let vocab: HashMap<String, u32> = [
+            ("<|endoftext|>".to_string(), 0u32),
+            ("th".to_string(), 1),
+            ("the".to_string(), 2),
+            ("Ġthe".to_string(), 3),
+        ]
+        .into_iter()
+        .collect();
+        let merges = vec![
+            ("t".to_string(), "h".to_string()),
+            ("th".to_string(), "e".to_string()),
+        ];
+        let tokenizer = BPETokenizer::new(vocab.clone(), merges.clone());
+
+        let vocab_body = serde_json::to_string_pretty(tokenizer.get_vocab_map())
+            .expect("vocab map serializes");
+        assert_eq!(
+            parse_vocab_json(&vocab_body).expect("saved vocab.json is readable"),
+            vocab
+        );
+
+        let merges_body = merges_txt_body(tokenizer.get_merge_rules());
+        assert_eq!(
+            parse_merges_txt(&merges_body).expect("saved merges.txt is readable"),
+            merges
+        );
+    }
+
+    #[test]
+    fn special_tokens_map_carries_all_five_names() {
+        let special = SpecialTokens {
+            pad: "<pad>".to_string(),
+            unk: "<unk>".to_string(),
+            cls: "<s>".to_string(),
+            sep: "</s>".to_string(),
+            mask: "<mask>".to_string(),
+        };
+        let json = special_tokens_map_json(&special);
+        assert_eq!(json.get("pad_token").and_then(|v| v.as_str()), Some("<pad>"));
+        assert_eq!(json.get("mask_token").and_then(|v| v.as_str()), Some("<mask>"));
+        // The saved map must be readable back by the config reader.
+        let reloaded = special_tokens_from_config(Some(&json));
+        assert_eq!(reloaded.pad, "<pad>");
+        assert_eq!(reloaded.sep, "</s>");
+    }
+
+    // ---- special_tokens_from_config ----
+
+    #[test]
+    fn special_tokens_fall_back_to_wordpiece_defaults() {
+        let special = special_tokens_from_config(None);
+        assert_eq!(special.pad, "[PAD]");
+        assert_eq!(special.unk, "[UNK]");
+        assert_eq!(special.cls, "[CLS]");
+        assert_eq!(special.sep, "[SEP]");
+        assert_eq!(special.mask, "[MASK]");
+    }
+
+    #[test]
+    fn special_tokens_follow_the_tokenizer_config() {
+        let config = serde_json::json!({"pad_token": "<pad>", "unk_token": "<unk>"});
+        let special = special_tokens_from_config(Some(&config));
+        assert_eq!(special.pad, "<pad>");
+        assert_eq!(special.unk, "<unk>");
+        // Unset entries keep the defaults.
+        assert_eq!(special.cls, "[CLS]");
     }
 }
 

@@ -134,7 +134,7 @@ and follow consistent patterns for configuration, weight loading, and forward pa
 
 #### DeepSeek family
 - **DeepSeek** (`deepseek`): Multi-Head Latent Attention + DeepSeekMoE. **Weight loading NOT yet implemented**
-- **DeepSeek-V2** (`deepseek_v2`): weight loading complete, unaffected by the v1 gap
+- **DeepSeek-V2** (`deepseek_v2`): **Corrected 2026-08-24** — the "weight loading complete" claim this line previously carried was wrong: the loader reported fake success on any non-empty input buffer without actually binding weights. As of this wave it returns a documented structured error instead of the fake success (an honesty fix, not a completion) — a real MLA+MoE checkpoint binder for `deepseek_v2` is still open work, same category as the `deepseek` v1 gap above, not "unaffected by" it.
 
 #### InternLM2, OPT, Granite, Aya
 - `internlm2`, `opt` (Meta), `granite` (IBM), `aya` (Cohere, multilingual) — each an independent feature-gated decoder

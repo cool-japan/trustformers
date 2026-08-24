@@ -19,11 +19,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{
-    sync::broadcast,
-    task::JoinHandle,
-    time::{interval, sleep},
-};
+use tokio::{sync::broadcast, task::JoinHandle, time::interval};
 use tracing::{debug, error, info, instrument, warn};
 
 // Import types and specialized components
@@ -440,72 +436,6 @@ impl GpuResourceManager {
         }
 
         None
-    }
-
-    /// Create a mock GPU device for testing purposes.
-    ///
-    /// This function is retained for unit-test use.  It is **not** called from the
-    /// production discovery path; real discovery uses `query_nvidia_devices`.
-    #[allow(dead_code)]
-    async fn create_mock_device(device_id: usize) -> GpuResult<GpuDeviceInfo> {
-        // Simulate different GPU types and capabilities
-        let (device_name, total_memory_mb, capabilities) = match device_id {
-            0 => (
-                "NVIDIA GeForce RTX 4090".to_string(),
-                24576, // 24GB
-                vec![
-                    GpuCapability::Cuda("12.0".to_string()),
-                    GpuCapability::MachineLearning(vec![
-                        "PyTorch".to_string(),
-                        "TensorFlow".to_string(),
-                        "JAX".to_string(),
-                    ]),
-                    GpuCapability::Vulkan("1.3".to_string()),
-                ],
-            ),
-            1 => (
-                "NVIDIA Tesla V100".to_string(),
-                32768, // 32GB
-                vec![
-                    GpuCapability::Cuda("11.8".to_string()),
-                    GpuCapability::MachineLearning(vec![
-                        "PyTorch".to_string(),
-                        "TensorFlow".to_string(),
-                    ]),
-                ],
-            ),
-            2 => (
-                "AMD Radeon RX 7900 XTX".to_string(),
-                24576, // 24GB
-                vec![
-                    GpuCapability::OpenCl("3.0".to_string()),
-                    GpuCapability::Vulkan("1.3".to_string()),
-                    GpuCapability::MachineLearning(vec!["PyTorch".to_string()]),
-                ],
-            ),
-            _ => (
-                format!("Generic GPU Device {}", device_id),
-                8192, // 8GB
-                vec![
-                    GpuCapability::OpenCl("2.0".to_string()),
-                    GpuCapability::Vulkan("1.2".to_string()),
-                ],
-            ),
-        };
-
-        // Simulate device discovery delay
-        sleep(Duration::from_millis(100)).await;
-
-        Ok(GpuDeviceInfo {
-            device_id,
-            device_name,
-            total_memory_mb,
-            available_memory_mb: total_memory_mb, // Initially all memory available
-            utilization_percent: 0.0,
-            capabilities,
-            status: GpuDeviceStatus::Available,
-            last_updated: Utc::now(),
-        })
     }
 
     /// Assess initial health of a discovered device.

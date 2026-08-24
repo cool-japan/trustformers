@@ -256,19 +256,20 @@ impl Layer for LayerNorm {
                                 let seq_len = metal_data.shape[0];
 
                                 let output_buffer_id = backend.layernorm_gpu_to_gpu(
-                                    &metal_data.buffer_id,
-                                    &w_data.buffer_id,
-                                    &b_data.buffer_id,
+                                    &metal_data.buffer_id(),
+                                    &w_data.buffer_id(),
+                                    &b_data.buffer_id(),
                                     seq_len,
                                     hidden_size,
                                     self.eps,
                                 )?;
 
-                                return Ok(Tensor::Metal(MetalTensorData {
-                                    buffer_id: output_buffer_id,
-                                    shape: metal_data.shape.clone(),
-                                    dtype: metal_data.dtype,
-                                }));
+                                return Ok(Tensor::Metal(MetalTensorData::new(
+                                    &backend,
+                                    output_buffer_id,
+                                    metal_data.shape.clone(),
+                                    metal_data.dtype,
+                                )?));
                             } else if metal_data.shape.len() == 3 {
                                 // 3D case: (batch, seq_len, hidden_size)
                                 // Flatten to 2D: (batch * seq_len, hidden_size)
@@ -283,9 +284,9 @@ impl Layer for LayerNorm {
 
                                 // Run GPU kernel on flattened 2D tensor
                                 let output_buffer_id = backend.layernorm_gpu_to_gpu(
-                                    &metal_data.buffer_id,
-                                    &w_data.buffer_id,
-                                    &b_data.buffer_id,
+                                    &metal_data.buffer_id(),
+                                    &w_data.buffer_id(),
+                                    &b_data.buffer_id(),
                                     flattened_seq_len,
                                     hidden_size,
                                     self.eps,
@@ -297,11 +298,12 @@ impl Layer for LayerNorm {
                                 // );
 
                                 // Return with original 3D shape
-                                return Ok(Tensor::Metal(MetalTensorData {
-                                    buffer_id: output_buffer_id,
-                                    shape: metal_data.shape.clone(),
-                                    dtype: metal_data.dtype,
-                                }));
+                                return Ok(Tensor::Metal(MetalTensorData::new(
+                                    &backend,
+                                    output_buffer_id,
+                                    metal_data.shape.clone(),
+                                    metal_data.dtype,
+                                )?));
                             }
                         },
                         _ => {
@@ -488,19 +490,20 @@ impl Layer for LayerNorm {
                                         // Execute GPU-to-GPU
                                         let output_buffer_id = backend.layernorm_gpu_to_gpu(
                                             &input_buffer_id,
-                                            &w_data.buffer_id,
-                                            &b_data.buffer_id,
+                                            &w_data.buffer_id(),
+                                            &b_data.buffer_id(),
                                             seq_len,
                                             hidden_size,
                                             self.eps,
                                         )?;
 
                                         // Return Metal tensor
-                                        return Ok(Tensor::Metal(MetalTensorData {
-                                            buffer_id: output_buffer_id,
-                                            shape: arr.shape().to_vec(),
-                                            dtype: crate::tensor::DType::F32,
-                                        }));
+                                        return Ok(Tensor::Metal(MetalTensorData::new(
+                                            &backend,
+                                            output_buffer_id,
+                                            arr.shape().to_vec(),
+                                            crate::tensor::DType::F32,
+                                        )?));
                                     },
 
                                     // Case 2: Weight/bias on CPU - standard path

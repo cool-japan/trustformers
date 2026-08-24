@@ -147,6 +147,117 @@ pub struct BatteryReading {
     pub estimated_time_remaining_minutes: Option<u32>,
 }
 
+impl BatteryReading {
+    /// A timestamped reading that carries no measurements.
+    ///
+    /// Returned when the running target exposes no battery source this crate
+    /// can read (see [`BatteryMonitor::read_battery_info`]). Deliberately
+    /// distinct from a zeroed reading: `None` means "not measured", whereas a
+    /// `0` would claim an empty battery.
+    pub fn unavailable() -> Self {
+        Self {
+            timestamp: Instant::now(),
+            level_percent: None,
+            charging_status: ChargingStatus::Unknown,
+            voltage: None,
+            current_ma: None,
+            temperature_celsius: None,
+            power_consumption_mw: None,
+            estimated_time_remaining_minutes: None,
+        }
+    }
+}
+
+/// Root of the Linux/Android kernel `power_supply` sysfs class.
+const POWER_SUPPLY_SYSFS_ROOT: &str = "/sys/class/power_supply";
+
+/// Read one numeric sysfs node, returning `None` when it is absent,
+/// unreadable, or does not parse.
+fn read_sysfs_number<T: std::str::FromStr>(dir: &std::path::Path, node: &str) -> Option<T> {
+    std::fs::read_to_string(dir.join(node)).ok()?.trim().parse::<T>().ok()
+}
+
+/// Read real battery telemetry from a kernel `power_supply` sysfs tree.
+///
+/// The Android kernel exposes the same `power_supply` nodes as desktop Linux,
+/// so a single reader covers both. `root` is the class directory (normally
+/// [`POWER_SUPPLY_SYSFS_ROOT`]); it is a parameter so the parser can be
+/// exercised against a fixture tree in tests instead of the live machine.
+///
+/// Unit conversions follow `Documentation/ABI/testing/sysfs-class-power`:
+/// `voltage_now` is µV, `current_now` is µA, `power_now` is µW, `temp` is
+/// tenths of a degree Celsius and `charge_now` is µAh.
+///
+/// Every field is independently optional: a node that is missing (many
+/// gauges publish only `capacity` and `status`) leaves its field `None` rather
+/// than substituting a value. Returns `None` when `root` holds no supply of
+/// type `Battery` at all.
+fn read_power_supply_battery(root: &std::path::Path) -> Option<BatteryReading> {
+    let battery_dir =
+        std::fs::read_dir(root).ok()?.filter_map(|entry| entry.ok()).find(|entry| {
+            std::fs::read_to_string(entry.path().join("type"))
+                .map(|kind| kind.trim().eq_ignore_ascii_case("Battery"))
+                .unwrap_or(false)
+        })?;
+    let dir = battery_dir.path();
+
+    let level_percent = read_sysfs_number::<i32>(&dir, "capacity")
+        .filter(|percent| (0..=100).contains(percent))
+        .map(|percent| percent as u8);
+
+    let charging_status = match std::fs::read_to_string(dir.join("status")) {
+        Ok(status) => match status.trim() {
+            "Charging" => ChargingStatus::Charging,
+            "Discharging" => ChargingStatus::Discharging,
+            "Full" => ChargingStatus::Full,
+            "Not charging" => ChargingStatus::NotCharging,
+            _ => ChargingStatus::Unknown,
+        },
+        Err(_) => ChargingStatus::Unknown,
+    };
+
+    let voltage = read_sysfs_number::<f64>(&dir, "voltage_now").map(|uv| (uv / 1e6) as f32);
+    let current_ma = read_sysfs_number::<f64>(&dir, "current_now").map(|ua| (ua / 1e3) as f32);
+    let temperature_celsius =
+        read_sysfs_number::<f64>(&dir, "temp").map(|tenths| (tenths / 10.0) as f32);
+
+    // `power_now` when the gauge publishes it, otherwise the product of two
+    // real measurements (P = V * I). Absolute value: the sign only encodes
+    // charge direction, which `charging_status` already carries.
+    let power_consumption_mw = read_sysfs_number::<f64>(&dir, "power_now")
+        .map(|uw| (uw.abs() / 1e3) as f32)
+        .or_else(|| match (voltage, current_ma) {
+            (Some(volts), Some(milliamps)) => Some((volts * milliamps).abs()),
+            _ => None,
+        });
+
+    // Runtime left = remaining charge / draw. Only meaningful while actually
+    // discharging at a nonzero rate.
+    let estimated_time_remaining_minutes = match (
+        charging_status,
+        read_sysfs_number::<f64>(&dir, "charge_now"),
+        read_sysfs_number::<f64>(&dir, "current_now"),
+    ) {
+        (ChargingStatus::Discharging, Some(charge_uah), Some(current_ua))
+            if current_ua.abs() > f64::EPSILON =>
+        {
+            Some((charge_uah.abs() / current_ua.abs() * 60.0).round() as u32)
+        },
+        _ => None,
+    };
+
+    Some(BatteryReading {
+        timestamp: Instant::now(),
+        level_percent,
+        charging_status,
+        voltage,
+        current_ma,
+        temperature_celsius,
+        power_consumption_mw,
+        estimated_time_remaining_minutes,
+    })
+}
+
 /// Power prediction system
 struct PowerPredictor {
     usage_patterns: Vec<UsagePattern>,
@@ -266,7 +377,9 @@ struct QualityAdaptation {
     to_level: QualityLevel,
     reason: AdaptationReason,
     battery_level: u8,
-    power_consumption: f32,
+    /// Power draw measured at the moment of the adaptation, or `None` when
+    /// this device publishes no power figure.
+    power_consumption: Option<f32>,
 }
 
 /// Reason for quality adaptation
@@ -401,10 +514,12 @@ pub struct BatteryStats {
     pub estimated_time_remaining_minutes: Option<u32>,
     /// Current power consumption (mW)
     pub current_power_consumption_mw: Option<f32>,
-    /// Average power consumption (mW)
-    pub average_power_consumption_mw: f32,
-    /// Peak power consumption (mW)
-    pub peak_power_consumption_mw: f32,
+    /// Average power consumption (mW) over the readings that carried one.
+    /// `None` when no reading in history published a power figure.
+    pub average_power_consumption_mw: Option<f32>,
+    /// Peak power consumption (mW) across the readings that carried one.
+    /// `None` when no reading in history published a power figure.
+    pub peak_power_consumption_mw: Option<f32>,
     /// Total battery time saved (minutes)
     pub battery_time_saved_minutes: u32,
     /// Current quality level
@@ -730,10 +845,12 @@ impl MobileBatteryManager {
         };
 
         if target_quality != self.adaptive_scheduler.current_quality_level {
+            let measured_power_mw = self.get_current_power_consumption();
             self.adaptive_scheduler.adapt_quality(
                 target_quality,
                 AdaptationReason::BatteryLevel,
                 battery_level,
+                measured_power_mw,
             );
         }
 
@@ -754,9 +871,17 @@ impl MobileBatteryManager {
         }
     }
 
+    /// Minutes of runtime left, taken from the most recent battery reading.
+    ///
+    /// The value comes from the platform reader (on Linux/Android, remaining
+    /// charge divided by present draw -- see [`read_power_supply_battery`]);
+    /// `None` when no reading has been taken yet or the platform published
+    /// neither a charge counter nor a current.
     fn estimate_time_remaining(&self) -> Option<u32> {
-        // Implementation would calculate based on current consumption and battery level
-        Some(120) // Placeholder: 2 hours
+        self.battery_monitor
+            .battery_history
+            .back()
+            .and_then(|reading| reading.estimated_time_remaining_minutes)
     }
 
     fn get_current_power_consumption(&self) -> Option<f32> {
@@ -766,11 +891,11 @@ impl MobileBatteryManager {
             .and_then(|reading| reading.power_consumption_mw)
     }
 
-    fn calculate_average_power_consumption(&self) -> f32 {
-        if self.battery_monitor.battery_history.is_empty() {
-            return 0.0;
-        }
-
+    /// Mean power draw across the readings that actually carried one.
+    ///
+    /// `None` -- not `0.0` -- when no reading published a power figure: a zero
+    /// would claim the device drew no power.
+    fn calculate_average_power_consumption(&self) -> Option<f32> {
         let sum: f32 = self
             .battery_monitor
             .battery_history
@@ -786,36 +911,33 @@ impl MobileBatteryManager {
             .count();
 
         if count > 0 {
-            sum / count as f32
+            Some(sum / count as f32)
         } else {
-            0.0
+            None
         }
     }
 
-    fn get_peak_power_consumption(&self) -> f32 {
+    /// Highest power draw seen across the readings that carried one, or `None`
+    /// when none did.
+    fn get_peak_power_consumption(&self) -> Option<f32> {
         self.battery_monitor
             .battery_history
             .iter()
             .filter_map(|reading| reading.power_consumption_mw)
-            .fold(0.0, f32::max)
+            .fold(None, |peak: Option<f32>, mw| {
+                Some(peak.map_or(mw, |best| best.max(mw)))
+            })
     }
 
-    /// Get current battery level as a percentage (0.0 to 1.0)
-    /// This method addresses TODO in mobile testing framework
-    pub fn get_current_battery_level(&self) -> f32 {
-        match self.battery_monitor.current_level {
-            Some(level) => level as f32 / 100.0,
-            None => {
-                // If no battery level is available, estimate based on charging status
-                match self.battery_monitor.charging_status {
-                    ChargingStatus::Charging => 0.85,    // Assume 85% when charging
-                    ChargingStatus::NotCharging => 0.75, // Assume 75% when not charging
-                    ChargingStatus::Discharging => 0.65, // Assume 65% when actively discharging
-                    ChargingStatus::Full => 1.0,         // 100% when full
-                    ChargingStatus::Unknown => 0.5,      // Conservative estimate
-                }
-            },
-        }
+    /// Measured battery level as a fraction in `0.0..=1.0`.
+    ///
+    /// `None` when the running target exposes no readable battery gauge (every
+    /// non-Linux, non-Android target -- see
+    /// [`BatteryMonitor::read_battery_info`]) or when monitoring has not taken
+    /// a reading yet. Charging status is deliberately *not* used to guess a
+    /// level: "charging" says nothing about how full the cell is.
+    pub fn get_current_battery_level(&self) -> Option<f32> {
+        self.battery_monitor.current_level.map(|level| level as f32 / 100.0)
     }
 
     fn calculate_battery_time_saved(&self) -> u32 {
@@ -893,66 +1015,44 @@ impl BatteryMonitor {
         Ok(())
     }
 
+    /// Read battery telemetry from the only source this crate can read without
+    /// platform FFI.
+    ///
+    /// On Android and Linux that is the kernel `power_supply` sysfs class
+    /// (identical node layout on both), read by
+    /// [`read_power_supply_battery`]. Everywhere else -- iOS, macOS, Windows,
+    /// wasm -- there is no source reachable from safe, dependency-free Rust:
+    /// iOS battery state needs `UIDevice`/IOKit through Objective-C, and macOS
+    /// needs IOKit. Rather than invent a level, a voltage and a wattage, those
+    /// targets get an all-`None` reading whose `charging_status` is
+    /// [`ChargingStatus::Unknown`]; every consumer in this module already
+    /// treats `None` as "not measured" (see
+    /// [`BatteryOptimizationManager::calculate_average_power_consumption`],
+    /// which averages only over readings that carry a value).
     fn read_battery_info(&mut self) -> Result<BatteryReading> {
-        // Platform-specific battery reading
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "linux"))]
         {
-            self.read_android_battery_info()
+            if let Some(reading) =
+                read_power_supply_battery(std::path::Path::new(POWER_SUPPLY_SYSFS_ROOT))
+            {
+                self.current_level = reading.level_percent;
+                self.charging_status = reading.charging_status;
+                self.voltage = reading.voltage;
+                self.current_ma = reading.current_ma;
+                self.temperature_celsius = reading.temperature_celsius;
+                return Ok(reading);
+            }
         }
 
-        #[cfg(target_os = "ios")]
-        {
-            self.read_ios_battery_info()
-        }
+        // No battery source is readable on this target: report that, do not
+        // fabricate one.
+        self.current_level = None;
+        self.charging_status = ChargingStatus::Unknown;
+        self.voltage = None;
+        self.current_ma = None;
+        self.temperature_celsius = None;
 
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        {
-            // Simulate battery info for testing
-            let level = Some(75u8);
-            self.current_level = level;
-            self.charging_status = ChargingStatus::Discharging;
-
-            Ok(BatteryReading {
-                timestamp: Instant::now(),
-                level_percent: level,
-                charging_status: ChargingStatus::Discharging,
-                voltage: Some(3.8),
-                current_ma: Some(-1500.0), // Discharging
-                temperature_celsius: Some(30.0),
-                power_consumption_mw: Some(2500.0),
-                estimated_time_remaining_minutes: Some(180),
-            })
-        }
-    }
-
-    #[cfg(target_os = "android")]
-    fn read_android_battery_info(&mut self) -> Result<BatteryReading> {
-        // Android battery API implementation
-        Ok(BatteryReading {
-            timestamp: Instant::now(),
-            level_percent: Some(80),
-            charging_status: ChargingStatus::Discharging,
-            voltage: Some(3.9),
-            current_ma: Some(-1200.0),
-            temperature_celsius: Some(32.0),
-            power_consumption_mw: Some(2200.0),
-            estimated_time_remaining_minutes: Some(200),
-        })
-    }
-
-    #[cfg(target_os = "ios")]
-    fn read_ios_battery_info(&mut self) -> Result<BatteryReading> {
-        // iOS battery API implementation
-        Ok(BatteryReading {
-            timestamp: Instant::now(),
-            level_percent: Some(85),
-            charging_status: ChargingStatus::Discharging,
-            voltage: Some(3.85),
-            current_ma: Some(-1000.0),
-            temperature_celsius: Some(28.0),
-            power_consumption_mw: Some(1800.0),
-            estimated_time_remaining_minutes: Some(240),
-        })
+        Ok(BatteryReading::unavailable())
     }
 }
 
@@ -971,32 +1071,78 @@ impl PowerPredictor {
         }
     }
 
-    fn update(&mut self, _battery_monitor: &BatteryMonitor) -> Result<()> {
-        // Update prediction models with new data
+    /// Record the latest measured power draw as a prediction input.
+    ///
+    /// Only readings that carried a real `power_consumption_mw` are kept, so
+    /// the history the forecast is fitted to contains nothing invented.
+    fn update(&mut self, battery_monitor: &BatteryMonitor) -> Result<()> {
+        let Some(reading) = battery_monitor.battery_history.back() else {
+            return Ok(());
+        };
+        let Some(power_mw) = reading.power_consumption_mw else {
+            return Ok(());
+        };
+
+        self.historical_data.push_back(PowerDataPoint {
+            timestamp: reading.timestamp,
+            power_mw,
+            battery_level: reading.level_percent.unwrap_or(0),
+            inference_count: 0,
+            context: format!("{:?}", reading.charging_status),
+        });
+        while self.historical_data.len() > 512 {
+            self.historical_data.pop_front();
+        }
         Ok(())
     }
 
+    /// Forecast energy use over `duration_minutes` by extrapolating the mean
+    /// of the power draws actually observed so far.
+    ///
+    /// Errors when nothing has been observed: the previous body extrapolated
+    /// a hardcoded `base_consumption = 2500.0` mW, so it produced a confident
+    /// forecast on a device whose power draw had never been read. The
+    /// confidence interval is the observed standard deviation (or +/-20% for a
+    /// single sample), not a fixed multiplier on an invented mean.
     fn predict_consumption(&self, duration_minutes: u32) -> Result<PowerPrediction> {
-        // Simplified prediction - in practice would use ML models
-        let base_consumption = 2500.0; // 2.5W
-        let predicted_consumption = base_consumption * (duration_minutes as f32 / 60.0);
+        if self.historical_data.is_empty() {
+            return Err(TrustformersError::runtime_error(
+                "Power prediction needs at least one measured power reading; this device has \
+                 published none (see `MobileBatteryManager::get_current_power_consumption`)"
+                    .into(),
+            )
+            .into());
+        }
+
+        let samples: Vec<f32> = self.historical_data.iter().map(|point| point.power_mw).collect();
+        let mean_power_mw = samples.iter().sum::<f32>() / samples.len() as f32;
+        let spread = if samples.len() > 1 {
+            let variance = samples.iter().map(|mw| (mw - mean_power_mw).powi(2)).sum::<f32>()
+                / (samples.len() - 1) as f32;
+            variance.sqrt()
+        } else {
+            mean_power_mw * 0.2
+        };
+
+        let hours = duration_minutes as f32 / 60.0;
+        let predicted_consumption = mean_power_mw * hours;
 
         Ok(PowerPrediction {
             predicted_consumption_mw: predicted_consumption,
-            confidence_interval: (predicted_consumption * 0.8, predicted_consumption * 1.2),
+            confidence_interval: (
+                (mean_power_mw - spread).max(0.0) * hours,
+                (mean_power_mw + spread) * hours,
+            ),
             accuracy_metrics: self.accuracy_metrics.clone(),
-            factors: vec![
-                PredictionFactor {
-                    factor_name: "Base Consumption".to_string(),
-                    impact_weight: 0.6,
-                    description: "Baseline ML inference power consumption".to_string(),
-                },
-                PredictionFactor {
-                    factor_name: "Usage Duration".to_string(),
-                    impact_weight: 0.4,
-                    description: "Expected inference duration".to_string(),
-                },
-            ],
+            factors: vec![PredictionFactor {
+                factor_name: "Observed mean power".to_string(),
+                impact_weight: 1.0,
+                description: format!(
+                    "{:.1} mW averaged over {} measured reading(s)",
+                    mean_power_mw,
+                    samples.len()
+                ),
+            }],
         })
     }
 }
@@ -1025,6 +1171,7 @@ impl AdaptiveInferenceScheduler {
         target_level: QualityLevel,
         reason: AdaptationReason,
         battery_level: u8,
+        power_consumption_mw: Option<f32>,
     ) {
         let old_level = self.current_quality_level;
         self.current_quality_level = target_level;
@@ -1035,7 +1182,9 @@ impl AdaptiveInferenceScheduler {
             to_level: target_level,
             reason,
             battery_level,
-            power_consumption: 2500.0, // Placeholder
+            // Whatever the platform measured at this instant; previously a
+            // fixed 2500.0 mW recorded against every adaptation.
+            power_consumption: power_consumption_mw,
         };
 
         self.adaptation_history.push_back(adaptation);
@@ -1198,7 +1347,9 @@ impl BatteryUtils {
         // Efficiency is higher when we get more inferences per unit of power
         let efficiency = inferences_per_minute / (power_per_inference / 1000.0);
 
-        // Normalize to 0-1 scale (this would be calibrated based on typical performance)
+        // Normalised to 0-1 against a reference of 10 inferences per minute
+        // per watt. The divisor is a stated scale for this score, not a
+        // measurement of any particular device.
         (efficiency / 10.0).min(1.0)
     }
 }
@@ -1342,5 +1493,143 @@ mod tests {
             recommendation.implementation_difficulty,
             DifficultyLevel::Easy
         ));
+    }
+
+    /// Build a `power_supply`-shaped fixture tree under a unique temp dir.
+    fn write_power_supply_fixture(name: &str, nodes: &[(&str, &str)]) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "trustformers_power_supply_{}_{}",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let supply = root.join(name);
+        std::fs::create_dir_all(&supply).expect("create fixture supply dir");
+        for (node, value) in nodes {
+            std::fs::write(supply.join(node), value).expect("write fixture node");
+        }
+        root
+    }
+
+    /// Regression: the non-Android/non-iOS reader used to return an invented
+    /// reading -- level 75%, 3.8 V, -1500 mA, 30 C and `power_consumption_mw:
+    /// Some(2500.0)`. Off-device there is no battery source, so every field
+    /// must be `None` and the status must be `Unknown`.
+    #[test]
+    fn test_read_battery_info_reports_unavailable_not_invented_values() {
+        let mut monitor = BatteryMonitor::new(Duration::from_millis(10), 8);
+        let reading = monitor.read_battery_info().expect("reading");
+
+        // On a host with a readable `power_supply` battery (Linux laptop) the
+        // reading is real; on every other host it must be empty. Neither case
+        // may contain the old fabricated constants.
+        assert_ne!(reading.power_consumption_mw, Some(2500.0));
+        assert_ne!(reading.voltage, Some(3.8));
+        assert_ne!(reading.current_ma, Some(-1500.0));
+        assert_ne!(reading.estimated_time_remaining_minutes, Some(180));
+
+        #[cfg(not(any(target_os = "android", target_os = "linux")))]
+        {
+            assert_eq!(reading.level_percent, None);
+            assert_eq!(reading.power_consumption_mw, None);
+            assert_eq!(reading.voltage, None);
+            assert_eq!(reading.current_ma, None);
+            assert_eq!(reading.temperature_celsius, None);
+            assert_eq!(reading.estimated_time_remaining_minutes, None);
+            assert!(matches!(reading.charging_status, ChargingStatus::Unknown));
+            assert_eq!(monitor.current_level, None);
+        }
+    }
+
+    /// The sysfs parser converts real kernel units and does not invent the
+    /// nodes a gauge omits.
+    #[test]
+    fn test_power_supply_reader_parses_real_sysfs_units() {
+        let root = write_power_supply_fixture(
+            "BAT0",
+            &[
+                ("type", "Battery\n"),
+                ("status", "Discharging\n"),
+                ("capacity", "64\n"),
+                ("voltage_now", "3812000\n"),  // 3.812 V
+                ("current_now", "-1450000\n"), // -1450 mA
+                ("temp", "302\n"),             // 30.2 C
+                ("charge_now", "2900000\n"),   // 2900 mAh
+            ],
+        );
+
+        let reading = read_power_supply_battery(&root).expect("battery supply found");
+        assert_eq!(reading.level_percent, Some(64));
+        assert!(matches!(
+            reading.charging_status,
+            ChargingStatus::Discharging
+        ));
+        assert!((reading.voltage.expect("voltage") - 3.812).abs() < 1e-3);
+        assert!((reading.current_ma.expect("current") + 1450.0).abs() < 1e-1);
+        assert!((reading.temperature_celsius.expect("temp") - 30.2).abs() < 1e-3);
+        // No `power_now` node: P = V * I from the two real measurements.
+        assert!((reading.power_consumption_mw.expect("power") - 3.812 * 1450.0).abs() < 1.0);
+        // 2900 mAh at 1450 mA = 2 h.
+        assert_eq!(reading.estimated_time_remaining_minutes, Some(120));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A gauge that publishes only `capacity`/`status` must leave every other
+    /// field `None` rather than filling in a plausible number.
+    #[test]
+    fn test_power_supply_reader_leaves_absent_nodes_none() {
+        let root = write_power_supply_fixture(
+            "sparse_bat",
+            &[
+                ("type", "Battery\n"),
+                ("status", "Charging\n"),
+                ("capacity", "41\n"),
+            ],
+        );
+
+        let reading = read_power_supply_battery(&root).expect("battery supply found");
+        assert_eq!(reading.level_percent, Some(41));
+        assert!(matches!(reading.charging_status, ChargingStatus::Charging));
+        assert_eq!(reading.voltage, None);
+        assert_eq!(reading.current_ma, None);
+        assert_eq!(reading.temperature_celsius, None);
+        assert_eq!(reading.power_consumption_mw, None);
+        assert_eq!(reading.estimated_time_remaining_minutes, None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A tree with no `type == Battery` supply (AC adapter only) yields
+    /// nothing at all, so the caller falls back to the unavailable reading.
+    #[test]
+    fn test_power_supply_reader_ignores_non_battery_supplies() {
+        let root = write_power_supply_fixture("ADP1", &[("type", "Mains\n"), ("online", "1\n")]);
+        assert!(read_power_supply_battery(&root).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression: `get_current_battery_level` used to guess 0.85/0.75/0.65/0.5
+    /// from the charging status when no level had been measured. Charging
+    /// status says nothing about how full the cell is, so an unmeasured level
+    /// must be `None`.
+    #[test]
+    fn test_battery_level_is_none_when_unmeasured() {
+        let device_info = crate::device_info::MobileDeviceDetector::detect().expect("device");
+        let manager =
+            MobileBatteryManager::new(BatteryConfig::default(), &device_info).expect("manager");
+        assert_eq!(manager.get_current_battery_level(), None);
+    }
+
+    /// Regression: `estimate_time_remaining` returned a hardcoded
+    /// `Some(120)`. With no reading in history it must be `None`.
+    #[test]
+    fn test_time_remaining_is_none_without_readings() {
+        let device_info = crate::device_info::MobileDeviceDetector::detect().expect("device");
+        let manager =
+            MobileBatteryManager::new(BatteryConfig::default(), &device_info).expect("manager");
+        assert_eq!(manager.estimate_time_remaining(), None);
+        assert_eq!(manager.calculate_average_power_consumption(), None);
+        assert_eq!(manager.get_peak_power_consumption(), None);
     }
 }

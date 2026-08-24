@@ -26,7 +26,10 @@ anyhow.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 memmap2.workspace = true
-serde_yaml.workspace = true
+# `serde_yaml_ng`, not `serde_yaml`: the original crate was archived by its author
+# in 2024 and receives no further fixes. `serde_yaml_ng` is the maintained hard
+# fork of 0.9.34 with an API-identical surface, so the switch is a rename.
+serde_yaml_ng.workspace = true
 fastrand.workspace = true
 chrono.workspace = true
 half.workspace = true

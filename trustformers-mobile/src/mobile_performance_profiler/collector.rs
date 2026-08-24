@@ -133,8 +133,8 @@ pub struct MobileMetricsCollector {
     /// Collection state tracking
     collection_state: Arc<RwLock<CollectionState>>,
 
-    /// Platform-specific collectors
-    platform_collector: Arc<dyn PlatformCollector + Send + Sync>,
+    /// Real system metrics source
+    platform_collector: Arc<SystemMetricsCollector>,
 
     /// Inference metrics tracker
     inference_tracker: Arc<Mutex<InferenceTracker>>,
@@ -213,13 +213,13 @@ struct CompletedInference {
     success: bool,
 
     /// Memory delta
-    memory_delta_mb: f32,
+    memory_delta_mb: Option<f32>,
 
     /// CPU usage during inference
-    cpu_usage_percent: f32,
+    cpu_usage_percent: Option<f32>,
 
     /// GPU usage during inference
-    gpu_usage_percent: f32,
+    gpu_usage_percent: Option<f32>,
 
     /// Completion timestamp
     timestamp: u64,
@@ -248,13 +248,13 @@ struct CacheStats {
 #[derive(Debug, Clone)]
 struct SystemSnapshot {
     /// Memory usage at snapshot time
-    memory_usage_mb: f32,
+    memory_usage_mb: Option<f32>,
 
     /// CPU usage at snapshot time
-    cpu_usage_percent: f32,
+    cpu_usage_percent: Option<f32>,
 
     /// GPU usage at snapshot time
-    gpu_usage_percent: f32,
+    gpu_usage_percent: Option<f32>,
 
     /// Timestamp
     timestamp: Instant,
@@ -288,52 +288,199 @@ pub struct CollectionStatistics {
     pub success_rate: f64,
 }
 
-/// Platform-specific collector trait
+/// Real system metrics source.
 ///
-/// This trait defines the interface for platform-specific metric collection.
-/// Implementations provide optimized collection methods for iOS and Android.
-trait PlatformCollector: std::fmt::Debug {
-    /// Collect memory metrics using platform-specific APIs
-    fn collect_memory_metrics(&self) -> Result<MemoryMetrics>;
-
-    /// Collect CPU metrics using platform-specific APIs
-    fn collect_cpu_metrics(&self) -> Result<CpuMetrics>;
-
-    /// Collect GPU metrics using platform-specific APIs
-    fn collect_gpu_metrics(&self) -> Result<GpuMetrics>;
-
-    /// Collect thermal metrics using platform-specific APIs
-    fn collect_thermal_metrics(&self) -> Result<ThermalMetrics>;
-
-    /// Collect battery metrics using platform-specific APIs
-    fn collect_battery_metrics(&self) -> Result<BatteryMetrics>;
-
-    /// Collect platform-specific metrics
-    fn collect_platform_metrics(&self) -> Result<PlatformMetrics>;
-
-    /// Get platform name
-    fn platform_name(&self) -> &str;
-
-    /// Check if platform supports specific metric type
-    fn supports_metric(&self, metric_type: &str) -> bool;
-}
-
-/// iOS-specific metrics collector
-#[cfg(target_os = "ios")]
-struct IOSCollector {
-    config: Arc<RwLock<MobileProfilerConfig>>,
-}
-
-/// Android-specific metrics collector
-#[cfg(target_os = "android")]
-struct AndroidCollector {
-    config: Arc<RwLock<MobileProfilerConfig>>,
-}
-
-/// Generic/fallback metrics collector for unsupported platforms
+/// Every figure this type returns comes from a live measurement. There is a
+/// single implementation rather than one per platform on purpose: the previous
+/// `IOSCollector` / `AndroidCollector` / `GenericCollector` split returned
+/// three different sets of invented constants (iOS "128 MB heap / 30% CPU /
+/// 55% GPU", Android "96 MB / 35% / 60%", generic "64 MB / 25% / 20%") with no
+/// platform call behind any of them. `sysinfo` reads the same real counters on
+/// every target this crate builds for, so one implementation covers all of
+/// them, and what genuinely cannot be measured is reported as absent instead
+/// of being filled in.
 #[derive(Debug)]
-struct GenericCollector {
-    config: Arc<RwLock<MobileProfilerConfig>>,
+struct SystemMetricsCollector;
+
+impl SystemMetricsCollector {
+    /// Real memory figures: this process's resident set size and the system's
+    /// available memory, both from `sysinfo`.
+    ///
+    /// The per-segment breakdown (heap/native/graphics/code/stack) has no
+    /// portable source and stays `None`.
+    fn collect_memory_metrics(&self) -> Result<MemoryMetrics> {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+        let mut system = System::new();
+        system.refresh_memory();
+
+        // A second `System` for the process refresh, mirroring
+        // `crash_reporter::collect_memory_usage`: reusing the instance that
+        // already refreshed system memory yields no process on macOS.
+        let pid = Pid::from_u32(std::process::id());
+        let mut process_system = System::new();
+        process_system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+
+        let bytes_to_mb = |bytes: u64| bytes as f32 / (1024.0 * 1024.0);
+        let resident_mb = process_system
+            .process(pid)
+            .map(|process| bytes_to_mb(process.memory()))
+            .ok_or_else(|| {
+                CollectionError::ResourceUnavailable(
+                    "sysinfo cannot see this process, so its resident memory is unreadable".into(),
+                )
+            })
+            .map_err(|e| TrustformersError::runtime_error(e.to_string()))?;
+
+        Ok(MemoryMetrics {
+            heap_used_mb: resident_mb,
+            heap_free_mb: None,
+            heap_total_mb: None,
+            native_used_mb: None,
+            graphics_used_mb: None,
+            code_used_mb: None,
+            stack_used_mb: None,
+            other_used_mb: None,
+            available_mb: bytes_to_mb(system.available_memory()),
+        })
+    }
+
+    /// Real CPU figures from `sysinfo`.
+    ///
+    /// Global usage needs two samples separated by at least
+    /// `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`, so this call sleeps for that
+    /// interval -- the cost of a real reading rather than a made-up one. Idle
+    /// is derived from usage; the user/kernel split and the throttling ratio
+    /// have no portable source and stay `None`.
+    fn collect_cpu_metrics(&self) -> Result<CpuMetrics> {
+        use sysinfo::System;
+
+        let mut system = System::new();
+        system.refresh_cpu_usage();
+        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+        system.refresh_cpu_all();
+
+        let usage_percent = system.global_cpu_usage();
+        // `sysinfo` reports 0 MHz when it has no frequency for a CPU.
+        let frequency_mhz = system
+            .cpus()
+            .iter()
+            .map(|cpu| cpu.frequency())
+            .max()
+            .filter(|mhz| *mhz > 0)
+            .map(|mhz| mhz as u32);
+
+        Ok(CpuMetrics {
+            usage_percent,
+            user_percent: None,
+            system_percent: None,
+            idle_percent: (100.0 - usage_percent).clamp(0.0, 100.0),
+            frequency_mhz,
+            temperature_c: hottest_component_celsius(),
+            throttling_level: None,
+        })
+    }
+
+    /// GPU telemetry has no portable source.
+    ///
+    /// Utilisation, VRAM occupancy, clock and board power all need a
+    /// vendor-specific driver query (Metal performance counters, the Android
+    /// GPU delegate, NVML). None of those is reachable from this crate's
+    /// dependency set, so there is nothing to report.
+    fn collect_gpu_metrics(&self) -> Result<Option<GpuMetrics>> {
+        Ok(None)
+    }
+
+    /// Thermal metrics from the system's thermal components, when it has any.
+    ///
+    /// `None` on hosts that expose no sensors -- Apple Silicon and most
+    /// containers among them. The trend needs a history this per-sample call
+    /// does not hold, so it is reported as [`TemperatureTrend::Stable`] only
+    /// when a temperature is genuinely read.
+    fn collect_thermal_metrics(&self) -> Result<Option<ThermalMetrics>> {
+        let Some(temperature_c) = hottest_component_celsius() else {
+            return Ok(None);
+        };
+
+        Ok(Some(ThermalMetrics {
+            temperature_c,
+            thermal_state: thermal_state_for(temperature_c),
+            // A throttling ratio is not published by any portable API.
+            throttling_level: None,
+            temperature_trend: TemperatureTrend::Stable,
+        }))
+    }
+
+    /// Battery telemetry is not readable from this crate's dependency set.
+    ///
+    /// `crate::battery` reads the Linux/Android `power_supply` sysfs class
+    /// directly; wiring that in here would make the profiler's battery figures
+    /// depend on a target-specific path, so this collector reports absence and
+    /// leaves battery reporting to that module.
+    fn collect_battery_metrics(&self) -> Result<Option<BatteryMetrics>> {
+        Ok(None)
+    }
+
+    /// Platform-specific metrics.
+    ///
+    /// The iOS and Android variants of [`PlatformMetrics`] need Metal
+    /// performance counters and NNAPI/ART statistics respectively; neither is
+    /// queried by this crate, so both stay absent.
+    fn collect_platform_metrics(&self) -> Result<PlatformMetrics> {
+        Ok(PlatformMetrics {
+            #[cfg(target_os = "ios")]
+            ios: None,
+            #[cfg(target_os = "android")]
+            android: None,
+        })
+    }
+
+    /// Name of the target this collector is measuring.
+    fn platform_name(&self) -> &'static str {
+        std::env::consts::OS
+    }
+
+    /// Whether a metric family is actually measured on this target.
+    ///
+    /// Previously this answered `true` for memory, CPU, GPU, thermal *and*
+    /// battery on every platform, which was only true because every one of
+    /// them returned a constant.
+    fn supports_metric(&self, metric_type: &str) -> bool {
+        match metric_type {
+            "memory" | "cpu" => true,
+            "thermal" => hottest_component_celsius().is_some(),
+            "gpu" | "battery" | "network" => false,
+            _ => false,
+        }
+    }
+}
+
+/// Highest temperature reported by the system's thermal components, in
+/// Celsius, or `None` when the platform exposes no sensors.
+fn hottest_component_celsius() -> Option<f32> {
+    sysinfo::Components::new_with_refreshed_list()
+        .iter()
+        .filter_map(|component| component.temperature())
+        .fold(None::<f32>, |hottest, celsius| {
+            Some(hottest.map_or(celsius, |best| best.max(celsius)))
+        })
+}
+
+/// Bucket a measured temperature into the shared [`ThermalState`] scale.
+fn thermal_state_for(celsius: f32) -> crate::device_info::ThermalState {
+    use crate::device_info::ThermalState;
+    match celsius {
+        t if t >= 100.0 => ThermalState::Shutdown,
+        t if t >= 90.0 => ThermalState::Emergency,
+        t if t >= 80.0 => ThermalState::Critical,
+        t if t >= 70.0 => ThermalState::Serious,
+        t if t >= 55.0 => ThermalState::Fair,
+        _ => ThermalState::Nominal,
+    }
 }
 
 impl MobileMetricsCollector {
@@ -374,7 +521,7 @@ impl MobileMetricsCollector {
         let config_arc = Arc::new(RwLock::new(config.clone()));
 
         // Create platform-specific collector
-        let platform_collector = Self::create_platform_collector(config_arc.clone())?;
+        let platform_collector = Arc::new(SystemMetricsCollector);
 
         // Initialize collector state
         let collection_state = Arc::new(RwLock::new(CollectionState {
@@ -618,7 +765,12 @@ impl MobileMetricsCollector {
     /// # let config = MobileProfilerConfig::default();
     /// # let collector = MobileMetricsCollector::new(config)?;
     /// let snapshot = collector.get_current_snapshot()?;
-    /// println!("Current CPU usage: {}%", snapshot.cpu.usage_percent);
+    /// // `None` when CPU profiling is disabled or the platform refused the
+    /// // measurement -- never a zero standing in for one.
+    /// match snapshot.cpu {
+    ///     Some(cpu) => println!("Current CPU usage: {}%", cpu.usage_percent),
+    ///     None => println!("CPU usage was not measured"),
+    /// }
     /// # Ok(())
     /// # }
     /// ```
@@ -728,9 +880,9 @@ impl MobileMetricsCollector {
         // Collect current system snapshot
         let current_snapshot = self.get_current_snapshot()?;
         let system_snapshot = SystemSnapshot {
-            memory_usage_mb: current_snapshot.memory.heap_used_mb,
-            cpu_usage_percent: current_snapshot.cpu.usage_percent,
-            gpu_usage_percent: current_snapshot.gpu.usage_percent,
+            memory_usage_mb: current_snapshot.memory.as_ref().map(|m| m.heap_used_mb),
+            cpu_usage_percent: current_snapshot.cpu.as_ref().map(|c| c.usage_percent),
+            gpu_usage_percent: current_snapshot.gpu.as_ref().map(|gpu| gpu.usage_percent),
             timestamp: Instant::now(),
         };
 
@@ -790,10 +942,15 @@ impl MobileMetricsCollector {
                 model_name: session.model_name.clone(),
                 duration_ms,
                 success,
-                memory_delta_mb: current_snapshot.memory.heap_used_mb
-                    - session.initial_metrics.memory_usage_mb,
-                cpu_usage_percent: current_snapshot.cpu.usage_percent,
-                gpu_usage_percent: current_snapshot.gpu.usage_percent,
+                memory_delta_mb: match (
+                    current_snapshot.memory.as_ref().map(|m| m.heap_used_mb),
+                    session.initial_metrics.memory_usage_mb,
+                ) {
+                    (Some(now), Some(before)) => Some(now - before),
+                    _ => None,
+                },
+                cpu_usage_percent: current_snapshot.cpu.as_ref().map(|c| c.usage_percent),
+                gpu_usage_percent: current_snapshot.gpu.as_ref().map(|gpu| gpu.usage_percent),
                 timestamp: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -1062,40 +1219,46 @@ impl MobileMetricsCollector {
             .as_millis() as u64;
 
         // Collect individual metric types
+        // Disabled-by-configuration and failed-to-measure both yield `None`.
+        // A zeroed `MemoryMetrics`/`CpuMetrics` would report an idle process
+        // that nothing had looked at.
         let memory = if config.memory_profiling.enabled {
-            self.platform_collector.collect_memory_metrics().unwrap_or_else(|e| {
+            self.platform_collector.collect_memory_metrics().map(Some).unwrap_or_else(|e| {
                 collection_errors.push(e);
-                MemoryMetrics::default()
+                None
             })
         } else {
-            MemoryMetrics::default()
+            None
         };
 
         let cpu = if config.cpu_profiling.enabled {
-            self.platform_collector.collect_cpu_metrics().unwrap_or_else(|e| {
+            self.platform_collector.collect_cpu_metrics().map(Some).unwrap_or_else(|e| {
                 collection_errors.push(e);
-                CpuMetrics::default()
+                None
             })
         } else {
-            CpuMetrics::default()
+            None
         };
 
+        // Unavailable metric families stay `None`. They are deliberately not
+        // replaced by a zeroed default: a zero would be read downstream as a
+        // measured idle GPU / silent network rather than as "not measured".
         let gpu = if config.gpu_profiling.enabled {
             self.platform_collector.collect_gpu_metrics().unwrap_or_else(|e| {
                 collection_errors.push(e);
-                GpuMetrics::default()
+                None
             })
         } else {
-            GpuMetrics::default()
+            None
         };
 
         let network = if config.network_profiling.enabled {
             self.collect_network_metrics().unwrap_or_else(|e| {
                 collection_errors.push(e);
-                NetworkMetrics::default()
+                None
             })
         } else {
-            NetworkMetrics::default()
+            None
         };
 
         let inference = self.collect_inference_metrics().unwrap_or_else(|e| {
@@ -1105,12 +1268,12 @@ impl MobileMetricsCollector {
 
         let thermal = self.platform_collector.collect_thermal_metrics().unwrap_or_else(|e| {
             collection_errors.push(e);
-            ThermalMetrics::default()
+            None
         });
 
         let battery = self.platform_collector.collect_battery_metrics().unwrap_or_else(|e| {
             collection_errors.push(e);
-            BatteryMetrics::default()
+            None
         });
 
         let platform = self.platform_collector.collect_platform_metrics().unwrap_or_else(|e| {
@@ -1180,20 +1343,15 @@ impl MobileMetricsCollector {
         Ok(())
     }
 
-    /// Collect network metrics (platform-agnostic)
-    fn collect_network_metrics(&self) -> Result<NetworkMetrics> {
-        // Platform-agnostic network metrics collection
-        // In a real implementation, this would use system APIs
-        Ok(NetworkMetrics {
-            bytes_sent: 1024000,
-            bytes_received: 2048000,
-            packets_sent: 2000,
-            packets_received: 3000,
-            connection_count: 5,
-            latency_ms: 45.0,
-            bandwidth_mbps: 25.0,
-            error_rate: 0.02,
-        })
+    /// Network metrics have no source in this crate's dependency set.
+    ///
+    /// Per-process byte/packet counters need `sysinfo`'s `network` feature
+    /// (system-wide, not per-process) or a platform socket API; latency,
+    /// bandwidth and error rate need active probing this profiler does not
+    /// perform. The previous body returned a fixed 1 MB sent / 2 MB received /
+    /// 45 ms / 25 Mbps / 2% error reading on every call, on every machine.
+    fn collect_network_metrics(&self) -> Result<Option<NetworkMetrics>> {
+        Ok(None)
     }
 
     /// Collect inference metrics from tracked sessions
@@ -1279,378 +1437,11 @@ impl MobileMetricsCollector {
         Ok(())
     }
 
-    /// Create platform-specific collector
-    fn create_platform_collector(
-        config: Arc<RwLock<MobileProfilerConfig>>,
-    ) -> Result<Arc<dyn PlatformCollector + Send + Sync>> {
-        #[cfg(target_os = "ios")]
-        {
-            Ok(Arc::new(IOSCollector { config }))
-        }
-        #[cfg(target_os = "android")]
-        {
-            Ok(Arc::new(AndroidCollector { config }))
-        }
-        #[cfg(not(any(target_os = "ios", target_os = "android")))]
-        {
-            Ok(Arc::new(GenericCollector { config }))
-        }
-    }
-
     /// Estimate memory usage of collector
     fn estimate_memory_usage(&self, history: &VecDeque<MobileMetricsSnapshot>) -> f32 {
         let snapshot_size = std::mem::size_of::<MobileMetricsSnapshot>();
         let total_size = snapshot_size * history.len();
         total_size as f32 / (1024.0 * 1024.0) // Convert to MB
-    }
-}
-
-// Platform-specific implementations
-
-#[cfg(target_os = "ios")]
-impl PlatformCollector for IOSCollector {
-    fn collect_memory_metrics(&self) -> Result<MemoryMetrics> {
-        use std::mem;
-
-        tracing::trace!("Collecting iOS memory metrics");
-
-        // Get memory info using mach system calls
-        // This is a simplified implementation - real implementation would use:
-        // - mach_task_basic_info for task memory info
-        // - vm_statistics64 for VM statistics
-        // - host_page_size for page size information
-
-        // In a real implementation, you would:
-        // 1. Get task port for current task
-        // 2. Call task_info with MACH_TASK_BASIC_INFO
-        // 3. Call host_statistics64 with HOST_VM_INFO64
-        // 4. Calculate memory usage from returned structures
-
-        Ok(MemoryMetrics {
-            heap_used_mb: 128.0,
-            heap_free_mb: 256.0,
-            heap_total_mb: 384.0,
-            native_used_mb: 64.0,
-            graphics_used_mb: 32.0,
-            code_used_mb: 16.0,
-            stack_used_mb: 8.0,
-            other_used_mb: 24.0,
-            available_mb: 1024.0,
-        })
-    }
-
-    fn collect_cpu_metrics(&self) -> Result<CpuMetrics> {
-        tracing::trace!("Collecting iOS CPU metrics");
-
-        // Use host_processor_info and sysctl for CPU metrics
-        // Real implementation would:
-        // 1. Call host_processor_info with PROCESSOR_CPU_LOAD_INFO
-        // 2. Use sysctl for CPU frequency and thermal information
-        // 3. Calculate usage percentages from CPU load info
-
-        Ok(CpuMetrics {
-            usage_percent: 30.0,
-            user_percent: 20.0,
-            system_percent: 10.0,
-            idle_percent: 70.0,
-            frequency_mhz: 3200,
-            temperature_c: 38.0,
-            throttling_level: 0.1,
-        })
-    }
-
-    fn collect_gpu_metrics(&self) -> Result<GpuMetrics> {
-        tracing::trace!("Collecting iOS GPU metrics");
-
-        // Use Metal performance counters
-        // Real implementation would:
-        // 1. Access Metal device performance counters
-        // 2. Query GPU utilization through Metal Performance Shaders
-        // 3. Get GPU memory usage through MTLDevice
-
-        Ok(GpuMetrics {
-            usage_percent: 55.0,
-            memory_used_mb: 384.0,
-            memory_total_mb: 1536.0,
-            frequency_mhz: 1396,
-            temperature_c: 45.0,
-            power_mw: 4200.0,
-        })
-    }
-
-    fn collect_thermal_metrics(&self) -> Result<ThermalMetrics> {
-        tracing::trace!("Collecting iOS thermal metrics");
-
-        // Use NSProcessInfo.thermalState
-        // Real implementation would:
-        // 1. Access NSProcessInfo thermal state
-        // 2. Use IOKit for detailed thermal sensors
-        // 3. Calculate thermal trends from historical data
-
-        Ok(ThermalMetrics {
-            temperature_c: 42.0,
-            thermal_state: crate::device_info::ThermalState::Fair,
-            throttling_level: 0.1,
-            temperature_trend: TemperatureTrend::Rising,
-        })
-    }
-
-    fn collect_battery_metrics(&self) -> Result<BatteryMetrics> {
-        tracing::trace!("Collecting iOS battery metrics");
-
-        // Use UIDevice.current.batteryLevel
-        // Real implementation would:
-        // 1. Access UIDevice battery information
-        // 2. Use IOKit for detailed power metrics
-        // 3. Calculate power consumption rates
-
-        Ok(BatteryMetrics {
-            level_percent: 68,
-            is_charging: false,
-            power_consumption_mw: 3200.0,
-            estimated_life_minutes: 145,
-        })
-    }
-
-    fn collect_platform_metrics(&self) -> Result<PlatformMetrics> {
-        tracing::trace!("Collecting iOS platform metrics");
-
-        Ok(PlatformMetrics {
-            #[cfg(target_os = "ios")]
-            ios: Some(IOSMetrics {
-                metal_stats: MetalPerformanceStats::default(),
-                coreml_stats: CoreMLPerformanceStats::default(),
-                memory_pressure: IOSMemoryPressure::default(),
-            }),
-            #[cfg(target_os = "android")]
-            android: None,
-        })
-    }
-
-    fn platform_name(&self) -> &str {
-        "iOS"
-    }
-
-    fn supports_metric(&self, metric_type: &str) -> bool {
-        match metric_type {
-            "memory" | "cpu" | "gpu" | "thermal" | "battery" | "metal" | "coreml" => true,
-            _ => false,
-        }
-    }
-}
-
-#[cfg(target_os = "android")]
-impl PlatformCollector for AndroidCollector {
-    fn collect_memory_metrics(&self) -> Result<MemoryMetrics> {
-        tracing::trace!("Collecting Android memory metrics");
-
-        // Use Android ActivityManager.MemoryInfo
-        // Real implementation would:
-        // 1. Access ActivityManager memory info
-        // 2. Read /proc/meminfo for system memory
-        // 3. Use Debug.MemoryInfo for detailed app memory
-
-        Ok(MemoryMetrics {
-            heap_used_mb: 96.0,
-            heap_free_mb: 128.0,
-            heap_total_mb: 224.0,
-            native_used_mb: 48.0,
-            graphics_used_mb: 64.0,
-            code_used_mb: 12.0,
-            stack_used_mb: 4.0,
-            other_used_mb: 16.0,
-            available_mb: 512.0,
-        })
-    }
-
-    fn collect_cpu_metrics(&self) -> Result<CpuMetrics> {
-        tracing::trace!("Collecting Android CPU metrics");
-
-        // Read from /proc/stat and /sys/devices/system/cpu/
-        // Real implementation would:
-        // 1. Parse /proc/stat for CPU usage statistics
-        // 2. Read CPU frequency from sysfs
-        // 3. Access thermal zones for temperature
-
-        Ok(CpuMetrics {
-            usage_percent: 35.0,
-            user_percent: 25.0,
-            system_percent: 10.0,
-            idle_percent: 65.0,
-            frequency_mhz: 2800,
-            temperature_c: 40.0,
-            throttling_level: 0.15,
-        })
-    }
-
-    fn collect_gpu_metrics(&self) -> Result<GpuMetrics> {
-        tracing::trace!("Collecting Android GPU metrics");
-
-        // Use GPU frequency and utilization from sysfs
-        // Real implementation would:
-        // 1. Read GPU frequency from vendor-specific sysfs paths
-        // 2. Access GPU utilization counters
-        // 3. Query GPU memory usage through vendor APIs
-
-        Ok(GpuMetrics {
-            usage_percent: 40.0,
-            memory_used_mb: 320.0,
-            memory_total_mb: 1024.0,
-            frequency_mhz: 950,
-            temperature_c: 38.0,
-            power_mw: 2800.0,
-        })
-    }
-
-    fn collect_thermal_metrics(&self) -> Result<ThermalMetrics> {
-        tracing::trace!("Collecting Android thermal metrics");
-
-        // Use PowerManager.getThermalStatus
-        // Real implementation would:
-        // 1. Access Android PowerManager thermal status
-        // 2. Read thermal zone temperatures from sysfs
-        // 3. Monitor thermal throttling events
-
-        Ok(ThermalMetrics {
-            temperature_c: 45.0,
-            thermal_state: crate::device_info::ThermalState::Fair,
-            throttling_level: 0.2,
-            temperature_trend: TemperatureTrend::Rising,
-        })
-    }
-
-    fn collect_battery_metrics(&self) -> Result<BatteryMetrics> {
-        tracing::trace!("Collecting Android battery metrics");
-
-        // Use BatteryManager
-        // Real implementation would:
-        // 1. Access BatteryManager for battery information
-        // 2. Read battery stats from system services
-        // 3. Calculate power consumption rates
-
-        Ok(BatteryMetrics {
-            level_percent: 72,
-            is_charging: true,
-            power_consumption_mw: 2800.0,
-            estimated_life_minutes: 220,
-        })
-    }
-
-    fn collect_platform_metrics(&self) -> Result<PlatformMetrics> {
-        tracing::trace!("Collecting Android platform metrics");
-
-        Ok(PlatformMetrics {
-            #[cfg(target_os = "ios")]
-            ios: None,
-            #[cfg(target_os = "android")]
-            android: Some(AndroidMetrics {
-                nnapi_stats: NNAPIPerformanceStats::default(),
-                gpu_delegate_stats: GPUDelegateStats::default(),
-                memory_stats: AndroidMemoryStats::default(),
-                doze_status: DozeStatus::default(),
-            }),
-        })
-    }
-
-    fn platform_name(&self) -> &str {
-        "Android"
-    }
-
-    fn supports_metric(&self, metric_type: &str) -> bool {
-        match metric_type {
-            "memory" | "cpu" | "gpu" | "thermal" | "battery" | "nnapi" | "doze" => true,
-            _ => false,
-        }
-    }
-}
-
-impl PlatformCollector for GenericCollector {
-    fn collect_memory_metrics(&self) -> Result<MemoryMetrics> {
-        tracing::trace!("Collecting generic memory metrics");
-
-        // Generic/fallback memory metrics
-        Ok(MemoryMetrics {
-            heap_used_mb: 64.0,
-            heap_free_mb: 128.0,
-            heap_total_mb: 192.0,
-            native_used_mb: 32.0,
-            graphics_used_mb: 16.0,
-            code_used_mb: 8.0,
-            stack_used_mb: 4.0,
-            other_used_mb: 12.0,
-            available_mb: 256.0,
-        })
-    }
-
-    fn collect_cpu_metrics(&self) -> Result<CpuMetrics> {
-        tracing::trace!("Collecting generic CPU metrics");
-
-        Ok(CpuMetrics {
-            usage_percent: 25.0,
-            user_percent: 15.0,
-            system_percent: 10.0,
-            idle_percent: 75.0,
-            frequency_mhz: 2400,
-            temperature_c: 35.0,
-            throttling_level: 0.0,
-        })
-    }
-
-    fn collect_gpu_metrics(&self) -> Result<GpuMetrics> {
-        tracing::trace!("Collecting generic GPU metrics");
-
-        Ok(GpuMetrics {
-            usage_percent: 20.0,
-            memory_used_mb: 128.0,
-            memory_total_mb: 512.0,
-            frequency_mhz: 800,
-            temperature_c: 40.0,
-            power_mw: 2000.0,
-        })
-    }
-
-    fn collect_thermal_metrics(&self) -> Result<ThermalMetrics> {
-        tracing::trace!("Collecting generic thermal metrics");
-
-        Ok(ThermalMetrics {
-            temperature_c: 35.0,
-            thermal_state: crate::device_info::ThermalState::Nominal,
-            throttling_level: 0.0,
-            temperature_trend: TemperatureTrend::Stable,
-        })
-    }
-
-    fn collect_battery_metrics(&self) -> Result<BatteryMetrics> {
-        tracing::trace!("Collecting generic battery metrics");
-
-        Ok(BatteryMetrics {
-            level_percent: 85,
-            is_charging: false,
-            power_consumption_mw: 1500.0,
-            estimated_life_minutes: 300,
-        })
-    }
-
-    fn collect_platform_metrics(&self) -> Result<PlatformMetrics> {
-        tracing::trace!("Collecting generic platform metrics");
-
-        Ok(PlatformMetrics {
-            #[cfg(target_os = "ios")]
-            ios: None,
-            #[cfg(target_os = "android")]
-            android: None,
-        })
-    }
-
-    fn platform_name(&self) -> &str {
-        "Generic"
-    }
-
-    fn supports_metric(&self, metric_type: &str) -> bool {
-        match metric_type {
-            "memory" | "cpu" | "gpu" | "thermal" | "battery" => true,
-            _ => false,
-        }
     }
 }
 
@@ -1875,5 +1666,148 @@ mod tests {
         // Collection should provide default values on error
         let snapshot = collector.get_current_snapshot().expect("Operation failed");
         assert!(snapshot.timestamp > 0);
+    }
+
+    /// Regression: the collector used to report a fixed 64 MB resident / 25%
+    /// CPU / 20% GPU / 85% battery / 35 C snapshot on every non-mobile host
+    /// (and different fixed sets on iOS and Android). Memory and CPU must now
+    /// be real `sysinfo` measurements, and everything without a real source
+    /// must be absent rather than a constant.
+    #[test]
+    fn test_snapshot_carries_real_measurements_not_constants() {
+        // Memory and CPU profiling explicitly enabled: this test is about what
+        // a *measuring* collector reports.
+        let mut config = fast_test_config();
+        config.memory_profiling.enabled = true;
+        config.cpu_profiling.enabled = true;
+        let collector = MobileMetricsCollector::new(config).expect("collector");
+        collector.collect_metrics().expect("collect");
+        let snapshot = collector.get_current_snapshot().expect("snapshot");
+
+        // Real resident memory: this test process occupies a nonzero, and not
+        // exactly-64.0 MB, resident set.
+        let memory = snapshot.memory.as_ref().expect("memory profiling was enabled");
+        assert!(memory.heap_used_mb > 0.0);
+        assert_ne!(memory.heap_used_mb, 64.0);
+        assert_ne!(memory.heap_used_mb, 128.0); // old iOS constant
+        assert_ne!(memory.heap_used_mb, 96.0); // old Android constant
+        assert!(memory.available_mb > 0.0);
+
+        // Real CPU: a percentage, and never one of the three old constants.
+        let cpu = snapshot.cpu.as_ref().expect("cpu profiling was enabled");
+        assert!((0.0..=100.0).contains(&cpu.usage_percent));
+        assert_ne!(cpu.usage_percent, 25.0);
+        assert_ne!(cpu.usage_percent, 30.0);
+        assert_ne!(cpu.usage_percent, 35.0);
+
+        // The unmeasurable segments are absent, not zeroed.
+        assert_eq!(memory.heap_total_mb, None);
+        assert_eq!(memory.graphics_used_mb, None);
+        assert_eq!(cpu.user_percent, None);
+        assert_eq!(cpu.throttling_level, None);
+
+        // Metric families with no source report absence.
+        assert!(
+            snapshot.gpu.is_none(),
+            "GPU telemetry has no source in this build"
+        );
+        assert!(
+            snapshot.battery.is_none(),
+            "battery telemetry has no source in this build"
+        );
+        assert!(
+            snapshot.network.is_none(),
+            "network telemetry has no source in this build"
+        );
+    }
+
+    /// A family switched off by configuration must be absent, not zeroed:
+    /// "profiling disabled" is not "the process used no memory".
+    #[test]
+    fn test_disabled_profiling_reports_absence_not_zero() {
+        let config = fast_test_config();
+        assert!(!config.memory_profiling.enabled && !config.cpu_profiling.enabled);
+        let collector = MobileMetricsCollector::new(config).expect("collector");
+        collector.collect_metrics().expect("collect");
+        let snapshot = collector.get_current_snapshot().expect("snapshot");
+
+        assert!(snapshot.memory.is_none());
+        assert!(snapshot.cpu.is_none());
+    }
+
+    /// `supports_metric` used to answer `true` for every family because every
+    /// family returned a constant. It must now answer for what is measured.
+    #[test]
+    fn test_supports_metric_reports_the_truth() {
+        let collector = SystemMetricsCollector;
+        assert!(collector.supports_metric("memory"));
+        assert!(collector.supports_metric("cpu"));
+        assert!(!collector.supports_metric("gpu"));
+        assert!(!collector.supports_metric("battery"));
+        assert!(!collector.supports_metric("network"));
+        assert!(!collector.supports_metric("nonsense"));
+        assert_eq!(collector.platform_name(), std::env::consts::OS);
+    }
+
+    /// Thermal reporting must be all-or-nothing: either the host exposes
+    /// sensors and a real temperature comes back, or the family is absent.
+    /// It must never be a fabricated 35.0 C / 42.0 C.
+    #[test]
+    fn test_thermal_is_measured_or_absent() {
+        let collector = SystemMetricsCollector;
+        match collector.collect_thermal_metrics().expect("thermal") {
+            Some(thermal) => {
+                assert!(hottest_component_celsius().is_some());
+                assert_ne!(thermal.temperature_c, 35.0);
+                assert_ne!(thermal.temperature_c, 42.0);
+                assert_eq!(thermal.throttling_level, None);
+            },
+            None => assert!(hottest_component_celsius().is_none()),
+        }
+    }
+
+    /// Two consecutive samples of a running process must not be byte-identical
+    /// the way a constant would be. Guards against a regression back to fixed
+    /// values that the value-specific assertions above would miss.
+    #[test]
+    fn test_repeated_collection_is_sampled_not_replayed() {
+        let mut config = fast_test_config();
+        config.memory_profiling.enabled = true;
+        let collector = MobileMetricsCollector::new(config).expect("collector");
+
+        collector.collect_metrics().expect("collect");
+        let first = collector.get_current_snapshot().expect("snapshot");
+        let mut ballast: Vec<u8> = vec![7u8; 64 * 1024 * 1024];
+        // Touch every page so the allocation is actually resident.
+        for page in ballast.chunks_mut(4096) {
+            page[0] = 1;
+        }
+        collector.collect_metrics().expect("collect");
+        let second = collector.get_current_snapshot().expect("snapshot");
+
+        assert!(second.timestamp >= first.timestamp);
+        let before = first.memory.as_ref().expect("memory measured").heap_used_mb;
+        let after = second.memory.as_ref().expect("memory measured").heap_used_mb;
+        // Touching 64 MB must move the measured resident set. A constant
+        // cannot respond to this.
+        assert!(
+            after > before,
+            "resident memory did not respond to a real 64 MB allocation: {} -> {}",
+            before,
+            after
+        );
+        drop(ballast);
+    }
+
+    /// The thermal bucketing is a pure function of a measured temperature.
+    #[test]
+    fn test_thermal_state_buckets() {
+        use crate::device_info::ThermalState;
+        assert!(matches!(thermal_state_for(20.0), ThermalState::Nominal));
+        assert!(matches!(thermal_state_for(60.0), ThermalState::Fair));
+        assert!(matches!(thermal_state_for(72.0), ThermalState::Serious));
+        assert!(matches!(thermal_state_for(85.0), ThermalState::Critical));
+        assert!(matches!(thermal_state_for(95.0), ThermalState::Emergency));
+        assert!(matches!(thermal_state_for(105.0), ThermalState::Shutdown));
     }
 }

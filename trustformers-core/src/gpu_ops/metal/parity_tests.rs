@@ -509,6 +509,80 @@ fn retained_buffers_survive_pressure_and_free_on_drop() -> Result<()> {
     Ok(())
 }
 
+/// Regression: `MetalTensorData` used to hold a bare `BufferId`. Dropping (or
+/// reassigning) every `Tensor::Metal` that named a given buffer did nothing to the
+/// cache - the entry stayed `Live` until an explicit `clear_buffer_cache` or process
+/// exit, leaking one GPU allocation per op result. `MetalTensorData::new` now takes a
+/// [`MetalBufferHandle`](super::types::MetalBufferHandle) through `retain_buffer`, so
+/// the buffer's lifetime is tied to the `Tensor` value itself, mirroring
+/// `CudaTensorData`. This would fail against the pre-fix bare-`BufferId` field, which
+/// had no `Drop` to hook and could not free anything.
+#[test]
+fn dropping_a_metal_tensor_frees_its_buffer() -> Result<()> {
+    use crate::tensor::{DType, MetalTensorData};
+
+    let backend = get_metal_backend()?;
+    let id = backend.create_transient_buffer(&fill(64, 7001))?;
+
+    let tensor = Tensor::Metal(MetalTensorData::new(&backend, id, vec![64], DType::F32)?);
+    assert!(
+        backend.has_buffer(&id)?,
+        "constructing the tensor must retain the buffer"
+    );
+
+    // A clone shares the buffer and keeps it alive independently of the original.
+    let cloned = tensor.clone();
+    drop(tensor);
+    assert!(
+        backend.has_buffer(&id)?,
+        "a live clone must keep the buffer resident after the original Tensor drops"
+    );
+
+    drop(cloned);
+    assert!(
+        !backend.has_buffer(&id)?,
+        "dropping the last Tensor::Metal referencing a buffer must free it \
+         immediately, not leave it resident until clear_buffer_cache/process exit"
+    );
+    Ok(())
+}
+
+/// The same regression as [`dropping_a_metal_tensor_frees_its_buffer`], but driven
+/// through a real GPU-to-GPU op (`ops::activations::gelu`) instead of constructing a
+/// `MetalTensorData` by hand - this is the exact call site `ops/activations.rs` builds
+/// on every GELU invocation, so it pins down that the *op's own* result adopted the
+/// handle rather than only the test helper.
+#[test]
+fn a_real_op_result_frees_its_buffer_when_the_tensor_drops() -> Result<()> {
+    use crate::tensor::{DType, MetalTensorData};
+
+    let backend = get_metal_backend()?;
+    let input_id = backend.create_transient_buffer(&fill(256, 7101))?;
+    let input = Tensor::Metal(MetalTensorData::new(
+        &backend,
+        input_id,
+        vec![256],
+        DType::F32,
+    )?);
+
+    let output = crate::ops::activations::gelu(&input)?;
+    let output_id = match &output {
+        Tensor::Metal(data) => data.buffer_id(),
+        other => panic!("expected a Metal GPU result, got {other:?}"),
+    };
+    assert!(
+        backend.has_buffer(&output_id)?,
+        "the op's result buffer must be resident while the returned Tensor is alive"
+    );
+
+    drop(output);
+    assert!(
+        !backend.has_buffer(&output_id)?,
+        "dropping gelu()'s returned Tensor must free its result buffer"
+    );
+    Ok(())
+}
+
 /// `download_buffer_to_vec` must refuse a GPU-private buffer.
 ///
 /// Note what this machine actually does: on Apple Silicon's unified memory,
@@ -660,11 +734,14 @@ fn layernorm_then_oxicuda_gemm_is_correctly_ordered() -> Result<()> {
 
 /// **Discriminating test for the eviction policy.**
 ///
-/// LRU eviction is only safe if nothing that is still *live* can be evicted. A
-/// `Tensor::Metal` holds a bare `BufferId`, not a handle, so an op output that is
-/// still referenced by a live tensor is - by construction - an unpinned, unretained
-/// cache entry. This drives the cache far past its cap while holding such a tensor
-/// and then uses it, which is exactly the failure mode a cap-and-evict design risks.
+/// LRU eviction is only safe if nothing that is still *live* can be evicted. This test
+/// drives straight at the `MetalBackend` layer with a bare `BufferId` and no
+/// [`MetalBufferHandle`] - the same shape the composite ops in this module use for
+/// their own scratch (`release_buffers`), and the shape every `Tensor::Metal` result
+/// used before it started retaining a handle (see the `MetalTensorData` note atop
+/// `types.rs`). A `Live`-tier entry with zero handles is still not a legal eviction
+/// target: it drives the cache far past its cap while holding such an id and then uses
+/// it, which is exactly the failure mode a cap-and-evict design risks.
 #[test]
 fn a_live_op_output_survives_eviction_pressure() -> Result<()> {
     let backend = get_metal_backend()?;

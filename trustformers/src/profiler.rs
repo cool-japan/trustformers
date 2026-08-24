@@ -238,6 +238,31 @@ impl Profiler {
         }
     }
 
+    /// How long this profiler instance has been alive.
+    pub fn uptime(&self) -> Duration {
+        self.session_start.elapsed()
+    }
+
+    /// The optimization advisor this profiler was constructed with.
+    ///
+    /// [`Self::generate_optimization_suggestions`] does not call
+    /// [`OptimizationAdvisor::analyze`] on it — see that method's doc comment
+    /// — so this is exposed for callers who want the advisor's real,
+    /// rule-based analysis directly.
+    pub fn advisor(&self) -> &OptimizationAdvisor {
+        &self.advisor
+    }
+
+    /// The rolling-window metrics tracker this profiler was constructed with.
+    ///
+    /// Nothing currently calls [`MetricsTracker::record_inference`] on it —
+    /// `end_session` computes its latency/throughput metrics directly from
+    /// the session's own samples instead — so its window is empty unless a
+    /// caller records into it directly.
+    pub fn metrics_tracker(&self) -> &MetricsTracker {
+        &self.metrics_tracker
+    }
+
     /// Enable profiling
     pub fn enable(&self) {
         self.core_profiler.enable();
@@ -695,11 +720,22 @@ impl Profiler {
         }
     }
 
+    /// Flag the single slowest recorded operation as worth optimizing.
+    ///
+    /// # Known limitation
+    ///
+    /// This is a minimal heuristic (one rule: "the slowest operation took
+    /// over 100ms"), not [`Self::advisor`]'s rule-based
+    /// [`OptimizationAdvisor::analyze`] — that needs an `AnalysisContext`
+    /// assembled from real hardware detection and the session's latency/
+    /// memory/throughput metrics, which this method does not build. Wiring
+    /// it in is real, scoped follow-up work, not something to fake here.
+    /// `expected_improvement`'s percentages are honestly `None` (no measured
+    /// or modelled estimate exists) rather than a plausible-looking constant.
     fn generate_optimization_suggestions(
         &self,
         operations: &HashMap<String, ProfileResult>,
     ) -> Vec<OptimizationSuggestion> {
-        // In a real implementation, this would use the OptimizationAdvisor
         let mut suggestions = Vec::new();
 
         // Find slow operations
@@ -720,10 +756,13 @@ impl Profiler {
                         "Consider algorithmic improvements".to_string(),
                         "Enable hardware acceleration".to_string(),
                     ],
+                    // No measurement or model backs a specific percentage
+                    // here, so these are honestly `None` rather than an
+                    // invented (if plausible-looking) number.
                     expected_improvement: crate::core::performance::PerformanceImprovement {
-                        latency_reduction: Some(30.0),
-                        throughput_increase: Some(25.0),
-                        memory_reduction: Some(10.0),
+                        latency_reduction: None,
+                        throughput_increase: None,
+                        memory_reduction: None,
                         other_metrics: std::collections::HashMap::new(),
                     },
                     code_examples: Some(vec![crate::core::performance::CodeExample {
@@ -1057,6 +1096,46 @@ mod tests {
 
         let profiler = profiler.expect("operation failed in test");
         assert!(profiler.is_enabled()); // Auto-enabled by default
+    }
+
+    #[test]
+    fn test_uptime_advisor_and_metrics_tracker_are_reachable() {
+        let profiler = Profiler::new().expect("operation failed in test");
+        // Real reads of previously write-only fields: `uptime` reports a
+        // real, non-negative elapsed duration; `advisor`/`metrics_tracker`
+        // return the actual instances the profiler was built with.
+        let _ = profiler.uptime();
+        assert_eq!(
+            profiler.metrics_tracker().latency_metrics().count,
+            0,
+            "a freshly built tracker has recorded nothing yet"
+        );
+        // `OptimizationAdvisor` exposes no introspectable state of its own;
+        // reaching it without panicking is the contract here.
+        let _ = profiler.advisor();
+    }
+
+    #[test]
+    fn test_generate_optimization_suggestions_does_not_fabricate_improvement_numbers() {
+        let profiler = Profiler::new().expect("operation failed in test");
+        let mut slow_op = ProfileResult::new("slow_op".to_string());
+        slow_op.total_time = Duration::from_millis(150);
+        let mut operations = HashMap::new();
+        operations.insert("slow_op".to_string(), slow_op);
+
+        let suggestions = profiler.generate_optimization_suggestions(&operations);
+        assert_eq!(
+            suggestions.len(),
+            1,
+            "a >100ms operation should produce exactly one suggestion"
+        );
+        let improvement = &suggestions[0].expected_improvement;
+        assert_eq!(
+            improvement.latency_reduction, None,
+            "no measurement or model backs a specific percentage; it must not be fabricated"
+        );
+        assert_eq!(improvement.throughput_increase, None);
+        assert_eq!(improvement.memory_reduction, None);
     }
 
     #[test]

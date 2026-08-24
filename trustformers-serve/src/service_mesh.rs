@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Service mesh integration for horizontal scaling and traffic management
 #[derive(Debug, Clone)]
@@ -342,90 +342,83 @@ impl ServiceMeshManager {
         }
     }
 
-    /// Register service with the mesh
+    /// Mark this service as registered **in this process**.
+    ///
+    /// No control plane is contacted. `trustformers-serve` links no Istio,
+    /// Linkerd, Consul, App Mesh or Envoy client, so registration cannot mean
+    /// more than "this manager now believes it is registered" — which is what
+    /// the state flag, the timestamp and the counter record.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// This used to dispatch on `mesh_type` into one of six private
+    /// `register_with_*` methods. Each logged `"Registering with Istio service
+    /// mesh"` (or the Linkerd/Consul/App Mesh/Envoy equivalent) at `info` and
+    /// returned `Ok(())` without opening a connection, so operator-visible
+    /// logs asserted a mesh integration that did not exist. The same held for
+    /// the `deregister_from_*`, `update_*_health` and `configure_*_traffic`
+    /// families — 24 no-op methods in all. They have been deleted along with
+    /// the four dispatch tables, and the log lines now say what actually
+    /// happened.
     pub async fn register_service(&self) -> Result<()> {
         let mut state = self.state.write().await;
         let mut metrics = self.metrics.lock().await;
-
-        match self.config.mesh_type {
-            ServiceMeshType::Istio => self.register_with_istio().await?,
-            ServiceMeshType::Linkerd => self.register_with_linkerd().await?,
-            ServiceMeshType::ConsulConnect => self.register_with_consul().await?,
-            ServiceMeshType::AppMesh => self.register_with_app_mesh().await?,
-            ServiceMeshType::Envoy => self.register_with_envoy().await?,
-            ServiceMeshType::Custom { ref name } => self.register_with_custom_mesh(name).await?,
-        }
 
         state.registered = true;
         state.last_registration = Some(Instant::now());
         metrics.registration_count += 1;
 
-        info!(
-            "Service '{}' registered with {:?} mesh",
+        warn!(
+            "Service '{}' marked as registered locally; no {:?} control plane was contacted \
+             (no mesh client is linked into this build)",
             self.config.service_name, self.config.mesh_type
         );
 
         Ok(())
     }
 
-    /// Deregister service from the mesh
+    /// Clear this process's local registration state.
+    ///
+    /// The counterpart to [`Self::register_service`]: local state only, no
+    /// control plane involved.
     pub async fn deregister_service(&self) -> Result<()> {
         let mut state = self.state.write().await;
-
-        match self.config.mesh_type {
-            ServiceMeshType::Istio => self.deregister_from_istio().await?,
-            ServiceMeshType::Linkerd => self.deregister_from_linkerd().await?,
-            ServiceMeshType::ConsulConnect => self.deregister_from_consul().await?,
-            ServiceMeshType::AppMesh => self.deregister_from_app_mesh().await?,
-            ServiceMeshType::Envoy => self.deregister_from_envoy().await?,
-            ServiceMeshType::Custom { ref name } => self.deregister_from_custom_mesh(name).await?,
-        }
 
         state.registered = false;
         state.last_registration = None;
 
         info!(
-            "Service '{}' deregistered from {:?} mesh",
-            self.config.service_name, self.config.mesh_type
+            "Service '{}' local registration state cleared",
+            self.config.service_name
         );
 
         Ok(())
     }
 
-    /// Update service health status
+    /// Record the service's health status in this manager.
+    ///
+    /// Stored on this manager's local state; nothing is pushed to a mesh
+    /// control plane. See [`Self::register_service`].
     pub async fn update_health_status(&self, status: HealthStatus) -> Result<()> {
         let mut state = self.state.write().await;
         state.health_status = status;
-
-        match self.config.mesh_type {
-            ServiceMeshType::Istio => self.update_istio_health().await?,
-            ServiceMeshType::Linkerd => self.update_linkerd_health().await?,
-            ServiceMeshType::ConsulConnect => self.update_consul_health().await?,
-            ServiceMeshType::AppMesh => self.update_app_mesh_health().await?,
-            ServiceMeshType::Envoy => self.update_envoy_health().await?,
-            ServiceMeshType::Custom { ref name } => self.update_custom_mesh_health(name).await?,
-        }
-
         Ok(())
     }
 
-    /// Configure traffic management rules
+    /// Store traffic management rules on this manager.
+    ///
+    /// The rules are held in local state for a caller to read back; they are
+    /// not translated into `VirtualService`, `ServiceProfile` or any other
+    /// mesh resource, because no mesh client is linked in. See
+    /// [`Self::register_service`].
     pub async fn configure_traffic_rules(&self, rules: Vec<TrafficRule>) -> Result<()> {
         let mut state = self.state.write().await;
         state.traffic_rules = rules;
 
-        match self.config.mesh_type {
-            ServiceMeshType::Istio => self.configure_istio_traffic().await?,
-            ServiceMeshType::Linkerd => self.configure_linkerd_traffic().await?,
-            ServiceMeshType::ConsulConnect => self.configure_consul_traffic().await?,
-            ServiceMeshType::AppMesh => self.configure_app_mesh_traffic().await?,
-            ServiceMeshType::Envoy => self.configure_envoy_traffic().await?,
-            ServiceMeshType::Custom { ref name } => {
-                self.configure_custom_mesh_traffic(name).await?
-            },
-        }
-
-        info!("Configured {} traffic rules", state.traffic_rules.len());
+        info!(
+            "Stored {} traffic rule(s) locally (not applied to any mesh)",
+            state.traffic_rules.len()
+        );
         Ok(())
     }
 
@@ -469,142 +462,6 @@ impl ServiceMeshManager {
                 + response_time.as_nanos() as u64)
                 / total,
         );
-    }
-
-    // Private implementation methods for different service meshes
-    async fn register_with_istio(&self) -> Result<()> {
-        // Implementation would integrate with Istio control plane
-        // This would typically involve creating ServiceEntry, DestinationRule, and VirtualService resources
-        info!("Registering with Istio service mesh");
-        // Placeholder for actual Istio integration
-        Ok(())
-    }
-
-    async fn register_with_linkerd(&self) -> Result<()> {
-        // Implementation would integrate with Linkerd control plane
-        info!("Registering with Linkerd service mesh");
-        // Placeholder for actual Linkerd integration
-        Ok(())
-    }
-
-    async fn register_with_consul(&self) -> Result<()> {
-        // Implementation would integrate with Consul Connect
-        info!("Registering with Consul Connect");
-        // Placeholder for actual Consul integration
-        Ok(())
-    }
-
-    async fn register_with_app_mesh(&self) -> Result<()> {
-        // Implementation would integrate with AWS App Mesh
-        info!("Registering with AWS App Mesh");
-        // Placeholder for actual App Mesh integration
-        Ok(())
-    }
-
-    async fn register_with_envoy(&self) -> Result<()> {
-        // Implementation would configure Envoy proxy
-        info!("Registering with Envoy proxy");
-        // Placeholder for actual Envoy integration
-        Ok(())
-    }
-
-    async fn register_with_custom_mesh(&self, name: &str) -> Result<()> {
-        info!("Registering with custom mesh: {}", name);
-        // Placeholder for custom mesh integration
-        Ok(())
-    }
-
-    // Similar deregistration methods
-    async fn deregister_from_istio(&self) -> Result<()> {
-        info!("Deregistering from Istio service mesh");
-        Ok(())
-    }
-
-    async fn deregister_from_linkerd(&self) -> Result<()> {
-        info!("Deregistering from Linkerd service mesh");
-        Ok(())
-    }
-
-    async fn deregister_from_consul(&self) -> Result<()> {
-        info!("Deregistering from Consul Connect");
-        Ok(())
-    }
-
-    async fn deregister_from_app_mesh(&self) -> Result<()> {
-        info!("Deregistering from AWS App Mesh");
-        Ok(())
-    }
-
-    async fn deregister_from_envoy(&self) -> Result<()> {
-        info!("Deregistering from Envoy proxy");
-        Ok(())
-    }
-
-    async fn deregister_from_custom_mesh(&self, name: &str) -> Result<()> {
-        info!("Deregistering from custom mesh: {}", name);
-        Ok(())
-    }
-
-    // Health update methods
-    async fn update_istio_health(&self) -> Result<()> {
-        // Update health status in Istio
-        Ok(())
-    }
-
-    async fn update_linkerd_health(&self) -> Result<()> {
-        // Update health status in Linkerd
-        Ok(())
-    }
-
-    async fn update_consul_health(&self) -> Result<()> {
-        // Update health status in Consul
-        Ok(())
-    }
-
-    async fn update_app_mesh_health(&self) -> Result<()> {
-        // Update health status in App Mesh
-        Ok(())
-    }
-
-    async fn update_envoy_health(&self) -> Result<()> {
-        // Update health status in Envoy
-        Ok(())
-    }
-
-    async fn update_custom_mesh_health(&self, _name: &str) -> Result<()> {
-        // Update health status in custom mesh
-        Ok(())
-    }
-
-    // Traffic configuration methods
-    async fn configure_istio_traffic(&self) -> Result<()> {
-        // Configure Istio traffic management
-        Ok(())
-    }
-
-    async fn configure_linkerd_traffic(&self) -> Result<()> {
-        // Configure Linkerd traffic management
-        Ok(())
-    }
-
-    async fn configure_consul_traffic(&self) -> Result<()> {
-        // Configure Consul traffic management
-        Ok(())
-    }
-
-    async fn configure_app_mesh_traffic(&self) -> Result<()> {
-        // Configure App Mesh traffic management
-        Ok(())
-    }
-
-    async fn configure_envoy_traffic(&self) -> Result<()> {
-        // Configure Envoy traffic management
-        Ok(())
-    }
-
-    async fn configure_custom_mesh_traffic(&self, _name: &str) -> Result<()> {
-        // Configure custom mesh traffic management
-        Ok(())
     }
 }
 

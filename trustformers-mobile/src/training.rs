@@ -294,8 +294,18 @@ impl OnDeviceTrainer {
             if self.should_apply_lora(name) {
                 let shape = param.shape();
                 if shape.len() == 2 {
-                    // For linear layers, create A and B matrices
-                    let lora_a = Tensor::randn(&[shape[0], rank])?;
+                    // For linear layers, create A and B matrices.
+                    //
+                    // A is drawn from a standard normal and then scaled by
+                    // `1 / sqrt(fan_in)` -- the Kaiming-style scaling the LoRA
+                    // paper's reference implementation uses. Without it A
+                    // starts at unit variance regardless of layer width, which
+                    // makes the first optimizer steps overshoot badly enough
+                    // that a run can end with a higher loss than it started
+                    // with, purely as a function of the draw.
+                    let fan_in = shape[0].max(1) as f32;
+                    let lora_a =
+                        Tensor::randn(&[shape[0], rank])?.mul_scalar(1.0 / fan_in.sqrt())?;
                     let lora_b = Tensor::zeros(&[rank, shape[1]])?; // Initialize B to zero
 
                     self.trainable_params.insert(format!("{}.lora_A", name), lora_a);

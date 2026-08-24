@@ -110,7 +110,8 @@ pub struct MobilePerformanceProfiler {
     /// Performance bottleneck detection
     pub(crate) bottleneck_detector: Arc<Mutex<BottleneckDetector>>,
     /// Optimization suggestion engine
-    pub(crate) optimization_engine: Arc<Mutex<OptimizationEngine>>,
+    pub(crate) optimization_engine:
+        Arc<Mutex<crate::mobile_performance_profiler::optimization::OptimizationEngine>>,
     /// Real-time monitoring system
     pub(crate) real_time_monitor: Arc<Mutex<RealTimeMonitor>>,
     /// Data export and visualization
@@ -211,10 +212,6 @@ pub struct BottleneckDetector {
     pub(crate) bottleneck_history: VecDeque<BottleneckDetectionEvent>,
     /// Detection rules and thresholds
     pub(crate) detection_rules: Vec<BottleneckRule>,
-    /// Severity calculation engine
-    pub(crate) severity_calculator: SeverityCalculator,
-    /// Historical analysis for trend detection
-    pub(crate) historical_analyzer: HistoricalAnalyzer,
     /// Detection statistics
     pub(crate) detection_stats: BottleneckDetectionStats,
 }
@@ -392,28 +389,6 @@ pub struct BottleneckDetectionStats {
 // =============================================================================
 // OPTIMIZATION ENGINE
 // =============================================================================
-
-/// Intelligent optimization suggestion engine
-///
-/// Analyzes performance data and generates targeted optimization recommendations
-/// using machine learning models and expert system rules.
-#[derive(Debug)]
-pub struct OptimizationEngine {
-    /// Engine configuration
-    pub(crate) config: OptimizationEngineConfig,
-    /// Generated optimization suggestions
-    pub(crate) active_suggestions: HashMap<String, OptimizationSuggestion>,
-    /// Suggestion generation rules
-    pub(crate) optimization_rules: Vec<OptimizationRule>,
-    /// Suggestion ranking system
-    pub(crate) suggestion_ranker: SuggestionRanker,
-    /// Impact estimation models
-    pub(crate) impact_estimator: ImpactEstimator,
-    /// Suggestion history and tracking
-    pub(crate) suggestion_history: VecDeque<OptimizationEvent>,
-    /// Engine performance statistics
-    pub(crate) engine_stats: OptimizationEngineStats,
-}
 
 /// Optimization rule for suggestion generation
 #[derive(Debug, Clone)]
@@ -662,8 +637,6 @@ pub struct ProfilerExportManager {
     pub(crate) export_history: VecDeque<ExportRecord>,
     /// Pending export tasks
     pub(crate) pending_exports: VecDeque<ExportTask>,
-    /// Visualization engine
-    pub(crate) visualization_engine: VisualizationEngine,
     /// Export statistics
     pub(crate) export_stats: ExportManagerStats,
 }
@@ -678,19 +651,6 @@ pub trait DataFormatter: std::fmt::Debug {
     fn mime_type(&self) -> &str;
     /// Estimate output size for planning
     fn estimate_size(&self, data: &ProfilingData) -> usize;
-}
-
-/// Visualization engine for generating charts and reports
-#[derive(Debug)]
-pub struct VisualizationEngine {
-    /// Chart generation system
-    pub(crate) chart_generator: ChartGenerator,
-    /// Dashboard builder
-    pub(crate) dashboard_builder: DashboardBuilder,
-    /// Report generator
-    pub(crate) report_generator: ReportGenerator,
-    /// Template engine
-    pub(crate) template_engine: TemplateEngine,
 }
 
 /// Export manager statistics
@@ -711,44 +671,6 @@ pub struct ExportManagerStats {
 // =============================================================================
 // HELPER COMPONENTS
 // =============================================================================
-
-/// Severity calculation system for bottlenecks
-#[derive(Debug)]
-pub struct SeverityCalculator {
-    /// Severity calculation rules
-    pub(crate) rules: Vec<SeverityRule>,
-    /// Weighting factors for different metrics
-    pub(crate) weights: HashMap<String, f32>,
-}
-
-/// Historical data analysis for trend detection
-#[derive(Debug)]
-pub struct HistoricalAnalyzer {
-    /// Historical data window
-    pub(crate) history_window: Duration,
-    /// Trend detection algorithms
-    pub(crate) trend_detectors: Vec<TrendDetector>,
-    /// Statistical models
-    pub(crate) statistical_models: Vec<StatisticalModel>,
-}
-
-/// Suggestion ranking system
-#[derive(Debug)]
-pub struct SuggestionRanker {
-    /// Ranking algorithms
-    pub(crate) ranking_algorithms: Vec<RankingAlgorithm>,
-    /// User preference weights
-    pub(crate) preference_weights: HashMap<String, f32>,
-}
-
-/// Impact estimation system
-#[derive(Debug)]
-pub struct ImpactEstimator {
-    /// Impact models
-    pub(crate) impact_models: Vec<ImpactModel>,
-    /// Historical impact data
-    pub(crate) historical_impacts: HashMap<String, Vec<ImpactMeasurement>>,
-}
 
 /// Alert management system
 #[derive(Debug)]
@@ -774,81 +696,11 @@ pub struct PerformanceAnalyzer {
     pub(crate) analysis_cache: HashMap<String, AnalysisResult>,
     /// Trend analysis data
     pub(crate) trend_data: VecDeque<TrendingMetrics>,
-    /// Performance models
-    pub(crate) performance_models: Vec<PerformanceModel>,
-}
-
-/// Chart generation system
-#[derive(Debug)]
-pub struct ChartGenerator {
-    /// Chart templates
-    pub(crate) templates: HashMap<ChartType, ChartTemplate>,
-    /// Rendering engine
-    pub(crate) renderer: ChartRenderer,
-}
-
-/// Dashboard building system
-#[derive(Debug)]
-pub struct DashboardBuilder {
-    /// Dashboard templates
-    pub(crate) templates: HashMap<String, DashboardTemplate>,
-    /// Widget registry
-    pub(crate) widgets: HashMap<String, DashboardWidget>,
-}
-
-/// Report generation system
-#[derive(Debug)]
-pub struct ReportGenerator {
-    /// Report templates
-    pub(crate) templates: HashMap<String, ReportTemplate>,
-    /// Content generators
-    pub(crate) generators: HashMap<String, ContentGenerator>,
-}
-
-/// Template processing engine
-#[derive(Debug)]
-pub struct TemplateEngine {
-    /// Template cache
-    pub(crate) template_cache: HashMap<String, Template>,
-    /// Template compiler
-    pub(crate) compiler: TemplateCompiler,
 }
 
 // =============================================================================
-// STUB TYPES FOR COMPILATION
+// NOTIFICATION HANDLING
 // =============================================================================
-
-// These would be properly implemented in production
-#[derive(Debug)]
-pub(super) struct SeverityRule;
-#[derive(Debug)]
-pub(super) struct TrendDetector;
-#[derive(Debug)]
-pub(super) struct StatisticalModel;
-#[derive(Debug)]
-pub(super) struct RankingAlgorithm;
-#[derive(Debug)]
-pub(super) struct ImpactModel;
-#[derive(Debug)]
-pub(super) struct ImpactMeasurement;
-#[derive(Debug)]
-pub(super) struct PerformanceModel;
-#[derive(Debug)]
-pub(super) struct ChartTemplate;
-#[derive(Debug)]
-pub(super) struct ChartRenderer;
-#[derive(Debug)]
-pub(super) struct DashboardTemplate;
-#[derive(Debug)]
-pub(super) struct DashboardWidget;
-#[derive(Debug)]
-pub(super) struct ReportTemplate;
-#[derive(Debug)]
-pub(super) struct ContentGenerator;
-#[derive(Debug)]
-pub(super) struct Template;
-#[derive(Debug)]
-pub(super) struct TemplateCompiler;
 
 /// Notification handler trait
 pub trait NotificationHandler: std::fmt::Debug {

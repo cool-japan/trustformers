@@ -223,7 +223,7 @@ impl SimdPerformanceAnalytics {
                 let (tensor_b, label_b) = labeled_tensors[j];
 
                 let correlation = self.simd_ops.correlation(tensor_a, tensor_b)?;
-                let mutual_info = self.compute_mutual_information(tensor_a, tensor_b)?;
+                let mutual_info = self.gaussian_mutual_information(tensor_a, tensor_b)?;
 
                 // SIMD-optimized regression analysis
                 let (slope, intercept, r_squared) =
@@ -233,7 +233,7 @@ impl SimdPerformanceAnalytics {
                     metric_a: label_a.to_string(),
                     metric_b: label_b.to_string(),
                     correlation,
-                    mutual_information: mutual_info,
+                    gaussian_mutual_information: mutual_info,
                     linear_regression: RegressionStats {
                         slope,
                         intercept,
@@ -256,23 +256,26 @@ impl SimdPerformanceAnalytics {
             let z_scores = self.compute_simd_z_scores(tensor)?;
             let z_anomalies = self.simd_ops.abs(&z_scores)?.gt_scalar(3.0)?; // |z| > 3 is anomaly
 
-            // Isolation Forest-style anomaly detection with SIMD
-            let isolation_scores = self.compute_simd_isolation_scores(tensor)?;
+            // Standardized-deviation outlier score (not an isolation forest;
+            // see `compute_simd_standardized_deviation_scores`).
+            let standardized_deviation_scores =
+                self.compute_simd_standardized_deviation_scores(tensor)?;
 
-            // SIMD-optimized Local Outlier Factor (LOF)
-            let lof_scores = self.compute_simd_lof_scores(tensor)?;
+            // Inverse local density (not Local Outlier Factor; see
+            // `compute_simd_inverse_local_density`).
+            let inverse_local_density_scores = self.compute_simd_inverse_local_density(tensor)?;
 
             // Combine scores using SIMD operations
             let combined_scores = self.simd_ops.add(
-                &self.simd_ops.add(&z_scores, &isolation_scores)?,
-                &lof_scores,
+                &self.simd_ops.add(&z_scores, &standardized_deviation_scores)?,
+                &inverse_local_density_scores,
             )?;
 
             anomaly_scores.push(AnomalyScore {
                 metric_index: idx,
                 z_score_anomalies: z_anomalies.gt_scalar_bool(3.0),
-                isolation_scores: isolation_scores.to_vec().clone(),
-                lof_scores: lof_scores.to_vec().clone(),
+                standardized_deviation_scores: standardized_deviation_scores.to_vec().clone(),
+                inverse_local_density_scores: inverse_local_density_scores.to_vec().clone(),
                 combined_scores: combined_scores.to_vec().clone(),
                 anomaly_threshold: 0.95, // 95th percentile
             });
@@ -349,30 +352,53 @@ impl SimdPerformanceAnalytics {
         Ok((slope, intercept, r_squared))
     }
 
-    /// Compute mutual information between two tensors (approximate)
-    fn compute_mutual_information(&self, x: &SciTensor<f32>, y: &SciTensor<f32>) -> Result<f32> {
-        // Simplified mutual information using correlation
-        // For exact computation, would need proper histogram-based entropy calculation
+    /// Mutual information between two series **under a bivariate-Gaussian
+    /// assumption**: `-0.5 * ln(1 - r^2)`, which is the exact mutual
+    /// information of a jointly Gaussian pair with correlation `r`.
+    ///
+    /// This is not a general estimator: for a non-Gaussian joint distribution
+    /// it measures only the linear dependence the correlation captures, and
+    /// reports zero for a dependence that is nonlinear but uncorrelated. A
+    /// distribution-free figure needs histogram- or kNN-based entropy
+    /// estimation, which this module does not implement.
+    fn gaussian_mutual_information(&self, x: &SciTensor<f32>, y: &SciTensor<f32>) -> Result<f32> {
         let correlation = self.simd_ops.correlation(x, y)?;
         Ok(-0.5 * (1.0 - correlation.powi(2)).ln())
     }
 
-    /// SIMD-optimized isolation forest scores
-    fn compute_simd_isolation_scores(&self, tensor: &SciTensor<f32>) -> Result<SciTensor<f32>> {
-        // Simplified isolation scoring using statistical bounds
-        let mean = self.stats_ops.simd_mean(tensor)?;
+    /// Per-sample outlier score from standardized deviation: `|z| / sigma`,
+    /// higher meaning further from the mean in units of the series' own
+    /// spread.
+    ///
+    /// Renamed from `compute_simd_isolation_scores`: this is **not** an
+    /// isolation forest. That algorithm scores a sample by the expected path
+    /// length needed to isolate it across an ensemble of random split trees,
+    /// which this module builds no trees for. The two agree on a unimodal
+    /// series and disagree on clustered or multimodal ones.
+    fn compute_simd_standardized_deviation_scores(
+        &self,
+        tensor: &SciTensor<f32>,
+    ) -> Result<SciTensor<f32>> {
         let std_dev = self.stats_ops.simd_std(tensor)?;
 
         let z_scores = self.compute_simd_z_scores(tensor)?;
         let abs_z = self.simd_ops.abs(&z_scores)?;
 
-        // Transform to isolation-like scores (higher = more isolated)
         self.simd_ops.div_scalar(&abs_z, std_dev)
     }
 
-    /// SIMD-optimized Local Outlier Factor scores
-    fn compute_simd_lof_scores(&self, tensor: &SciTensor<f32>) -> Result<SciTensor<f32>> {
-        // Simplified LOF using local density approximation
+    /// Per-sample inverse local density over a sorted `k`-neighbourhood:
+    /// higher means the sample sits in a sparser part of the value range.
+    ///
+    /// Renamed from `compute_simd_lof_scores`: this is **not** Local Outlier
+    /// Factor. LOF is the *ratio* of a point's local reachability density to
+    /// the mean local reachability density of its k neighbours, which makes it
+    /// scale-free across regions of differing density; this returns the raw
+    /// reciprocal density and so is not comparable between regions.
+    fn compute_simd_inverse_local_density(
+        &self,
+        tensor: &SciTensor<f32>,
+    ) -> Result<SciTensor<f32>> {
         let sorted_indices = self.get_sorted_indices(tensor)?;
         let mut lof_scores = vec![1.0; tensor.len()];
 
@@ -472,7 +498,10 @@ pub struct CrossMetricRelationship {
     pub metric_a: String,
     pub metric_b: String,
     pub correlation: f32,
-    pub mutual_information: f32,
+    /// Mutual information under a bivariate-Gaussian assumption; see
+    /// `SimdPerformanceAnalytics::gaussian_mutual_information` for what that
+    /// does and does not capture.
+    pub gaussian_mutual_information: f32,
     pub linear_regression: RegressionStats,
     pub relationship_strength: RelationshipStrength,
 }
@@ -499,8 +528,14 @@ pub enum RelationshipStrength {
 pub struct AnomalyScore {
     pub metric_index: usize,
     pub z_score_anomalies: Vec<bool>,
-    pub isolation_scores: Vec<f32>,
-    pub lof_scores: Vec<f32>,
+    /// Per-sample `|z| / sigma`. Renamed from `isolation_scores`: no
+    /// isolation forest is built (see
+    /// `SimdPerformanceAnalytics::compute_simd_standardized_deviation_scores`).
+    pub standardized_deviation_scores: Vec<f32>,
+    /// Per-sample inverse local density over a sorted k-neighbourhood.
+    /// Renamed from `lof_scores`: this is not Local Outlier Factor (see
+    /// `SimdPerformanceAnalytics::compute_simd_inverse_local_density`).
+    pub inverse_local_density_scores: Vec<f32>,
     pub combined_scores: Vec<f32>,
     pub anomaly_threshold: f32,
 }

@@ -546,10 +546,21 @@ pub struct ModelLoadRequest {
 fn default_device() -> String {
     "cpu".to_string()
 }
-/// Mock authentication token handler for testing
+/// Credentials posted to the token endpoint.
+///
+/// Renamed from `MockTokenRequest` in 0.2.1. The name and its "for testing"
+/// doc comment outlived the handler they described:
+/// [`auth_token_handler`](crate::server::functions::auth_token_handler) has
+/// authenticated against the configured
+/// [`AuthService`](crate::auth::AuthService) since the canned-token path was
+/// removed, and a type called `Mock*` sitting on the crate's real
+/// credential-accepting endpoint invited exactly the wrong conclusion about
+/// what that endpoint does.
 #[derive(Debug, serde::Deserialize)]
-pub struct MockTokenRequest {
+pub struct TokenRequest {
+    /// Username to authenticate.
     pub username: String,
+    /// Password to authenticate with.
     pub password: String,
 }
 /// Server state for sharing between handlers

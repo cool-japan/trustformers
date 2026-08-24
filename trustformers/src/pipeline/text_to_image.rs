@@ -264,6 +264,12 @@ impl DdimScheduler {
         }
     }
 
+    /// The `(beta_start, beta_end)` bounds of the linear schedule `betas` was
+    /// generated from.
+    pub fn beta_range(&self) -> (f64, f64) {
+        (self.beta_start, self.beta_end)
+    }
+
     /// Decreasing timestep sequence for inference, e.g. `[999, 978, …, 0]` for 20 steps.
     pub fn timesteps(&self) -> Vec<usize> {
         let total = 1000_usize;
@@ -775,6 +781,21 @@ mod tests {
         // Last beta should be close to beta_end (0.012).
         let last = *betas.last().expect("non-empty");
         assert!((last - 0.012).abs() < 1e-6, "last beta mismatch");
+    }
+
+    #[test]
+    fn test_ddim_scheduler_beta_range_matches_generated_betas() {
+        let sched = DdimScheduler::new(20);
+        let (beta_start, beta_end) = sched.beta_range();
+        let betas = sched.betas();
+        assert!(
+            (beta_start - betas[0]).abs() < 1e-9,
+            "beta_range().0 must match betas()[0]"
+        );
+        assert!(
+            (beta_end - *betas.last().expect("non-empty")).abs() < 1e-9,
+            "beta_range().1 must match betas().last()"
+        );
     }
 
     // --- SchedulerType variants ---

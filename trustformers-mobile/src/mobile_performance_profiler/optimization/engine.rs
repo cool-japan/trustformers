@@ -282,6 +282,14 @@ impl OptimizationEngine {
         // Rank and prioritize suggestions
         let ranked_suggestions = self.rank_suggestions(suggestions, metrics)?;
 
+        // Record them so `get_active_suggestions` / `get_all_suggestions`
+        // report what was generated. Without this the accessors returned an
+        // empty list no matter how many rules fired.
+        self.active_suggestions.clear();
+        for suggestion in &ranked_suggestions {
+            self.active_suggestions.insert(suggestion.title.clone(), suggestion.clone());
+        }
+
         Ok(ranked_suggestions)
     }
 
@@ -306,7 +314,7 @@ impl OptimizationEngine {
                         "Test accuracy impact on validation dataset".to_string(),
                         "Deploy quantized model if accuracy is acceptable".to_string(),
                     ],
-                    estimated_improvement: "30% latency reduction".to_string(),
+                    estimated_improvement: String::new(), // filled in from the measurement that triggered the rule
                     difficulty: DifficultyLevel::Medium,
                     priority: PriorityLevel::High,
                 },
@@ -333,7 +341,7 @@ impl OptimizationEngine {
                         "Configure GPU backend in inference settings".to_string(),
                         "Monitor GPU utilization and performance".to_string(),
                     ],
-                    estimated_improvement: "40% performance improvement".to_string(),
+                    estimated_improvement: String::new(), // filled in from the measurement that triggered the rule
                     difficulty: DifficultyLevel::Low,
                     priority: PriorityLevel::High,
                 },
@@ -359,7 +367,7 @@ impl OptimizationEngine {
                         "Reduce batch size by 25-50%".to_string(),
                         "Monitor latency and throughput impact".to_string(),
                     ],
-                    estimated_improvement: "25% memory reduction".to_string(),
+                    estimated_improvement: String::new(), // filled in from the measurement that triggered the rule
                     difficulty: DifficultyLevel::Low,
                     priority: PriorityLevel::Medium,
                 },
@@ -380,21 +388,26 @@ impl OptimizationEngine {
         match condition {
             OptimizationCondition::HighMemoryUsage {
                 threshold_percent, ..
-            } => Ok(
-                (metrics.memory.heap_used_mb / metrics.memory.heap_total_mb * 100.0)
-                    > *threshold_percent,
-            ),
+            } => Ok(metrics
+                .memory
+                .as_ref()
+                .and_then(|memory| memory.resident_share_percent())
+                .is_some_and(|share| share > *threshold_percent)),
             OptimizationCondition::InferenceLatencyHigh { threshold_ms, .. } => {
                 Ok(metrics.inference.avg_latency_ms > *threshold_ms as f64)
             },
             OptimizationCondition::LowCacheHitRate {
                 threshold_percent, ..
             } => {
-                // Simplified: assume we have cache hit rate data
-                Ok(50.0 < *threshold_percent) // Placeholder - cache hit rate not available
+                // Real hit rate: the collector's inference tracker counts
+                // every recorded hit and miss. This used to compare an
+                // invented constant 50.0 against the threshold, so the rule
+                // fired (or not) regardless of the actual cache.
+                let hit_rate_percent = metrics.inference.cache_hit_rate as f32 * 100.0;
+                Ok(metrics.inference.total_inferences > 0 && hit_rate_percent < *threshold_percent)
             },
             OptimizationCondition::CPUInefficiency { severity, .. } => {
-                Ok(metrics.cpu.usage_percent > (severity * 100.0))
+                Ok(metrics.cpu.as_ref().is_some_and(|cpu| cpu.usage_percent > (severity * 100.0)))
             },
             _ => Ok(false), // Simplified for other conditions
         }
@@ -408,9 +421,10 @@ impl OptimizationEngine {
     ) -> Result<OptimizationSuggestion> {
         let mut suggestion = rule.suggestion_template.clone();
 
-        // Customize suggestion based on current metrics
-        let improvement = self.calculate_estimated_improvement(rule, metrics)?;
-        suggestion.estimated_improvement = format!("{}% improvement", improvement);
+        // State what was actually measured against the rule's threshold. The
+        // previous line reported `"{}% improvement"` from a fixed 30.0 base --
+        // a predicted speedup nothing had measured or modelled.
+        suggestion.estimated_improvement = self.describe_trigger(rule, metrics);
 
         Ok(suggestion)
     }
@@ -427,7 +441,10 @@ impl OptimizationEngine {
                 title: "Memory Optimization".to_string(),
                 description: format!("Address {} memory bottleneck", bottleneck.description),
                 implementation_steps: vec!["Optimize memory usage".to_string()],
-                estimated_improvement: "80% performance recovery".to_string(),
+                estimated_improvement: format!(
+                    "memory bottleneck, impact score {:.1}/100",
+                    bottleneck.impact_score
+                ),
                 difficulty: DifficultyLevel::Medium,
                 priority: PriorityLevel::High,
             }],
@@ -436,11 +453,51 @@ impl OptimizationEngine {
                 title: "CPU Optimization".to_string(),
                 description: format!("Address {} CPU bottleneck", bottleneck.description),
                 implementation_steps: vec!["Optimize CPU usage".to_string()],
-                estimated_improvement: "70% performance recovery".to_string(),
+                estimated_improvement: format!(
+                    "CPU bottleneck, impact score {:.1}/100",
+                    bottleneck.impact_score
+                ),
                 difficulty: DifficultyLevel::Medium,
                 priority: PriorityLevel::High,
             }],
-            _ => Vec::new(), // Simplified for other bottleneck types
+            BottleneckType::Latency => vec![OptimizationSuggestion {
+                suggestion_type: SuggestionType::ModelOptimization,
+                title: "Inference Latency Optimization".to_string(),
+                description: format!("Address {} latency bottleneck", bottleneck.description),
+                implementation_steps: vec![
+                    "Enable INT8 quantization and re-measure".to_string(),
+                    "Route the model through an available hardware backend".to_string(),
+                ],
+                estimated_improvement: format!(
+                    "latency bottleneck, impact score {:.1}/100",
+                    bottleneck.impact_score
+                ),
+                difficulty: DifficultyLevel::Medium,
+                priority: PriorityLevel::High,
+            }],
+            BottleneckType::Cache => vec![OptimizationSuggestion {
+                suggestion_type: SuggestionType::PerformanceOptimization,
+                title: "Cache Effectiveness".to_string(),
+                description: format!("Address {} cache bottleneck", bottleneck.description),
+                implementation_steps: vec![
+                    "Increase the KV/result cache size".to_string(),
+                    "Review the cache key so equivalent requests share an entry".to_string(),
+                ],
+                estimated_improvement: format!(
+                    "cache bottleneck, impact score {:.1}/100",
+                    bottleneck.impact_score
+                ),
+                difficulty: DifficultyLevel::Low,
+                priority: PriorityLevel::Medium,
+            }],
+            // GPU, Network, Thermal and Power bottlenecks cannot be detected
+            // at all today (no measured input -- see
+            // `BottleneckDetector::evaluate_rule`), so there is no suggestion
+            // template for them to reach.
+            BottleneckType::GPU
+            | BottleneckType::Network
+            | BottleneckType::Thermal
+            | BottleneckType::Power => Vec::new(),
         };
 
         Ok(suggestions)
@@ -467,29 +524,43 @@ impl OptimizationEngine {
     }
 
     /// Calculate estimated improvement for a rule in current context
-    fn calculate_estimated_improvement(
-        &self,
-        rule: &OptimizationRule,
-        metrics: &MobileMetricsSnapshot,
-    ) -> Result<f32> {
-        let base_improvement = 30.0; // Default improvement estimate since estimated_improvement is now a String
-
-        // Adjust based on how severe the issue is
-        let severity_factor = match &rule.condition {
+    /// Describe the measurement that tripped this rule.
+    ///
+    /// This crate models no relationship between applying a suggestion and the
+    /// speedup that follows, so it reports the observation rather than a
+    /// predicted gain.
+    fn describe_trigger(&self, rule: &OptimizationRule, metrics: &MobileMetricsSnapshot) -> String {
+        match &rule.condition {
             OptimizationCondition::HighMemoryUsage {
                 threshold_percent, ..
-            } => {
-                let memory_percent =
-                    metrics.memory.heap_used_mb / metrics.memory.heap_total_mb * 100.0;
-                (memory_percent - threshold_percent) / threshold_percent
+            } => match metrics.memory.as_ref().and_then(|m| m.resident_share_percent()) {
+                Some(share) => format!(
+                    "resident memory at {:.1}% of usable (rule threshold {:.1}%)",
+                    share, threshold_percent
+                ),
+                None => "resident memory share not yet sampled".to_string(),
             },
-            OptimizationCondition::InferenceLatencyHigh { threshold_ms, .. } => {
-                (metrics.inference.avg_latency_ms as f32 - threshold_ms) / threshold_ms
+            OptimizationCondition::InferenceLatencyHigh { threshold_ms, .. } => format!(
+                "mean inference latency {:.1} ms over {} inferences (rule threshold {:.1} ms)",
+                metrics.inference.avg_latency_ms, metrics.inference.total_inferences, threshold_ms
+            ),
+            OptimizationCondition::LowCacheHitRate {
+                threshold_percent, ..
+            } => format!(
+                "cache hit rate {:.1}% (rule threshold {:.1}%)",
+                metrics.inference.cache_hit_rate as f32 * 100.0,
+                threshold_percent
+            ),
+            OptimizationCondition::CPUInefficiency { severity, .. } => match metrics.cpu.as_ref() {
+                Some(cpu) => format!(
+                    "CPU usage {:.1}% (rule threshold {:.1}%)",
+                    cpu.usage_percent,
+                    severity * 100.0
+                ),
+                None => "CPU usage not measured".to_string(),
             },
-            _ => 1.0,
-        };
-
-        Ok(base_improvement * (1.0 + severity_factor * 0.5))
+            _ => format!("rule `{}` condition met", rule.id),
+        }
     }
 
     /// Adjust confidence based on current context
@@ -510,6 +581,22 @@ impl OptimizationEngine {
     /// Get active suggestions
     pub fn get_active_suggestions(&self) -> Vec<OptimizationSuggestion> {
         self.active_suggestions.values().cloned().collect()
+    }
+
+    /// Every suggestion generated so far in this session.
+    pub fn get_all_suggestions(&self) -> Vec<OptimizationSuggestion> {
+        self.active_suggestions.values().cloned().collect()
+    }
+
+    /// Hot-reload the engine's configuration from the profiler's own config.
+    pub fn update_config(
+        &mut self,
+        config: crate::mobile_performance_profiler::config::MobileProfilerConfig,
+    ) -> Result<()> {
+        self.config.enabled = config.enabled;
+        self.config.generation_interval_ms = config.sampling.interval_ms;
+        debug!("Updated optimization engine configuration");
+        Ok(())
     }
 
     /// Mark a suggestion as implemented
@@ -553,5 +640,123 @@ impl Default for OptimizationEngine {
         // for the default config and Default cannot return a Result.
         Self::new(OptimizationEngineConfig::default())
             .expect("default OptimizationEngineConfig must yield a valid engine")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mobile_performance_profiler::types::{
+        BottleneckSeverity, BottleneckType, CpuMetrics, InferenceMetrics, MemoryMetrics,
+        MobileMetricsSnapshot, PerformanceBottleneck,
+    };
+
+    fn bottleneck(bottleneck_type: BottleneckType) -> PerformanceBottleneck {
+        PerformanceBottleneck {
+            bottleneck_type,
+            severity: BottleneckSeverity::Medium,
+            description: "test".to_string(),
+            affected_component: "test".to_string(),
+            impact_score: 42.0,
+            suggestions: Vec::new(),
+            timestamp: 1,
+        }
+    }
+
+    /// Regression: `generate_bottleneck_suggestions` matched only Memory and
+    /// CPU and fell through to `Vec::new()` for everything else, so the
+    /// Latency and Cache bottlenecks the detector reports produced nothing.
+    #[test]
+    fn test_latency_and_cache_bottlenecks_produce_suggestions() {
+        let engine = OptimizationEngine::default();
+        let metrics = MobileMetricsSnapshot::default();
+
+        for kind in [BottleneckType::Latency, BottleneckType::Cache] {
+            let suggestions = engine
+                .generate_bottleneck_suggestions(&bottleneck(kind), &metrics)
+                .expect("suggestion generation");
+            assert!(
+                !suggestions.is_empty(),
+                "{kind:?} bottleneck produced no suggestion"
+            );
+            // The reported figure states the measured impact, not a predicted
+            // "% improvement" from a fixed base.
+            assert!(suggestions[0].estimated_improvement.contains("impact score 42.0/100"));
+        }
+    }
+
+    /// Regression: the `LowCacheHitRate` condition used to be
+    /// `Ok(50.0 < *threshold_percent)` -- an invented constant compared
+    /// against the threshold, so the rule's verdict never depended on the
+    /// actual cache.
+    #[test]
+    fn test_cache_hit_rate_rule_reads_the_measured_rate() {
+        let engine = OptimizationEngine::default();
+        let condition = OptimizationCondition::LowCacheHitRate {
+            threshold_percent: 60.0,
+            cache_type: CacheType::Model,
+        };
+
+        let mut poor = MobileMetricsSnapshot::default();
+        poor.inference = InferenceMetrics {
+            total_inferences: 100,
+            cache_hit_rate: 0.10,
+            ..Default::default()
+        };
+        assert!(engine.evaluate_optimization_condition(&condition, &poor).expect("evaluate"));
+
+        let mut good = poor.clone();
+        good.inference.cache_hit_rate = 0.95;
+        assert!(!engine.evaluate_optimization_condition(&condition, &good).expect("evaluate"));
+    }
+
+    /// Regression: `HighMemoryUsage` divided by `heap_total_mb`, which no
+    /// platform publishes. It now reads the measured resident share, and an
+    /// unmeasured snapshot cannot trip the rule.
+    #[test]
+    fn test_memory_rule_needs_a_real_measurement() {
+        let engine = OptimizationEngine::default();
+        let condition = OptimizationCondition::HighMemoryUsage {
+            threshold_percent: 80.0,
+            pattern: MemoryUsagePattern::SteadyHigh,
+        };
+
+        let unmeasured = MobileMetricsSnapshot::default();
+        assert!(unmeasured.memory.is_none());
+        assert!(!engine
+            .evaluate_optimization_condition(&condition, &unmeasured)
+            .expect("evaluate"));
+
+        let mut pressured = unmeasured.clone();
+        pressured.memory = Some(MemoryMetrics {
+            heap_used_mb: 900.0,
+            available_mb: 100.0,
+            ..Default::default()
+        });
+        assert!(engine
+            .evaluate_optimization_condition(&condition, &pressured)
+            .expect("evaluate"));
+    }
+
+    /// CPU conditions likewise need a measurement.
+    #[test]
+    fn test_cpu_rule_needs_a_real_measurement() {
+        let engine = OptimizationEngine::default();
+        let condition = OptimizationCondition::CPUInefficiency {
+            pattern: CPUUsagePattern::SingleCoreHigh,
+            severity: 0.8,
+        };
+
+        let unmeasured = MobileMetricsSnapshot::default();
+        assert!(!engine
+            .evaluate_optimization_condition(&condition, &unmeasured)
+            .expect("evaluate"));
+
+        let mut busy = unmeasured.clone();
+        busy.cpu = Some(CpuMetrics {
+            usage_percent: 92.0,
+            ..Default::default()
+        });
+        assert!(engine.evaluate_optimization_condition(&condition, &busy).expect("evaluate"));
     }
 }

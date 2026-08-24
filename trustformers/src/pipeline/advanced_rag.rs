@@ -227,7 +227,23 @@ impl AdvancedRAGPipeline {
                 .await?;
 
             let retrieved_docs = retrieval_result.documents;
-            all_documents.extend(retrieved_docs.clone());
+            // Deduplicate against documents already accumulated in this
+            // reasoning chain: the retriever's `context` hint is advisory
+            // only, so a retriever (the mock included) may legitimately
+            // return the same document id again on a later hop. Re-adding it
+            // to `all_documents` would double-count it in
+            // `total_documents_used` and duplicate it in the self-reflection
+            // evidence passed to `SelfReflector::reflect_on_answer`.
+            let mut newly_seen_docs = Vec::with_capacity(retrieved_docs.len());
+            {
+                let mut cache = self.document_cache.write().await;
+                for doc in &retrieved_docs {
+                    if cache.insert(doc.id.clone(), doc.clone()).is_none() {
+                        newly_seen_docs.push(doc.clone());
+                    }
+                }
+            }
+            all_documents.extend(newly_seen_docs);
 
             // Retrieve knowledge graph nodes if enabled
             if self.config.enable_graph_rag {
@@ -764,23 +780,6 @@ mod tests {
     use super::*;
     use crate::Result;
 
-    // Simple LCG for deterministic pseudo-random values
-    struct Lcg {
-        state: u64,
-    }
-
-    impl Lcg {
-        fn new(seed: u64) -> Self {
-            Self { state: seed }
-        }
-
-        fn next_f32(&mut self) -> f32 {
-            self.state =
-                self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((self.state >> 33) as f32) / (u32::MAX as f32)
-        }
-    }
-
     // Mock generation pipeline for testing
     struct MockGenerationPipeline;
 
@@ -1181,6 +1180,38 @@ mod tests {
         if let Ok(PipelineOutput::AdvancedRAG(rag_output)) = result {
             assert!(rag_output.retrieval_iterations <= 2);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_hop_reasoning_dedupes_repeated_documents() {
+        // `MockAdvancedRetriever` always returns the same two documents
+        // (doc1, doc2) regardless of query or prior-context hint, which is
+        // exactly what a real vector-index retriever can do too when a
+        // reformulated query still ranks the same top-k highest. Force two
+        // hops (a high `uncertainty_threshold` stops the loop from exiting
+        // after hop 0's default 0.8 confidence) and assert the repeated
+        // documents are not double-counted.
+        let config = AdvancedRAGConfig {
+            max_hops: 2,
+            uncertainty_threshold: 0.95,
+            ..Default::default()
+        };
+        let mock_generation_pipeline = Arc::new(MockGenerationPipeline);
+        let rag_pipeline = create_advanced_rag_pipeline(config, mock_generation_pipeline);
+        let input = PipelineInput::Text("What is climate change?".to_string());
+        let result = rag_pipeline.__call__(input).expect("pipeline call should succeed");
+        let PipelineOutput::AdvancedRAG(rag_output) = result else {
+            panic!("expected AdvancedRAG output");
+        };
+        assert_eq!(
+            rag_output.retrieval_iterations, 2,
+            "both hops should run given the forced uncertainty threshold"
+        );
+        assert_eq!(
+            rag_output.total_documents_used, 2,
+            "a document id retrieved again on a later hop must be deduplicated via the \
+             document cache, not double-counted in total_documents_used"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

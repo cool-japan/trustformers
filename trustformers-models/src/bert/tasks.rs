@@ -2,6 +2,7 @@
 
 use crate::bert::config::BertConfig;
 use crate::bert::model::BertModel;
+use crate::weight_loading::binding::{bind_head_layer_norm, bind_head_linear};
 use crate::weight_loading::checkpoint::{Checkpoint, LoadReport};
 use std::io::Read;
 use trustformers_core::device::Device;
@@ -18,76 +19,6 @@ use trustformers_core::traits::{Layer, Model, TokenizedInput};
 /// loader detects either spelling, but the *published* names have to commit to
 /// one, and the task models' is `bert.`.
 const BACKBONE_NAMESPACE: &str = "bert";
-
-/// Bind a `[out, in]` head projection and its bias from a checkpoint.
-///
-/// A head that the checkpoint does not carry is legitimate — a pretrained
-/// backbone ships without a fine-tuned head — but it is recorded in
-/// [`LoadReport::missing`] so the caller can see that the layer kept its random
-/// initialisation. A head that *is* present must reach the model: silently
-/// leaving it behind is exactly the failure this crate is being cleaned of.
-///
-/// # Errors
-///
-/// Fails when a tensor is present with the wrong shape.
-fn bind_head_linear(
-    checkpoint: &Checkpoint,
-    report: &mut LoadReport,
-    name: &str,
-    weight_shape: [usize; 2],
-    layer: &mut Linear,
-) -> Result<()> {
-    let weight_name = format!("{name}.weight");
-    match checkpoint.take_shaped(&weight_name, &weight_shape)? {
-        Some(weight) => {
-            layer.set_weight(weight)?;
-            report.mark_loaded(&weight_name);
-        },
-        None => report.note_absent(&weight_name),
-    }
-
-    let bias_name = format!("{name}.bias");
-    match checkpoint.take_shaped(&bias_name, &[weight_shape[0]])? {
-        Some(bias) => {
-            layer.set_bias(bias)?;
-            report.mark_loaded(&bias_name);
-        },
-        None => report.note_absent(&bias_name),
-    }
-    Ok(())
-}
-
-/// Bind a head layer norm from a checkpoint, recording what was found.
-///
-/// # Errors
-///
-/// Fails when a tensor is present with the wrong shape.
-fn bind_head_layer_norm(
-    checkpoint: &Checkpoint,
-    report: &mut LoadReport,
-    name: &str,
-    hidden_size: usize,
-    norm: &mut trustformers_core::layers::LayerNorm,
-) -> Result<()> {
-    let weight_name = format!("{name}.weight");
-    match checkpoint.take_shaped(&weight_name, &[hidden_size])? {
-        Some(weight) => {
-            norm.set_weight(weight)?;
-            report.mark_loaded(&weight_name);
-        },
-        None => report.note_absent(&weight_name),
-    }
-
-    let bias_name = format!("{name}.bias");
-    match checkpoint.take_shaped(&bias_name, &[hidden_size])? {
-        Some(bias) => {
-            norm.set_bias(bias)?;
-            report.mark_loaded(&bias_name);
-        },
-        None => report.note_absent(&bias_name),
-    }
-    Ok(())
-}
 
 #[derive(Debug, Clone)]
 pub struct BertForSequenceClassification {

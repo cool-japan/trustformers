@@ -463,24 +463,53 @@ pub struct InferenceMetrics {
 /// including heap, native, graphics, and system memory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryMetrics {
-    /// Heap memory used in MB
+    /// Resident set size of this process in MB.
+    ///
+    /// This is the closest real measurement available: neither the Rust global
+    /// allocator nor any portable OS API separates a "heap" figure from the
+    /// rest of a process's resident memory.
     pub heap_used_mb: f32,
-    /// Heap memory free in MB
-    pub heap_free_mb: f32,
-    /// Total heap memory in MB
-    pub heap_total_mb: f32,
-    /// Native memory used in MB
-    pub native_used_mb: f32,
-    /// Graphics memory used in MB
-    pub graphics_used_mb: f32,
-    /// Code memory used in MB
-    pub code_used_mb: f32,
-    /// Stack memory used in MB
-    pub stack_used_mb: f32,
-    /// Other memory used in MB
-    pub other_used_mb: f32,
-    /// Available system memory in MB
+    /// Heap memory free in MB. `None` -- no allocator on any supported target
+    /// publishes a free-heap counter.
+    pub heap_free_mb: Option<f32>,
+    /// Total heap memory in MB. `None` for the same reason as
+    /// [`Self::heap_free_mb`].
+    pub heap_total_mb: Option<f32>,
+    /// Native (non-managed) memory used in MB. `None` off a managed runtime:
+    /// only the Android ART/JVM split maps onto this field.
+    pub native_used_mb: Option<f32>,
+    /// Graphics memory used in MB. `None` without a GPU driver query.
+    pub graphics_used_mb: Option<f32>,
+    /// Code (text segment) memory used in MB. `None` without per-segment
+    /// accounting.
+    pub code_used_mb: Option<f32>,
+    /// Stack memory used in MB. `None` without per-segment accounting.
+    pub stack_used_mb: Option<f32>,
+    /// Memory used that falls into none of the categories above, in MB.
+    /// `None` when the categories above are not themselves measured.
+    pub other_used_mb: Option<f32>,
+    /// Available system memory in MB.
     pub available_mb: f32,
+}
+
+impl MemoryMetrics {
+    /// This process's resident memory as a percentage of the memory it could
+    /// occupy in total (its own resident set plus what the system still has
+    /// available).
+    ///
+    /// Both terms are real `sysinfo` measurements, which is why this replaces
+    /// the old `heap_used_mb / heap_total_mb` ratio: no platform publishes a
+    /// heap total, so that denominator was never measured.
+    ///
+    /// `None` when neither figure is nonzero (nothing has been sampled yet).
+    pub fn resident_share_percent(&self) -> Option<f32> {
+        let total = self.heap_used_mb + self.available_mb;
+        if total > 0.0 {
+            Some(self.heap_used_mb / total * 100.0)
+        } else {
+            None
+        }
+    }
 }
 
 /// CPU performance metrics
@@ -488,20 +517,26 @@ pub struct MemoryMetrics {
 /// Tracks CPU utilization, frequency, temperature, and throttling status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuMetrics {
-    /// Overall CPU usage percentage (0-100)
+    /// Overall CPU usage percentage (0-100).
     pub usage_percent: f32,
-    /// User space CPU usage percentage
-    pub user_percent: f32,
-    /// System/kernel CPU usage percentage
-    pub system_percent: f32,
-    /// CPU idle percentage
+    /// User space CPU usage percentage. `None` -- the user/kernel split is not
+    /// exposed by the portable system API this crate reads.
+    pub user_percent: Option<f32>,
+    /// System/kernel CPU usage percentage. `None` for the same reason as
+    /// [`Self::user_percent`].
+    pub system_percent: Option<f32>,
+    /// CPU idle percentage, derived as `100 - usage_percent`.
     pub idle_percent: f32,
-    /// Current CPU frequency in MHz
-    pub frequency_mhz: u32,
-    /// CPU temperature in Celsius
-    pub temperature_c: f32,
-    /// Thermal throttling level (0.0 to 1.0)
-    pub throttling_level: f32,
+    /// Current CPU frequency in MHz. `None` when the platform publishes no
+    /// frequency for the CPU.
+    pub frequency_mhz: Option<u32>,
+    /// CPU temperature in Celsius, from the hottest reported thermal
+    /// component. `None` when the platform exposes no thermal sensors (common
+    /// on Apple Silicon and inside containers).
+    pub temperature_c: Option<f32>,
+    /// Thermal throttling level (0.0 to 1.0). `None` -- no supported platform
+    /// publishes a throttling ratio through a portable API.
+    pub throttling_level: Option<f32>,
 }
 
 /// GPU performance metrics
@@ -555,8 +590,9 @@ pub struct ThermalMetrics {
     pub temperature_c: f32,
     /// Thermal state from the system
     pub thermal_state: ThermalState,
-    /// Current throttling level (0.0 to 1.0)
-    pub throttling_level: f32,
+    /// Current throttling level (0.0 to 1.0). `None` -- no supported platform
+    /// publishes a throttling ratio through a portable API.
+    pub throttling_level: Option<f32>,
     /// Temperature trend direction
     pub temperature_trend: TemperatureTrend,
 }
@@ -627,20 +663,28 @@ pub struct AndroidMetrics {
 pub struct MobileMetricsSnapshot {
     /// Timestamp when metrics were collected (Unix timestamp in milliseconds)
     pub timestamp: u64,
-    /// Memory usage metrics
-    pub memory: MemoryMetrics,
-    /// CPU performance metrics
-    pub cpu: CpuMetrics,
-    /// GPU performance metrics
-    pub gpu: GpuMetrics,
-    /// Network performance metrics
-    pub network: NetworkMetrics,
-    /// ML inference metrics
+    /// Memory usage metrics, or `None` when memory profiling is disabled by
+    /// configuration or the platform refused the measurement. A `None` here
+    /// means "not measured"; it must never be read as a process using no
+    /// memory.
+    pub memory: Option<MemoryMetrics>,
+    /// CPU performance metrics, or `None` when CPU profiling is disabled by
+    /// configuration. Never read a `None` as an idle CPU.
+    pub cpu: Option<CpuMetrics>,
+    /// GPU performance metrics, or `None` when this build has no GPU
+    /// telemetry source. A `None` here means "not measured" -- it must never
+    /// be read as an idle GPU.
+    pub gpu: Option<GpuMetrics>,
+    /// Network performance metrics, or `None` when no per-process network
+    /// counters were readable.
+    pub network: Option<NetworkMetrics>,
+    /// ML inference metrics, measured by this crate's own inference tracker.
     pub inference: InferenceMetrics,
-    /// Thermal performance metrics
-    pub thermal: ThermalMetrics,
-    /// Battery performance metrics
-    pub battery: BatteryMetrics,
+    /// Thermal metrics, or `None` when the platform exposes no thermal
+    /// sensors.
+    pub thermal: Option<ThermalMetrics>,
+    /// Battery metrics, or `None` when the platform exposes no battery gauge.
+    pub battery: Option<BatteryMetrics>,
     /// Platform-specific metrics
     pub platform: PlatformMetrics,
 }
@@ -877,8 +921,9 @@ pub struct ProfilingData {
     pub suggestions: Vec<OptimizationSuggestion>,
     /// Statistical summary of the session
     pub summary: ProfilingSummary,
-    /// Overall system health assessment
-    pub system_health: SystemHealth,
+    /// Overall system health assessment, or `None` when no metric family was
+    /// measurable on the running device.
+    pub system_health: Option<SystemHealth>,
     /// Timestamp when data was exported
     pub export_timestamp: u64,
     /// Version of the profiler that collected the data
@@ -921,18 +966,24 @@ pub struct ProfilingSummary {
     pub session_duration_ms: u64,
     /// Average inference time in milliseconds
     pub avg_inference_time_ms: f64,
-    /// Peak memory usage in MB
-    pub peak_memory_mb: f32,
-    /// Average CPU usage percentage
-    pub avg_cpu_usage_percent: f32,
-    /// Average GPU usage percentage
-    pub avg_gpu_usage_percent: f32,
-    /// Total battery consumed in mAh
-    pub battery_consumed_mah: f32,
-    /// Number of thermal events detected
-    pub thermal_events: u32,
-    /// Overall performance score (0.0 to 100.0)
-    pub performance_score: f32,
+    /// Peak memory usage in MB, or `None` when no snapshot carried a memory
+    /// measurement.
+    pub peak_memory_mb: Option<f32>,
+    /// Average CPU usage percentage, or `None` when no snapshot carried a CPU
+    /// measurement.
+    pub avg_cpu_usage_percent: Option<f32>,
+    /// Average GPU usage percentage, or `None` when no snapshot in the
+    /// session carried GPU telemetry.
+    pub avg_gpu_usage_percent: Option<f32>,
+    /// Total battery consumed in mAh, or `None` when no snapshot carried
+    /// battery telemetry.
+    pub battery_consumed_mah: Option<f32>,
+    /// Number of thermal throttling events detected, or `None` when no
+    /// snapshot carried a throttling level to count them from.
+    pub thermal_events: Option<u32>,
+    /// Overall performance score (0.0 to 100.0), or `None` when the session
+    /// recorded no metrics to score.
+    pub performance_score: Option<f32>,
 }
 
 // =============================================================================
@@ -1164,13 +1215,13 @@ impl Default for MemoryMetrics {
     fn default() -> Self {
         Self {
             heap_used_mb: 0.0,
-            heap_free_mb: 0.0,
-            heap_total_mb: 0.0,
-            native_used_mb: 0.0,
-            graphics_used_mb: 0.0,
-            code_used_mb: 0.0,
-            stack_used_mb: 0.0,
-            other_used_mb: 0.0,
+            heap_free_mb: None,
+            heap_total_mb: None,
+            native_used_mb: None,
+            graphics_used_mb: None,
+            code_used_mb: None,
+            stack_used_mb: None,
+            other_used_mb: None,
             available_mb: 0.0,
         }
     }
@@ -1180,12 +1231,12 @@ impl Default for CpuMetrics {
     fn default() -> Self {
         Self {
             usage_percent: 0.0,
-            user_percent: 0.0,
-            system_percent: 0.0,
+            user_percent: None,
+            system_percent: None,
             idle_percent: 100.0,
-            frequency_mhz: 0,
-            temperature_c: 0.0,
-            throttling_level: 0.0,
+            frequency_mhz: None,
+            temperature_c: None,
+            throttling_level: None,
         }
     }
 }
@@ -1239,7 +1290,7 @@ impl Default for ThermalMetrics {
         Self {
             temperature_c: 0.0,
             thermal_state: ThermalState::Nominal,
-            throttling_level: 0.0,
+            throttling_level: None,
             temperature_trend: TemperatureTrend::Stable,
         }
     }
@@ -1248,7 +1299,9 @@ impl Default for ThermalMetrics {
 impl Default for BatteryMetrics {
     fn default() -> Self {
         Self {
-            level_percent: 100,
+            // Zero, not 100: a default-constructed value has measured nothing,
+            // and claiming a full battery is worse than claiming an empty one.
+            level_percent: 0,
             is_charging: false,
             power_consumption_mw: 0.0,
             estimated_life_minutes: 0,
@@ -1365,12 +1418,12 @@ impl Default for ProfilingSummary {
             total_bottlenecks: 0,
             session_duration_ms: 0,
             avg_inference_time_ms: 0.0,
-            peak_memory_mb: 0.0,
-            avg_cpu_usage_percent: 0.0,
-            avg_gpu_usage_percent: 0.0,
-            battery_consumed_mah: 0.0,
-            thermal_events: 0,
-            performance_score: 0.0,
+            peak_memory_mb: None,
+            avg_cpu_usage_percent: None,
+            avg_gpu_usage_percent: None,
+            battery_consumed_mah: None,
+            thermal_events: None,
+            performance_score: None,
         }
     }
 }

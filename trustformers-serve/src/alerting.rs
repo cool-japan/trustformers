@@ -640,24 +640,37 @@ impl AlertingService {
                 let below_max = max.map(|m| value <= m).unwrap_or(true);
                 Ok(above_min && below_max)
             },
-            AlertCondition::Rate {
-                window_secs: _,
-                operator,
-                value: threshold,
-            } => {
-                // Simplified rate calculation - would need historical data
-                Ok(self.compare_values(value, *threshold, *operator))
+            AlertCondition::Rate { window_secs, .. } => {
+                // A rate is a change over a window, and this evaluator is
+                // handed one instantaneous sample. It used to compare that
+                // sample against the threshold and report the answer as a rate
+                // check — so a `Rate` rule fired on the level, not the rate,
+                // and the configured window was ignored.
+                Err(anyhow!(
+                    "rate conditions need the metric's history over the last {window_secs}s; \
+                     this evaluator receives a single sample per rule"
+                ))
             },
             AlertCondition::Anomaly {
-                sensitivity: _,
-                window_secs: _,
+                sensitivity,
+                window_secs,
             } => {
-                // Simplified anomaly detection - would use statistical analysis
-                Ok(value > 100.0) // Placeholder logic
+                // This used to answer `value > 100.0` — a fixed threshold that
+                // ignored both `sensitivity` and `window_secs`, and that fired
+                // on any metric whose normal range happens to exceed 100.
+                Err(anyhow!(
+                    "anomaly conditions (sensitivity {sensitivity}, window {window_secs}s) need a \
+                     baseline distribution; this evaluator receives a single sample per rule"
+                ))
             },
-            AlertCondition::Custom { expression: _ } => {
-                // Would implement expression evaluation
-                Ok(false)
+            AlertCondition::Custom { expression } => {
+                // This used to return `Ok(false)`, so a custom rule silently
+                // never fired and looked to an operator like a rule that was
+                // being evaluated and staying healthy.
+                Err(anyhow!(
+                    "custom alert expressions are not evaluated on this build; \
+                     rule expression: {expression}"
+                ))
             },
         }
     }

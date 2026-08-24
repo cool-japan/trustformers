@@ -212,24 +212,6 @@ pub struct DocumentMetadata {
     pub quality_score: Option<f32>,
 }
 
-/// Document region for layout analysis
-#[derive(Debug, Clone)]
-struct DocumentRegion {
-    pub bbox: BoundingBox,
-    pub region_type: RegionType,
-}
-
-/// Type of document region
-#[derive(Debug, Clone)]
-enum RegionType {
-    Header,
-    Title,
-    Body,
-    Footer,
-    Table,
-    List,
-}
-
 /// Document understanding pipeline
 pub struct DocumentUnderstandingPipeline<M, T> {
     base: BasePipeline<M, T>,

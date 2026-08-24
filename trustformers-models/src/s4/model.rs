@@ -4,9 +4,7 @@ use scirs2_core::Complex64; // SciRS2 Integration Policy
 use std::f32::consts::PI;
 use trustformers_core::{
     device::Device,
-    errors::{
-        compute_error, invalid_format, invalid_input, runtime_error, tensor_op_error, Result,
-    },
+    errors::{invalid_input, runtime_error, tensor_op_error, Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
     ops::activations::gelu,
     tensor::Tensor,
@@ -627,21 +625,45 @@ impl Model for S4Model {
         self.ln_f.forward(hidden)
     }
 
+    /// Loading a pretrained S4 checkpoint is not implemented.
+    ///
+    /// A previous revision parsed a bespoke `S4ML` container and returned
+    /// `Ok(())`, which read like a loader — but every component step either
+    /// discarded the array it had just decoded (`let _weight_array = …` for the
+    /// embedding) or ran through `validate_and_skip_tensor`, a length check and
+    /// an offset bump. Not one tensor reached a parameter; a well-formed file
+    /// "loaded successfully" into a model that still held its constructor
+    /// initialisation. That machinery is deleted rather than kept as decoration.
+    ///
+    /// Binding for real needs two things this type does not yet have: setters on
+    /// [`S4Layer`] for the state-space parameters (`a_real`/`a_imag`,
+    /// `b_real`/`b_imag`, `c_real`/`c_imag`, `d`, `dt`) that also invalidate the
+    /// discretisation cache `a_bar`/`b_bar` — installing parameters without
+    /// invalidating it would leave the model computing with the *pre-load*
+    /// discretisation, which is the same silent-wrong-answer failure in a new
+    /// disguise — and a tensor-name map for a checkpoint format that something
+    /// other than this crate actually produces.
+    ///
+    /// The stream is drained first so the caller's reader is left in a defined
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Always fails: with an I/O error when the stream cannot be read, otherwise
+    /// with `not_implemented`.
     fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        use trustformers_core::errors::invalid_input;
-
-        // Read weight data
         let mut buffer = Vec::new();
         reader
             .read_to_end(&mut buffer)
-            .map_err(|e| invalid_input(format!("Failed to read S4 weights: {}", e)))?;
+            .map_err(|e| invalid_input(format!("Failed to read S4 weights: {e}")))?;
 
-        if buffer.is_empty() {
-            return Err(invalid_input("S4 weight file is empty"));
-        }
-
-        // Enhanced weight loading implementation
-        self.load_weights_from_buffer(&buffer)
+        Err(TrustformersError::not_implemented(
+            "S4Model::load_pretrained: S4 checkpoint loading is not implemented. The state-space \
+             parameters have no setters and the discretisation cache would have to be invalidated \
+             with them, so no checkpoint can be bound; reporting success would leave the model \
+             randomly initialised. Install weights explicitly through the layer setters instead."
+                .to_string(),
+        ))
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -663,323 +685,6 @@ impl Model for S4Model {
         total += self.ln_f.parameter_count();
 
         total
-    }
-}
-
-impl S4Model {
-    /// Load model weights from binary buffer
-    fn load_weights_from_buffer(&mut self, buffer: &[u8]) -> Result<()> {
-        // Check for minimum header size (magic number + version + metadata size)
-        if buffer.len() < 12 {
-            return Err(invalid_input(
-                "S4 weight file too small to contain valid header",
-            ));
-        }
-
-        let mut offset = 0;
-
-        // Read magic number to verify file format
-        let magic = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
-        offset += 4;
-
-        if magic != 0x53344D4C {
-            // "S4ML" in little-endian
-            return Err(invalid_format(
-                "S4 magic number 0x53344D4C",
-                format!("0x{:08X}", magic),
-            ));
-        }
-
-        // Read version
-        let version = u32::from_le_bytes([
-            buffer[offset],
-            buffer[offset + 1],
-            buffer[offset + 2],
-            buffer[offset + 3],
-        ]);
-        offset += 4;
-
-        if version > 1 {
-            return Err(invalid_format("S4 version ≤ 1", version.to_string()));
-        }
-
-        // Read metadata size
-        let metadata_size = u32::from_le_bytes([
-            buffer[offset],
-            buffer[offset + 1],
-            buffer[offset + 2],
-            buffer[offset + 3],
-        ]) as usize;
-        offset += 4;
-
-        // Validate we have enough data for metadata
-        if buffer.len() < offset + metadata_size {
-            return Err(invalid_input("Insufficient data for metadata"));
-        }
-
-        // Parse metadata (JSON format)
-        let metadata_bytes = &buffer[offset..offset + metadata_size];
-        let metadata_str = std::str::from_utf8(metadata_bytes)
-            .map_err(|e| invalid_input(format!("Invalid UTF-8 in metadata: {}", e)))?;
-
-        let metadata: serde_json::Value = serde_json::from_str(metadata_str)
-            .map_err(|e| invalid_input(format!("Invalid JSON in metadata: {}", e)))?;
-
-        offset += metadata_size;
-
-        // Validate model configuration matches
-        if let Some(config_obj) = metadata.get("config") {
-            self.validate_config_compatibility(config_obj)?;
-        }
-
-        // Load component weights
-        offset = self.load_embedding_weights(buffer, offset)?;
-        offset = self.load_block_weights(buffer, offset)?;
-        offset = self.load_final_norm_weights(buffer, offset)?;
-
-        // Verify all data was consumed
-        if offset != buffer.len() {
-            tracing::warn!(
-                "Warning: S4 weight file contains unused data ({} bytes remaining)",
-                buffer.len() - offset
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Validate that loaded config is compatible with current model
-    fn validate_config_compatibility(&self, config_obj: &serde_json::Value) -> Result<()> {
-        // Check critical parameters
-        if let Some(d_model) = config_obj.get("d_model").and_then(|v| v.as_u64()) {
-            if d_model as usize != self.config.d_model {
-                return Err(compute_error(
-                    "model_loading",
-                    format!(
-                        "Model dimension mismatch: expected {}, found {}",
-                        self.config.d_model, d_model
-                    ),
-                ));
-            }
-        }
-
-        if let Some(n_layer) = config_obj.get("n_layer").and_then(|v| v.as_u64()) {
-            if n_layer as usize != self.config.n_layer {
-                return Err(compute_error(
-                    "model_loading",
-                    format!(
-                        "Layer count mismatch: expected {}, found {}",
-                        self.config.n_layer, n_layer
-                    ),
-                ));
-            }
-        }
-
-        if let Some(d_state) = config_obj.get("d_state").and_then(|v| v.as_u64()) {
-            if d_state as usize != self.config.d_state {
-                return Err(compute_error(
-                    "model_loading",
-                    format!(
-                        "State dimension mismatch: expected {}, found {}",
-                        self.config.d_state, d_state
-                    ),
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Load embedding layer weights
-    fn load_embedding_weights(&mut self, buffer: &[u8], mut offset: usize) -> Result<usize> {
-        // Read embedding weight tensor size
-        if buffer.len() < offset + 4 {
-            return Err(invalid_input("Insufficient data for embedding weights"));
-        }
-
-        let weight_size = u32::from_le_bytes([
-            buffer[offset],
-            buffer[offset + 1],
-            buffer[offset + 2],
-            buffer[offset + 3],
-        ]) as usize;
-        offset += 4;
-
-        let expected_size = self.config.vocab_size * self.config.d_model * 4; // 4 bytes per f32
-        if weight_size != expected_size {
-            return Err(invalid_format(
-                format!("embedding weight size {}", expected_size),
-                weight_size.to_string(),
-            ));
-        }
-
-        // Validate we have enough data
-        if buffer.len() < offset + weight_size {
-            return Err(invalid_input(
-                "Insufficient data for embedding weight tensor",
-            ));
-        }
-
-        // Extract weight data
-        let weight_bytes = &buffer[offset..offset + weight_size];
-
-        // Convert bytes to f32 values
-        let mut weights = Vec::with_capacity(self.config.vocab_size * self.config.d_model);
-        for chunk in weight_bytes.chunks_exact(4) {
-            let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            weights.push(value);
-        }
-
-        // Create weight tensor and apply to embedding layer
-        let _weight_array =
-            Array2::from_shape_vec((self.config.vocab_size, self.config.d_model), weights)
-                .map_err(|e| {
-                    runtime_error(format!("Failed to reshape embedding weights: {}", e))
-                })?;
-
-        // Note: Since Embedding doesn't have a public set_weights method,
-        // we track that weights were successfully loaded
-        offset += weight_size;
-
-        Ok(offset)
-    }
-
-    /// Load weights for all S4 blocks
-    fn load_block_weights(&mut self, buffer: &[u8], mut offset: usize) -> Result<usize> {
-        for block_idx in 0..self.config.n_layer {
-            offset = self.load_single_block_weights(buffer, offset, block_idx)?;
-        }
-        Ok(offset)
-    }
-
-    /// Load weights for a single S4 block
-    fn load_single_block_weights(
-        &mut self,
-        buffer: &[u8],
-        mut offset: usize,
-        _block_idx: usize,
-    ) -> Result<usize> {
-        // Load S4 layer state space parameters
-        offset = self.load_state_space_parameters(buffer, offset)?;
-
-        // Load normalization weights
-        offset = self.load_layer_norm_weights(buffer, offset)?;
-
-        // Load input projection weights
-        offset =
-            self.load_linear_weights(buffer, offset, self.config.d_model, self.config.d_model * 2)?;
-
-        // Load output projection weights
-        offset =
-            self.load_linear_weights(buffer, offset, self.config.d_model, self.config.d_model)?;
-
-        Ok(offset)
-    }
-
-    /// Load state space parameters (A, B, C, D matrices and dt)
-    fn load_state_space_parameters(&mut self, buffer: &[u8], mut offset: usize) -> Result<usize> {
-        // Load A matrix (complex, stored as real and imaginary parts)
-        let a_size = self.config.d_state * self.config.d_state * 4; // f32 size
-        offset = self.validate_and_skip_tensor(buffer, offset, a_size, "A matrix real part")?;
-        offset =
-            self.validate_and_skip_tensor(buffer, offset, a_size, "A matrix imaginary part")?;
-
-        // Load B vector (complex)
-        let b_size = self.config.d_state * 4; // f32 size
-        offset = self.validate_and_skip_tensor(buffer, offset, b_size, "B vector real part")?;
-        offset =
-            self.validate_and_skip_tensor(buffer, offset, b_size, "B vector imaginary part")?;
-
-        // Load C vector (complex)
-        let c_size = self.config.d_state * 4; // f32 size
-        offset = self.validate_and_skip_tensor(buffer, offset, c_size, "C vector real part")?;
-        offset =
-            self.validate_and_skip_tensor(buffer, offset, c_size, "C vector imaginary part")?;
-
-        // Load D vector (real)
-        let d_size = self.config.d_model * 4; // f32 size
-        offset = self.validate_and_skip_tensor(buffer, offset, d_size, "D vector")?;
-
-        // Load dt parameter
-        let dt_size = self.config.d_model * 4; // f32 size
-        offset = self.validate_and_skip_tensor(buffer, offset, dt_size, "dt parameter")?;
-
-        Ok(offset)
-    }
-
-    /// Load layer normalization weights
-    fn load_layer_norm_weights(&self, buffer: &[u8], mut offset: usize) -> Result<usize> {
-        let weight_size = self.config.d_model * 4; // f32 size
-        offset = self.validate_and_skip_tensor(buffer, offset, weight_size, "LayerNorm weight")?;
-
-        let bias_size = self.config.d_model * 4; // f32 size
-        offset = self.validate_and_skip_tensor(buffer, offset, bias_size, "LayerNorm bias")?;
-
-        Ok(offset)
-    }
-
-    /// Load linear layer weights
-    fn load_linear_weights(
-        &self,
-        buffer: &[u8],
-        mut offset: usize,
-        in_features: usize,
-        out_features: usize,
-    ) -> Result<usize> {
-        let weight_size = out_features * in_features * 4; // f32 size
-        offset = self.validate_and_skip_tensor(buffer, offset, weight_size, "Linear weight")?;
-
-        let bias_size = out_features * 4; // f32 size (assuming bias exists)
-        offset = self.validate_and_skip_tensor(buffer, offset, bias_size, "Linear bias")?;
-
-        Ok(offset)
-    }
-
-    /// Load final layer normalization weights
-    fn load_final_norm_weights(&self, buffer: &[u8], mut offset: usize) -> Result<usize> {
-        offset = self.load_layer_norm_weights(buffer, offset)?;
-        Ok(offset)
-    }
-
-    /// Validate tensor data and skip over it (helper function)
-    fn validate_and_skip_tensor(
-        &self,
-        buffer: &[u8],
-        offset: usize,
-        expected_size: usize,
-        tensor_name: &str,
-    ) -> Result<usize> {
-        use trustformers_core::errors::TrustformersError;
-
-        if buffer.len() < offset + 4 {
-            return Err(invalid_input(format!(
-                "Insufficient data for {} size header",
-                tensor_name
-            )));
-        }
-
-        let tensor_size = u32::from_le_bytes([
-            buffer[offset],
-            buffer[offset + 1],
-            buffer[offset + 2],
-            buffer[offset + 3],
-        ]) as usize;
-
-        if tensor_size != expected_size {
-            return Err(TrustformersError::invalid_format(
-                format!("{}", expected_size),
-                format!("{}", tensor_size),
-            ));
-        }
-
-        if buffer.len() < offset + 4 + tensor_size {
-            return Err(TrustformersError::invalid_input_simple(format!(
-                "Insufficient data for {} tensor",
-                tensor_name
-            )));
-        }
-
-        Ok(offset + 4 + tensor_size)
     }
 }
 
@@ -1026,13 +731,18 @@ impl Model for S4ForLanguageModeling {
         self.lm_head.forward(hidden)
     }
 
+    /// Delegates to [`S4Model::load_pretrained`], which refuses with a documented
+    /// error rather than reporting a load that did not happen.
+    ///
+    /// A previous revision called the backbone loader, ignored the LM head with
+    /// the comment "For now, just return success after loading S4 weights", and
+    /// returned `Ok(())` — on top of a backbone loader that bound nothing.
+    ///
+    /// # Errors
+    ///
+    /// Always fails; see [`S4Model::load_pretrained`].
     fn load_pretrained(&mut self, reader: &mut dyn std::io::Read) -> Result<()> {
-        // Load S4 backbone weights first
-        self.s4.load_pretrained(reader)?;
-
-        // LM head weights would be loaded here in a full implementation
-        // For now, just return success after loading S4 weights
-        Ok(())
+        self.s4.load_pretrained(reader)
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -1401,6 +1111,141 @@ mod tests {
         assert!(
             state.iter().all(|&x| x == 0.0),
             "Initial causal state must be zero"
+        );
+    }
+
+    // ── Checkpoint loading refuses instead of faking success ────────────────
+
+    fn loading_config() -> S4Config {
+        S4Config {
+            d_model: 8,
+            d_state: 4,
+            n_layer: 1,
+            vocab_size: 12,
+            max_position_embeddings: 16,
+            ..S4Config::default()
+        }
+    }
+
+    /// Rebuild the exact `S4ML` byte stream the deleted loader accepted.
+    ///
+    /// This fixture is the point of the regression test: the old
+    /// `load_weights_from_buffer` walked precisely this layout, validated every
+    /// length, *skipped* every payload and returned `Ok(())`. Feeding it back in
+    /// proves the model no longer claims to have loaded weights it never bound.
+    fn well_formed_s4ml_buffer(config: &S4Config) -> Vec<u8> {
+        fn push_tensor(bytes: &mut Vec<u8>, element_count: usize) {
+            let byte_len = element_count * 4;
+            bytes.extend_from_slice(&(byte_len as u32).to_le_bytes());
+            for i in 0..element_count {
+                bytes.extend_from_slice(&(i as f32 + 1.0).to_le_bytes());
+            }
+        }
+
+        let d_model = config.d_model;
+        let d_state = config.d_state;
+
+        let metadata = format!(
+            r#"{{"config":{{"d_model":{d_model},"d_state":{d_state},"n_layer":{},"vocab_size":{}}}}}"#,
+            config.n_layer, config.vocab_size
+        );
+        let metadata_bytes = metadata.as_bytes();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x5334_4D4Cu32.to_le_bytes()); // "S4ML"
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // version
+        bytes.extend_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(metadata_bytes);
+
+        // Embeddings.
+        push_tensor(&mut bytes, config.vocab_size * d_model);
+
+        for _ in 0..config.n_layer {
+            // State-space parameters: A (real, imag), B (real, imag),
+            // C (real, imag), D, dt.
+            push_tensor(&mut bytes, d_state * d_state);
+            push_tensor(&mut bytes, d_state * d_state);
+            push_tensor(&mut bytes, d_state);
+            push_tensor(&mut bytes, d_state);
+            push_tensor(&mut bytes, d_state);
+            push_tensor(&mut bytes, d_state);
+            push_tensor(&mut bytes, d_model);
+            push_tensor(&mut bytes, d_model);
+            // Block LayerNorm.
+            push_tensor(&mut bytes, d_model);
+            push_tensor(&mut bytes, d_model);
+            // Input projection (d_model -> 2 * d_model) and its bias.
+            push_tensor(&mut bytes, 2 * d_model * d_model);
+            push_tensor(&mut bytes, 2 * d_model);
+            // Output projection (d_model -> d_model) and its bias.
+            push_tensor(&mut bytes, d_model * d_model);
+            push_tensor(&mut bytes, d_model);
+        }
+
+        // Final LayerNorm.
+        push_tensor(&mut bytes, d_model);
+        push_tensor(&mut bytes, d_model);
+
+        bytes
+    }
+
+    /// Regression: this exact buffer used to return `Ok(())` while every tensor
+    /// in it was length-checked and skipped, leaving the model at its
+    /// constructor initialisation.
+    #[test]
+    fn load_pretrained_refuses_the_container_it_used_to_fake_a_load_from() {
+        let config = loading_config();
+        let bytes = well_formed_s4ml_buffer(&config);
+
+        let mut model = S4Model::new(config).expect("model must build");
+        let before = model.embeddings.weight().data().expect("readable");
+
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a load that binds nothing must not report success");
+        assert!(
+            err.to_string().contains("not implemented")
+                || err.to_string().contains("not_implemented"),
+            "the refusal must say the loader is unimplemented: {err}"
+        );
+        assert_eq!(
+            model.embeddings.weight().data().expect("readable"),
+            before,
+            "a refused load must leave every parameter untouched"
+        );
+    }
+
+    /// The language-modelling wrapper used to call the backbone loader and then
+    /// return `Ok(())` with the LM head untouched; it now propagates the refusal.
+    #[test]
+    fn language_modeling_load_pretrained_propagates_the_refusal() {
+        let config = loading_config();
+        let bytes = well_formed_s4ml_buffer(&config);
+
+        let mut model = S4ForLanguageModeling::new(config).expect("model must build");
+        let before = model.lm_head.weight().data().expect("readable");
+
+        model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("the wrapper must not report a load the backbone refused");
+        assert_eq!(
+            model.lm_head.weight().data().expect("readable"),
+            before,
+            "the LM head must be untouched by a refused load"
+        );
+    }
+
+    /// The stream is still drained, so a caller reusing the reader sees a
+    /// defined state.
+    #[test]
+    fn load_pretrained_drains_the_reader_before_refusing() {
+        let mut model = S4Model::new(loading_config()).expect("model must build");
+        let bytes = vec![0x33u8; 96];
+        let mut cursor = bytes.as_slice();
+        let _ = model.load_pretrained(&mut cursor);
+        assert!(
+            cursor.is_empty(),
+            "the reader must be fully consumed even when the load is refused"
         );
     }
 }

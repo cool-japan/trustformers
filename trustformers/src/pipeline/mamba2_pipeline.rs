@@ -8,7 +8,6 @@
 //! - Advanced selective scan mechanisms
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -177,8 +176,6 @@ pub struct Mamba2Model {
     embeddings: Vec<Vec<f64>>,
     lm_head: Vec<Vec<f64>>,
     layers: Vec<Mamba2Layer>,
-    performance_tracker: Arc<RwLock<Mamba2PerformanceTracker>>,
-    state_manager: Arc<RwLock<StateManager>>,
 }
 
 impl std::fmt::Debug for Mamba2Model {
@@ -188,6 +185,25 @@ impl std::fmt::Debug for Mamba2Model {
             .field("blocks", &self.blocks.len())
             .field("vocab_size", &self.embeddings.len())
             .finish()
+    }
+}
+
+impl Mamba2Model {
+    /// The models-crate configuration the real SSD `blocks` were built from.
+    pub fn models_config(&self) -> &trustformers_models::mamba2::Mamba2Config {
+        &self.models_config
+    }
+
+    /// Freshly-initialised per-layer SSM parameters (`a_matrix`/`b_matrix`/
+    /// `c_matrix`/`d_param`), one entry per block in `blocks`.
+    ///
+    /// These are not consulted by the scan itself (the real forward pass
+    /// delegates entirely to [`trustformers_models::mamba2::Mamba2Block`]);
+    /// they exist so callers can verify the model was not initialised with
+    /// degenerate (all-zero) projections before running it — a zero `C`
+    /// matrix would silently reduce the scan to the identity.
+    pub fn layers(&self) -> &[Mamba2Layer] {
+        &self.layers
     }
 }
 
@@ -201,15 +217,6 @@ pub struct Mamba2PerformanceTracker {
     pub throughput_tokens_per_second: f32,
     pub hardware_utilization: f32,
     pub selective_scan_efficiency: f32,
-}
-
-/// State management for ultra-long sequences
-#[derive(Debug, Default)]
-pub struct StateManager {
-    pub checkpoint_interval: usize,
-    pub state_checkpoints: HashMap<usize, Vec<u8>>,
-    pub compression_enabled: bool,
-    pub max_state_memory_mb: f32,
 }
 
 /// Mamba-2 pipeline output with enhanced information
@@ -422,8 +429,6 @@ impl Mamba2Pipeline {
             embeddings,
             lm_head,
             layers: layer_states,
-            performance_tracker: Arc::new(RwLock::new(Mamba2PerformanceTracker::default())),
-            state_manager: Arc::new(RwLock::new(StateManager::default())),
         })
     }
 

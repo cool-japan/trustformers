@@ -1,7 +1,8 @@
 use crate::common::ActivationType;
 use crate::fnet::config::FNetConfig;
 use crate::weight_loading::binding::{
-    bind_embedding, bind_linear, take_norm_bias, take_norm_weight,
+    bind_embedding, bind_head_layer_norm, bind_head_linear, bind_linear, take_norm_bias,
+    take_norm_weight,
 };
 use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use std::io::Read;
@@ -702,8 +703,13 @@ impl Model for FNetForSequenceClassification {
         self.classifier.forward(cls_output)
     }
 
+    /// Load the encoder and, when the checkpoint carries one, the classifier head.
+    ///
+    /// # Errors
+    ///
+    /// See [`FNetForSequenceClassification::load_pretrained_report`].
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.fnet.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -715,10 +721,96 @@ impl Model for FNetForSequenceClassification {
     }
 }
 
+impl FNetForSequenceClassification {
+    /// Load the encoder and the classification head, reporting what was bound.
+    ///
+    /// A previous revision delegated straight to `FNetModel::load_pretrained`,
+    /// which binds the encoder only. `FNetModel`'s unused-tensor policy tolerates
+    /// the `classifier.` namespace, so a fine-tuned checkpoint's head was
+    /// silently dropped: inference then ran through a constructor-initialised
+    /// classifier while `load_pretrained` returned `Ok(())`.
+    ///
+    /// A checkpoint that carries no head at all — a plain pretrained encoder — is
+    /// still accepted, but the absent head tensors are recorded in
+    /// [`LoadReport::missing`] so the caller can see the layer kept its
+    /// initialisation rather than being told everything was loaded.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when the head is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.fnet.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.fnet.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "classifier",
+            [self.num_labels, hidden],
+            &mut self.classifier,
+        )?;
+        Ok(report)
+    }
+}
+
+/// FNet's masked-language-modelling prediction head.
+///
+/// HuggingFace's `FNetLMPredictionHead` is a `transform` block — a square dense
+/// projection, GELU and a `LayerNorm` — followed by a `decoder` back to the
+/// vocabulary, exactly the layout BERT uses. A previous revision of this crate
+/// collapsed the head to a single `Linear`, which meant a real
+/// `FNetForMaskedLM` checkpoint could not be represented at all: its
+/// `cls.predictions.transform.*` tensors had nowhere to land and were dropped
+/// while the load reported success.
+pub struct FNetLMHead {
+    dense: Linear,
+    layer_norm: LayerNorm,
+    decoder: Linear,
+}
+
+impl FNetLMHead {
+    /// Build the head for `config` on `device`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the LayerNorm cannot be constructed for `hidden_size`.
+    pub fn new_with_device(config: &FNetConfig, device: Device) -> Result<Self> {
+        Ok(Self {
+            dense: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
+            decoder: Linear::new_with_device(config.hidden_size, config.vocab_size, true, device),
+        })
+    }
+
+    /// dense → GELU → LayerNorm → decoder.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any layer failure.
+    pub fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
+        let hidden_states = self.dense.forward(hidden_states)?;
+        let hidden_states = trustformers_core::ops::activations::gelu(&hidden_states)?;
+        let hidden_states = self.layer_norm.forward(hidden_states)?;
+        self.decoder.forward(hidden_states)
+    }
+
+    /// Total learnable parameters of the head.
+    pub fn parameter_count(&self) -> usize {
+        self.dense.parameter_count()
+            + self.layer_norm.parameter_count()
+            + self.decoder.parameter_count()
+    }
+}
+
 /// FNet for masked language modeling
 pub struct FNetForMaskedLM {
     fnet: FNetModel,
-    mlm_head: Linear,
+    mlm_head: FNetLMHead,
     device: Device,
 }
 
@@ -729,7 +821,7 @@ impl FNetForMaskedLM {
 
     pub fn new_with_device(config: FNetConfig, device: Device) -> Result<Self> {
         let fnet = FNetModel::new_with_device(config.clone(), device)?;
-        let mlm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, true, device);
+        let mlm_head = FNetLMHead::new_with_device(&config, device)?;
 
         Ok(Self {
             fnet,
@@ -740,6 +832,74 @@ impl FNetForMaskedLM {
 
     pub fn device(&self) -> Device {
         self.device
+    }
+
+    /// Load the encoder and the masked-LM head, reporting what was bound.
+    ///
+    /// A previous revision delegated straight to `FNetModel::load_pretrained`,
+    /// which binds the encoder only. `FNetModel`'s unused-tensor policy tolerates
+    /// the `cls.` namespace, so the whole prediction head was silently dropped
+    /// while `load_pretrained` returned `Ok(())`.
+    ///
+    /// HuggingFace declares the decoder with `bias=False` and aliases
+    /// `decoder.bias` onto a separate `cls.predictions.bias` parameter, so a real
+    /// checkpoint may spell the output bias either way; both are accepted, and
+    /// the canonical `cls.predictions.bias` wins when the checkpoint has both.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when a head tensor is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.fnet.load_from_checkpoint(&checkpoint)?;
+
+        let config = self.fnet.get_config().clone();
+        let hidden = config.hidden_size;
+        let vocab = config.vocab_size;
+
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "cls.predictions.transform.dense",
+            [hidden, hidden],
+            &mut self.mlm_head.dense,
+        )?;
+        bind_head_layer_norm(
+            &checkpoint,
+            &mut report,
+            "cls.predictions.transform.LayerNorm",
+            hidden,
+            &mut self.mlm_head.layer_norm,
+        )?;
+
+        let decoder_weight = "cls.predictions.decoder.weight";
+        match checkpoint.take_shaped(decoder_weight, &[vocab, hidden])? {
+            Some(weight) => {
+                self.mlm_head.decoder.set_weight(weight)?;
+                report.mark_loaded(decoder_weight);
+            },
+            None => report.note_absent(decoder_weight),
+        }
+
+        let canonical_bias = "cls.predictions.bias";
+        let aliased_bias = "cls.predictions.decoder.bias";
+        let bias_name =
+            if checkpoint.contains(canonical_bias) { canonical_bias } else { aliased_bias };
+        match checkpoint.take_shaped(bias_name, &[vocab])? {
+            Some(bias) => {
+                self.mlm_head.decoder.set_bias(bias)?;
+                report.mark_loaded(bias_name);
+                // The two spellings alias one parameter; note the other as
+                // consumed so a checkpoint carrying both is fully accounted for.
+                if checkpoint.contains(aliased_bias) && bias_name == canonical_bias {
+                    report.mark_loaded(aliased_bias);
+                }
+            },
+            None => report.note_absent(canonical_bias),
+        }
+
+        Ok(report)
     }
 }
 
@@ -753,8 +913,13 @@ impl Model for FNetForMaskedLM {
         self.mlm_head.forward(sequence_output)
     }
 
+    /// Load the encoder and, when the checkpoint carries one, the prediction head.
+    ///
+    /// # Errors
+    ///
+    /// See [`FNetForMaskedLM::load_pretrained_report`].
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.fnet.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -1441,6 +1606,207 @@ mod tests {
             .expect_err("garbage must not be accepted as weights");
         assert!(
             err.to_string().contains("unrecognised checkpoint container"),
+            "unexpected: {err}"
+        );
+    }
+
+    // ── Task heads (regression for the head-dropping delegation) ────────────
+
+    /// The tensors a fine-tuned `FNetForSequenceClassification` export adds on
+    /// top of the encoder.
+    fn classifier_tensors(config: &FNetConfig, num_labels: usize) -> Vec<F32Tensor> {
+        vec![
+            F32Tensor::ramp("classifier.weight", &[num_labels, config.hidden_size], 90.0),
+            F32Tensor::ramp("classifier.bias", &[num_labels], 95.0),
+        ]
+    }
+
+    /// The tensors a `FNetForMaskedLM` export adds on top of the encoder.
+    fn prediction_head_tensors(config: &FNetConfig, aliased_bias: bool) -> Vec<F32Tensor> {
+        let hidden = config.hidden_size;
+        let bias_name = if aliased_bias {
+            "cls.predictions.decoder.bias"
+        } else {
+            "cls.predictions.bias"
+        };
+        vec![
+            F32Tensor::ramp(
+                "cls.predictions.transform.dense.weight",
+                &[hidden, hidden],
+                60.0,
+            ),
+            F32Tensor::ramp("cls.predictions.transform.dense.bias", &[hidden], 65.0),
+            F32Tensor::ramp(
+                "cls.predictions.transform.LayerNorm.weight",
+                &[hidden],
+                70.0,
+            ),
+            F32Tensor::ramp("cls.predictions.transform.LayerNorm.bias", &[hidden], 75.0),
+            F32Tensor::ramp(
+                "cls.predictions.decoder.weight",
+                &[config.vocab_size, hidden],
+                80.0,
+            ),
+            F32Tensor::ramp(bias_name, &[config.vocab_size], 85.0),
+        ]
+    }
+
+    /// Regression: the wrapper delegated to `FNetModel::load_pretrained`, whose
+    /// unused-tensor policy tolerates the `classifier.` namespace. The head was
+    /// therefore dropped on the floor while the load returned `Ok(())`.
+    #[test]
+    fn sequence_classification_load_pretrained_binds_the_classifier_head() {
+        let config = loading_config();
+        let num_labels = 3;
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(classifier_tensors(&config, num_labels));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model =
+            FNetForSequenceClassification::new(config, num_labels).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        assert!(
+            report.loaded.contains(&"classifier.weight".to_string())
+                && report.loaded.contains(&"classifier.bias".to_string()),
+            "the classification head must be among the loaded tensors: {:?}",
+            report.loaded
+        );
+    }
+
+    /// A plain pretrained encoder ships without a fine-tuned head. That is
+    /// accepted, but the gap is reported rather than passed off as a full load.
+    #[test]
+    fn sequence_classification_load_pretrained_records_an_absent_head() {
+        let config = loading_config();
+        let bytes = build_safetensors(&fnet_tensors(&config, "fnet."));
+
+        let mut model = FNetForSequenceClassification::new(config, 3).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a head-less encoder checkpoint must still load");
+        assert!(
+            !report.is_complete(),
+            "a checkpoint without a head must not be reported as complete"
+        );
+        assert!(
+            report.missing.contains(&"classifier.weight".to_string()),
+            "the absent head must be named: {:?}",
+            report.missing
+        );
+    }
+
+    #[test]
+    fn sequence_classification_load_pretrained_rejects_a_head_of_the_wrong_width() {
+        let config = loading_config();
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(classifier_tensors(&config, 7));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetForSequenceClassification::new(config, 3).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a 7-label head must not be reshaped into a 3-label model");
+        assert!(
+            err.to_string().contains("classifier.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// Regression: the masked-LM wrapper delegated to the encoder loader, whose
+    /// policy tolerates the whole `cls.` namespace, so the prediction head was
+    /// silently discarded.
+    #[test]
+    fn masked_lm_load_pretrained_binds_the_prediction_head() {
+        let config = loading_config();
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(prediction_head_tensors(&config, false));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetForMaskedLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        for name in [
+            "cls.predictions.transform.dense.weight",
+            "cls.predictions.transform.LayerNorm.weight",
+            "cls.predictions.decoder.weight",
+            "cls.predictions.bias",
+        ] {
+            assert!(
+                report.loaded.contains(&name.to_string()),
+                "{name} must be among the loaded tensors: {:?}",
+                report.loaded
+            );
+        }
+    }
+
+    /// HuggingFace aliases `cls.predictions.decoder.bias` onto
+    /// `cls.predictions.bias`; an export may carry either spelling.
+    #[test]
+    fn masked_lm_load_pretrained_accepts_the_aliased_decoder_bias() {
+        let config = loading_config();
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(prediction_head_tensors(&config, true));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetForMaskedLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("the aliased bias spelling must load");
+        assert!(
+            report.loaded.contains(&"cls.predictions.decoder.bias".to_string()),
+            "the aliased bias must be consumed: {:?}",
+            report.loaded
+        );
+    }
+
+    #[test]
+    fn masked_lm_load_pretrained_records_an_absent_head() {
+        let config = loading_config();
+        let bytes = build_safetensors(&fnet_tensors(&config, "fnet."));
+
+        let mut model = FNetForMaskedLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a head-less encoder checkpoint must still load");
+        assert!(
+            report.missing.contains(&"cls.predictions.decoder.weight".to_string()),
+            "the absent prediction head must be named: {:?}",
+            report.missing
+        );
+    }
+
+    #[test]
+    fn masked_lm_load_pretrained_rejects_a_head_for_a_different_vocabulary() {
+        let config = loading_config();
+        let wider = FNetConfig {
+            vocab_size: config.vocab_size * 2,
+            ..config.clone()
+        };
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(prediction_head_tensors(&wider, false));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetForMaskedLM::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a head for a bigger vocabulary must not be reshaped into place");
+        assert!(
+            err.to_string().contains("cls.predictions.decoder.weight"),
             "unexpected: {err}"
         );
     }

@@ -48,7 +48,6 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_stream::Stream;
 use url::Url;
-use uuid::Uuid;
 
 /// Re-export commonly used types
 pub use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -103,7 +102,7 @@ impl Default for ClientConfig {
 #[async_trait::async_trait]
 pub trait Authenticator: Send + Sync {
     /// Apply authentication to the request builder
-    async fn apply(&self, request_builder: RequestBuilder) -> Result<RequestBuilder, ClientError>;
+    async fn apply(&self, request_builder: RequestBuilder) -> Result<RequestBuilder>;
 }
 
 /// API Key authentication
@@ -136,7 +135,7 @@ impl ApiKeyAuth {
 
 #[async_trait::async_trait]
 impl Authenticator for ApiKeyAuth {
-    async fn apply(&self, request_builder: RequestBuilder) -> Result<RequestBuilder, ClientError> {
+    async fn apply(&self, request_builder: RequestBuilder) -> Result<RequestBuilder> {
         let header_value = format!("{}{}", self.prefix, self.api_key);
         Ok(request_builder.header(&self.header, header_value))
     }
@@ -172,79 +171,218 @@ impl JwtAuth {
 
 #[async_trait::async_trait]
 impl Authenticator for JwtAuth {
-    async fn apply(&self, request_builder: RequestBuilder) -> Result<RequestBuilder, ClientError> {
+    async fn apply(&self, request_builder: RequestBuilder) -> Result<RequestBuilder> {
         let header_value = format!("{}{}", self.prefix, self.token);
         Ok(request_builder.header(&self.header, header_value))
     }
 }
 
-/// OAuth2 authentication
+/// A cached access token together with the instant it stops being usable.
+#[cfg(feature = "oauth2")]
+#[derive(Clone, Debug)]
+struct CachedToken {
+    /// The bearer token itself.
+    access_token: String,
+    /// When the token expires.
+    ///
+    /// `None` when the authorization server sent no `expires_in`, which
+    /// RFC 6749 section 5.1 permits; such a token is used until the server
+    /// rejects it, because the client has no basis for guessing a lifetime.
+    expires_at: Option<DateTime<Utc>>,
+}
+
+#[cfg(feature = "oauth2")]
+impl CachedToken {
+    /// Whether the token can still be used at `now`.
+    ///
+    /// `skew` is subtracted from the expiry so a token that is about to lapse is
+    /// refreshed rather than sent on a request that would outlive it.
+    fn is_usable(&self, now: DateTime<Utc>, skew: chrono::Duration) -> bool {
+        match self.expires_at {
+            Some(expires_at) => now + skew < expires_at,
+            None => true,
+        }
+    }
+}
+
+/// Successful token response, RFC 6749 section 5.1.
+#[cfg(feature = "oauth2")]
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    /// The issued access token.
+    access_token: String,
+    /// Lifetime in seconds. Optional per section 5.1.
+    #[serde(default)]
+    expires_in: Option<i64>,
+}
+
+/// Error response, RFC 6749 section 5.2.
+#[cfg(feature = "oauth2")]
+#[derive(Debug, Deserialize)]
+struct TokenErrorResponse {
+    /// Machine-readable error code (`invalid_client`, `invalid_grant`, ...).
+    error: String,
+    /// Human-readable elaboration, when the server sends one.
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+/// OAuth2 authentication using the client-credentials grant (RFC 6749 §4.4).
+///
+/// The token is fetched on first use and cached until shortly before it
+/// expires. Until 0.2.1 this delegated to the `oauth2` crate; that dependency
+/// was dropped because `oauth2` 5.0 pins `reqwest` 0.12 while this crate is on
+/// 0.13, and only this one grant was ever used. The old implementation also
+/// compared `expires_in` — a *duration* — against a wall-clock timestamp, so a
+/// token was treated as already expired and re-fetched on every single request.
 #[cfg(feature = "oauth2")]
 #[derive(Clone)]
 pub struct OAuth2Auth {
-    client: oauth2::basic::BasicClient,
-    token: Arc<RwLock<Option<oauth2::StandardToken>>>,
+    /// HTTP client used for the token endpoint only.
+    http_client: HttpClient,
+    /// Client identifier registered with the authorization server.
+    client_id: String,
+    /// Client secret registered with the authorization server.
+    client_secret: String,
+    /// Token endpoint.
+    token_url: Url,
+    /// Scopes to request; empty means "send no `scope` parameter".
+    scopes: Vec<String>,
+    /// The token in flight, shared between clones of this authenticator.
+    token: Arc<RwLock<Option<CachedToken>>>,
 }
 
 #[cfg(feature = "oauth2")]
 impl OAuth2Auth {
-    /// Create a new OAuth2 authenticator
+    /// Headroom applied to the cached token's expiry, so a token cannot lapse
+    /// between the check and the request that carries it.
+    const EXPIRY_SKEW_SECONDS: i64 = 30;
+
+    /// Create a new OAuth2 authenticator.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `token_url` is not a valid absolute URL, or when the HTTP
+    /// client backing the token endpoint cannot be built.
     pub fn new(
         client_id: impl Into<String>,
         client_secret: impl Into<String>,
         token_url: impl AsRef<str>,
-    ) -> Result<Self, ClientError> {
-        let client = oauth2::basic::BasicClient::new(
-            oauth2::ClientId::new(client_id.into()),
-            Some(oauth2::ClientSecret::new(client_secret.into())),
-            oauth2::AuthUrl::new("https://example.com/auth".to_string()).expect("static auth URL is always valid"), // Not used for client credentials
-            Some(oauth2::TokenUrl::new(token_url.as_ref().to_string()).map_err(|e| ClientError::Configuration(e.to_string()))?),
-        );
+    ) -> Result<Self> {
+        let token_url = Url::parse(token_url.as_ref())?;
 
         Ok(Self {
-            client,
+            http_client: HttpClient::builder().build()?,
+            client_id: client_id.into(),
+            client_secret: client_secret.into(),
+            token_url,
+            scopes: Vec::new(),
             token: Arc::new(RwLock::new(None)),
         })
     }
 
-    /// Get a valid access token
-    async fn get_token(&self) -> Result<String, ClientError> {
-        let token_guard = self.token.read().await;
+    /// Request the given scopes when fetching a token.
+    #[must_use]
+    pub fn with_scopes<S: Into<String>>(mut self, scopes: impl IntoIterator<Item = S>) -> Self {
+        self.scopes = scopes.into_iter().map(Into::into).collect();
+        self
+    }
 
-        // Check if we have a valid token
-        if let Some(token) = token_guard.as_ref() {
-            if let Some(expires_at) = token.expires_in() {
-                if chrono::Utc::now().timestamp() < expires_at.as_secs() as i64 {
-                    return Ok(token.access_token().secret().clone());
+    /// Get a valid access token, fetching a new one only when the cached token
+    /// is missing or about to expire.
+    async fn get_token(&self) -> Result<String> {
+        let skew = chrono::Duration::seconds(Self::EXPIRY_SKEW_SECONDS);
+
+        {
+            let cached = self.token.read().await;
+            if let Some(token) = cached.as_ref() {
+                if token.is_usable(Utc::now(), skew) {
+                    return Ok(token.access_token.clone());
                 }
-            } else {
-                return Ok(token.access_token().secret().clone());
             }
         }
 
-        drop(token_guard);
+        let mut cached = self.token.write().await;
 
-        // Need to get a new token
-        let mut token_guard = self.token.write().await;
+        // Another task may have refreshed the token while this one waited for
+        // the write lock; re-check rather than issuing a second request.
+        if let Some(token) = cached.as_ref() {
+            if token.is_usable(Utc::now(), skew) {
+                return Ok(token.access_token.clone());
+            }
+        }
 
-        let token_result = self
-            .client
-            .exchange_client_credentials()
-            .request_async(oauth2::reqwest::async_http_client)
-            .await
-            .map_err(|e| ClientError::Authentication(format!("OAuth2 token exchange failed: {}", e)))?;
-
-        let access_token = token_result.access_token().secret().clone();
-        *token_guard = Some(token_result);
+        let fetched = self.request_token().await?;
+        let access_token = fetched.access_token.clone();
+        *cached = Some(fetched);
 
         Ok(access_token)
+    }
+
+    /// Perform the client-credentials token request.
+    ///
+    /// Credentials go in the `Authorization: Basic` header, the form carries
+    /// `grant_type=client_credentials` plus the configured scopes, per
+    /// RFC 6749 sections 2.3.1 and 4.4.2.
+    async fn request_token(&self) -> Result<CachedToken> {
+        let mut form: Vec<(&str, String)> = vec![("grant_type", "client_credentials".to_string())];
+        if !self.scopes.is_empty() {
+            form.push(("scope", self.scopes.join(" ")));
+        }
+
+        let response = self
+            .http_client
+            .post(self.token_url.clone())
+            .basic_auth(&self.client_id, Some(&self.client_secret))
+            .form(&form)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body = response.text().await?;
+
+        if !status.is_success() {
+            let detail = match serde_json::from_str::<TokenErrorResponse>(&body) {
+                Ok(error) => match error.error_description {
+                    Some(description) => format!("{} ({})", error.error, description),
+                    None => error.error,
+                },
+                // Not every server sends the section 5.2 body; report what it
+                // did send rather than claiming an error code it never used.
+                Err(_) => body,
+            };
+            return Err(ClientError::Authentication(format!(
+                "OAuth2 token endpoint returned HTTP {status}: {detail}"
+            )));
+        }
+
+        let token: TokenResponse = serde_json::from_str(&body).map_err(|error| {
+            ClientError::Authentication(format!(
+                "OAuth2 token endpoint returned a body that is not an RFC 6749 \
+                 section 5.1 token response: {error}"
+            ))
+        })?;
+
+        // A non-positive or absurd lifetime is treated as "no lifetime given"
+        // rather than as an instantly-expired token, which would send this
+        // client into a refresh loop.
+        let expires_at = token
+            .expires_in
+            .filter(|seconds| *seconds > 0)
+            .and_then(chrono::Duration::try_seconds)
+            .map(|lifetime| Utc::now() + lifetime);
+
+        Ok(CachedToken {
+            access_token: token.access_token,
+            expires_at,
+        })
     }
 }
 
 #[cfg(feature = "oauth2")]
 #[async_trait::async_trait]
 impl Authenticator for OAuth2Auth {
-    async fn apply(&self, request_builder: RequestBuilder) -> Result<RequestBuilder, ClientError> {
+    async fn apply(&self, request_builder: RequestBuilder) -> Result<RequestBuilder> {
         let token = self.get_token().await?;
         Ok(request_builder.bearer_auth(token))
     }
@@ -253,14 +391,14 @@ impl Authenticator for OAuth2Auth {
 /// Custom authentication using a closure
 pub struct CustomAuth<F>
 where
-    F: Fn(RequestBuilder) -> Result<RequestBuilder, ClientError> + Send + Sync,
+    F: Fn(RequestBuilder) -> Result<RequestBuilder> + Send + Sync,
 {
     apply_fn: F,
 }
 
 impl<F> CustomAuth<F>
 where
-    F: Fn(RequestBuilder) -> Result<RequestBuilder, ClientError> + Send + Sync,
+    F: Fn(RequestBuilder) -> Result<RequestBuilder> + Send + Sync,
 {
     /// Create a new custom authenticator
     pub fn new(apply_fn: F) -> Self {
@@ -271,9 +409,9 @@ where
 #[async_trait::async_trait]
 impl<F> Authenticator for CustomAuth<F>
 where
-    F: Fn(RequestBuilder) -> Result<RequestBuilder, ClientError> + Send + Sync,
+    F: Fn(RequestBuilder) -> Result<RequestBuilder> + Send + Sync,
 {
-    async fn apply(&self, request_builder: RequestBuilder) -> Result<RequestBuilder, ClientError> {
+    async fn apply(&self, request_builder: RequestBuilder) -> Result<RequestBuilder> {
         (self.apply_fn)(request_builder)
     }
 }
@@ -867,36 +1005,36 @@ impl TrustformersClient {
     fn handle_streaming_response(&self, response: Response) -> impl Stream<Item = Result<StreamingChunk>> {
         let debug = self.config.debug;
 
-        response.bytes_stream().map(move |chunk_result| {
-            match chunk_result {
-                Ok(chunk) => {
-                    let text = String::from_utf8_lossy(&chunk);
-
-                    if debug {
-                        log::debug!("Streaming chunk: {}", text);
-                    }
-
-                    // Parse Server-Sent Events format
-                    for line in text.lines() {
-                        if line.starts_with("data: ") {
-                            let data = &line[6..]; // Remove "data: " prefix
-                            if data == "[DONE]" {
-                                continue; // End of stream marker
-                            }
-
-                            match serde_json::from_str::<StreamingChunk>(data) {
-                                Ok(chunk) => return Ok(chunk),
-                                Err(e) => return Err(ClientError::Serialization(e)),
-                            }
-                        }
-                    }
-
-                    // If no data line found, it might be a keep-alive or other event
-                    Err(ClientError::Streaming("No data in chunk".to_string()))
-                }
-                Err(e) => Err(ClientError::Request(e)),
-            }
+        response.bytes_stream().map(move |chunk_result| match chunk_result {
+            Ok(chunk) => Self::parse_streaming_chunk(&chunk, debug),
+            Err(error) => Err(ClientError::Request(error)),
         })
+    }
+
+    /// Parse one Server-Sent Events chunk into a [`StreamingChunk`].
+    ///
+    /// `[DONE]` end-of-stream markers are skipped. A chunk carrying no `data:`
+    /// payload — a keep-alive or a comment line — is reported as a streaming
+    /// error rather than silently dropped.
+    fn parse_streaming_chunk(chunk: &[u8], debug: bool) -> Result<StreamingChunk> {
+        let text = String::from_utf8_lossy(chunk);
+
+        if debug {
+            log::debug!("Streaming chunk: {}", text);
+        }
+
+        for line in text.lines() {
+            let Some(data) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            if data == "[DONE]" {
+                continue;
+            }
+            return serde_json::from_str::<StreamingChunk>(data)
+                .map_err(ClientError::Serialization);
+        }
+
+        Err(ClientError::Streaming("No data in chunk".to_string()))
     }
 }
 
@@ -1018,5 +1156,189 @@ impl ClientBuilder {
     }
 }
 
-// Async trait import
-use async_trait::async_trait;
+#[cfg(all(test, feature = "oauth2"))]
+mod oauth2_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Number of bytes of a request this mock endpoint is willing to buffer.
+    const MAX_REQUEST_BYTES: usize = 8 * 1024;
+
+    /// Wrap a JSON body in a minimal HTTP/1.1 response.
+    fn http_response(status_line: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// Consume one HTTP request head from `stream`.
+    ///
+    /// The body of a client-credentials POST is tiny, so reading up to the
+    /// header terminator has already consumed it.
+    async fn drain_request(stream: &mut tokio::net::TcpStream) {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 1024];
+
+        while let Ok(read) = stream.read(&mut chunk).await {
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if buffer.windows(4).any(|window| window == b"\r\n\r\n")
+                || buffer.len() >= MAX_REQUEST_BYTES
+            {
+                break;
+            }
+        }
+    }
+
+    /// A loopback token endpoint that serves `responses` in order, one
+    /// connection each, and counts the requests it actually received.
+    ///
+    /// No test in this crate touches the network: the listener binds
+    /// `127.0.0.1:0` and the port is handed back to the caller.
+    async fn spawn_token_endpoint(
+        responses: Vec<String>,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback listener can always be bound");
+        let address = listener.local_addr().expect("a bound listener has an address");
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&served);
+
+        let handle = tokio::spawn(async move {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                drain_request(&mut stream).await;
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        (format!("http://{address}/token"), served, handle)
+    }
+
+    /// Build an authenticator against `token_url` with proxies disabled, so the
+    /// test never leaves the loopback interface even under a proxy environment.
+    fn hermetic_auth(token_url: &str) -> OAuth2Auth {
+        let mut auth = OAuth2Auth::new("client-id", "client-secret", token_url)
+            .expect("the loopback token URL is valid");
+        auth.http_client =
+            HttpClient::builder().no_proxy().build().expect("the HTTP client builds");
+        auth
+    }
+
+    /// Regression: the previous implementation compared `expires_in`, a
+    /// duration, against a wall-clock timestamp, so every cached token looked
+    /// expired and a token request was issued for every single API call.
+    #[tokio::test]
+    async fn a_live_token_is_cached_instead_of_refetched() {
+        let (token_url, served, handle) = spawn_token_endpoint(vec![http_response(
+            "200 OK",
+            r#"{"access_token":"tok-1","token_type":"Bearer","expires_in":3600}"#,
+        )])
+        .await;
+        let auth = hermetic_auth(&token_url);
+
+        assert_eq!(auth.get_token().await.expect("first token"), "tok-1");
+        assert_eq!(auth.get_token().await.expect("cached token"), "tok-1");
+        assert_eq!(
+            served.load(Ordering::SeqCst),
+            1,
+            "the second call must be served from the cache"
+        );
+
+        handle.abort();
+    }
+
+    /// A token that expires inside the skew window is refreshed before it is
+    /// used, so a request can never carry a token that lapses in flight.
+    #[tokio::test]
+    async fn a_token_expiring_within_the_skew_is_refreshed() {
+        let (token_url, served, handle) = spawn_token_endpoint(vec![
+            http_response(
+                "200 OK",
+                r#"{"access_token":"tok-1","token_type":"Bearer","expires_in":1}"#,
+            ),
+            http_response(
+                "200 OK",
+                r#"{"access_token":"tok-2","token_type":"Bearer","expires_in":3600}"#,
+            ),
+        ])
+        .await;
+        let auth = hermetic_auth(&token_url);
+
+        assert_eq!(auth.get_token().await.expect("first token"), "tok-1");
+        assert_eq!(auth.get_token().await.expect("refreshed token"), "tok-2");
+        assert_eq!(served.load(Ordering::SeqCst), 2);
+
+        handle.abort();
+    }
+
+    /// An RFC 6749 section 5.2 error body is reported with its code and
+    /// description rather than swallowed.
+    #[tokio::test]
+    async fn an_error_response_is_reported_with_its_code() {
+        let (token_url, _served, handle) = spawn_token_endpoint(vec![http_response(
+            "401 Unauthorized",
+            r#"{"error":"invalid_client","error_description":"client secret rejected"}"#,
+        )])
+        .await;
+        let auth = hermetic_auth(&token_url);
+
+        let error = auth.get_token().await.expect_err("the endpoint refused the credentials");
+        let message = error.to_string();
+        assert!(message.contains("invalid_client"), "{message}");
+        assert!(message.contains("client secret rejected"), "{message}");
+        assert!(matches!(error, ClientError::Authentication(_)), "{message}");
+
+        handle.abort();
+    }
+
+    /// A body that is not a token response is a failure, not a token.
+    #[tokio::test]
+    async fn a_non_token_body_is_rejected() {
+        let (token_url, _served, handle) =
+            spawn_token_endpoint(vec![http_response("200 OK", r#"{"unexpected":"shape"}"#)]).await;
+        let auth = hermetic_auth(&token_url);
+
+        let error = auth.get_token().await.expect_err("there is no access token in that body");
+        assert!(error.to_string().contains("section 5.1"), "{error}");
+
+        handle.abort();
+    }
+
+    #[test]
+    fn a_token_without_an_expiry_stays_usable() {
+        let token = CachedToken {
+            access_token: "tok".to_string(),
+            expires_at: None,
+        };
+        assert!(token.is_usable(Utc::now(), chrono::Duration::seconds(30)));
+    }
+
+    #[test]
+    fn expiry_is_evaluated_against_the_skew() {
+        let now = Utc::now();
+        let token = CachedToken {
+            access_token: "tok".to_string(),
+            expires_at: Some(now + chrono::Duration::seconds(20)),
+        };
+        assert!(
+            !token.is_usable(now, chrono::Duration::seconds(30)),
+            "20s of life left is inside a 30s skew window"
+        );
+        assert!(
+            token.is_usable(now, chrono::Duration::seconds(5)),
+            "20s of life left is outside a 5s skew window"
+        );
+    }
+}

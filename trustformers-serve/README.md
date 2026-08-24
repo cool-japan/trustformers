@@ -1,6 +1,6 @@
 # TrustformeRS Serve
 
-**Version:** 0.2.1 | **Status:** Stable | **Tests:** 5,572 passed, 1 skipped, 0 failed (`cargo nextest run -p trustformers-serve`, default features, verified 2026-08-18) | **SLoC:** 278,397 (`tokei`, 2026-08-18) | **Updated:** 2026-08-18
+**Version:** 0.2.1 (unreleased) | **Status:** Stable | **Tests:** 5,572 passed, 1 skipped, 0 failed as of 2026-08-18, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24) | **SLoC:** 273,756 (`tokei`, verified 2026-08-24 — down from 278,397 on 2026-08-18, mainly the `resource_manager/` placeholder tree, 5,972 lines, deleted outright this cycle) | **Updated:** 2026-08-24
 
 High-performance inference server for TrustformeRS models with advanced batching, multi-protocol APIs, cloud-native deployment, and comprehensive observability.
 
@@ -21,6 +21,8 @@ swagger-ui = ["dep:utoipa-swagger-ui"]  # kept opt-in: build-dep pulls banned `z
 `default = []` does **not** mean a minimal/lightweight build — it only means these three extras are off by default. Everything else is an unconditional dependency compiled in regardless of feature flags: all AWS SDK crates (SageMaker, SQS, CloudWatch, Lambda client), `async-nats`, `lapin` (RabbitMQ), `redis`, the full OpenTelemetry stack, `tonic`/`tonic-prost` (gRPC), `async-graphql`, `axum` (REST), and `utoipa` (OpenAPI spec generation). There is no `aws` feature to enable — the AWS SDKs are always compiled in.
 >
 > **Updated 2026-08-18**: the Azure crates (`azure_core`, `azure_identity`, `azure_mgmt_machinelearningservices`, `azure_mgmt_web`) and GCP crates (`google-cloud-functions-v2`, `google-cloud-gax`) this paragraph used to list here were removed from `Cargo.toml` — none had a call site anywhere in `src/`, and the Azure/GCP serverless providers return a structured `NotImplemented` error rather than calling any SDK, so no capability was lost. `AzureMachineLearningProvider`'s inference path (`src/cloud_providers/rest.rs`) calls Azure's REST API directly over `reqwest` instead of the SDK, so Azure inference still works without that dependency.
+
+> **Updated 2026-08-24**: `src/resource_manager/`, a placeholder resource-management tree that fabricated network ports (always `vec![8080]`), temp-directory paths (never actually created), database connection ids (synthesized), GPU device stats (echoed indices plus a constant 8192MB), and monitoring efficiency (a constant `0.75`), is deleted outright. The crate's public `ResourceManagementSystem` name — previously the unprefixed alias for that fake tree — now resolves directly to the real, tested `resource_management/` tree instead (`ModularResourceManagementSystem` kept as a compatibility alias for the same type).
 
 ### Dynamic Batching System
 
@@ -146,7 +148,7 @@ A unified multi-cloud provider abstraction (`CloudProvider` trait) with health-c
 
 - **AWS**: EKS deployment, S3 model storage, CloudWatch metrics. SageMaker inference goes through the provider abstraction.
 - **GCP**: GKE autopilot, GCS model storage, Cloud Monitoring. Vertex AI inference goes through the provider abstraction.
-- **Azure**: AKS deployment, Blob Storage, Azure Monitor. Azure ML inference (`AzureMachineLearningProvider`) makes a real `reqwest` REST call to the configured endpoint (`POST {base}/chat/completions` with an `api-key` header) — confirmed by reading `src/cloud_providers/rest.rs` on 2026-08-18. AWS/GCP inference not individually re-confirmed this pass; the shared fabricated-response macro (`impl_provider!`) that used to back all three is gone crate-wide (`rg impl_provider! src/cloud_providers.rs` finds nothing), which is the strongest available evidence they changed too, but each provider file should be spot-checked before relying on this for AWS/GCP specifically.
+- **Azure**: AKS deployment, Blob Storage, Azure Monitor. Azure ML inference (`AzureMachineLearningProvider`) makes a real `reqwest` REST call to the configured endpoint (`POST {base}/chat/completions` with an `api-key` header) — confirmed by reading `src/cloud_providers/rest.rs` on 2026-08-18. AWS/GCP inference: `grep -c "Mock response\|example.com/endpoint" src/cloud_providers.rs` returns 0 (confirmed 2026-08-24), matching this crate's own `CHANGELOG.md` entry that all 6 provider integrations lost the shared canned-response fabrication — still not individually exercised against a live AWS/GCP endpoint in this documentation pass.
 
 See [TODO.md](TODO.md) for the current verification state of message queues and cloud providers.
 

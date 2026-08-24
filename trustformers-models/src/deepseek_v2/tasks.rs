@@ -189,6 +189,12 @@ impl Model for DeepSeekV2ForCausalLM {
         self.lm_head.forward(hidden)
     }
 
+    /// Delegates to [`DeepSeekV2Model::load_pretrained`], which refuses with a
+    /// documented error rather than reporting a load that did not happen.
+    ///
+    /// # Errors
+    ///
+    /// Always fails; see [`DeepSeekV2Model::load_pretrained`].
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> CoreResult<()> {
         self.model.load_pretrained(reader)
     }

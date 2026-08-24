@@ -501,8 +501,6 @@ impl LinearRegressionModel {
         features.push(system_state.available_memory_mb as f64);
         features.push(system_state.load_average as f64);
         features.push(system_state.active_processes as f64);
-        features.push(system_state.io_wait_percent as f64);
-        features.push(system_state.network_utilization as f64);
 
         // Test characteristics features
         features.push(test_characteristics.average_duration.as_secs_f64());

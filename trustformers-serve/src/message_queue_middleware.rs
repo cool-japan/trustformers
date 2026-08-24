@@ -601,17 +601,26 @@ async fn async_inference(
     })))
 }
 
+/// Fetch the result of a previously queued async inference request.
+///
+/// Answers `501 Not Implemented`: [`MessageQueueMiddleware`] publishes
+/// requests onto the queue but subscribes to no results topic and keeps no
+/// result store, so it cannot know whether `request_id` is still running,
+/// finished, failed, or was never submitted.
+///
+/// It used to answer `200 OK` with `{"status": "processing"}` for every id it
+/// was ever given. A client polling that endpoint would poll forever, and a
+/// client that mistyped an id — or asked about a request that had already
+/// failed — was told the work was in progress.
 async fn get_async_result(
     State(_middleware): State<Arc<MessageQueueMiddleware>>,
     Path(request_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // In a real implementation, this would check the results queue/cache
-    // For now, return a placeholder response
-    Ok(Json(serde_json::json!({
-        "request_id": request_id,
-        "status": "processing",
-        "message": "Result not yet available"
-    })))
+    log::warn!(
+        "async result requested for '{request_id}', but no result store is wired into the \
+         message-queue middleware"
+    );
+    Err(StatusCode::NOT_IMPLEMENTED)
 }
 
 impl Default for MessageQueueMiddlewareConfig {

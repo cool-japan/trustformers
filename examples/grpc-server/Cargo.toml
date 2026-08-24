@@ -1,53 +1,88 @@
 [package]
 name = "trustformers-grpc-server"
-version.workspace = true
-edition.workspace = true
+version = "0.2.1"
+edition = "2021"
+rust-version = "1.89"
 publish = false
 
+# This directory lives inside the repository tree but is listed in the root
+# `[workspace] exclude` list, so it is NOT a workspace member. A non-member
+# cannot inherit `[workspace.package]` values: the previous
+# `version.workspace = true` / `edition.workspace = true` made even
+# `cargo metadata` fail with "failed to find a workspace root". The empty
+# `[workspace]` table below makes this directory its own workspace root, and the
+# literal `version` / `edition` / `rust-version` above mirror the repository
+# root's `[workspace.package]` values.
+[workspace]
+
+# Mirrors the repository root's `[workspace.lints]`. A non-member cannot inherit
+# it with `[lints] workspace = true`, so it is repeated here rather than left
+# off: this example is held to the same lint policy as the crates it exercises.
+[lints.rust]
+unused_variables = "warn"
+unused_imports = "warn"
+dead_code = "warn"
+unused_mut = "warn"
+unused_assignments = "warn"
+deprecated = "warn"
+
+[lints.clippy]
+all = "warn"
+
 [dependencies]
-# gRPC framework
-tonic = { version = "0.12", features = ["transport", "gzip", "tls"] }
-prost = "0.13"
-prost-types = "0.13"
+# gRPC framework (tonic 0.14 majors, matching the repository root's
+# `[workspace.dependencies]`). tonic 0.14's default feature set is
+# `router` + `transport` (= `server` + `channel`) + `codegen`, which is exactly
+# what this server needs. The 0.12-era `gzip` and `tls` features are gone on
+# purpose: `gzip` pulled `flate2` in for a compression mode nothing here ever
+# enabled (and `flate2` is banned by the COOLJAPAN pure-Rust policy), and 0.14
+# replaced the single `tls` feature with the backend-specific `tls-ring` /
+# `tls-aws-lc` pair, neither of which a plain `serve(addr)` listener uses.
+tonic = "0.14.6"
+# tonic 0.14 moved the prost codec out of `tonic` itself into `tonic-prost`;
+# the generated service code names `tonic_prost::ProstCodec`, so the runtime
+# crate has to be a dependency even though no source file mentions it.
+tonic-prost = "0.14.6"
+prost = "0.14"
+# `proto/inference.proto` imports `google/protobuf/struct.proto`, so the
+# generated messages reference `::prost_types::Struct`.
+prost-types = "0.14"
+# gRPC health checking (`grpc.health.v1.Health`) and server reflection for
+# grpcurl / grpcui. Both track tonic's own major.
+tonic-health = "0.14.6"
+tonic-reflection = "0.14.6"
 
 # Async runtime
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "sync"] }
 tokio-stream = "0.1"
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# `stream!` for the server-streaming `StreamPredict` response.
+async-stream = "0.3"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
-# Error handling
-anyhow = "1.0"
+# Error handling. `ServiceError` carries the real failure message as a string
+# built at the failure site, so there is no `anyhow` here: the previous manifest
+# listed it for an `#[from] anyhow::Error` variant that no code path produced.
 thiserror = "2.0"
 
-# TrustformeRS
+# TrustformeRS. `all-models` turns on bert/roberta/albert/gpt2/gpt_neo/gpt_j/t5;
+# the generative dispatch behind `AutoModel::generate_token_ids` is `cfg`-gated
+# on the last four, so without it every generate call would return
+# `FeatureUnavailable` at runtime.
 trustformers = { path = "../../trustformers", features = ["all-models"] }
-trustformers-core = { path = "../../trustformers-core" }
+# `GenerationConfig` is defined here and is not re-exported by `trustformers`.
 trustformers-models = { path = "../../trustformers-models" }
-trustformers-tokenizers = { path = "../../trustformers-tokenizers" }
 
 # Utilities
-uuid = { version = "1.0", features = ["v4", "serde"] }
-dashmap = "6.0"
-chrono = { version = "0.4", features = ["serde"] }
-bytes = "1.9"
-futures-util = "0.3"
-
-# Health check
-tonic-health = "0.12"
-tonic-reflection = "0.12"
-
-# Metrics
-prometheus = { version = "0.13", features = ["process"] }
+uuid = { version = "1.23", features = ["v4"] }
+dashmap = "6.1"
 
 [build-dependencies]
-tonic-build = { version = "0.12", features = ["prost"] }
+# tonic 0.14 split code generation out of `tonic-build` into `tonic-prost-build`
+# (same split as `trustformers-serve/build.rs`).
+tonic-prost-build = "0.14.6"
 
 [[bin]]
 name = "trustformers-grpc-server"

@@ -267,19 +267,45 @@ fn test_resolution_action_construction() {
     assert_eq!(action.success_criteria.len(), 1);
 }
 
+/// Regression: `PredictionModel::predict` used to return its input unchanged.
+///
+/// `RealTimeTrendAnalyzer::predict_future_performance` fed it a metric's
+/// historical series and took `prediction.first()`, so the "forecast" was the
+/// oldest sample already on record — published with a confidence score and a
+/// `prediction_method: "statistical_ml"` label. The model holds no
+/// coefficients, so it now says it cannot predict.
 #[test]
-fn test_prediction_model_predict() {
+fn test_prediction_model_predict_reports_it_has_no_parameters() {
     let model = PredictionModel {
         model_type: "linear".to_string(),
         accuracy: 0.9,
         trained_at: chrono::Utc::now(),
     };
     let input = vec![1.0, 2.0, 3.0];
-    let result = model.predict(&input);
-    match result {
-        Ok(output) => assert_eq!(output.len(), 3),
-        Err(_) => panic!("predict should not fail"),
-    }
+    let err = model.predict(&input).expect_err("a model with no parameters cannot predict");
+    let message = err.to_string();
+    assert!(message.contains("linear"), "{message}");
+    assert!(message.contains("no trained parameters"), "{message}");
+}
+
+/// Regression: `train_with_data` used to stamp `trained_at` and report success
+/// while `PredictionModel` has nowhere to store what was learned.
+#[test]
+fn test_prediction_model_train_reports_it_has_no_storage() {
+    let mut model = PredictionModel {
+        model_type: "linear".to_string(),
+        accuracy: 0.9,
+        trained_at: chrono::Utc::now(),
+    };
+    let before = model.trained_at;
+    let err = model
+        .train_with_data(&[(vec![1.0], vec![2.0])])
+        .expect_err("a model with no parameter storage cannot be trained");
+    assert!(err.to_string().contains("no parameter storage"), "{err}");
+    assert_eq!(
+        model.trained_at, before,
+        "a failed train must not claim freshness"
+    );
 }
 
 #[test]

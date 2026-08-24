@@ -286,6 +286,11 @@ impl<T: Tokenizer + Clone> CoreMLTextClassificationPipeline<T> {
     pub fn device_capabilities(&self) -> &CoreMLDeviceCapabilities {
         self.backend.device_capabilities()
     }
+
+    /// Get the Core ML backend configuration this pipeline was built with.
+    pub fn config(&self) -> &CoreMLBackendConfig {
+        &self.config
+    }
 }
 
 impl<T: Tokenizer + Clone> Pipeline for CoreMLTextClassificationPipeline<T> {
@@ -371,6 +376,11 @@ impl<T: Tokenizer + Clone> CoreMLTextGenerationPipeline<T> {
             backend,
             config,
         })
+    }
+
+    /// Get the Core ML backend configuration this pipeline was built with.
+    pub fn config(&self) -> &CoreMLBackendConfig {
+        &self.config
     }
 }
 

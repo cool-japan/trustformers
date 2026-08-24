@@ -31,6 +31,9 @@ pub struct DeviceFarmSession {
     pub assigned_devices: Vec<String>,
     pub pending_tasks: VecDeque<TestTask>,
     pub completed_tasks: Vec<TestTask>,
+    /// Results this manager actually recorded for the session. Only a task
+    /// that really executed contributes one.
+    pub recorded_results: Vec<DeviceTestResult>,
     pub session_metadata: DeviceFarmSessionMetadata,
 }
 
@@ -172,6 +175,7 @@ impl DeviceFarmManager {
         let assigned_devices = self.allocate_devices(&test_tasks).await?;
 
         let session = DeviceFarmSession {
+            recorded_results: Vec::new(),
             session_id: session_id.clone(),
             status: SessionStatus::Pending,
             start_time: SystemTime::now(),
@@ -296,41 +300,33 @@ impl DeviceFarmManager {
         }
     }
 
-    /// Run test on a specific device (simplified implementation)
+    /// Running a test suite on a farm device is not implemented in this
+    /// manager.
+    ///
+    /// It has no channel to a device -- no ADB/`xcrun` session for a local
+    /// slot, and no farm client for a remote one. The previous body slept
+    /// 100 ms and returned a fabricated `TestSuiteResults` with
+    /// `success_rate: 0.95` and a 60 s execution / 5 s setup / 2 s cleanup /
+    /// 3 s network breakdown that nothing had timed, for every device on
+    /// every provider.
+    ///
+    /// [`super::framework::MobileTestingFramework`] is the path that really
+    /// executes a suite, in-process on this host.
     async fn run_test_on_device(
         &self,
-        task: &TestTask,
+        _task: &TestTask,
         device_id: &str,
     ) -> Result<DeviceTestResult> {
-        // Simulate test execution
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Confirms the device is in the pool before reporting the limitation.
+        let _device_info = self.get_device_info(device_id)?;
 
-        let device_info = self.get_device_info(device_id)?;
-
-        // Create mock test results
-        let test_results = TestSuiteResults {
-            timestamp: SystemTime::now(),
-            duration: Duration::from_secs(60),
-            benchmark_results: vec![],
-            battery_results: vec![],
-            stress_results: vec![],
-            memory_results: vec![],
-            success_rate: 0.95,
-        };
-
-        Ok(DeviceTestResult {
-            device_id: device_id.to_string(),
-            device_info,
-            test_results,
-            execution_metrics: DeviceExecutionMetrics {
-                execution_time: Duration::from_secs(60),
-                setup_time: Duration::from_secs(5),
-                cleanup_time: Duration::from_secs(2),
-                network_time: Duration::from_secs(3),
-                availability_time: Duration::from_secs(50),
-            },
-            artifacts: Vec::new(),
-        })
+        Err(TrustformersError::runtime_error(format!(
+            "Executing a test suite on farm device `{}`: this manager has no device channel \
+             (no ADB/xcrun session, no farm client). Run `MobileTestingFramework` in-process to \
+             execute a suite on this host.",
+            device_id
+        ))
+        .into())
     }
 
     /// Get device information by ID
@@ -373,166 +369,126 @@ impl DeviceFarmManager {
         Ok(None)
     }
 
-    /// Initialize AWS Device Farm devices
+    /// AWS Device Farm device discovery is not implemented.
+    ///
+    /// It requires an authenticated AWS Device Farm client, which this crate
+    /// does not depend on. This used to populate the pool with three invented
+    /// devices (`aws-iphone-14`, `aws-galaxy-s23`, `aws-pixel-7`, each with a
+    /// made-up 8 GB / 256 GB / 1080x2340 spec) that no AWS query produced,
+    /// after which the whole manager operated on a fictional fleet. The
+    /// sibling `providers::AwsDeviceFarmProvider` reports the same limitation
+    /// the same way.
     async fn initialize_aws_devices(&mut self, _region: &str, _project_name: &str) -> Result<()> {
-        // Simulate AWS device initialization
-        self.device_pool = vec![
-            self.create_mock_device("aws-iphone-14", "iPhone 14", "iOS", "17.0"),
-            self.create_mock_device("aws-galaxy-s23", "Galaxy S23", "Android", "14"),
-            self.create_mock_device("aws-pixel-7", "Pixel 7", "Android", "14"),
-        ];
-        Ok(())
+        Err(TrustformersError::runtime_error(
+            "AWS Device Farm device discovery: this crate has no AWS Device Farm client, so no \
+             device list can be retrieved. Use DeviceFarmProvider::Local to run against this host."
+                .to_string(),
+        )
+        .into())
     }
 
-    /// Initialize Firebase Test Lab devices
+    /// Firebase Test Lab device discovery is not implemented.
+    ///
+    /// Same limitation as [`Self::initialize_aws_devices`]: no Firebase Test
+    /// Lab client exists in this crate, and the previous body invented three
+    /// devices instead of saying so.
     async fn initialize_firebase_devices(
         &mut self,
         _project_id: &str,
         _test_lab_id: &str,
     ) -> Result<()> {
-        // Simulate Firebase device initialization
-        self.device_pool = vec![
-            self.create_mock_device("firebase-iphone-13", "iPhone 13", "iOS", "16.0"),
-            self.create_mock_device("firebase-galaxy-s22", "Galaxy S22", "Android", "13"),
-            self.create_mock_device("firebase-oneplus-9", "OnePlus 9", "Android", "13"),
-        ];
-        Ok(())
+        Err(TrustformersError::runtime_error(
+            "Firebase Test Lab device discovery: this crate has no Firebase Test Lab client, so \
+             no device list can be retrieved. Use DeviceFarmProvider::Local to run against this \
+             host."
+                .to_string(),
+        )
+        .into())
     }
 
-    /// Initialize local device farm
+    /// Initialize a local device farm from the real host.
+    ///
+    /// A "local farm" runs on this machine, so every slot describes the
+    /// running host, detected for real by
+    /// [`crate::device_info::MobileDeviceDetector`]. Only the slot's label
+    /// comes from `device_names`; the hardware fields are measured, not
+    /// invented (they were previously a fixed 8 GB / 256 GB / 1080x2340
+    /// regardless of the machine).
     async fn initialize_local_devices(
         &mut self,
         pool_size: usize,
         device_names: &[String],
     ) -> Result<()> {
+        let host = crate::device_info::MobileDeviceDetector::detect()?;
+        let host_ram_mb = host.memory_info.total_mb;
+        // Real free space on the volume holding the process's working
+        // directory, via `sysinfo::Disks` -- the same source
+        // `android_work_manager::check_storage_constraints` uses.
+        let host_storage_gb = {
+            let disks = sysinfo::Disks::new_with_refreshed_list();
+            let total_bytes: u64 = disks.iter().map(|disk| disk.total_space()).max().unwrap_or(0);
+            (total_bytes / (1024 * 1024 * 1024)) as usize
+        };
+
         self.device_pool = device_names
             .iter()
             .take(pool_size)
             .enumerate()
-            .map(|(i, name)| {
-                let os_name =
-                    if name.contains("iphone") || name.contains("ios") { "iOS" } else { "Android" };
-                let os_version = if os_name == "iOS" { "17.0" } else { "14" };
-                self.create_mock_device(&format!("local-{}", i), name, os_name, os_version)
+            .map(|(index, name)| DeviceInfo {
+                device_name: format!("local-{}", index),
+                os_name: std::env::consts::OS.to_string(),
+                os_version: host.basic_info.os_version.clone(),
+                device_type: DeviceType::Generic,
+                hardware_model: name.clone(),
+                cpu_architecture: std::env::consts::ARCH.to_string(),
+                ram_mb: host_ram_mb,
+                storage_gb: host_storage_gb,
+                // No portable API reports a screen resolution for a headless
+                // host, so the slot reports none rather than a phone's.
+                screen_resolution: (0, 0),
+                sensors: Vec::new(),
             })
             .collect();
         Ok(())
     }
 
-    /// Create a mock device for testing
-    fn create_mock_device(
-        &self,
-        id: &str,
-        name: &str,
-        os_name: &str,
-        os_version: &str,
-    ) -> DeviceInfo {
-        DeviceInfo {
-            device_name: id.to_string(),
-            os_name: os_name.to_string(),
-            os_version: os_version.to_string(),
-            device_type: if name.contains("iphone")
-                || name.contains("galaxy")
-                || name.contains("pixel")
-            {
-                DeviceType::Phone
-            } else {
-                DeviceType::Generic
-            },
-            hardware_model: name.to_string(),
-            cpu_architecture: if os_name == "iOS" {
-                "arm64".to_string()
-            } else {
-                "aarch64".to_string()
-            },
-            ram_mb: 8192,
-            storage_gb: 256,
-            screen_resolution: (1080, 2340),
-            sensors: vec![
-                "accelerometer".to_string(),
-                "gyroscope".to_string(),
-                "camera".to_string(),
-            ],
-        }
-    }
-
-    /// Get session results
+    /// Results for a completed session.
+    ///
+    /// `Ok(None)` when the session is unknown, and an empty device list plus
+    /// an unaggregatable error when no task on it produced a real result --
+    /// which is the case for every session today, because
+    /// [`Self::run_test_on_device`] has no device channel to execute through.
+    ///
+    /// The previous body synthesised one `DeviceTestResult` per completed task
+    /// with `success_rate: 0.95`, a 60 s duration and a fixed timing
+    /// breakdown, then hand-wrote an `AggregatedTestResults` claiming
+    /// `avg_latency_ms: 50.0`, a P95 of 70.0, `best_device: "aws-iphone-14"`
+    /// and a 0.98 compatibility rate -- a complete cross-device report for
+    /// tests that never ran.
     pub fn get_session_results(&self, session_id: &str) -> Result<Option<DeviceFarmSessionResult>> {
-        if let Some(session) = self.active_sessions.get(session_id) {
-            // Create aggregated results from completed tasks
-            let device_results: Vec<DeviceTestResult> = session
-                .completed_tasks
-                .iter()
-                .filter_map(|task| {
-                    if let Some(device_id) = &task.assigned_device {
-                        // This is a simplified version - in real implementation,
-                        // we would have actual test results stored
-                        self.get_device_info(device_id).ok().map(|device_info| DeviceTestResult {
-                            device_id: device_id.clone(),
-                            device_info,
-                            test_results: TestSuiteResults {
-                                timestamp: SystemTime::now(),
-                                duration: Duration::from_secs(60),
-                                benchmark_results: vec![],
-                                battery_results: vec![],
-                                stress_results: vec![],
-                                memory_results: vec![],
-                                success_rate: 0.95,
-                            },
-                            execution_metrics: DeviceExecutionMetrics {
-                                execution_time: Duration::from_secs(60),
-                                setup_time: Duration::from_secs(5),
-                                cleanup_time: Duration::from_secs(2),
-                                network_time: Duration::from_secs(3),
-                                availability_time: Duration::from_secs(50),
-                            },
-                            artifacts: vec![],
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+        let Some(session) = self.active_sessions.get(session_id) else {
+            return Ok(None);
+        };
 
-            let aggregated_results = AggregatedTestResults {
-                device_count: device_results.len(),
-                overall_success_rate: 0.95,
-                metrics: AggregatedMetrics {
-                    avg_latency_ms: 50.0,
-                    latency_std_dev: 10.0,
-                    avg_throughput_fps: 20.0,
-                    avg_memory_usage_mb: 256.0,
-                    avg_power_consumption_mw: 500.0,
-                    statistical_summary: StatisticalSummary {
-                        mean: 50.0,
-                        median: 48.0,
-                        std_deviation: 10.0,
-                        min: 30.0,
-                        max: 80.0,
-                        percentiles: HashMap::from([
-                            ("P95".to_string(), 70.0),
-                            ("P99".to_string(), 75.0),
-                        ]),
-                    },
-                },
-                cross_device_analysis: CrossDeviceAnalysis {
-                    performance_variance: 0.15,
-                    best_device: "aws-iphone-14".to_string(),
-                    worst_device: "aws-galaxy-s23".to_string(),
-                    compatibility_rate: 0.98,
-                },
-            };
+        // Only results this manager actually recorded. Nothing records any
+        // today, so this is empty and the aggregation below reports that
+        // rather than inventing a fleet report.
+        let device_results: Vec<DeviceTestResult> = session.recorded_results.clone();
+        let aggregator = ResultAggregator::new(AggregationRules {
+            statistical_methods: vec![StatisticalMethod::Mean, StatisticalMethod::Median],
+            outlier_detection: false,
+            confidence_level: self.config.result_aggregation.statistical_analysis.confidence_level,
+            minimum_sample_size: 1,
+        });
+        let aggregated_results = aggregator.aggregate_results(&device_results)?;
 
-            Ok(Some(DeviceFarmSessionResult {
-                session_id: session_id.to_string(),
-                start_time: session.start_time,
-                duration: SystemTime::now().duration_since(session.start_time).unwrap_or_default(),
-                device_results,
-                aggregated_results,
-            }))
-        } else {
-            Ok(None)
-        }
+        Ok(Some(DeviceFarmSessionResult {
+            session_id: session_id.to_string(),
+            start_time: session.start_time,
+            duration: SystemTime::now().duration_since(session.start_time).unwrap_or_default(),
+            device_results,
+            aggregated_results,
+        }))
     }
 
     /// Cancel a session
@@ -543,6 +499,14 @@ impl DeviceFarmManager {
         } else {
             Err(TrustformersError::config_error("Session not found", "cancel_session").into())
         }
+    }
+
+    /// Devices currently in the pool.
+    ///
+    /// Empty until [`Self::initialize`] succeeds; a failed discovery adds
+    /// nothing.
+    pub fn get_available_devices(&self) -> &[DeviceInfo] {
+        &self.device_pool
     }
 
     /// Get all active sessions
@@ -556,6 +520,18 @@ impl DeviceFarmManager {
                 )
             })
             .collect()
+    }
+}
+
+/// Mean of a sample series, or `None` when the series is empty.
+///
+/// `None` rather than `0.0`: no samples is not an average of zero.
+fn mean_of(samples: impl Iterator<Item = f32>) -> Option<f32> {
+    let collected: Vec<f32> = samples.collect();
+    if collected.is_empty() {
+        None
+    } else {
+        Some(collected.iter().sum::<f32>() / collected.len() as f32)
     }
 }
 
@@ -618,9 +594,26 @@ impl ResultAggregator {
             metrics: AggregatedMetrics {
                 avg_latency_ms: avg_latency,
                 latency_std_dev,
-                avg_throughput_fps: 20.0,        // Simplified
-                avg_memory_usage_mb: 256.0,      // Simplified
-                avg_power_consumption_mw: 500.0, // Simplified
+                avg_throughput_fps: mean_of(
+                    device_results
+                        .iter()
+                        .flat_map(|r| &r.test_results.benchmark_results)
+                        .map(|b| b.throughput_fps),
+                ),
+                avg_memory_usage_mb: mean_of(
+                    device_results
+                        .iter()
+                        .flat_map(|r| &r.test_results.benchmark_results)
+                        .map(|b| b.memory_usage_mb as f32),
+                ),
+                // Averaged over the battery results that were measured; the
+                // previous line reported a fixed 500 mW on every fleet.
+                avg_power_consumption_mw: mean_of(
+                    device_results
+                        .iter()
+                        .flat_map(|r| &r.test_results.battery_results)
+                        .map(|b| b.avg_power_consumption_mw),
+                ),
                 statistical_summary,
             },
             cross_device_analysis: CrossDeviceAnalysis {

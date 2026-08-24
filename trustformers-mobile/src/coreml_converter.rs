@@ -545,9 +545,11 @@ impl CoreMLModelConverter {
         // Natural sort (numeric runs compare numerically, so `"h.2"` sorts
         // before `"h.10"`) -- the same deterministic order
         // `inference.rs`'s `MobileInferenceEngine` uses to run a checkpoint
-        // with no architecture graph; see `crate::inference::natural_cmp`.
+        // with no architecture graph; see `crate::inference::tensor_conversion::natural_cmp`.
         let mut names: Vec<&String> = weights.keys().collect();
-        names.sort_by(|a, b| crate::inference::natural_cmp(a.as_str(), b.as_str()));
+        names.sort_by(|a, b| {
+            crate::inference::tensor_conversion::natural_cmp(a.as_str(), b.as_str())
+        });
 
         let mut layers = Vec::new();
         let mut blobs = HashMap::new();

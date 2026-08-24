@@ -280,9 +280,9 @@ mod tests {
         assert_eq!(config.temperature, deserialized.temperature);
 
         // Test YAML serialization
-        let yaml = serde_yaml::to_string(&config).expect("Failed to serialize config to YAML");
+        let yaml = serde_yaml_ng::to_string(&config).expect("Failed to serialize config to YAML");
         let deserialized: ConversationalConfig =
-            serde_yaml::from_str(&yaml).expect("Failed to deserialize config from YAML");
+            serde_yaml_ng::from_str(&yaml).expect("Failed to deserialize config from YAML");
         assert_eq!(config.temperature, deserialized.temperature);
     }
 

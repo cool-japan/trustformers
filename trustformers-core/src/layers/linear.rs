@@ -750,14 +750,14 @@ impl Layer for Linear {
             // Perform GPU-to-GPU matmul using MPS (100-500x faster!)
             // Try MPS first, fallback to naive kernel if MPS unavailable
             let output_buffer_id = backend
-                .matmul_gpu_to_gpu_mps(&input_metal.buffer_id, &weight_buffer_id, m, k, n)
+                .matmul_gpu_to_gpu_mps(&input_metal.buffer_id(), &weight_buffer_id, m, k, n)
                 .or_else(|_e| {
                     // eprintln!(
                     //     "⚠️  MPS matmul failed: {:?}, falling back to naive Metal kernel",
                     //     e
                     // );
                     // Fallback to naive Metal kernel if MPS fails
-                    backend.matmul_gpu_to_gpu(&input_metal.buffer_id, &weight_buffer_id, m, k, n)
+                    backend.matmul_gpu_to_gpu(&input_metal.buffer_id(), &weight_buffer_id, m, k, n)
                 })?;
 
             // Calculate output shape (preserve batch dimensions, change last dim)
@@ -765,11 +765,12 @@ impl Layer for Linear {
             output_shape.push(n);
 
             // Create output Metal tensor
-            let mut output = Tensor::Metal(MetalTensorData {
-                buffer_id: output_buffer_id,
-                shape: output_shape.clone(),
-                dtype: input_metal.dtype,
-            });
+            let mut output = Tensor::Metal(MetalTensorData::new(
+                &backend,
+                output_buffer_id,
+                output_shape.clone(),
+                input_metal.dtype,
+            )?);
 
             // Handle bias if present
             if let Some(ref bias) = self.bias {
@@ -783,8 +784,8 @@ impl Layer for Linear {
                         if let Tensor::Metal(output_data) = &output {
                             // eprintln!("🔍 Linear: Output is Metal, calling add_bias_gpu_to_gpu");
                             let output_buffer_id = backend.add_bias_gpu_to_gpu(
-                                &output_data.buffer_id,
-                                &bias_data.buffer_id,
+                                &output_data.buffer_id(),
+                                &bias_data.buffer_id(),
                                 batch_dims,
                                 n,
                             )?;
@@ -792,11 +793,12 @@ impl Layer for Linear {
                             //     "🔍 Linear: add_bias_gpu_to_gpu succeeded, returning Metal tensor"
                             // );
 
-                            return Ok(Tensor::Metal(MetalTensorData {
-                                buffer_id: output_buffer_id,
-                                shape: output_shape.clone(),
-                                dtype: output_data.dtype,
-                            }));
+                            return Ok(Tensor::Metal(MetalTensorData::new(
+                                &backend,
+                                output_buffer_id,
+                                output_shape.clone(),
+                                output_data.dtype,
+                            )?));
                         }
                         // eprintln!("🔍 Linear: Output is NOT Metal, falling back to CPU");
                     },

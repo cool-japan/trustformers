@@ -3,6 +3,8 @@
 
 use crate::albert::config::AlbertConfig;
 use crate::albert::model::AlbertModel;
+use crate::weight_loading::binding::{bind_head_layer_norm, bind_head_linear};
+use crate::weight_loading::checkpoint::{Checkpoint, LoadReport};
 use std::io::Read;
 use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
@@ -131,8 +133,13 @@ impl Model for AlbertForSequenceClassification {
         })
     }
 
+    /// Load the encoder and, when the checkpoint carries one, the task head.
+    ///
+    /// # Errors
+    ///
+    /// See the wrapper's `load_pretrained_report`.
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.albert.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -215,8 +222,13 @@ impl Model for AlbertForTokenClassification {
         })
     }
 
+    /// Load the encoder and, when the checkpoint carries one, the task head.
+    ///
+    /// # Errors
+    ///
+    /// See the wrapper's `load_pretrained_report`.
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.albert.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -295,8 +307,13 @@ impl Model for AlbertForQuestionAnswering {
         })
     }
 
+    /// Load the encoder and, when the checkpoint carries one, the task head.
+    ///
+    /// # Errors
+    ///
+    /// See the wrapper's `load_pretrained_report`.
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.albert.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -413,8 +430,13 @@ impl Model for AlbertForMaskedLM {
         })
     }
 
+    /// Load the encoder and, when the checkpoint carries one, the task head.
+    ///
+    /// # Errors
+    ///
+    /// See the wrapper's `load_pretrained_report`.
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        self.albert.load_pretrained(reader)
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -448,6 +470,144 @@ impl Model for AlbertForMaskedLM {
             + config.embedding_size * config.vocab_size + config.vocab_size; // decoder + bias
 
         embedding_params + projection_params + encoder_params + pooler_params + mlm_head_params
+    }
+}
+
+/// Why the task heads are bound here rather than by `AlbertModel`.
+///
+/// `AlbertModel::load_from_checkpoint` finishes through a policy that tolerates
+/// the `predictions.`, `classifier.`, `qa_outputs.` and `sop_classifier.`
+/// namespaces, so that loading a bare encoder from a fine-tuned checkpoint does
+/// not fail. Delegating a task wrapper's `load_pretrained` straight to it
+/// therefore *dropped the head*: the encoder was bound, the head kept its
+/// constructor initialisation, and the call returned `Ok(())`. Each wrapper now
+/// binds its own head off the same parsed checkpoint.
+impl AlbertForSequenceClassification {
+    /// Load the encoder and the pooled classification head.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when the head is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.albert.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.albert.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "classifier",
+            [self.num_labels, hidden],
+            &mut self.classifier,
+        )?;
+        Ok(report)
+    }
+}
+
+impl AlbertForTokenClassification {
+    /// Load the encoder and the per-token classification head.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when the head is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.albert.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.albert.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "classifier",
+            [self.num_labels, hidden],
+            &mut self.classifier,
+        )?;
+        Ok(report)
+    }
+}
+
+impl AlbertForQuestionAnswering {
+    /// Load the encoder and the span head.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when the head is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.albert.load_from_checkpoint(&checkpoint)?;
+        let hidden = self.albert.get_config().hidden_size;
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "qa_outputs",
+            [2, hidden],
+            &mut self.qa_outputs,
+        )?;
+        Ok(report)
+    }
+}
+
+impl AlbertForMaskedLM {
+    /// Load the encoder and the masked-LM prediction head.
+    ///
+    /// ALBERT's head projects back down to the *embedding* width before the
+    /// decoder, because the model factorises its embedding matrix; the decoder's
+    /// output bias is a standalone `predictions.bias` parameter that HuggingFace
+    /// also aliases as `predictions.decoder.bias`. Both spellings are accepted.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the checkpoint cannot be parsed, when an encoder parameter is
+    /// missing, or when a head tensor is present with the wrong shape.
+    pub fn load_pretrained_report(&mut self, reader: &mut dyn Read) -> Result<LoadReport> {
+        let checkpoint = Checkpoint::from_reader(reader)?;
+        let mut report = self.albert.load_from_checkpoint(&checkpoint)?;
+        let config = self.albert.get_config().clone();
+        let hidden = config.hidden_size;
+        let embedding = config.embedding_size;
+        let vocab = config.vocab_size;
+
+        bind_head_linear(
+            &checkpoint,
+            &mut report,
+            "predictions.dense",
+            [embedding, hidden],
+            &mut self.predictions.dense,
+        )?;
+        bind_head_layer_norm(
+            &checkpoint,
+            &mut report,
+            "predictions.LayerNorm",
+            embedding,
+            &mut self.predictions.layer_norm,
+        )?;
+
+        let decoder_weight = "predictions.decoder.weight";
+        match checkpoint.take_shaped(decoder_weight, &[vocab, embedding])? {
+            Some(weight) => {
+                self.predictions.decoder.set_weight(weight)?;
+                report.mark_loaded(decoder_weight);
+            },
+            None => report.note_absent(decoder_weight),
+        }
+
+        let canonical_bias = "predictions.bias";
+        let aliased_bias = "predictions.decoder.bias";
+        let bias_name =
+            if checkpoint.contains(canonical_bias) { canonical_bias } else { aliased_bias };
+        match checkpoint.take_shaped(bias_name, &[vocab])? {
+            Some(bias) => {
+                self.predictions.bias = bias;
+                report.mark_loaded(bias_name);
+                if bias_name == canonical_bias && checkpoint.contains(aliased_bias) {
+                    report.mark_loaded(aliased_bias);
+                }
+            },
+            None => report.note_absent(canonical_bias),
+        }
+
+        Ok(report)
     }
 }
 

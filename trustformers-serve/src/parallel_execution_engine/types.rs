@@ -2,7 +2,11 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use crate::resource_manager::{
+// 0.2.1: these came from `crate::resource_manager`, the placeholder tree deleted
+// in favour of `crate::resource_management` (see the re-export comment in
+// `lib.rs`). The types are the same shape; `AllocationEvent` additionally
+// carries the `resource_type` it was allocated for.
+use crate::resource_management::{
     AlertSystem, AllocationEvent, DistributionEvent, ExecutionPerformanceMetrics, ExecutionState,
     HealthChecker, LoadMetrics, ResourceMonitor, WorkerPool,
 };
@@ -1039,7 +1043,7 @@ impl ResourceManager {
             _resource_pools: Arc::new(Mutex::new(HashMap::new())),
             _resource_monitor: Arc::new(
                 ResourceMonitor::new(
-                    crate::test_parallelization::ResourceMonitoringConfig::default(),
+                    crate::resource_management::ResourceMonitoringConfig::default(),
                 )
                 .await?,
             ),
@@ -1074,6 +1078,7 @@ impl ResourceManager {
         let event = AllocationEvent {
             timestamp: chrono::Utc::now(),
             resource_id: allocation_id.clone(),
+            resource_type: allocation.resource_type.clone(),
             test_id: "test_execution".to_string(),
             event_type: "Allocated".to_string(),
             details: {

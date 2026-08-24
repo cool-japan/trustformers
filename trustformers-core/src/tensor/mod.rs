@@ -159,25 +159,49 @@ impl DType {
 /// # Ok(())
 /// # }
 /// ```
-/// Metal GPU buffer wrapper for GPU-resident tensors
+/// Metal GPU buffer wrapper for GPU-resident tensors.
+///
+/// Holds a reference-counted [`MetalBufferHandle`](crate::gpu_ops::metal::MetalBufferHandle)
+/// rather than a raw buffer id, mirroring [`CudaTensorData`]: cloning shares the same GPU
+/// allocation (refcount increment only), and when the last clone drops the buffer is removed
+/// from the backend's cache and the `MTLBuffer` freed. A bare `BufferId` here previously left
+/// every GPU-resident tensor's buffer parked in the cache until `clear_buffer_cache` or process
+/// exit - see the module docs on `gpu_ops::metal::types` for the full history.
 #[cfg(all(target_os = "macos", feature = "metal"))]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MetalTensorData {
-    pub buffer_id: crate::gpu_ops::metal::BufferId,
+    /// Lifecycle-managed reference to the GPU-resident buffer.
+    pub buffer: crate::gpu_ops::metal::MetalBufferHandle,
     pub shape: Vec<usize>,
     pub dtype: DType,
 }
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
-impl Clone for MetalTensorData {
-    fn clone(&self) -> Self {
-        // Note: This creates a reference to the same GPU buffer
-        // Actual data is not copied - buffer is reference counted
-        Self {
-            buffer_id: self.buffer_id,
-            shape: self.shape.clone(),
-            dtype: self.dtype,
-        }
+impl MetalTensorData {
+    /// Wrap a freshly minted buffer id into a lifecycle-managed Metal tensor payload.
+    ///
+    /// Takes a reference on `buffer_id` through
+    /// [`MetalBackend::retain_buffer`](crate::gpu_ops::metal::MetalBackend::retain_buffer),
+    /// which exempts the entry from LRU eviction and frees it when the last clone of the
+    /// returned value drops. Each raw id must be wrapped at most once; all sharing then
+    /// goes through `clone()`.
+    pub fn new(
+        backend: &crate::gpu_ops::metal::MetalBackend,
+        buffer_id: crate::gpu_ops::metal::BufferId,
+        shape: Vec<usize>,
+        dtype: DType,
+    ) -> Result<Self> {
+        Ok(Self {
+            buffer: backend.retain_buffer(&buffer_id)?,
+            shape,
+            dtype,
+        })
+    }
+
+    /// The resident buffer id backing this tensor.
+    #[inline]
+    pub fn buffer_id(&self) -> crate::gpu_ops::metal::BufferId {
+        self.buffer.id()
     }
 }
 
@@ -304,8 +328,8 @@ impl std::fmt::Debug for Tensor {
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => write!(
                 f,
-                "Tensor::Metal(shape: {:?}, dtype: {:?}, buffer_id: {:?})",
-                data.shape, data.dtype, data.buffer_id
+                "Tensor::Metal(shape: {:?}, dtype: {:?}, buffer: {:?})",
+                data.shape, data.dtype, data.buffer
             ),
             #[cfg(feature = "cuda")]
             Tensor::CUDA(data) => write!(

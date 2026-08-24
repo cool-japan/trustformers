@@ -401,6 +401,27 @@ impl MixtureOfDepthsPipeline {
         self
     }
 
+    /// The base pipeline this `MixtureOfDepthsPipeline` was constructed with.
+    ///
+    /// `execute_with_mod` performs its own routing/embedding/layer-execution
+    /// via `embedder`/`layer_executor`/`depth_router` rather than delegating
+    /// to it, so this is exposed for callers that want a text-generating
+    /// fallback (or a baseline to compare MoD routing against) without
+    /// having to keep a second `Arc` clone of their own around.
+    pub fn base_model(&self) -> &Arc<dyn Pipeline<Input = String, Output = PipelineOutput>> {
+        &self.base_model
+    }
+
+    /// Number of entries currently stored in the layer-execution cache.
+    ///
+    /// Nothing populates this cache yet — `execute_layer` does not consult or
+    /// write to it — so this is always `0` today. It is exposed now so a
+    /// future memoisation pass has a real, testable read path to build on
+    /// rather than a field nothing ever touches.
+    pub async fn cached_layer_count(&self) -> usize {
+        self.layer_cache.read().await.len()
+    }
+
     /// Embed the input with the attached embedder.
     ///
     /// # Errors
@@ -1028,6 +1049,35 @@ mod tests {
         fn __call__(&self, _input: Self::Input) -> TrustformersResult<Self::Output> {
             Ok(PipelineOutput::Text("Mock output".to_string()))
         }
+    }
+
+    #[test]
+    fn test_base_model_accessor_returns_the_constructed_pipeline() {
+        let pipeline = create_mixture_of_depths_pipeline(
+            MixtureOfDepthsConfig::default(),
+            Arc::new(MockBaseModel),
+        );
+        let output = pipeline
+            .base_model()
+            .__call__("hello".to_string())
+            .expect("the base model must be callable through the accessor");
+        assert!(
+            matches!(output, PipelineOutput::Text(t) if t == "Mock output"),
+            "base_model() must return the same pipeline the constructor was given"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cached_layer_count_starts_empty() {
+        let pipeline = create_mixture_of_depths_pipeline(
+            MixtureOfDepthsConfig::default(),
+            Arc::new(MockBaseModel),
+        );
+        assert_eq!(
+            pipeline.cached_layer_count().await,
+            0,
+            "a freshly constructed pipeline has an empty layer cache"
+        );
     }
 
     // ── Config defaults ───────────────────────────────────────────────────────

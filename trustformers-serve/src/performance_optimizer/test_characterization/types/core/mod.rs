@@ -1467,22 +1467,54 @@ pub struct PredictionModel {
 }
 
 impl PredictionModel {
-    /// Make a prediction using the trained model
-    pub fn predict(&self, input: &[f64]) -> TestCharacterizationResult<Vec<f64>> {
-        // Placeholder implementation
-        // In a real implementation, this would use the trained model to make predictions
-        Ok(input.to_vec())
+    /// Make a prediction using the trained model.
+    ///
+    /// Fails with [`TestCharacterizationError::Internal`]: this struct
+    /// holds a `model_type` string, an `accuracy` number and a timestamp — it
+    /// carries no coefficients, weights or history, so there is nothing here
+    /// to predict *with*.
+    ///
+    /// ## Fixed in 0.2.1
+    ///
+    /// This used to `Ok(input.to_vec())` — it echoed its input back as the
+    /// prediction. `RealTimeTrendAnalyzer::predict_future_performance` fed it
+    /// a metric's historical series and read `prediction.first()`, so the
+    /// "predicted" value was the *oldest observed sample*, reported under
+    /// `prediction_method: "statistical_ml"` with the trend's own confidence
+    /// score attached. A forecast that returns a past measurement is worse
+    /// than no forecast, because the confidence number makes it look
+    /// examined.
+    pub fn predict(&self, _input: &[f64]) -> TestCharacterizationResult<Vec<f64>> {
+        Err(TestCharacterizationError::Internal {
+            message: format!(
+                "prediction model '{}' holds no trained parameters; there is nothing to predict \
+                 with",
+                self.model_type
+            ),
+            component: "PredictionModel::predict".to_string(),
+            details: HashMap::new(),
+        })
     }
 
-    /// Train the model with new data
+    /// Train the model with new data.
+    ///
+    /// Fails with [`TestCharacterizationError::Internal`] for the same
+    /// reason [`Self::predict`] does: there is no parameter storage on this
+    /// struct for training to write into. It used to stamp `trained_at` with
+    /// the current time and report success, so the model advertised itself as
+    /// freshly trained while `accuracy` kept whatever value it was built with.
     pub fn train_with_data(
         &mut self,
         _data: &[(Vec<f64>, Vec<f64>)],
     ) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would update the model with new training data
-        self.trained_at = Utc::now();
-        Ok(())
+        Err(TestCharacterizationError::Internal {
+            message: format!(
+                "prediction model '{}' has no parameter storage to train into",
+                self.model_type
+            ),
+            component: "PredictionModel::train_with_data".to_string(),
+            details: HashMap::new(),
+        })
     }
 }
 

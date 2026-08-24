@@ -1,5 +1,7 @@
 # TrustformeRS Tokenizers Migration Guide
 
+> **Accuracy note (2026-08-24):** `tiktoken-migration.md` in this directory was found to describe roughly 30 methods/types that don't exist on the real `TiktokenTokenizer` (batching, caching config, chat templating, cost estimation, production monitoring, and more) and has been rewritten from the real source. The other five guides linked below were not individually rewritten this pass but were spot-checked for the same pattern; each now carries its own dated banner with a rough hit count. This index page's own `.with_debug_mode(true)` example below (line ~239) is one such unverified call — do not assume a method shown anywhere in this directory exists in the crate without checking `trustformers-tokenizers/src/` directly.
+
 Welcome to the TrustformeRS Tokenizers migration guide! This comprehensive collection of guides will help you migrate from other popular tokenization libraries to TrustformeRS Tokenizers with minimal code changes and maximum performance benefits.
 
 ## Why Migrate to TrustformeRS Tokenizers?

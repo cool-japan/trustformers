@@ -2,6 +2,9 @@ use crate::error::{Result, TrustformersError};
 use crate::pipeline::{BasePipeline, Pipeline, PipelineOutput};
 use crate::{AutoModel, AutoTokenizer};
 use trustformers_core::traits::{Model, Tokenizer};
+// Only `generate_with_beam_search` (t5-gated) needs this at module scope;
+// every other function that touches `Tensor` imports it locally.
+#[cfg(feature = "t5")]
 use trustformers_core::Tensor;
 
 /// Options for translation
@@ -189,6 +192,12 @@ impl TranslationPipeline {
     }
 
     /// Generate text using beam search decoding
+    ///
+    /// `cfg`-gated on `t5`: its only live caller is [`Self::translate_with_t5`]
+    /// (also `t5`-gated). `translate_with_mbart` calls it too, but under a
+    /// `mbart` Cargo feature that does not exist in this crate's `[features]`
+    /// table — that call site never compiles under any real build.
+    #[cfg(feature = "t5")]
     fn generate_with_beam_search(&self, input_tensor: &Tensor) -> Result<Vec<u32>> {
         // Simplified beam search implementation
         // In a real implementation, this would be much more sophisticated

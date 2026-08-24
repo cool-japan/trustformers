@@ -156,7 +156,7 @@ impl MeasurementUnavailable {
     /// Returns `anyhow::Error` rather than `Self` because every caller
     /// immediately wraps it in `Err(..)`; naming it `new` would suggest a
     /// constructor, so it is `raise`.
-    fn raise(measurement: &'static str, reason: &'static str) -> anyhow::Error {
+    pub(crate) fn raise(measurement: &'static str, reason: &'static str) -> anyhow::Error {
         anyhow::Error::new(Self {
             measurement,
             reason,
@@ -262,20 +262,20 @@ impl MicroBenchmarkEngine {
     }
 
     /// Execute micro-benchmarks with given configuration
+    ///
+    /// Returns [`MeasurementUnavailable`]: the `avg_latency_ns` of `100.0` and
+    /// `throughput_ops_sec` of `1_000_000.0` this used to report were literals
+    /// that no timing loop produced, and `benchmarks_run` counted calls to
+    /// this method rather than benchmarks. Nothing was executed, so nothing is
+    /// reported.
     pub async fn execute_micro_benchmarks(
         &mut self,
         _config: &HashMap<String, String>,
     ) -> anyhow::Result<HashMap<String, f64>> {
-        // Placeholder implementation - would execute actual micro-benchmarks
-        self.benchmarks_executed += 1;
-        let mut results = HashMap::new();
-        results.insert(
-            "benchmarks_run".to_string(),
-            self.benchmarks_executed as f64,
-        );
-        results.insert("avg_latency_ns".to_string(), 100.0);
-        results.insert("throughput_ops_sec".to_string(), 1000000.0);
-        Ok(results)
+        Err(MeasurementUnavailable::raise(
+            "micro-benchmark timings",
+            "no micro-benchmark harness is linked into trustformers-serve",
+        ))
     }
 }
 
@@ -551,6 +551,15 @@ impl StatisticalAnalysisEngine {
     }
 
     /// Analyze results with statistical methods
+    ///
+    /// Returns [`MeasurementUnavailable`]. The `mean: 100.0`, `stddev: 10.0`,
+    /// `median: 98.0` and `confidence_interval: 95.0` this used to return were
+    /// the same four literals for every input — the `results` argument was
+    /// never read. Summary statistics also have nothing to summarise here:
+    /// `ProfileResult` is an enum of per-subsystem profile structs, not a
+    /// numeric sample, so there is no population to take a mean over even in
+    /// principle. Producing statistics from it needs a defined metric
+    /// extraction that this crate does not have.
     pub async fn analyze_results(
         &mut self,
         _results: &HashMap<
@@ -558,14 +567,10 @@ impl StatisticalAnalysisEngine {
             crate::performance_optimizer::resource_modeling::performance_profiler::ProfileResult,
         >,
     ) -> anyhow::Result<HashMap<String, f64>> {
-        // Placeholder implementation - would perform statistical analysis
-        self.analyses_performed += 1;
-        let mut stats = HashMap::new();
-        stats.insert("mean".to_string(), 100.0);
-        stats.insert("stddev".to_string(), 10.0);
-        stats.insert("median".to_string(), 98.0);
-        stats.insert("confidence_interval".to_string(), 95.0);
-        Ok(stats)
+        Err(MeasurementUnavailable::raise(
+            "summary statistics over profiling results",
+            "profile results carry no numeric sample to summarise",
+        ))
     }
 }
 
@@ -585,6 +590,12 @@ impl TrendAnalysisEngine {
     }
 
     /// Analyze performance trends from results
+    ///
+    /// Returns [`MeasurementUnavailable`]. A trend needs a time series, and
+    /// this is handed a single snapshot: the previous implementation reported
+    /// `trend_direction: 1.0` ("improving") and `trend_strength: 0.8` on every
+    /// call without reading `results` at all, so it declared improvement it
+    /// had no way to observe.
     pub async fn analyze_performance_trends(
         &mut self,
         _results: &HashMap<
@@ -592,16 +603,10 @@ impl TrendAnalysisEngine {
             crate::performance_optimizer::resource_modeling::performance_profiler::ProfileResult,
         >,
     ) -> anyhow::Result<HashMap<String, f64>> {
-        // Placeholder implementation - would analyze performance trends
-        self.trends_detected += 1;
-        let mut trends = HashMap::new();
-        trends.insert("trend_direction".to_string(), 1.0); // 1.0 = improving
-        trends.insert("trend_strength".to_string(), 0.8);
-        trends.insert(
-            "prediction_confidence".to_string(),
-            self.prediction_accuracy,
-        );
-        Ok(trends)
+        Err(MeasurementUnavailable::raise(
+            "performance trends",
+            "a single profiling snapshot contains no time series to trend",
+        ))
     }
 }
 
@@ -621,22 +626,22 @@ impl OptimizationRecommender {
     }
 
     /// Generate optimization recommendations based on results
+    ///
+    /// Returns [`MeasurementUnavailable`]. The three sentences this used to
+    /// return ("Consider increasing thread pool size", ...) were a fixed list
+    /// emitted regardless of `results`, carried `estimated_impact` figures of
+    /// `0.8 / 0.6 / 0.4` that no experiment produced, and would have been
+    /// identical on a machine where every one of them was the wrong advice.
+    /// Advice presented as derived from measurements has to be derived from
+    /// measurements.
     pub async fn generate_recommendations(
         &mut self,
         _results: &HashMap<String, f64>,
     ) -> anyhow::Result<OptimizationRecommendations> {
-        // Placeholder implementation - would generate actual recommendations
-        self.recommendations_generated += 1;
-        let recommendations = vec![
-            "Consider increasing thread pool size".to_string(),
-            "Enable CPU affinity for better cache locality".to_string(),
-            "Optimize memory allocation patterns".to_string(),
-        ];
-        Ok(OptimizationRecommendations {
-            recommendations,
-            priority_order: vec!["high".to_string(), "medium".to_string(), "low".to_string()],
-            estimated_impact: vec![0.8, 0.6, 0.4],
-        })
+        Err(MeasurementUnavailable::raise(
+            "optimization recommendations",
+            "no rule set maps profiling statistics to recommendations on this build",
+        ))
     }
 }
 
@@ -655,21 +660,38 @@ impl ReportGenerator {
         Self::default()
     }
 
-    /// Generate detailed report from profiling data
+    /// Render the supplied profiling statistics as a report.
+    ///
+    /// The report now contains the caller's data and nothing else. It used to
+    /// ignore `data` entirely and emit the fixed lines "System performance
+    /// metrics analyzed" and "Recommendations: See optimization section" —
+    /// a report that read the same whether the machine was healthy or on fire,
+    /// and that pointed at an "optimization section" it did not produce.
+    ///
+    /// Keys are emitted in sorted order so that two reports over the same
+    /// statistics compare equal.
     pub async fn generate_detailed_report(
         &mut self,
-        _data: &HashMap<String, f64>,
+        data: &HashMap<String, f64>,
     ) -> anyhow::Result<String> {
-        // Placeholder implementation - would generate actual detailed report
         self.reports_generated += 1;
-        let report = format!(
-            "Performance Profiling Report #{}\n\
-             Format: {}\n\
-             Summary: System performance metrics analyzed\n\
-             Recommendations: See optimization section\n",
+        let format = if self.format.is_empty() { "text" } else { &self.format };
+        let mut entries: Vec<(&String, &f64)> = data.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+
+        let mut report = format!(
+            "Performance Profiling Report #{}\nFormat: {}\nMetrics: {}\n",
             self.reports_generated,
-            if self.format.is_empty() { "JSON" } else { &self.format }
+            format,
+            entries.len()
         );
+        if entries.is_empty() {
+            report.push_str("No statistics were supplied for this report.\n");
+        } else {
+            for (key, value) in entries {
+                report.push_str(&format!("  {key}: {value}\n"));
+            }
+        }
         Ok(report)
     }
 }
@@ -749,18 +771,52 @@ impl ConsistencyChecker {
         Self::default()
     }
 
-    /// Check result consistency
+    /// Check the supplied metrics for values that cannot be a measurement.
+    ///
+    /// A metric is inconsistent when it is `NaN` or infinite: no profiler can
+    /// have measured either, so its presence means the value came from a
+    /// division by zero, an uninitialised field, or an arithmetic overflow
+    /// upstream. The score is the fraction of entries that survive that check,
+    /// and every failing key is named in `inconsistencies`.
+    ///
+    /// This used to report `is_consistent: true` and `consistency_score: 0.95`
+    /// unconditionally, without reading `results` — it declared data sound
+    /// before looking at it, and could never have flagged a problem.
+    /// `inconsistencies_found` now counts real findings rather than staying at
+    /// zero forever.
     pub async fn check_result_consistency(
         &mut self,
-        _results: &HashMap<String, f64>,
+        results: &HashMap<String, f64>,
     ) -> anyhow::Result<ConsistencyResults> {
-        // Placeholder implementation - would check actual result consistency
         self.checks_performed += 1;
+
+        let mut inconsistencies: Vec<String> = results
+            .iter()
+            .filter(|(_, value)| !value.is_finite())
+            .map(|(key, value)| {
+                let kind = if value.is_nan() { "NaN" } else { "infinite" };
+                format!("{key} is {kind}, which is not a measurable value")
+            })
+            .collect();
+        inconsistencies.sort();
+
+        self.inconsistencies_found = self
+            .inconsistencies_found
+            .saturating_add(u32::try_from(inconsistencies.len()).unwrap_or(u32::MAX));
+
+        // An empty input is vacuously consistent: there is nothing in it that
+        // could contradict anything else.
+        let score = if results.is_empty() {
+            1.0
+        } else {
+            (results.len() - inconsistencies.len()) as f64 / results.len() as f64
+        };
+
         Ok(ConsistencyResults {
-            is_consistent: true,
-            consistency_score: 0.95,
-            inconsistencies: Vec::new(),
-            overall_consistency_score: 0.95,
+            is_consistent: inconsistencies.is_empty(),
+            consistency_score: score,
+            inconsistencies,
+            overall_consistency_score: score,
         })
     }
 }
@@ -852,23 +908,77 @@ impl QualityAssuranceEngine {
         Self::default()
     }
 
-    /// Perform quality checks on data
+    /// Assess the supplied metrics against the checks this build can actually
+    /// run.
+    ///
+    /// Two properties are checkable without knowing what each metric means:
+    /// whether the set is empty (nothing was collected), and whether every
+    /// value is finite. `data_completeness` is `0.0` for an empty set and
+    /// `1.0` otherwise; `consistency_score` is the finite fraction; the
+    /// overall score is their product; and each non-finite metric becomes a
+    /// named issue.
+    ///
+    /// `reliability_score` / `data_reliability` are equal to the consistency
+    /// score rather than the `0.90` literal they used to carry: reliability
+    /// over repeated runs would need more than one run, and this method is
+    /// given one.
+    ///
+    /// Previously every field was a constant — `overall_quality: 0.95`,
+    /// `data_completeness: 1.0`, no issues — returned without reading `data`,
+    /// so a report over an empty metric set claimed complete, high-quality
+    /// data.
     pub async fn perform_quality_checks(
         &mut self,
-        _data: &HashMap<String, f64>,
+        data: &HashMap<String, f64>,
     ) -> anyhow::Result<QualityAssessmentReport> {
-        // Placeholder implementation - would perform comprehensive quality checks
         self.checks_performed += 1;
+
+        let mut issues: Vec<String> = data
+            .iter()
+            .filter(|(_, value)| !value.is_finite())
+            .map(|(key, value)| {
+                let kind = if value.is_nan() { "NaN" } else { "infinite" };
+                format!("{key} is {kind}")
+            })
+            .collect();
+        issues.sort();
+
+        let data_completeness = if data.is_empty() { 0.0 } else { 1.0 };
+        let consistency_score = if data.is_empty() {
+            0.0
+        } else {
+            (data.len() - issues.len()) as f64 / data.len() as f64
+        };
+        let overall = data_completeness * consistency_score;
+        self.quality_score = overall;
+
+        let recommendations = if issues.is_empty() && !data.is_empty() {
+            Vec::new()
+        } else {
+            vec![QualityRecommendation {
+                recommendation: if data.is_empty() {
+                    "No metrics were collected; check that profiling ran before assessing quality"
+                        .to_string()
+                } else {
+                    "Re-run profiling: some metrics are not finite values".to_string()
+                },
+                priority: "High".to_string(),
+                expected_improvement: 0.0,
+                action: "Re-run profiling".to_string(),
+                implementation_difficulty: "Low".to_string(),
+            }]
+        };
+
         Ok(QualityAssessmentReport {
-            overall_quality: 0.95,
-            data_completeness: 1.0,
-            consistency_score: 0.95,
-            reliability_score: 0.90,
-            issues: Vec::new(),
-            quality_score: 0.95,
-            quality_issues: Vec::new(),
-            data_reliability: 0.90,
-            recommendations: Vec::new(),
+            overall_quality: overall,
+            data_completeness,
+            consistency_score,
+            reliability_score: consistency_score,
+            issues: issues.clone(),
+            quality_score: overall,
+            quality_issues: issues,
+            data_reliability: consistency_score,
+            recommendations,
             assessment_timestamp: chrono::Utc::now(),
         })
     }
@@ -1639,5 +1749,121 @@ mod measurement_tests {
                 "a failure must say why, not fall back to a constant: {error}"
             ),
         }
+    }
+
+    /// Regression: `check_result_consistency` used to report
+    /// `is_consistent: true` with a score of `0.95` without reading its input,
+    /// so it could never flag anything.
+    #[tokio::test]
+    async fn consistency_check_flags_values_that_cannot_be_measurements() {
+        let mut checker = ConsistencyChecker::new();
+        let mut results = HashMap::new();
+        results.insert("throughput".to_string(), 120.0);
+        results.insert("latency".to_string(), f64::NAN);
+        results.insert("bandwidth".to_string(), f64::INFINITY);
+
+        let outcome = checker
+            .check_result_consistency(&results)
+            .await
+            .expect("the check itself must succeed");
+
+        assert!(!outcome.is_consistent);
+        assert_eq!(outcome.inconsistencies.len(), 2);
+        assert!((outcome.consistency_score - 1.0 / 3.0).abs() < 1e-9);
+        assert_eq!(checker.inconsistencies_found, 2);
+        assert!(outcome.inconsistencies.iter().any(|i| i.contains("latency")));
+        assert!(outcome.inconsistencies.iter().any(|i| i.contains("bandwidth")));
+    }
+
+    /// Clean input is reported clean, and the score is exactly 1.0 rather than
+    /// the 0.95 the old constant returned.
+    #[tokio::test]
+    async fn consistency_check_passes_finite_metrics() {
+        let mut checker = ConsistencyChecker::new();
+        let mut results = HashMap::new();
+        results.insert("throughput".to_string(), 120.0);
+        results.insert("latency".to_string(), 3.5);
+
+        let outcome = checker
+            .check_result_consistency(&results)
+            .await
+            .expect("the check itself must succeed");
+
+        assert!(outcome.is_consistent);
+        assert!(outcome.inconsistencies.is_empty());
+        assert!((outcome.consistency_score - 1.0).abs() < 1e-9);
+    }
+
+    /// Regression: `perform_quality_checks` used to report
+    /// `data_completeness: 1.0` and `overall_quality: 0.95` for an empty
+    /// metric set — high-quality, complete data that did not exist.
+    #[tokio::test]
+    async fn quality_assessment_reports_an_empty_metric_set_as_incomplete() {
+        let mut engine = QualityAssuranceEngine::new();
+        let report = engine
+            .perform_quality_checks(&HashMap::new())
+            .await
+            .expect("the assessment itself must succeed");
+
+        assert!((report.data_completeness - 0.0).abs() < 1e-9);
+        assert!((report.overall_quality - 0.0).abs() < 1e-9);
+        assert_eq!(report.recommendations.len(), 1);
+    }
+
+    /// A complete, finite metric set scores 1.0 and raises no issues.
+    #[tokio::test]
+    async fn quality_assessment_scores_clean_metrics() {
+        let mut engine = QualityAssuranceEngine::new();
+        let mut data = HashMap::new();
+        data.insert("a".to_string(), 1.0);
+        data.insert("b".to_string(), 2.0);
+
+        let report = engine
+            .perform_quality_checks(&data)
+            .await
+            .expect("the assessment itself must succeed");
+
+        assert!((report.overall_quality - 1.0).abs() < 1e-9);
+        assert!(report.quality_issues.is_empty());
+        assert!(report.recommendations.is_empty());
+        assert!((engine.quality_score - 1.0).abs() < 1e-9);
+    }
+
+    /// Regression: `generate_detailed_report` ignored its input and emitted the
+    /// fixed line "Summary: System performance metrics analyzed".
+    #[tokio::test]
+    async fn detailed_report_contains_the_statistics_it_was_given() {
+        let mut generator = ReportGenerator::new();
+        let mut data = HashMap::new();
+        data.insert("total_profiles".to_string(), 3.0);
+        data.insert("cache_hits".to_string(), 17.0);
+
+        let report =
+            generator.generate_detailed_report(&data).await.expect("rendering must succeed");
+
+        assert!(report.contains("cache_hits: 17"), "{report}");
+        assert!(report.contains("total_profiles: 3"), "{report}");
+        assert!(report.contains("Metrics: 2"), "{report}");
+        assert!(
+            !report.contains("System performance metrics analyzed"),
+            "{report}"
+        );
+        // Keys render in sorted order, so the same statistics always render
+        // identically.
+        assert!(
+            report.find("cache_hits").unwrap_or(0) < report.find("total_profiles").unwrap_or(0)
+        );
+    }
+
+    /// Regression: `analyze_results` returned mean 100 / stddev 10 / median 98
+    /// for every input, including an empty one.
+    #[tokio::test]
+    async fn summary_statistics_report_that_they_have_no_sample() {
+        let mut engine = StatisticalAnalysisEngine::new();
+        let err = engine
+            .analyze_results(&HashMap::new())
+            .await
+            .expect_err("profile results are not a numeric sample");
+        assert!(err.to_string().contains("summary statistics"), "{err}");
     }
 }

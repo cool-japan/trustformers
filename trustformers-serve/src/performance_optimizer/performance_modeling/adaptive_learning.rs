@@ -821,14 +821,21 @@ impl ActiveLearningController {
         self.budget.queries_this_hour < self.budget.max_queries_per_hour
     }
 
-    /// Calculate uncertainty score for data point
+    /// Calculate uncertainty score for data point.
+    ///
+    /// Uses load per available core: a machine running at or beyond one
+    /// runnable task per core is contended, and a measurement taken under
+    /// contention says less about the parallelism level than the same
+    /// measurement taken on an idle machine.
+    ///
+    /// This used to average `load_average` with `io_wait_percent`. That second
+    /// term was removed with the field — see
+    /// [`crate::performance_optimizer::types::SystemState`] — because nothing
+    /// ever measured it.
     fn calculate_uncertainty(&self, data_point: &PerformanceDataPoint) -> Result<f32> {
-        // Simplified uncertainty calculation based on system variability
-        let system_variability = data_point.system_state.load_average;
-        let resource_pressure = data_point.system_state.io_wait_percent;
-
-        let uncertainty = (system_variability + resource_pressure) / 2.0;
-        Ok(uncertainty.min(1.0))
+        let system = &data_point.system_state;
+        let load_per_core = system.load_average / (system.available_cores as f32).max(1.0);
+        Ok(load_per_core.clamp(0.0, 1.0))
     }
 
     /// Calculate information gain for data point

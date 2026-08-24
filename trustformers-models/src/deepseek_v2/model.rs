@@ -802,17 +802,44 @@ impl Model for DeepSeekV2Model {
         self.norm.forward(hidden_states)
     }
 
+    /// Loading a pretrained DeepSeek-V2 checkpoint is not implemented.
+    ///
+    /// A previous revision read the stream into a buffer, checked only that the
+    /// buffer was non-empty and returned `Ok(())` — binding nothing. Any
+    /// non-empty byte sequence "loaded successfully" while the model kept its
+    /// constructor initialisation.
+    ///
+    /// The reason it is an error rather than a binder is concrete: this
+    /// implementation's [`MlaAttention`] decomposes multi-head latent attention
+    /// into `c_kv` / `k_pe` / `k_nope` / `v_proj`, whereas a HuggingFace
+    /// DeepSeek-V2 export stores the fused `kv_a_proj_with_mqa` and `kv_b_proj`
+    /// *plus* two RMS norms on the compressed latents, `q_a_layernorm` and
+    /// `kv_a_layernorm`, that this attention block does not model at all. The
+    /// fused projections could be split, but the two norms have nowhere to go,
+    /// and binding everything except them is precisely the silent-drop failure
+    /// this crate is being cleaned of. Modelling the latent norms is the
+    /// prerequisite for a real loader here.
+    ///
+    /// The stream is drained first so the caller's reader is left in a defined
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Always fails: with an I/O error when the stream cannot be read, otherwise
+    /// with `not_implemented`.
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
         let mut buffer = Vec::new();
         reader.read_to_end(&mut buffer).map_err(|e| {
-            TrustformersError::io_error(format!("DeepSeekV2: failed to read weights: {}", e))
+            TrustformersError::io_error(format!("DeepSeekV2: failed to read weights: {e}"))
         })?;
-        if buffer.is_empty() {
-            return Err(TrustformersError::invalid_input_simple(
-                "DeepSeekV2: pretrained weight data is empty".to_string(),
-            ));
-        }
-        Ok(())
+        Err(TrustformersError::not_implemented(
+            "DeepSeekV2Model::load_pretrained: this implementation's MLA attention has no home \
+             for a checkpoint's `q_a_layernorm` / `kv_a_layernorm` latent norms and stores the \
+             key/value projection split rather than fused, so no HuggingFace DeepSeek-V2 \
+             checkpoint can be bound without silently dropping weights. Install weights \
+             explicitly through the layer setters instead."
+                .to_string(),
+        ))
     }
 
     fn get_config(&self) -> &Self::Config {
@@ -1132,5 +1159,44 @@ mod tests {
         let cfg = tiny_config();
         let model = DeepSeekV2Model::new(cfg).expect("model creation should succeed");
         assert!(model.num_parameters() > 0, "model must have parameters");
+    }
+
+    /// Regression: `load_pretrained` read the stream, checked only that it was
+    /// non-empty and returned `Ok(())` without binding anything — so *any*
+    /// non-empty byte sequence reported a successful load while the model kept
+    /// its constructor initialisation.
+    #[test]
+    fn load_pretrained_refuses_instead_of_reporting_a_load_that_did_not_happen() {
+        let mut model = DeepSeekV2Model::new(tiny_config()).expect("model must build");
+        let before = model.embed_tokens.weight().data().expect("readable");
+
+        let plausible_weights = vec![0x11u8; 4096];
+        let err = model
+            .load_pretrained(&mut plausible_weights.as_slice())
+            .expect_err("a non-empty buffer must not be reported as a successful load");
+        let message = err.to_string();
+        assert!(
+            message.contains("kv_a_layernorm") || message.contains("q_a_layernorm"),
+            "the error must say which weights have no home: {message}"
+        );
+        assert_eq!(
+            model.embed_tokens.weight().data().expect("readable"),
+            before,
+            "a refused load must leave every parameter untouched"
+        );
+    }
+
+    /// The stream is still drained, so a caller that reuses the reader sees a
+    /// defined state rather than a partially consumed one.
+    #[test]
+    fn load_pretrained_drains_the_reader_before_refusing() {
+        let mut model = DeepSeekV2Model::new(tiny_config()).expect("model must build");
+        let bytes = vec![0x22u8; 128];
+        let mut cursor = bytes.as_slice();
+        let _ = model.load_pretrained(&mut cursor);
+        assert!(
+            cursor.is_empty(),
+            "the reader must be fully consumed even when the load is refused"
+        );
     }
 }

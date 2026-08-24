@@ -866,14 +866,8 @@ impl Default for ModelPerformanceMetrics {
     fn default() -> Self {
         Self {
             training_accuracy: 0.0,
-            validation_accuracy: 0.0,
-            test_accuracy: 0.0,
-            loss: 0.0,
             convergence_status: ConvergenceStatus::NotConverged,
             accuracy: 0.0,
-            precision: 0.0,
-            recall: 0.0,
-            f1_score: 0.0,
             training_examples: 0,
             last_updated: Utc::now(),
         }
@@ -992,8 +986,6 @@ impl Default for SystemState {
             available_memory_mb: 8192,
             load_average: 0.0,
             active_processes: 0,
-            io_wait_percent: 0.0,
-            network_utilization: 0.0,
             temperature_metrics: None,
         }
     }

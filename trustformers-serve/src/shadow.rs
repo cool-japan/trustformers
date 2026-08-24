@@ -801,7 +801,7 @@ impl ShadowTestingService {
         let mut latency_differences = Vec::new();
 
         for shadow_response in shadow_responses {
-            // Simple similarity calculation (placeholder)
+            // Structural JSON similarity; see `json_similarity`.
             let similarity =
                 self.calculate_similarity(&production_response.payload, &shadow_response.payload);
             similarity_scores.push(similarity);

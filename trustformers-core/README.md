@@ -2,24 +2,23 @@
 
 ![Version](https://img.shields.io/badge/version-0.2.1-blue)
 ![Status](https://img.shields.io/badge/status-Stable-brightgreen)
-![Tests](https://img.shields.io/badge/tests-2%2C353%2B%20passing-brightgreen)
-![SLoC](https://img.shields.io/badge/SLoC-153%2C689-informational)
-![Date](https://img.shields.io/badge/updated-2026--07--09-lightgrey)
+![SLoC](https://img.shields.io/badge/SLoC-178%2C532-informational)
+![Date](https://img.shields.io/badge/updated-2026--08--24-lightgrey)
 
 Core infrastructure crate providing fundamental abstractions and utilities for the TrustformeRS ecosystem.
 
 ## Current State
 
-**Version 0.2.1 — Stable (2026-07-09)**
+**Version 0.2.1 (unreleased) — last verified 2026-08-24**
 
-This crate is **stable and production-ready**, serving as the foundation for all other TrustformeRS components. It provides high-performance tensor operations, layer implementations, and advanced optimization techniques. ~2,353 tests pass for this crate specifically, with zero stubs or unimplemented items, and zero clippy/rustdoc warnings workspace-wide.
+This crate is **stable and production-ready** for its real (CPU/CUDA/Metal) compute paths, serving as the foundation for all other TrustformeRS components. It provides high-performance tensor operations, layer implementations, and advanced optimization techniques. The last workspace-level test run reported to this documentation pass measured 20,629 passed / 43 skipped / 0 failed across the whole workspace (default features, 2026-08-24) — this crate's own share was not re-measured separately this pass; see `TODO.md` for the crate's detailed, dated status (including which GPU backends are real vs. feature-flag facades).
 
 ## Features
 
 ### Tensor Operations
 - **Comprehensive tensor abstraction** supporting multiple backends
 - **SciRS2 integration** for SIMD-optimized operations
-- **GPU support** through multiple backends (CUDA, Metal, Vulkan, WebGPU, OpenCL, ROCm, OneAPI, XLA, RISC-V), each opt-in behind its own Cargo feature (`cuda`, `metal`, `vulkan`, `wgpu_backend`, `opencl`, `rocm`, `oneapi`, `xla`, `riscv`) — no GPU backend is enabled by default (`default = ["linalg"]`)
+- **GPU support**: each backend below is an opt-in Cargo feature (no GPU backend is enabled by default, `default = ["linalg"]`), but the features are not equally real. **Real, hardware-verified on this project's own machines**: CUDA (`cuda`, via the Pure-Rust `oxicuda`), Metal (`metal`, via `oxicuda-metal`). **Real code, not hardware-verified in this environment**: Vulkan (`vulkan`, via `vulkano` — device/pipeline setup is real, several compute operations still return a structured "not implemented" error), ROCm (`rocm` — real `dlopen`-based HIP calls if a real AMD runtime is present on the host). **Empty facades — the feature exists, the backend does not**: `oneapi`, `xla`, `riscv` (every operation returns a structured "no runtime linked" error or runs a scalar-CPU fallback; see `TODO.md` for specifics). `wgpu_backend`/`opencl` exist as features but were not characterized by this documentation pass.
 - **Automatic differentiation** with reverse-mode and forward-mode autodiff
 - **Memory-efficient operations** with zero-copy views
 
@@ -121,8 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Testing
 
-The crate includes comprehensive test coverage:
-- **~2,353 unit and integration tests, all passing** (this crate's approximate share of a workspace-wide run completed 2026-07-01: 18,102 passed / 0 failed / 119 skipped via `cargo nextest run --workspace --all-features`, plus 0 clippy warnings and 0 rustdoc warnings)
+The crate includes comprehensive test coverage. Workspace-wide (default features), `cargo nextest run --workspace` most recently measured 20,629 passed / 43 skipped / 0 failed (2026-08-24; see root `README.md`/`TODO.md` for the current figure, as this grows over time and this crate's own share was not separately re-measured this pass):
 - Property-based testing with proptest
 - Memory leak detection
 - Performance benchmarks

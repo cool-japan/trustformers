@@ -23,7 +23,7 @@ impl FeatureExtractor for InteractionFeatureExtractor {
             "cores_x_memory".to_string(),
             "cpu_intensity_x_parallelism".to_string(),
             "memory_intensity_x_cores".to_string(),
-            "load_x_io_wait".to_string(),
+            "load_x_active_processes".to_string(),
             "duration_x_complexity".to_string(),
         ];
         for data_point in data_points {
@@ -37,7 +37,7 @@ impl FeatureExtractor for InteractionFeatureExtractor {
                 (test_chars.resource_intensity.cpu_intensity as f64) * parallelism,
                 (test_chars.resource_intensity.memory_intensity as f64)
                     * (system.available_cores as f64),
-                (system.load_average as f64) * (system.io_wait_percent as f64),
+                (system.load_average as f64) * (system.active_processes as f64),
                 test_chars.average_duration.as_secs_f64()
                     * (test_chars.dependency_complexity as f64),
             ];

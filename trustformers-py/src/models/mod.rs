@@ -1,3 +1,5 @@
+pub(crate) mod generation;
+mod inputs;
 mod losses;
 mod weights;
 
@@ -10,8 +12,7 @@ use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde_json::Value;
-use trustformers_core::errors::TrustformersError;
-use trustformers_core::generation::{GenerationConfig, GenerationStrategy, TextGenerator};
+use generation::SamplingOptions;
 use weights::{
     load_config_from_hub, load_pretrained_weights, report_weight_loading,
     save_pretrained_for_model, trustformers_error_to_py_err,
@@ -23,9 +24,9 @@ type PyObject = Py<PyAny>;
 
 
 use trustformers_core::tensor::Tensor;
-use trustformers_core::traits::Model;
+use trustformers_core::traits::{Model, TokenizedInput};
 use trustformers_models::{
-    bert::{BertConfig, BertModel},
+    bert::{BertConfig, BertForSequenceClassification, BertModel},
     gpt2::{Gpt2Config, Gpt2LMHeadModel, Gpt2Model},
     llama::{LlamaConfig, LlamaModel},
     mamba::{MambaConfig, MambaModel},
@@ -1096,6 +1097,23 @@ fn extract_token_ids(tensor: &Tensor) -> PyResult<Vec<i64>> {
     }
 }
 
+/// Build a [`TokenizedInput`] from the tensors a `forward` binding receives.
+///
+/// PyO3 boundary over [`inputs::tokenized_input_from_parts`], which holds the
+/// pure (and unit-tested) conversion and validation logic.
+fn tokenized_input_from_tensors(
+    input_ids: &PyTensor,
+    attention_mask: Option<&PyTensor>,
+    token_type_ids: Option<&PyTensor>,
+) -> PyResult<TokenizedInput> {
+    inputs::tokenized_input_from_parts(
+        &input_ids.inner,
+        attention_mask.map(|tensor| &tensor.inner),
+        token_type_ids.map(|tensor| &tensor.inner),
+    )
+    .map_err(trustformers_error_to_py_err)
+}
+
 /// Extract non-negative token IDs, for use with
 /// [`trustformers_core::generation::TextGenerator`], which indexes with `usize`.
 fn extract_token_ids_usize(tensor: &Tensor) -> PyResult<Vec<usize>> {
@@ -1538,6 +1556,13 @@ pub struct PyGPT2LMHeadModel {
     inner: Gpt2LMHeadModel,
 }
 
+impl PyGPT2LMHeadModel {
+    /// The wrapped Rust model, for the `text-generation` pipeline.
+    pub(crate) fn model(&self) -> &Gpt2LMHeadModel {
+        &self.inner
+    }
+}
+
 #[pymethods]
 impl PyGPT2LMHeadModel {
     #[new]
@@ -1610,32 +1635,9 @@ impl PyGPT2LMHeadModel {
         labels: Option<&PyTensor>,
     ) -> PyResult<PyObject> {
         Python::attach(|py| {
-            use trustformers_core::traits::TokenizedInput;
-
-            let tokenized_input = TokenizedInput {
-                input_ids: input_ids
-                    .inner
-                    .to_vec_f32()
-                    .map_err(trustformers_error_to_py_err)?
-                    .iter()
-                    .map(|&x| x as u32)
-                    .collect(),
-                attention_mask: attention_mask.map_or_else(
-                    || vec![1u8; input_ids.inner.shape()[0]],
-                    |mask| {
-                        mask.inner
-                            .to_vec_f32()
-                            .unwrap_or_default()
-                            .iter()
-                            .map(|&x| x as u8)
-                            .collect()
-                    },
-                ),
-                token_type_ids: None, // GPT-2 doesn't use token type IDs
-                special_tokens_mask: None,
-                offset_mapping: None,
-                overflowing_tokens: None,
-            };
+            // GPT-2 has no segment embeddings, so `token_type_ids` is always
+            // `None` here.
+            let tokenized_input = tokenized_input_from_tensors(input_ids, attention_mask, None)?;
 
             let outputs = self.inner.forward(tokenized_input).map_err(|e| {
                 PyValueError::new_err(format!("Transformer forward pass failed: {}", e))
@@ -1654,7 +1656,8 @@ impl PyGPT2LMHeadModel {
             // Calculate loss if labels provided
             if let Some(labels_tensor) = labels {
                 // Compute cross-entropy loss for language modeling (next token prediction)
-                let loss_value = compute_language_modeling_loss(&logits, &labels_tensor.inner)
+                let loss_value =
+                    losses::language_modeling_cross_entropy(&logits, &labels_tensor.inner)
                     .map_err(|e| {
                         PyValueError::new_err(format!(
                             "Language modeling loss calculation failed: {}",
@@ -1694,59 +1697,19 @@ impl PyGPT2LMHeadModel {
         top_k: Option<usize>,
         top_p: Option<f32>,
     ) -> PyResult<PyTensor> {
-        use trustformers_core::traits::TokenizedInput;
-
         let prompt = extract_token_ids_usize(&input_ids.inner)?;
-        if prompt.is_empty() {
-            return Err(PyValueError::new_err(
-                "generate() requires at least one input token",
-            ));
-        }
-
-        let vocab_size = self.inner.get_config().vocab_size;
-        let strategy = if !do_sample {
-            GenerationStrategy::Greedy
-        } else if let Some(p) = top_p {
-            GenerationStrategy::TopP { p, temperature }
-        } else if let Some(k) = top_k {
-            GenerationStrategy::TopK { k, temperature }
-        } else {
-            GenerationStrategy::Sampling { temperature }
-        };
-
-        let generation_config = GenerationConfig {
-            strategy,
-            max_length: Some(max_length),
+        let options = SamplingOptions {
+            max_length,
             do_sample,
-            use_cache: false,
-            eos_token_id: Some(self.inner.get_config().eos_token_id as usize),
-            ..GenerationConfig::default()
+            temperature,
+            top_k,
+            top_p,
+            ..SamplingOptions::default()
         };
-
-        let generator = TextGenerator::new(generation_config, vocab_size);
-        let sequences = generator
-            .generate(&prompt, |sequence, _cache| {
-                let token_ids: Vec<u32> = sequence.iter().map(|&t| t as u32).collect();
-                let seq_len = token_ids.len();
-                let tokenized = TokenizedInput {
-                    input_ids: token_ids,
-                    attention_mask: vec![1u8; seq_len],
-                    token_type_ids: None,
-                    special_tokens_mask: None,
-                    offset_mapping: None,
-                    overflowing_tokens: None,
-                };
-                let output = self.inner.forward(tokenized)?;
-                Ok((output.logits, None))
-            })
+        let mut sequences = generation::generate_with_gpt2(&self.inner, &prompt, &options)
             .map_err(|e| PyValueError::new_err(format!("Generation failed: {}", e)))?;
 
-        let generated = sequences
-            .into_iter()
-            .next()
-            .ok_or_else(|| PyValueError::new_err("generation produced no sequence"))?;
-
-        build_usize_token_tensor(&generated)
+        build_usize_token_tensor(&sequences.swap_remove(0))
     }
 
     /// Get model configuration.

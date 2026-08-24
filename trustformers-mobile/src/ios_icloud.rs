@@ -16,11 +16,14 @@ enabling seamless model sharing and backup across devices using CloudKit.
 ## Usage
 
 ```rust
-use trustformers_mobile::ios_icloud::{iCloudModelSync, SyncConfig};
+# fn main() -> Result<(), trustformers_core::TrustformersError> {
+use trustformers_mobile::ios_icloud::{iCloudModelSync, iCloudSyncConfig};
 
-let config = SyncConfig::default();
+let config = iCloudSyncConfig::default();
 let mut sync = iCloudModelSync::new(config)?;
 sync.enable_auto_sync(true)?;
+# Ok(())
+# }
 ```
 */
 

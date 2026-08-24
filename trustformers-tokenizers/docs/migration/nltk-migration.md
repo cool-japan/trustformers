@@ -1,5 +1,7 @@
 # Migrating from NLTK to TrustformeRS
 
+> **Accuracy note (2026-08-24):** the `migration/tiktoken-migration.md` guide in this same directory was found to describe roughly 30 methods/types that don't exist on the real `TiktokenTokenizer` and was rewritten from the real source to fix it. A same-pattern grep of this file (not a full method-by-method audit) turns up about 2 hits of the same kind — API calls, config structs, or helper types below that were not individually checked against `trustformers-tokenizers/src/`. Verify any specific method name you plan to depend on against the source before relying on it; do not assume the presence of a name here means it exists in the crate.
+
 This guide will help you migrate from NLTK's tokenization tools to TrustformeRS Tokenizers while maintaining compatibility with classical NLP approaches and gaining significant performance improvements for text processing tasks.
 
 ## Why Migrate from NLTK?

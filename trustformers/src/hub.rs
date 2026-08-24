@@ -775,6 +775,11 @@ impl DownloadManager {
 /// Pulled out of `DownloadManager::cleanup_cache` so the message content
 /// (which directory is being cleaned, and to what target) is unit-testable
 /// without capturing `tracing` output.
+///
+/// `cfg`-gated on `hub` because its only caller, `DownloadManager::cleanup_cache`,
+/// lives on the `hub`-gated `DownloadManager` impl block: without networking
+/// there is no smart cache to clean.
+#[cfg(feature = "hub")]
 fn format_cache_cleanup_start_message(
     cache_dir: &Path,
     current_size: u64,
@@ -1488,8 +1493,8 @@ fn parse_model_card_from_readme(content: &str) -> Result<ModelCard> {
             let yaml_content = &content[yaml_start + 4..yaml_start + 4 + yaml_end];
 
             // Parse YAML frontmatter
-            let yaml_value: serde_yaml::Value =
-                serde_yaml::from_str(yaml_content).map_err(|e| {
+            let yaml_value: serde_yaml_ng::Value =
+                serde_yaml_ng::from_str(yaml_content).map_err(|e| {
                     TrustformersError::invalid_input(
                         format!("Failed to parse YAML frontmatter: {}", e),
                         Some("yaml_frontmatter"),
@@ -1586,6 +1591,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "hub")]
     fn test_format_cache_cleanup_start_message_reports_directory_and_sizes() {
         // Regression test: `cleanup_cache`'s `cache_dir` parameter used to be
         // computed and passed in but never read. Guard against that regressing.

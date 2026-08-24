@@ -4,52 +4,59 @@
 [![Documentation](https://docs.rs/trustformers-client/badge.svg)](https://docs.rs/trustformers-client)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](../../LICENSE)
 
-A comprehensive Rust client library for TrustformeRS serving infrastructure.
+A Rust client library for TrustformeRS serving infrastructure.
+
+> **Every snippet below is written against the API this crate actually exposes.**
+> Up to 0.2.0 this file documented a different client — `TrustformersClient::new`,
+> `client.infer`, `AuthConfig`, `StreamingRequest`, `BatchRequest`,
+> `ClientError::Network` — none of which exist here, alongside two example files
+> that were never written and a test feature that was never declared. That
+> documentation was rewritten in 0.2.1 against the real surface.
 
 ## Features
 
-- **Async/Await API**: Modern async Rust with `tokio`
-- **Type-safe requests**: Strongly-typed request/response types
-- **Streaming support**: Real-time streaming inference
-- **Batch operations**: Efficient batched requests
-- **Health checks**: Built-in health and readiness probes
-- **OAuth2 authentication**: Optional OAuth2 support
-- **Retry logic**: Automatic retry with exponential backoff
-- **Connection pooling**: Efficient HTTP connection reuse
+- **Async/await API** built on `tokio`
+- **Typed requests and responses** via `serde`
+- **Streaming inference** over Server-Sent Events
+- **Batch inference**
+- **Health and readiness endpoints**, model listing and server metrics
+- **Authentication**: API key, JWT, OAuth2 client credentials, or your own
+  `Authenticator` implementation
+- **Retry logic** with exponential backoff
+- **Connection pooling** through `reqwest`
 
 ## Installation
 
-Add this to your `Cargo.toml`:
-
 ```toml
 [dependencies]
-trustformers-client = "0.1.4"
-tokio = { version = "1.0", features = ["full"] }
+trustformers-client = "0.2.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
+
+The `oauth2` feature is enabled by default; disable default features if you do
+not need it.
 
 ## Quick Start
 
-### Basic Inference
+Clients are constructed through `TrustformersClient::builder`; there is no
+`new` constructor, because the base URL alone is not enough to build one.
 
-```rust
-use trustformers_client::{TrustformersClient, InferenceRequest};
+```rust,no_run
+use trustformers_client::{InferenceRequest, TrustformersClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create client
-    let client = TrustformersClient::new("http://localhost:8080")?;
+    let client = TrustformersClient::builder("http://localhost:8080")
+        .api_key("your-api-key")
+        .build()?;
 
-    // Prepare request
-    let request = InferenceRequest {
-        model: "bert-base-uncased".to_string(),
-        inputs: vec!["Hello, world!".to_string()],
-        max_length: Some(512),
-        ..Default::default()
-    };
+    let request = InferenceRequest::new("Hello, world!").model_id("gpt2");
 
-    // Run inference
-    let response = client.infer(&request).await?;
-    println!("Predictions: {:?}", response.predictions);
+    let response = client.inference(request).await?;
+    for choice in &response.choices {
+        println!("{}", choice.text);
+    }
+    println!("{} tokens", response.usage.total_tokens);
 
     Ok(())
 }
@@ -57,83 +64,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Streaming Inference
 
-```rust
-use trustformers_client::{TrustformersClient, StreamingRequest};
+`stream_inference` turns streaming on for you, so the request does not have to
+set it.
+
+```rust,no_run
 use futures_util::StreamExt;
+use trustformers_client::{InferenceOptions, InferenceRequest, TrustformersClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = TrustformersClient::new("http://localhost:8080")?;
+    let client = TrustformersClient::builder("http://localhost:8080").build()?;
 
-    let request = StreamingRequest {
-        model: "gpt2".to_string(),
-        prompt: "Once upon a time".to_string(),
-        max_tokens: Some(100),
-        ..Default::default()
-    };
+    let request = InferenceRequest::new("Once upon a time")
+        .model_id("gpt2")
+        .options(InferenceOptions::new().max_tokens(100));
 
-    // Stream tokens as they're generated
-    let mut stream = client.stream(&request).await?;
-    while let Some(token) = stream.next().await {
-        let token = token?;
-        print!("{}", token.text);
+    let mut stream = client.stream_inference(request).await?;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if let Some(choice) = chunk.choices.first() {
+            if let Some(content) = &choice.delta.content {
+                print!("{content}");
+            }
+        }
     }
 
     Ok(())
 }
 ```
+
+A chunk that carries no `data:` payload — a keep-alive, for instance — is
+reported as `ClientError::Streaming` rather than silently dropped, so a caller
+that wants to ignore keep-alives should match on that variant.
 
 ### Batch Inference
 
-```rust
-use trustformers_client::{TrustformersClient, BatchRequest};
+```rust,no_run
+use trustformers_client::{BatchInferenceRequest, BatchOptions, InferenceRequest, TrustformersClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = TrustformersClient::new("http://localhost:8080")?;
+    let client = TrustformersClient::builder("http://localhost:8080").build()?;
 
-    let requests = vec![
-        InferenceRequest {
-            model: "bert-base-uncased".to_string(),
-            inputs: vec!["First text".to_string()],
-            ..Default::default()
-        },
-        InferenceRequest {
-            model: "bert-base-uncased".to_string(),
-            inputs: vec!["Second text".to_string()],
-            ..Default::default()
-        },
-    ];
+    let batch = BatchInferenceRequest::new(vec![
+        InferenceRequest::new("First text").model_id("gpt2"),
+        InferenceRequest::new("Second text").model_id("gpt2"),
+    ])
+    .options(BatchOptions::new().max_batch_size(8).parallel(true));
 
-    let batch = BatchRequest { requests };
-    let responses = client.batch_infer(&batch).await?;
-
-    for response in responses {
-        println!("Predictions: {:?}", response.predictions);
-    }
+    let response = client.batch_inference(batch).await?;
+    println!("{} responses in this batch", response.batch_size);
 
     Ok(())
 }
 ```
 
-### Health Checks
+### Health, Models and Metrics
 
-```rust
+```rust,no_run
 use trustformers_client::TrustformersClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = TrustformersClient::new("http://localhost:8080")?;
+    let client = TrustformersClient::builder("http://localhost:8080").build()?;
 
-    // Check server health
     let health = client.health().await?;
-    println!("Server status: {}", health.status);
+    println!("status: {} (up {}s)", health.status, health.uptime);
 
-    // Check readiness
-    let ready = client.ready().await?;
-    if ready {
-        println!("Server is ready to accept requests");
+    // Per-component detail from the same shape, on a different endpoint.
+    let detailed = client.detailed_health().await?;
+    for (component, status) in &detailed.components {
+        println!("  {component}: {status}");
     }
+
+    for model in client.list_models().await? {
+        println!("{} ({} parameters)", model.id, model.parameters);
+    }
+
+    let metrics = client.get_metrics().await?;
+    println!("{} metrics reported", metrics.len());
 
     Ok(())
 }
@@ -141,110 +150,157 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Authentication
 
-Enable OAuth2 authentication by adding the `oauth2` feature:
+Four authenticators ship with the crate, and the builder has a shortcut for
+three of them:
 
-```toml
-[dependencies]
-trustformers-client = { version = "0.1.4", features = ["oauth2"] }
+```rust,no_run
+use trustformers_client::TrustformersClient;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // API key (sent as `Authorization: Bearer …` by default)
+    let client = TrustformersClient::builder("http://localhost:8080")
+        .api_key("your-api-key")
+        .build()?;
+
+    // JWT bearer token
+    let client = TrustformersClient::builder("http://localhost:8080")
+        .jwt_token("your-jwt")
+        .build()?;
+
+    // OAuth2 client credentials (requires the default `oauth2` feature)
+    let client = TrustformersClient::builder("http://localhost:8080")
+        .oauth2("client-id", "client-secret", "https://auth.example.com/token")?
+        .build()?;
+    Ok(())
+}
 ```
 
-Then use authenticated client:
+`ApiKeyAuth::with_header` and `JwtAuth::with_header` cover servers that expect a
+different header or prefix; `CustomAuth::new` takes a closure over the
+`reqwest::RequestBuilder` for anything else. Pass any of them to
+`ClientBuilder::authenticator`.
 
-```rust
-use trustformers_client::{TrustformersClient, AuthConfig};
+The OAuth2 authenticator implements the client-credentials grant of RFC 6749
+section 4.4 directly on this crate's `reqwest`, without the `oauth2` crate: it
+fetches a token on first use and caches it until 30 seconds before it expires. A
+token response with no `expires_in` is used until the server rejects it, and an
+RFC 6749 section 5.2 error body is surfaced as `ClientError::Authentication`
+carrying the server's error code and description. Use `with_scopes` to request
+scopes:
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let auth = AuthConfig::OAuth2 {
-        client_id: "your-client-id".to_string(),
-        client_secret: "your-secret".to_string(),
-        token_url: "https://auth.example.com/token".to_string(),
-    };
+```rust,no_run
+use trustformers_client::{OAuth2Auth, TrustformersClient};
 
-    let client = TrustformersClient::with_auth(
-        "http://localhost:8080",
-        auth,
-    ).await?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let auth = OAuth2Auth::new("client-id", "client-secret", "https://auth.example.com/token")?
+        .with_scopes(["inference.read", "inference.write"]);
 
-    // Client automatically handles token refresh
-    let response = client.infer(&request).await?;
-
+    let client = TrustformersClient::builder("http://localhost:8080")
+        .authenticator(auth)
+        .build()?;
     Ok(())
 }
 ```
 
 ## Configuration
 
-```rust
-use trustformers_client::{TrustformersClient, ClientConfig};
+```rust,no_run
 use std::time::Duration;
+use trustformers_client::{ClientConfig, TrustformersClient};
 
-let config = ClientConfig {
-    timeout: Duration::from_secs(30),
-    max_retries: 3,
-    retry_delay: Duration::from_millis(100),
-    pool_idle_timeout: Some(Duration::from_secs(90)),
-    pool_max_idle_per_host: Some(32),
-    ..Default::default()
-};
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = ClientConfig {
+        timeout: Duration::from_secs(30),
+        max_retries: 3,
+        initial_retry_delay: Duration::from_millis(100),
+        max_retry_delay: Duration::from_secs(5),
+        backoff_multiplier: 2.0,
+        retryable_status_codes: vec![429, 500, 502, 503, 504],
+        ..Default::default()
+    };
 
-let client = TrustformersClient::with_config(
-    "http://localhost:8080",
-    config,
-)?;
+    let client = TrustformersClient::builder("http://localhost:8080")
+        .config(config)
+        .build()?;
+    Ok(())
+}
+```
+
+Connection pooling is configured on the underlying HTTP client, which the
+builder accepts directly. This snippet needs a matching `reqwest = "0.13"` in
+your own `Cargo.toml`, because the builder takes a `reqwest::ClientBuilder` and
+this crate does not re-export it:
+
+```rust,no_run
+use std::time::Duration;
+use trustformers_client::TrustformersClient;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = TrustformersClient::builder("http://localhost:8080")
+        .http_client_builder(
+            reqwest::Client::builder()
+                .pool_idle_timeout(Duration::from_secs(90))
+                .pool_max_idle_per_host(32),
+        )
+        .build()?;
+    Ok(())
+}
 ```
 
 ## Error Handling
 
-```rust
-use trustformers_client::{TrustformersClient, ClientError};
+```rust,no_run
+use trustformers_client::{ClientError, InferenceRequest, TrustformersClient};
 
 #[tokio::main]
-async fn main() {
-    let client = TrustformersClient::new("http://localhost:8080").unwrap();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = TrustformersClient::builder("http://localhost:8080").build()?;
 
-    match client.infer(&request).await {
-        Ok(response) => println!("Success: {:?}", response),
-        Err(ClientError::Network(e)) => eprintln!("Network error: {}", e),
-        Err(ClientError::Server { status, message }) => {
-            eprintln!("Server error {}: {}", status, message)
+    match client.inference(InferenceRequest::new("hello")).await {
+        Ok(response) => println!("{}", response.choices[0].text),
+        Err(ClientError::Request(error)) => eprintln!("transport error: {error}"),
+        Err(ClientError::Http { status, message }) => {
+            eprintln!("server returned {status}: {message}")
         }
-        Err(ClientError::Timeout) => eprintln!("Request timed out"),
-        Err(e) => eprintln!("Other error: {}", e),
+        Err(ClientError::Authentication(message)) => eprintln!("auth failed: {message}"),
+        Err(ClientError::Timeout) => eprintln!("request timed out"),
+        Err(ClientError::MaxRetriesExceeded) => eprintln!("gave up after the retry budget"),
+        Err(error) => eprintln!("other error: {error}"),
     }
+
+    Ok(())
 }
 ```
 
 ## Examples
 
-See the [`examples/`](examples/) directory for more comprehensive examples:
+- [`basic_client.rs`](examples/basic_client.rs) — health checks, model listing,
+  single and batch inference, streaming, and server metrics against a running
+  server.
 
-- [`basic_client.rs`](examples/basic_client.rs) - Basic inference requests
-- [`streaming_client.rs`](examples/streaming_client.rs) - Streaming token generation
-- [`batch_client.rs`](examples/batch_client.rs) - Batch processing
+```bash
+cargo run --example basic_client
+```
 
 ## Requirements
 
-- Rust 1.75 or higher
-- Tokio runtime for async operations
+- Rust 1.89 or newer (`rust-version` in `Cargo.toml`)
+- A `tokio` runtime
 
 ## Testing
-
-Run tests:
 
 ```bash
 cargo test
 ```
 
-Run with integration tests (requires running server):
-
-```bash
-cargo test --features integration-tests
-```
+The test suite is hermetic: the OAuth2 tests drive a token endpoint bound to
+`127.0.0.1:0` in-process, so no test contacts the network or needs a running
+TrustformeRS server.
 
 ## Documentation
 
-Full API documentation is available at [docs.rs/trustformers-client](https://docs.rs/trustformers-client).
+Full API documentation is available at
+[docs.rs/trustformers-client](https://docs.rs/trustformers-client).
 
 ## License
 
@@ -252,9 +308,10 @@ Licensed under Apache-2.0.
 
 ## Related Projects
 
-- [TrustformeRS](https://github.com/cool-japan/trustformers) - Main transformer library
-- [TrustformeRS Serve](../../) - Serving infrastructure
+- [TrustformeRS](https://github.com/cool-japan/trustformers) — main transformer library
+- [TrustformeRS Serve](../../) — serving infrastructure
 
 ## Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](../../CONTRIBUTING.md) for guidelines.
+Contributions are welcome! Please see [CONTRIBUTING.md](../../CONTRIBUTING.md)
+for guidelines.

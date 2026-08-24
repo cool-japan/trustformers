@@ -198,7 +198,7 @@ impl ConfigurationManager {
             serde_json::from_str(&content)?
         } else {
             // Try YAML format
-            serde_yaml::from_str(&content)?
+            serde_yaml_ng::from_str(&content)?
         };
 
         let validation_result = self.validate_config(config_type, &config);
@@ -221,7 +221,7 @@ impl ConfigurationManager {
     ) -> Result<()> {
         let content = match format {
             ConfigFormat::Json => serde_json::to_string_pretty(config)?,
-            ConfigFormat::Yaml => serde_yaml::to_string(config)?,
+            ConfigFormat::Yaml => serde_yaml_ng::to_string(config)?,
         };
 
         std::fs::write(path, content)?;

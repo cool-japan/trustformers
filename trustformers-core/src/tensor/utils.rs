@@ -71,7 +71,7 @@ impl Tensor {
             #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => {
                 // Use buffer_id as a unique identifier for Metal tensors
-                data.buffer_id.hash(&mut hasher);
+                data.buffer_id().hash(&mut hasher);
                 self.len().hash(&mut hasher);
             },
             #[cfg(feature = "cuda")]
@@ -363,11 +363,12 @@ impl Tensor {
                     );
                 }
 
-                Ok(Tensor::Metal(super::MetalTensorData {
+                Ok(Tensor::Metal(super::MetalTensorData::new(
+                    &backend,
                     buffer_id,
-                    shape: arr.shape().to_vec(),
-                    dtype: DType::F32,
-                }))
+                    arr.shape().to_vec(),
+                    DType::F32,
+                )?))
             },
 
             // F64 → Metal (convert to F32 first)
@@ -377,11 +378,12 @@ impl Tensor {
                 let backend = get_metal_backend()?;
                 let data_vec: Vec<f32> = arr.iter().map(|&x| x as f32).collect();
                 let buffer_id = backend.create_persistent_buffer(&data_vec)?;
-                Ok(Tensor::Metal(super::MetalTensorData {
+                Ok(Tensor::Metal(super::MetalTensorData::new(
+                    &backend,
                     buffer_id,
-                    shape: arr.shape().to_vec(),
-                    dtype: DType::F32,
-                }))
+                    arr.shape().to_vec(),
+                    DType::F32,
+                )?))
             },
 
             // Metal → F32
@@ -389,7 +391,7 @@ impl Tensor {
             (Tensor::Metal(metal_data), crate::device::Device::CPU) => {
                 use crate::gpu_ops::metal::get_metal_backend;
                 let backend = get_metal_backend()?;
-                let buffer = backend.get_persistent_buffer(&metal_data.buffer_id)?;
+                let buffer = backend.get_persistent_buffer(&metal_data.buffer_id())?;
 
                 // Download from GPU
                 let size: usize = metal_data.shape.iter().product();

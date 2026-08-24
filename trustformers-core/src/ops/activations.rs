@@ -30,13 +30,14 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
             // );
 
             // Execute GELU GPU-to-GPU (NO CPU transfers!)
-            let output_buffer_id = backend.gelu_gpu_to_gpu(&metal_data.buffer_id, size)?;
+            let output_buffer_id = backend.gelu_gpu_to_gpu(&metal_data.buffer_id(), size)?;
 
-            Ok(Tensor::Metal(MetalTensorData {
-                buffer_id: output_buffer_id,
-                shape: metal_data.shape.clone(),
-                dtype: metal_data.dtype,
-            }))
+            Ok(Tensor::Metal(MetalTensorData::new(
+                &backend,
+                output_buffer_id,
+                metal_data.shape.clone(),
+                metal_data.dtype,
+            )?))
         },
 
         // GPU-resident CUDA tensor - process directly on GPU (ZERO TRANSFERS!)

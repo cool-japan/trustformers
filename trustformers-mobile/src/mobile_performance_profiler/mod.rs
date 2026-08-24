@@ -9,7 +9,6 @@
 //! The mobile performance profiler is organized into several focused modules:
 //! - [`types`] - Core types, metrics structures, and shared data models
 //! - [`config`] - Configuration management for profiling parameters
-//! - [`metrics`] - Metrics collection, snapshots, and aggregation
 //! - [`bottleneck_detection`] - Performance bottleneck detection and analysis
 //! - [`optimization`] - Optimization engine and suggestion generation
 //! - [`monitoring`] - Real-time monitoring, alerting, and event handling
@@ -23,7 +22,6 @@ pub mod bottleneck_detection;
 pub mod collector;
 pub mod config;
 pub mod export;
-pub mod metrics;
 pub mod monitoring;
 pub mod optimization;
 pub mod profiler;
@@ -41,7 +39,7 @@ pub use bottleneck_detection::{BottleneckDetector, BottleneckType, PerformanceBo
 pub use collector::{CollectionStatistics, MobileMetricsCollector};
 pub use config::ExportConfig;
 pub use config::{CpuProfilingConfig, MemoryProfilingConfig, MobileProfilerConfig, SamplingConfig};
-pub use export::{ExportFormat, ProfilerExportManager, VisualizationEngine};
+pub use export::{ExportFormat, ProfilerExportManager};
 pub use monitoring::{AlertManager, AlertType, PerformanceAlert, RealTimeMonitor};
 pub use optimization::OptimizationEngine;
 pub use session::{ProfilingSession, SessionInfo, SessionMetadata};

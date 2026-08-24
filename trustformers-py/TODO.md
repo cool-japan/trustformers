@@ -103,20 +103,22 @@ embeddings = outputs.last_hidden_state  # NumPy array
 ```python
 from trustformers import pipeline
 
-# Text generation
-generator = pipeline("text-generation", model="gpt2")
+from trustformers import GPT2LMHeadModel, BPETokenizer
+
+# Text generation. `pipeline` takes a *local* checkpoint directory: this crate
+# has no Hugging Face Hub downloader, so a bare name like "gpt2" raises.
+model = GPT2LMHeadModel.from_pretrained("/path/to/local/gpt2")
+tokenizer = BPETokenizer(vocab, merges)
+generator = pipeline("text-generation", model=model, tokenizer=tokenizer)
 result = generator("Once upon a time", max_length=100)
-print(result[0]['generated_text'])
+print(result[0]['generated_text'])   # prompt + real decoded continuation
 
-# Text classification
-classifier = pipeline("sentiment-analysis")
-result = classifier("I love Rust!")
-print(result)  # [{'label': 'POSITIVE', 'score': 0.9998}]
+# Text classification. Labels come from the checkpoint's `id2label`; scores are
+# a real softmax over the classification head's logits and sum to 1.
+classifier = pipeline("text-classification", model=classifier_model, tokenizer=tokenizer)
+print(classifier("I love Rust!"))    # [{'label': ..., 'score': ...}, ...]
 
-# Question answering
-qa = pipeline("question-answering")
-result = qa(question="What is Rust?", context="Rust is a systems programming language...")
-print(result['answer'])
+# Question answering / NER raise NotImplementedError -- see Known Limitations.
 ```
 
 ---
@@ -362,8 +364,8 @@ pytest tests/benchmarks/ --benchmark-only
   exception rather than silently succeeding).
 - **`save_pretrained` writes a real `config.json` + `model.safetensors`** for
   `BertModel`, `GPT2Model`, `GPT2LMHeadModel`, `T5Model`, and `LlamaModel`
-  (`BertForSequenceClassification` exports the BERT encoder only -- its
-  classification head is still a placeholder, tracked below). It raises for
+  (and for `BertForSequenceClassification`, which exports the encoder under
+  `bert.` *plus* its real `classifier.{weight,bias}` head). It raises for
   `RwkvModel`/`MambaModel`, since `trustformers-models` has not yet given
   either architecture a `Model::named_tensors()` override to enumerate weights
   from; once one is added, `save_pretrained` starts working with no changes
@@ -372,13 +374,120 @@ pytest tests/benchmarks/ --benchmark-only
   head (mirrors HuggingFace's own headless `GPT2Model`). Use
   `GPT2LMHeadModel.from_pretrained(...)` for real autoregressive generation
   (greedy/temperature/top-k/top-p via `trustformers_core::generation::TextGenerator`).
-- **`pipelines.py` task pipelines are still stubbed**: `TextGenerationPipeline`,
-  `TextClassificationPipeline`, `TokenClassificationPipeline`, and
-  `QuestionAnsweringPipeline.__call__` all return hardcoded example output
-  (`"{text} [Generated continuation]"`, `score: 0.95`, always-`POSITIVE`
-  sentiment, etc.) rather than running their wrapped model/tokenizer. This is
-  a separate fake-implementation gap from the `models.py` one fixed above --
-  not yet wired to the same real inference paths.
+- **`TextGenerationPipeline` and `TextClassificationPipeline` run real
+  inference.** `text-generation` tokenizes with the pipeline's own tokenizer,
+  decodes through `trustformers_core::generation::TextGenerator` over a real
+  `GPT2LMHeadModel`, and detokenizes the result; `text-classification` runs a
+  real `BertForSequenceClassification` forward pass and reports a real softmax
+  over its logits, labelled from the checkpoint's `id2label`. Both resolve
+  their model and tokenizer at *construction*, so a mismatched pair is refused
+  where the caller can still act on it. (They previously returned hardcoded
+  output -- `"{text} [Generated continuation]"` with `score: 0.95`, and a fixed
+  `POSITIVE 0.7 / NEGATIVE 0.3` pair -- without ever touching the model.)
+- **`TokenClassificationPipeline` and `QuestionAnsweringPipeline` refuse
+  construction** with a structured `NotImplementedError`. Two things are
+  missing, and neither is papered over:
+  1. `trustformers_models::bert::BertForTokenClassification` and
+     `BertForQuestionAnswering` are real models with real heads, but this crate
+     exposes no Python wrapper for either yet.
+  2. Both pipelines' HuggingFace output shape carries *character* offsets
+     (`start` / `end`), and `trustformers-tokenizers` sets
+     `TokenizedInput::offset_mapping` to `None` unconditionally in both its
+     WordPiece and BPE encoders, so those keys cannot be filled honestly.
+     Reporting token indices under them would be wrong in a way callers could
+     not detect.
+  They previously invented a `B-PER` entity named `"John"` at characters 0..4
+  for every input, and the literal answer string `"Example answer"` with
+  `score: 0.85` for every question.
+- **Tokenizer `from_pretrained` reads real local files.** `WordPieceTokenizer`
+  loads `vocab.txt` (ids are line numbers) or `vocab.json`, plus an optional
+  `tokenizer_config.json` for the special-token names and `do_lower_case`;
+  `BPETokenizer` gained a `from_pretrained` that loads `vocab.json` **and**
+  `merges.txt` (both required -- a BPE tokenizer without its merge table cannot
+  reproduce its own tokenization). Special-token ids are looked up in the loaded
+  vocabulary and a token that is missing from it is an error, not a default id
+  pointing at some other token. Previously a `download_file_from_hub` stub
+  returned the empty *path* for every request, so `WordPieceTokenizer.from_pretrained`
+  could only ever raise "Failed to read vocab.txt: No such file or directory",
+  and `BPETokenizer` had no `from_pretrained` at all.
+- **`AutoTokenizer.from_pretrained` actually loads the named checkpoint.** It
+  used to ignore the path entirely and return a freshly constructed, empty
+  tokenizer -- a five-entry `[PAD]/[UNK]/[CLS]/[SEP]/[MASK]` vocabulary for
+  WordPiece, and no vocabulary and no merges for BPE -- while reporting success.
+  Every real word encodes to `[UNK]` under those, so anything downstream was
+  running on noise. SentencePiece checkpoints (T5, LLaMA) now raise
+  `NotImplementedError` instead of being silently loaded with the BPE reader.
+- **Tokenizer `save_pretrained` round-trips with `from_pretrained`.**
+  `WordPieceTokenizer` writes a real `vocab.txt`, and `BPETokenizer` a real
+  `vocab.json` + `merges.txt`, alongside `tokenizer_config.json` (carrying the
+  tokenizer's *actual* vocabulary size) and `special_tokens_map.json`. The base
+  `PreTrainedTokenizer.save_pretrained` now refuses, as
+  `PreTrainedModel.save_pretrained` already did: it holds no vocabulary, and it
+  used to write a `"vocab_size": 30522` (BERT's, whatever the tokenizer really
+  was) with no vocabulary file at all.
+- **`top_k` and `top_p` default to `None` in `TextGenerationPipeline`**, not to
+  HuggingFace's `50` / `1.0`. `TextGenerator` applies exactly one truncation
+  strategy per step, so adopting both defaults would mean silently dropping
+  one; setting both explicitly is an error for the same reason.
+- **Pipelines reject unknown keyword arguments** instead of accepting and
+  ignoring them, which is what the placeholder implementations did with every
+  argument they were given (`max_length`, `temperature`, `top_k`, ... were all
+  discarded by a `let _ = (...)`).
+
+---
+
+### Dependency pins (PyO3 0.28 / SciRS2 0.5.1)
+
+**Status:** deliberate pin, not drift. Recorded here because it is the one place
+this crate knowingly departs from the workspace's "always the latest crates.io
+version" policy.
+
+- `pyo3 = "0.28"` and `scirs2-core` / `scirs2-numpy` `= "0.5.1"` are pinned
+  *together*. They cannot be bumped independently:
+  - `scirs2-numpy` 0.6.x hard-requires `pyo3 = "0.29.0"` (verified against its
+    published `Cargo.toml`).
+  - `pyo3` declares `links = "python"`, so Cargo permits **exactly one** `pyo3`
+    version in the dependency graph. A `scirs2-numpy` on 0.29 next to this
+    crate's own `pyo3 = "0.28"` is therefore not a resolvable graph, not merely
+    a warning.
+  - 0.5.1 is the pair this crate's `Cargo.lock` already resolves against
+    `pyo3` 0.28.3.
+- **Migrating requires a PyO3 0.28 -> 0.29 pass over this crate's whole binding
+  surface** (~10k lines across `models/`, `pipelines/`, `tokenizers.rs`,
+  `tensor*.rs`, `training.rs`, `auto.rs`). It is a single atomic change --
+  `pyo3`, `pyo3-build-config`, `scirs2-core`, and `scirs2-numpy` all move in one
+  commit or none of them do.
+- **Security context:** RUSTSEC-2026-0176 / RUSTSEC-2026-0177 are the advisories
+  that make this worth tracking rather than leaving as a silent pin. Until the
+  migration lands, the pin is the reason `cargo audit` output for this crate
+  must be read against these two IDs specifically.
+- **Migration checklist** (for whoever picks this up):
+  1. Bump `pyo3`, `pyo3-build-config`, `scirs2-core`, `scirs2-numpy` in one edit.
+  2. Re-check the pyo3 0.29 deprecations this crate already tracks:
+     `Bound::cast` (replaced `PyAnyMethods::downcast` in 0.28) and the removal
+     of the crate-root `PyObject` alias, which every module here re-declares
+     locally as `type PyObject = Py<PyAny>;`.
+  3. `cargo check && cargo clippy --all-targets -- -D warnings && cargo test`
+     from inside `trustformers-py/` -- it is a workspace-excluded crate with its
+     own `[workspace]` table and its own lock file, so workspace-level commands
+     do not cover it.
+
+### Build notes
+
+- **This crate is excluded from the root workspace** (`[workspace]` in its own
+  `Cargo.toml`). Every `cargo` command for it must be run from inside
+  `trustformers-py/`; a green `cargo check --workspace` at the repo root says
+  nothing about this crate.
+- **The `trustformers` umbrella crate is deliberately not a dependency.** It was
+  removed after verifying, with `cargo tree -e features -p trustformers-core`
+  and `-p trustformers-models` snapshots taken before and after, that the
+  normalised feature sets of both crates were byte-identical either way -- so no
+  feature unification was lost. It dropped 54 transitive packages (and added none) (clap, url,
+  the `icu_*` family, `oxiarc-{archive,brotli,bzip2,lzma,snappy}`, `dirs`,
+  `encoding_rs`, ...) with no version changes anywhere in the lock. The bindings
+  reach `trustformers-core` / `-models` / `-tokenizers` / `-optim` / `-training`
+  directly; the only mentions of the umbrella left in `src/` are three
+  commented-out `use` lines.
 
 ---
 

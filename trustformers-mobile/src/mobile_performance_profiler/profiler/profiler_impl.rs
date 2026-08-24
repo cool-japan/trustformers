@@ -59,7 +59,10 @@ impl MobilePerformanceProfiler {
         // Initialize all subsystems
         let session_tracker = ProfilingSession::new(device_info.clone())?;
         let bottleneck_detector = BottleneckDetector::new(config.clone())?;
-        let optimization_engine = OptimizationEngine::new(config.clone())?;
+        let optimization_engine =
+            crate::mobile_performance_profiler::optimization::OptimizationEngine::new(
+                OptimizationEngineConfig::default(),
+            )?;
         let real_time_monitor = RealTimeMonitor::new(config.clone())?;
         let export_manager = ProfilerExportManager::new(config.clone())?;
         let alert_manager = AlertManager::new(config.clone())?;
@@ -406,7 +409,15 @@ impl MobilePerformanceProfiler {
     pub fn detect_bottlenecks(&self) -> Result<Vec<PerformanceBottleneck>> {
         debug!("Detecting performance bottlenecks");
 
-        let detector = self.bottleneck_detector.lock().unwrap_or_else(|p| p.into_inner());
+        // Evaluate the detection rules against the collector's current
+        // snapshot. This call used to return `get_active_bottlenecks()` from a
+        // detector whose rule list was constructed empty and never populated,
+        // so it could only ever return nothing -- a clean bill of health that
+        // no measurement backed.
+        let metrics = self.measure_now()?;
+
+        let mut detector = self.bottleneck_detector.lock().unwrap_or_else(|p| p.into_inner());
+        detector.analyze(&metrics).context("Failed to evaluate bottleneck rules")?;
         let bottlenecks = detector.get_active_bottlenecks();
 
         debug!("Detected {} bottlenecks", bottlenecks.len());
@@ -424,8 +435,13 @@ impl MobilePerformanceProfiler {
     pub fn get_optimization_suggestions(&self) -> Result<Vec<OptimizationSuggestion>> {
         debug!("Getting optimization suggestions");
 
-        let engine = self.optimization_engine.lock().unwrap_or_else(|p| p.into_inner());
-        let suggestions = engine.get_active_suggestions();
+        let bottlenecks = self.detect_bottlenecks()?;
+        let metrics = self.measure_now()?;
+
+        let mut engine = self.optimization_engine.lock().unwrap_or_else(|p| p.into_inner());
+        let suggestions = engine
+            .generate_suggestions(&metrics, &bottlenecks)
+            .context("Failed to generate optimization suggestions")?;
 
         debug!("Generated {} optimization suggestions", suggestions.len());
         Ok(suggestions)
@@ -435,7 +451,10 @@ impl MobilePerformanceProfiler {
     ///
     /// Returns currently active performance alerts that require attention.
     pub fn get_active_alerts(&self) -> Result<Vec<PerformanceAlert>> {
-        let manager = self.alert_manager.lock().unwrap_or_else(|p| p.into_inner());
+        let metrics = self.measure_now()?;
+
+        let mut manager = self.alert_manager.lock().unwrap_or_else(|p| p.into_inner());
+        manager.evaluate(&metrics).context("Failed to evaluate alert rules")?;
         Ok(manager.get_active_alerts())
     }
 
@@ -443,11 +462,9 @@ impl MobilePerformanceProfiler {
     ///
     /// Returns overall system health status including component-specific
     /// health scores and recommendations.
-    pub fn get_system_health(&self) -> Result<SystemHealth> {
+    pub fn get_system_health(&self) -> Result<Option<SystemHealth>> {
         debug!("Getting system health assessment");
-
-        let analyzer = self.performance_analyzer.lock().unwrap_or_else(|p| p.into_inner());
-        analyzer.get_current_health().context("Failed to get system health assessment")
+        self.assess_health_now().context("Failed to get system health assessment")
     }
 
     /// Export profiling data in specified format
@@ -560,11 +577,9 @@ impl MobilePerformanceProfiler {
     /// Perform health check on the profiler system
     ///
     /// Returns system health status and diagnostic information.
-    pub fn health_check(&self) -> Result<SystemHealth> {
+    pub fn health_check(&self) -> Result<Option<SystemHealth>> {
         debug!("Performing profiler health check");
-
-        let analyzer = self.performance_analyzer.lock().unwrap_or_else(|p| p.into_inner());
-        analyzer.get_current_health().context("Failed to perform health check")
+        self.assess_health_now().context("Failed to perform health check")
     }
 
     /// Get profiler capabilities and supported features
@@ -600,16 +615,43 @@ impl MobilePerformanceProfiler {
     /// Assess overall system health
     ///
     /// Provides comprehensive health assessment of the mobile system.
-    pub fn assess_system_health(&self) -> Result<SystemHealth> {
+    pub fn assess_system_health(&self) -> Result<Option<SystemHealth>> {
         debug!("Assessing system health");
-
-        let analyzer = self.performance_analyzer.lock().unwrap_or_else(|p| p.into_inner());
-        analyzer.get_current_health().context("Failed to assess system health")
+        self.assess_health_now().context("Failed to assess system health")
     }
 
     // =============================================================================
     // PRIVATE HELPER METHODS
     // =============================================================================
+
+    /// Take a fresh measurement and return it.
+    ///
+    /// The query APIs below (`detect_bottlenecks`, `get_active_alerts`,
+    /// health assessment) sample at the moment they are called rather than
+    /// reading whatever the background sampler last stored, so a profiler that
+    /// has not yet completed a sampling interval still answers from real data
+    /// instead of from a default-constructed snapshot.
+    fn measure_now(&self) -> Result<MobileMetricsSnapshot> {
+        let collector = self.metrics_collector.lock().unwrap_or_else(|p| p.into_inner());
+        if let Err(error) = collector.collect_metrics() {
+            // Collection disabled by configuration, or a family refused: the
+            // snapshot below then reports which families are absent.
+            debug!(
+                "Metrics collection reported an error while sampling: {}",
+                error
+            );
+        }
+        collector.get_current_snapshot().context("Failed to read current metrics")
+    }
+
+    /// Assess health from a fresh measurement.
+    ///
+    /// `None` when the running device measured no metric family at all.
+    fn assess_health_now(&self) -> Result<Option<SystemHealth>> {
+        let metrics = self.measure_now()?;
+        let analyzer = self.performance_analyzer.lock().unwrap_or_else(|p| p.into_inner());
+        analyzer.assess_health(&metrics)
+    }
 
     /// Generate comprehensive profiling data
     fn generate_profiling_data(&self) -> Result<ProfilingData> {
@@ -649,10 +691,7 @@ impl MobilePerformanceProfiler {
         let summary = self.calculate_profiling_summary(&metrics, &events, &bottlenecks)?;
 
         // Get system health assessment
-        let system_health = {
-            let analyzer = self.performance_analyzer.lock().unwrap_or_else(|p| p.into_inner());
-            analyzer.get_current_health()?
-        };
+        let system_health = self.assess_health_now()?;
 
         Ok(ProfilingData {
             session_info,
@@ -663,7 +702,7 @@ impl MobilePerformanceProfiler {
             summary,
             system_health,
             export_timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64,
-            profiler_version: "1.0.0".to_string(),
+            profiler_version: env!("CARGO_PKG_VERSION").to_string(),
         })
     }
 
@@ -687,25 +726,62 @@ impl MobilePerformanceProfiler {
             inference_events.iter().filter_map(|e| e.duration_ms).sum::<f64>()
                 / total_inferences.max(1) as f64;
 
-        // Calculate resource usage statistics
+        // Resource usage statistics. Every aggregate below is taken over the
+        // snapshots that actually carried the metric: a snapshot with no GPU,
+        // battery or thermal telemetry contributes nothing rather than a zero,
+        // and an aggregate with no contributing snapshot at all is `None`.
         let peak_memory_mb = metrics
             .iter()
-            .map(|m| m.memory.heap_used_mb + m.memory.native_used_mb)
-            .fold(0.0f32, f32::max);
+            .filter_map(|m| {
+                m.memory
+                    .as_ref()
+                    .map(|memory| memory.heap_used_mb + memory.native_used_mb.unwrap_or(0.0))
+            })
+            .fold(None::<f32>, |peak, mb| {
+                Some(peak.map_or(mb, |best| best.max(mb)))
+            });
 
-        let avg_cpu_usage =
-            metrics.iter().map(|m| m.cpu.usage_percent).sum::<f32>() / metrics.len() as f32;
+        let cpu_samples: Vec<f32> = metrics
+            .iter()
+            .filter_map(|m| m.cpu.as_ref().map(|cpu| cpu.usage_percent))
+            .collect();
+        let avg_cpu_usage = if cpu_samples.is_empty() {
+            None
+        } else {
+            Some(cpu_samples.iter().sum::<f32>() / cpu_samples.len() as f32)
+        };
 
-        let avg_gpu_usage =
-            metrics.iter().map(|m| m.gpu.usage_percent).sum::<f32>() / metrics.len() as f32;
+        let gpu_samples: Vec<f32> = metrics
+            .iter()
+            .filter_map(|m| m.gpu.as_ref().map(|gpu| gpu.usage_percent))
+            .collect();
+        let avg_gpu_usage = if gpu_samples.is_empty() {
+            None
+        } else {
+            Some(gpu_samples.iter().sum::<f32>() / gpu_samples.len() as f32)
+        };
 
-        // Calculate battery consumption
-        let battery_consumed_mah =
-            metrics.iter().map(|m| m.battery.power_consumption_mw).sum::<f32>() / 1000.0; // Convert mW to mAh estimate
+        let battery_samples: Vec<f32> = metrics
+            .iter()
+            .filter_map(|m| m.battery.as_ref().map(|battery| battery.power_consumption_mw))
+            .collect();
+        // mW summed over the sampled snapshots, expressed in mAh-equivalent
+        // units the way this summary has always reported it.
+        let battery_consumed_mah = if battery_samples.is_empty() {
+            None
+        } else {
+            Some(battery_samples.iter().sum::<f32>() / 1000.0)
+        };
 
-        // Count thermal events
-        let thermal_events =
-            metrics.iter().filter(|m| m.thermal.throttling_level > 0.0).count() as u32;
+        let throttling_samples: Vec<f32> = metrics
+            .iter()
+            .filter_map(|m| m.thermal.as_ref().and_then(|thermal| thermal.throttling_level))
+            .collect();
+        let thermal_events = if throttling_samples.is_empty() {
+            None
+        } else {
+            Some(throttling_samples.iter().filter(|level| **level > 0.0).count() as u32)
+        };
 
         // Calculate overall performance score
         let performance_score = self.calculate_performance_score(metrics, bottlenecks)?;
@@ -725,38 +801,62 @@ impl MobilePerformanceProfiler {
         })
     }
 
-    /// Calculate overall performance score
+    /// Overall performance score in `0.0..=100.0`, or `None` when the session
+    /// recorded nothing to score.
+    ///
+    /// The score is a weighted average over the components the latest snapshot
+    /// actually measured, with the remaining weights renormalised. GPU and
+    /// thermal drop out on a device that reports neither rather than
+    /// contributing a full mark (which the old `100.0 - 0.0` produced from an
+    /// unmeasured GPU) or a zero. The old empty-session return was a flat
+    /// `50.0` "neutral score" -- a number where there was no measurement.
     fn calculate_performance_score(
         &self,
         metrics: &[MobileMetricsSnapshot],
         bottlenecks: &[PerformanceBottleneck],
-    ) -> Result<f32> {
-        if metrics.is_empty() {
-            return Ok(50.0); // Neutral score
-        }
-
-        let latest_metrics = &metrics[metrics.len() - 1];
-
-        // Base score from resource utilization (0-100)
-        let memory_score = 100.0
-            - (latest_metrics.memory.heap_used_mb / latest_metrics.memory.heap_total_mb.max(1.0))
-                * 100.0;
-        let cpu_score = 100.0 - latest_metrics.cpu.usage_percent;
-        let gpu_score = 100.0 - latest_metrics.gpu.usage_percent;
-        let thermal_score = match latest_metrics.thermal.thermal_state {
-            ThermalState::Nominal => 100.0,
-            ThermalState::Fair => 80.0,
-            ThermalState::Serious => 60.0,
-            ThermalState::Critical => 20.0,
-            ThermalState::Emergency => 5.0,
-            ThermalState::Shutdown => 0.0,
+    ) -> Result<Option<f32>> {
+        let Some(latest_metrics) = metrics.last() else {
+            return Ok(None);
         };
 
-        // Calculate weighted average
-        let base_score =
-            (memory_score * 0.3 + cpu_score * 0.3 + gpu_score * 0.2 + thermal_score * 0.2)
-                .max(0.0)
-                .min(100.0);
+        let mut weighted_sum = 0.0f32;
+        let mut total_weight = 0.0f32;
+        let mut fold = |score: f32, weight: f32| {
+            weighted_sum += score.clamp(0.0, 100.0) * weight;
+            total_weight += weight;
+        };
+
+        if let Some(share) = latest_metrics
+            .memory
+            .as_ref()
+            .and_then(|memory| memory.resident_share_percent())
+        {
+            fold(100.0 - share, 0.3);
+        }
+        if let Some(cpu) = latest_metrics.cpu.as_ref() {
+            fold(100.0 - cpu.usage_percent, 0.3);
+        }
+        if let Some(gpu) = latest_metrics.gpu.as_ref() {
+            fold(100.0 - gpu.usage_percent, 0.2);
+        }
+        if let Some(thermal) = latest_metrics.thermal.as_ref() {
+            fold(
+                match thermal.thermal_state {
+                    ThermalState::Nominal => 100.0,
+                    ThermalState::Fair => 80.0,
+                    ThermalState::Serious => 60.0,
+                    ThermalState::Critical => 20.0,
+                    ThermalState::Emergency => 5.0,
+                    ThermalState::Shutdown => 0.0,
+                },
+                0.2,
+            );
+        }
+
+        if total_weight <= 0.0 {
+            return Ok(None);
+        }
+        let base_score = (weighted_sum / total_weight).clamp(0.0, 100.0);
 
         // Apply bottleneck penalties
         let bottleneck_penalty = bottlenecks
@@ -769,7 +869,7 @@ impl MobilePerformanceProfiler {
             })
             .sum::<f32>();
 
-        Ok((base_score - bottleneck_penalty).max(0.0).min(100.0))
+        Ok(Some((base_score - bottleneck_penalty).clamp(0.0, 100.0)))
     }
 
     /// Get current session duration in milliseconds

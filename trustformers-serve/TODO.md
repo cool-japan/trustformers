@@ -1,6 +1,6 @@
 # trustformers-serve TODO List
 
-**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~4,321 | **Public API Items:** 7,319 | **SLoC:** 283,692 | **Updated:** 2026-07-09
+**Version:** 0.2.1 (unreleased) | **Status:** Stable | **Tests:** ~4,321 as of 2026-07-01, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24) | **Public API Items:** 7,319 as of 2026-07-09, not re-verified | **SLoC:** 273,756 (`tokei`, verified 2026-08-24; was 283,692/278,397 on 2026-07-09/2026-08-18 — this cycle's `resource_manager/` placeholder-tree deletion, 5,972 lines, is the largest single driver of the drop) | **Updated:** 2026-08-24
 
 ## Overview
 
@@ -14,15 +14,15 @@ This is the largest crate in the `trustformers` workspace by public API surface:
 - GraphQL API for flexible queries
 - Distributed serving with load balancing
 - Model management (hot-swapping, versioning, A/B testing)
-- Hardware acceleration (CUDA, ROCm, Metal, XLA, Vulkan)
+- Hardware acceleration via `trustformers-core`'s device layer — CUDA/Metal real, ROCm real-but-unverified-here, XLA/Vulkan not reliably real (see "Hardware Acceleration" below, corrected 2026-08-24)
 - Kubernetes deployment with autoscaling
 - Monitoring and observability (Prometheus with once_cell lazy statics, Jaeger, OpenTelemetry)
 - SLO monitoring and breach alerting
 - NUMA/topology-aware performance optimizer (Linux sysfs, macOS sysctl)
 - Speculative decoding with draft models
 - Kernel fusion for GPU operations
-- Message queue integration (Kafka — production; RabbitMQ/Redis Streams/NATS/SQS — interface complete, real backend wiring pending)
-- Cloud provider support (AWS, GCP, Azure — orchestration layer real; per-provider inference calls simulated pending real SDK integration)
+- Message queue integration (Kafka — production; RabbitMQ/Redis Streams/NATS/SQS — **real backends since 2026-08-18**, see "Completed Features" below — this bullet previously read "interface complete, wiring pending", which is now stale)
+- Cloud provider support (AWS, GCP, Azure — orchestration layer real; **`cloud_providers.rs` no longer returns a canned mock response for any of its 6 provider integrations, verified 2026-08-24** — `grep -c "Mock response\|example.com/endpoint"` returns 0 hits in that file today. This bullet previously read "per-provider inference calls simulated", which is now stale for at least the generic `cloud_providers.rs` path; the AWS Lambda serverless *adapter* specifically is a separate, still-fabricated concern — see "Completed Features" below.)
 - GDPR compliance
 
 ---
@@ -32,10 +32,10 @@ This is the largest crate in the `trustformers` workspace by public API surface:
 ### Implementation Status
 - [x] **PRODUCTION-READY** - Complete serving infrastructure
 - [x] **ZERO COMPILATION ERRORS** - Clean compilation
-- [x] **COMPREHENSIVE TESTING** - ~4,321 tests passing, 0 failures (workspace-wide `cargo nextest run --workspace --all-features`, 2026-07-01: 18,102 passed / 0 failed / 119 skipped, 0 clippy warnings, 0 rustdoc warnings)
+- [x] **COMPREHENSIVE TESTING** - ~4,321 tests as of 2026-07-01 (stale figure, not independently re-run this pass; see root `TODO.md` for the current workspace-wide baseline, 20,629 passed / 43 skipped / 0 failed as of 2026-08-24)
 - [x] **REQUEST QUEUING** - Priority queue with deadline awareness and cancellation (`queue` module)
 - [x] **PRIORITY SCHEDULING** - WRR, EDF, fair queuing, priority, and FIFO strategies (`scheduler` module)
-- [x] **HARDWARE ACCELERATED** - CUDA, ROCm, Metal support
+- [x] **HARDWARE ACCELERATED** - CUDA and Metal support real and hardware-verified elsewhere in this workspace; ROCm real but not hardware-verified here (see "Hardware Acceleration" below, corrected 2026-08-24)
 - [x] **KUBERNETES READY** - Helm charts, autoscaling, monitoring
 
 ### Feature Coverage
@@ -446,11 +446,13 @@ server.enable_ab_test("gpt2", ab_config)?;
 
 ### Hardware Acceleration
 
+> **Corrected 2026-08-24**: this section describes the `trustformers-core`/`trustformers-models` hardware layer this crate dispatches to, not code `trustformers-serve` implements itself — and the checkmarks below overclaimed against that layer's real state. See `trustformers-core/TODO.md`'s "Hardware Acceleration" section (rewritten 2026-08-24) for the verified, per-backend detail. Summary: **CUDA and Metal are real** (hardware-verified elsewhere in this workspace); **ROCm** has real `dlopen`-based HIP scaffolding but is not hardware-verified in this environment; **Metal no longer uses MPS** (Metal Performance Shaders) — it runs on the Pure-Rust `oxicuda-metal`, so the "Metal Performance Shaders (MPS)" bullet below is stale; `trustformers-core` has no XLA/oneAPI backend beyond empty no-op facades, and no TPU support at all — do not read the "Key Responsibilities" bullet above's "Hardware acceleration (CUDA, ROCm, Metal, XLA, Vulkan)" as implying XLA works.
+
 #### CUDA Support
 
 **NVIDIA GPU acceleration**
 
-- [x] **Features**
+- [x] **Features** (real, hardware-verified elsewhere in this workspace — see `trustformers-core/TODO.md`)
   - cuDNN integration
   - cuBLAS for GEMM
   - Multi-GPU support
@@ -463,11 +465,7 @@ server.enable_ab_test("gpt2", ab_config)?;
 
 **AMD GPU acceleration**
 
-- [x] **Features**
-  - MIOpen integration
-  - rocBLAS for GEMM
-  - HIP kernels
-  - Multi-GPU support
+- Real `dlopen`-based HIP runtime bindings exist in `trustformers-core` (feature-gated, not hardware-verified in this environment — see `trustformers-core/TODO.md`). The specific sub-features below (MIOpen, rocBLAS, multi-GPU) were not individually verified this pass; do not assume all four are wired just because the section header is real.
 
 ---
 
@@ -475,11 +473,10 @@ server.enable_ab_test("gpt2", ab_config)?;
 
 **Apple Silicon acceleration**
 
-- [x] **Features**
-  - Metal Performance Shaders (MPS)
-  - Metal compute kernels
+- [x] **Features** (real, hardware-verified elsewhere in this workspace — see `trustformers-core/TODO.md`), corrected 2026-08-24: runs on the Pure-Rust `oxicuda-metal`, **not** Metal Performance Shaders (MPS) — the MPS dependency was dropped
+  - Metal compute kernels (via `oxicuda-metal`)
   - Unified memory
-  - Neural Engine integration
+  - Neural Engine integration (not independently verified this pass)
 
 ---
 
@@ -570,7 +567,7 @@ helm install trustformers ./helm/trustformers \
 - ~~RabbitMQ, Redis Streams, NATS, and AWS SQS message-queue backends are trait-complete but currently no-op placeholders~~ — **fixed, verified 2026-08-18**: real backends now live under `src/message_queue/{rabbitmq,nats,redis_streams,sqs}.rs`; see "Message Queue Integration" above.
 - ~~Per-provider cloud inference/deployment ... is simulated/mocked~~ — **fixed for Azure, verified 2026-08-18**: the shared mock-response macro is gone crate-wide; Azure's REST implementation makes real HTTP calls. AWS/GCP/HuggingFace/OpenAI/Anthropic not individually re-checked this pass — see "Cloud Provider Support" above.
 - The AWS Lambda serverless adapter (`src/serverless/awslambdaprovider_traits.rs`) is not yet wired to real AWS Lambda: `deploy()` fabricates an ARN using a hardcoded placeholder AWS account ID, `invoke()` echoes the input payload back instead of invoking the function, and `get_metrics()` returns hardcoded constants; the struct holds a real `aws_sdk_lambda::Client` field but it is unused at its one call site. Not re-verified this pass.
-- **`resource_manager/` placeholder tree still exported under the unprefixed name** (added 2026-08-18, not previously tracked in this file): `ResourceManagementSystem` (`lib.rs:474`) is the fake tree (fabricated ports/paths/connections/GPU stats/efficiency numbers); the real, tested tree (`resource_management/`) is only exported as `ModularResourceManagementSystem` (`lib.rs:467`). See root `TODO.md` P1 for detail — this was flagged as the single highest-value open item in the crate after Wave 3, and remains open.
+- ~~**`resource_manager/` placeholder tree still exported under the unprefixed name**~~ — **resolved, verified 2026-08-24**: the placeholder tree (`src/resource_manager/`, which fabricated ports/paths/connections/GPU stats/efficiency numbers) is deleted outright, not merely deprecated. `ResourceManagementSystem` now resolves directly to the real, tested `resource_management/` tree; `ModularResourceManagementSystem` is kept only as a compatibility type alias, and `lib.rs` carries a comment explaining the history. 4 new regression tests guard the unprefixed surface. Two caveats from the package that did this work, neither independently verified this pass: (1) it reports two fabrications remaining inside `lib.rs` itself (the file it had to migrate) that it did not have ownership to fix; (2) the sub-managers under `resource_management/` the unprefixed names now point at have not had their own dedicated correctness audit — only the renaming/re-pointing was done. See root `TODO.md` P1 for the same note.
 
 ---
 

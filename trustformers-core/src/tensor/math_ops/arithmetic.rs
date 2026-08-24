@@ -97,13 +97,14 @@ impl Tensor {
                 let size = a_data.shape.iter().product();
 
                 let output_buffer_id =
-                    backend.add_gpu_to_gpu(&a_data.buffer_id, &b_data.buffer_id, size)?;
+                    backend.add_gpu_to_gpu(&a_data.buffer_id(), &b_data.buffer_id(), size)?;
 
-                Ok(Tensor::Metal(MetalTensorData {
-                    buffer_id: output_buffer_id,
-                    shape: a_data.shape.clone(),
-                    dtype: a_data.dtype,
-                }))
+                Ok(Tensor::Metal(MetalTensorData::new(
+                    &backend,
+                    output_buffer_id,
+                    a_data.shape.clone(),
+                    a_data.dtype,
+                )?))
             },
             #[cfg(all(target_os = "macos", feature = "metal"))]
             (Tensor::Metal(_), _) | (_, Tensor::Metal(_)) => {

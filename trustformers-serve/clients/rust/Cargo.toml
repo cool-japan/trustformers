@@ -23,11 +23,15 @@ keywords = ["machine-learning", "transformers", "ai", "client", "trustformers"]
 categories = ["api-bindings", "web-programming"]
 
 [dependencies]
-# HTTP Client
+# HTTP Client.
+# `rustls` is the 0.13 spelling of what 0.12 called `rustls-tls`; the old name
+# does not exist any more, so the manifest could not resolve. `form` is needed
+# for the OAuth2 client-credentials POST in `src/lib.rs`.
 reqwest = { version = "0.13.4", default-features = false, features = [
     "json",
     "stream",
-    "rustls-tls",
+    "form",
+    "rustls",
     "http2",
     "charset",
 ] }
@@ -52,11 +56,14 @@ log = "0.4.33"
 # URL manipulation
 url = "2.5.8"
 
-# Authentication
-oauth2 = { version = "5.0.0", default-features = false, features = [
-    "reqwest",
-    "rustls-tls",
-], optional = true }
+# Authentication: no `oauth2` crate.
+#
+# Only the client-credentials grant (RFC 6749 section 4.4) was ever used, and it
+# is a single form POST. `oauth2` 5.0 pins `reqwest` 0.12, so depending on it
+# would pull a second HTTP + TLS stack into a client library whose entire point
+# is to be a light dependency, and would leave this crate's public API split
+# across two incompatible `reqwest` majors. The grant is issued directly through
+# this crate's own `reqwest` instead — see `OAuth2Auth` in `src/lib.rs`.
 
 # Async traits
 async-trait = "0.1.92"
@@ -64,16 +71,22 @@ async-trait = "0.1.92"
 # Futures utilities
 futures-util = "0.3.34"
 
-# UUID for request IDs
-uuid = { version = "1.24.1", features = ["v4", "serde"] }
-
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+# `net` + `io-util` back the loopback token endpoint the OAuth2 tests talk to,
+# so no test needs the network.
+tokio = { version = "1.53.1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+] }
 env_logger = "0.11.11"
 
 [features]
 default = ["oauth2"]
-oauth2 = ["dep:oauth2"]
+# Gates `OAuth2Auth`, which is implemented in this crate rather than pulled from
+# the `oauth2` crate; see the authentication note in `[dependencies]`.
+oauth2 = []
 
 # Only `basic_client.rs` exists, and it already exercises the streaming and batch
 # paths end to end. The manifest previously also declared `streaming_client` and

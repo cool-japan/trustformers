@@ -447,6 +447,25 @@ impl ObjectDetectionPipeline {
         Ok(Self { config, labels })
     }
 
+    /// The class names this pipeline is configured to recognize, indexed by
+    /// class id (i.e. `labels()[id]` is the name for [`Detection::label_id`]
+    /// `id`).
+    pub fn labels(&self) -> &[String] {
+        &self.labels
+    }
+
+    /// Resolve a raw class index from your own model's output into this
+    /// pipeline's canonical label name.
+    ///
+    /// [`Self::detect`] never produces raw detections (no backbone is
+    /// implemented), so callers integrating their own model can use this to
+    /// build a correct [`Detection::label`] from their model's `label_id`
+    /// before calling [`Self::postprocess`], instead of hardcoding a
+    /// separate label list that could drift from this pipeline's.
+    pub fn resolve_label(&self, label_id: usize) -> Option<&str> {
+        self.labels.get(label_id).map(String::as_str)
+    }
+
     /// Run object detection on a single image.
     ///
     /// `image` is a flat `f32` buffer, `height` and `width` describe its spatial dimensions.
@@ -671,6 +690,28 @@ mod tests {
     }
 
     // ---- 10. DetectionResult filter_by_confidence ----
+
+    #[test]
+    fn test_resolve_label_matches_coco_names() {
+        let pipeline = ObjectDetectionPipeline::new(ObjectDetectionConfig::default()).expect("ok");
+        assert_eq!(pipeline.resolve_label(0), Some("person"));
+        assert_eq!(pipeline.resolve_label(1), Some("bicycle"));
+        assert_eq!(
+            pipeline.resolve_label(0),
+            pipeline.labels().first().map(String::as_str),
+            "resolve_label must agree with labels()"
+        );
+    }
+
+    #[test]
+    fn test_resolve_label_out_of_range_is_none() {
+        let pipeline = ObjectDetectionPipeline::new(ObjectDetectionConfig::default()).expect("ok");
+        assert_eq!(
+            pipeline.resolve_label(usize::MAX),
+            None,
+            "an out-of-range class id must not panic or fabricate a name"
+        );
+    }
 
     #[test]
     fn test_filter_by_confidence() {

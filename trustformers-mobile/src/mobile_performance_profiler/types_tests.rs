@@ -125,9 +125,11 @@ mod tests {
     fn test_memory_metrics_default() {
         let metrics = MemoryMetrics::default();
         assert!((metrics.heap_used_mb - 0.0).abs() < f32::EPSILON);
-        assert!((metrics.heap_free_mb - 0.0).abs() < f32::EPSILON);
-        assert!((metrics.heap_total_mb - 0.0).abs() < f32::EPSILON);
-        assert!((metrics.native_used_mb - 0.0).abs() < f32::EPSILON);
+        // Unmeasurable segments default to "not measured", never to a zero
+        // that reads as a measured empty segment.
+        assert_eq!(metrics.heap_free_mb, None);
+        assert_eq!(metrics.heap_total_mb, None);
+        assert_eq!(metrics.native_used_mb, None);
         assert!((metrics.available_mb - 0.0).abs() < f32::EPSILON);
     }
 
@@ -137,8 +139,8 @@ mod tests {
         let metrics = CpuMetrics::default();
         assert!((metrics.usage_percent - 0.0).abs() < f32::EPSILON);
         assert!((metrics.idle_percent - 100.0).abs() < f32::EPSILON);
-        assert_eq!(metrics.frequency_mhz, 0);
-        assert!((metrics.throttling_level - 0.0).abs() < f32::EPSILON);
+        assert_eq!(metrics.frequency_mhz, None);
+        assert_eq!(metrics.throttling_level, None);
     }
 
     // Test 11: GpuMetrics default values
@@ -167,7 +169,9 @@ mod tests {
     #[test]
     fn test_battery_metrics_default() {
         let metrics = BatteryMetrics::default();
-        assert_eq!(metrics.level_percent, 100);
+        // Regression: this default used to be 100, so a battery nothing had
+        // read reported as fully charged.
+        assert_eq!(metrics.level_percent, 0);
         assert!(!metrics.is_charging);
         assert!((metrics.power_consumption_mw - 0.0).abs() < f32::EPSILON);
         assert_eq!(metrics.estimated_life_minutes, 0);
@@ -179,7 +183,7 @@ mod tests {
         let metrics = ThermalMetrics::default();
         assert!((metrics.temperature_c - 0.0).abs() < f32::EPSILON);
         assert_eq!(metrics.temperature_trend, TemperatureTrend::Stable);
-        assert!((metrics.throttling_level - 0.0).abs() < f32::EPSILON);
+        assert_eq!(metrics.throttling_level, None);
     }
 
     // Test 15: MobileMetricsSnapshot default
@@ -187,12 +191,15 @@ mod tests {
     fn test_mobile_metrics_snapshot_default() {
         let snapshot = MobileMetricsSnapshot::default();
         assert_eq!(snapshot.timestamp, 0);
-        assert_eq!(snapshot.memory.heap_used_mb, 0.0);
-        assert_eq!(snapshot.cpu.usage_percent, 0.0);
-        assert_eq!(snapshot.gpu.usage_percent, 0.0);
-        assert_eq!(snapshot.network.bytes_sent, 0);
+        // Every metric family of a default snapshot is absent: nothing has
+        // been measured, which is not the same as a zero measurement.
+        assert!(snapshot.memory.is_none());
+        assert!(snapshot.cpu.is_none());
+        assert!(snapshot.gpu.is_none());
+        assert!(snapshot.network.is_none());
+        assert!(snapshot.thermal.is_none());
+        assert!(snapshot.battery.is_none());
         assert_eq!(snapshot.inference.total_inferences, 0);
-        assert_eq!(snapshot.battery.level_percent, 100);
     }
 
     // Test 16: ExportFormat equality
@@ -309,8 +316,12 @@ mod tests {
         assert_eq!(summary.total_events, 0);
         assert_eq!(summary.total_bottlenecks, 0);
         assert_eq!(summary.session_duration_ms, 0);
-        assert!((summary.performance_score - 0.0).abs() < f32::EPSILON);
-        assert_eq!(summary.thermal_events, 0);
+        // A default summary has scored nothing, so these are absent rather
+        // than zero.
+        assert_eq!(summary.performance_score, None);
+        assert_eq!(summary.thermal_events, None);
+        assert_eq!(summary.avg_gpu_usage_percent, None);
+        assert_eq!(summary.battery_consumed_mah, None);
     }
 
     // Test 24: Config types with various values using LCG

@@ -1,10 +1,11 @@
 use crate::models::{
-    PyBertModel, PyGPT2LMHeadModel, PyLlamaModel, PyMambaModel, PyRwkvModel, PyT5Model,
+    PyBertForSequenceClassification, PyBertModel, PyGPT2LMHeadModel, PyLlamaModel, PyMambaModel,
+    PyRwkvModel, PyT5Model,
 };
 use crate::tokenizers::{PyBPETokenizer, PyWordPieceTokenizer};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 use pyo3::IntoPyObjectExt;
 
 /// Owned Python reference alias (pyo3 0.28 removed the `PyObject` type alias from
@@ -199,28 +200,33 @@ impl PyAutoTokenizer {
         // Determine tokenizer type from name
         let tokenizer_type = infer_tokenizer_type(pretrained_model_name_or_path);
 
-        // Create appropriate tokenizer based on type
+        // Every arm loads the tokenizer's real files from `pretrained_model_name_or_path`.
+        // This used to ignore the path entirely and return a freshly constructed,
+        // *empty* tokenizer -- a five-token `[PAD]/[UNK]/[CLS]/[SEP]/[MASK]`
+        // vocabulary for WordPiece, and no vocabulary and no merges at all for
+        // BPE -- while reporting that the requested checkpoint had been loaded.
+        // Under those tokenizers every real word encodes to `[UNK]`, so anything
+        // downstream (generation, classification) was operating on noise.
         match tokenizer_type.as_str() {
-            "wordpiece" => {
-                // Create a basic WordPiece tokenizer
-                let (tokenizer, base) = PyWordPieceTokenizer::new(None, true)?;
-                Py::new(py, (tokenizer, base)).and_then(|t| t.into_py_any(py))
-            },
+            "wordpiece" => PyWordPieceTokenizer::from_pretrained(
+                py,
+                pretrained_model_name_or_path,
+                None,
+            )?
+            .into_py_any(py),
             "bpe" => {
-                // Create a basic BPE tokenizer
-                let (tokenizer, base) = PyBPETokenizer::new(None, None)?;
-                Py::new(py, (tokenizer, base)).and_then(|t| t.into_py_any(py))
+                PyBPETokenizer::from_pretrained(py, pretrained_model_name_or_path, None)?
+                    .into_py_any(py)
             },
-            "sentencepiece" => {
-                // For now, fall back to BPE for SentencePiece models
-                let (tokenizer, base) = PyBPETokenizer::new(None, None)?;
-                Py::new(py, (tokenizer, base)).and_then(|t| t.into_py_any(py))
-            },
-            _ => {
-                // Default to WordPiece tokenizer
-                let (tokenizer, base) = PyWordPieceTokenizer::new(None, true)?;
-                Py::new(py, (tokenizer, base)).and_then(|t| t.into_py_any(py))
-            },
+            // T5/LLaMA checkpoints ship a SentencePiece model, and this crate
+            // implements WordPiece and BPE only. Loading one of those with the
+            // BPE reader (what this used to do) produces a tokenizer that
+            // silently disagrees with the checkpoint it claims to serve.
+            other => Err(PyNotImplementedError::new_err(format!(
+                "no {other} tokenizer is implemented in this crate, so \
+                 '{pretrained_model_name_or_path}' cannot be loaded. Available: WordPieceTokenizer \
+                 (vocab.txt / vocab.json) and BPETokenizer (vocab.json + merges.txt)."
+            ))),
         }
     }
 }
@@ -326,7 +332,21 @@ impl PyAutoModelForMaskedLM {
     }
 }
 
-/// Pipeline factory function
+/// Pipeline factory function.
+///
+/// Routes every task name [`crate::pipelines::canonical_task`] knows to its
+/// pipeline class, and lets that class decide whether it can be built: the
+/// two span-level pipelines refuse construction with a structured
+/// `NotImplementedError` rather than returning invented spans, and the two
+/// real pipelines refuse a model that does not carry the head their task
+/// needs.
+///
+/// This used to route only `text-generation` and `text-classification`, so
+/// `pipeline("ner", ...)` reported "Unknown task" even though a (fake)
+/// `TokenClassificationPipeline` existed. A second, unreachable copy of this
+/// factory also lived in `pipelines.rs`, never registered with the module and
+/// so never callable from Python; it has been deleted rather than left to
+/// drift out of sync with this one.
 #[pyfunction]
 #[pyo3(signature = (task, model=None, tokenizer=None, device=None, **kwargs))]
 pub fn pipeline(
@@ -338,58 +358,66 @@ pub fn pipeline(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
     let _ = kwargs;
-    use crate::pipelines::{PyTextClassificationPipeline, PyTextGenerationPipeline};
-
-    // If model/tokenizer not provided, auto-detect based on task
-    let (model, tokenizer) = if model.is_none() || tokenizer.is_none() {
-        let default_model = match task {
-            "text-generation" => "gpt2",
-            "text-classification" | "sentiment-analysis" => "bert-base-uncased",
-            "question-answering" => "bert-large-uncased-whole-word-masking-finetuned-squad",
-            "token-classification" | "ner" => "bert-base-cased",
-            _ => "bert-base-uncased",
-        };
-
-        let model = match model {
-            None => PyAutoModel::from_pretrained(py, default_model, None)?,
-            Some(m) => m.clone().unbind(),
-        };
-
-        let tokenizer = match tokenizer {
-            None => PyAutoTokenizer::from_pretrained(py, default_model, None)?,
-            Some(t) => t.clone().unbind(),
-        };
-
-        (model, tokenizer)
-    } else {
-        // Both model and tokenizer are provided (guaranteed by the `if` condition).
-        match (model, tokenizer) {
-            (Some(m), Some(t)) => (m.clone().unbind(), t.clone().unbind()),
-            _ => {
-                return Err(PyValueError::new_err(
-                    "model and tokenizer must both be provided",
-                ))
-            },
-        }
+    use crate::pipelines::{
+        canonical_task, PipelineTask, PyQuestionAnsweringPipeline, PyTextClassificationPipeline,
+        PyTextGenerationPipeline, PyTokenClassificationPipeline, KNOWN_TASKS,
     };
 
-    // Create appropriate pipeline
-    match task {
-        "text-generation" => {
-            let model_bound = model.bind(py);
-            let tokenizer_bound = tokenizer.bind(py);
-            let (pipeline, base) = PyTextGenerationPipeline::new(py, model_bound, tokenizer_bound, device)?;
-            Py::new(py, (pipeline, base)).and_then(|p| p.into_py_any(py))
+    let resolved_task = canonical_task(task).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "Unknown task: {task}. Supported tasks: {}",
+            KNOWN_TASKS.join(", ")
+        ))
+    })?;
+
+    // A default checkpoint name is only useful if it can actually be loaded.
+    // `from_pretrained` resolves a *local* path (this crate has no Hub
+    // downloader), so a bare "gpt2" cannot be found and the error says so --
+    // which is better than the previous behaviour of quietly building a
+    // pipeline around a randomly initialised model.
+    let default_model = match resolved_task {
+        PipelineTask::TextGeneration => "gpt2",
+        PipelineTask::TextClassification => "bert-base-uncased",
+        PipelineTask::TokenClassification => "bert-base-cased",
+        PipelineTask::QuestionAnswering => {
+            "bert-large-uncased-whole-word-masking-finetuned-squad"
         },
-        "text-classification" | "sentiment-analysis" => {
-            let model_bound = model.bind(py);
-            let tokenizer_bound = tokenizer.bind(py);
-            let (pipeline, base) = PyTextClassificationPipeline::new(py, model_bound, tokenizer_bound, device)?;
-            Py::new(py, (pipeline, base)).and_then(|p| p.into_py_any(py))
+    };
+
+    let model = match model {
+        Some(model) => model.clone().unbind(),
+        None => match resolved_task {
+            PipelineTask::TextClassification => {
+                PyBertForSequenceClassification::from_pretrained(py, default_model, None)?
+                    .into_py_any(py)?
+            },
+            _ => PyAutoModel::from_pretrained(py, default_model, None)?,
         },
-        _ => Err(PyValueError::new_err(format!(
-            "Unknown task: {}. Supported tasks: text-generation, text-classification, sentiment-analysis",
-            task
-        )))
+    };
+    let tokenizer = match tokenizer {
+        Some(tokenizer) => tokenizer.clone().unbind(),
+        None => PyAutoTokenizer::from_pretrained(py, default_model, None)?,
+    };
+
+    let model_bound = model.bind(py);
+    let tokenizer_bound = tokenizer.bind(py);
+
+    match resolved_task {
+        PipelineTask::TextGeneration => {
+            let parts = PyTextGenerationPipeline::new(model_bound, tokenizer_bound, device)?;
+            Py::new(py, parts).and_then(|pipeline| pipeline.into_py_any(py))
+        },
+        PipelineTask::TextClassification => {
+            let parts = PyTextClassificationPipeline::new(model_bound, tokenizer_bound, device)?;
+            Py::new(py, parts).and_then(|pipeline| pipeline.into_py_any(py))
+        },
+        PipelineTask::TokenClassification => {
+            let parts = PyTokenClassificationPipeline::new(&PyTuple::empty(py), None)?;
+            Py::new(py, parts).and_then(|pipeline| pipeline.into_py_any(py))
+        },
+        PipelineTask::QuestionAnswering => {
+            let parts = PyQuestionAnsweringPipeline::new(&PyTuple::empty(py), None)?;
+            Py::new(py, parts).and_then(|pipeline| pipeline.into_py_any(py))
+        },
     }
 }

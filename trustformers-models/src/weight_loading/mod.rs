@@ -27,8 +27,8 @@ pub mod test_support;
 mod tests;
 
 pub use binding::{
-    bind_embedding, bind_linear, take_norm_bias, take_norm_weight, DecoderShapes,
-    DECODER_BUFFER_SUFFIXES,
+    bind_embedding, bind_head_layer_norm, bind_head_linear, bind_linear, take_norm_bias,
+    take_norm_weight, DecoderShapes, DECODER_BUFFER_SUFFIXES,
 };
 pub use checkpoint::{
     Checkpoint, CheckpointFormat, CheckpointReader, LoadReport, UnusedTensors, WeightBinder,

@@ -264,7 +264,7 @@ impl TextGenerator {
             Tensor::Metal(metal_data) => {
                 use crate::gpu_ops::metal::get_metal_backend;
                 let backend = get_metal_backend()?;
-                backend.download_buffer_to_vec(&metal_data.buffer_id)
+                backend.download_buffer_to_vec(&metal_data.buffer_id())
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "unsupported tensor dtype for generation logits",

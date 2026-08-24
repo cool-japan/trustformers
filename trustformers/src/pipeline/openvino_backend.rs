@@ -320,6 +320,15 @@ impl OpenVINOModel {
     pub fn get_memory_info(&self) -> Result<MemoryInfo> {
         Err(openvino_unavailable("memory_info"))
     }
+
+    /// The nested model wrapper, when this instance was built with one (see
+    /// [`Self::new_with_wrapper`] and friends). `infer`/`benchmark_mock`
+    /// never consult it — there is no real execution engine to hand it to —
+    /// so this is purely for callers that want to inspect what a
+    /// wrapper-carrying constructor actually built.
+    pub fn wrapper(&self) -> Option<&OpenVINOModelWrapper> {
+        self.model.as_deref()
+    }
 }
 use trustformers_core::tensor::Tensor;
 
@@ -573,6 +582,35 @@ pub struct OpenVINOModelWrapper {
 impl Default for OpenVINOModelWrapper {
     fn default() -> Self {
         Self::new_empty()
+    }
+}
+
+impl OpenVINOModelWrapper {
+    /// The `OpenVINOModel` this wrapper was nested under, when constructed
+    /// with one.
+    pub fn inner_model(&self) -> Option<&OpenVINOModel> {
+        self.model.as_deref()
+    }
+
+    /// The backend configuration this wrapper was built with.
+    pub fn config(&self) -> &OpenVINOBackendConfig {
+        &self.config
+    }
+
+    /// Input tensor names this wrapper reports.
+    pub fn input_names(&self) -> &[String] {
+        &self.input_names
+    }
+
+    /// Output tensor names this wrapper reports.
+    pub fn output_names(&self) -> &[String] {
+        &self.output_names
+    }
+
+    /// The (always-unavailable, see [`OpenVINORuntime`]) runtime this
+    /// wrapper is bound to.
+    pub fn runtime(&self) -> &Arc<OpenVINORuntime> {
+        &self.runtime
     }
 }
 
@@ -1542,6 +1580,29 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_openvino_model_wrapper_accessor_returns_nested_wrapper() {
+        let model = OpenVINOModel::new_with_wrapper();
+        let wrapper = model.wrapper().expect("new_with_wrapper must nest a wrapper");
+        assert_eq!(
+            wrapper.input_names().to_vec(),
+            vec!["input_ids".to_string()]
+        );
+        assert_eq!(wrapper.output_names().to_vec(), vec!["logits".to_string()]);
+        assert!(
+            wrapper.inner_model().is_none(),
+            "the nested wrapper must not itself nest a model"
+        );
+        let _ = wrapper.config();
+        let _ = wrapper.runtime();
+    }
+
+    #[test]
+    fn test_openvino_model_wrapper_accessor_is_none_without_a_wrapper() {
+        let model = OpenVINOModel::new_empty_model();
+        assert!(model.wrapper().is_none());
+    }
 
     #[test]
     fn test_openvino_backend_config() {

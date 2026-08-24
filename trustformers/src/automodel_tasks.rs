@@ -353,16 +353,13 @@ impl AutoModelForCausalLM {
                 .map_err(Into::into),
             #[cfg(not(any(feature = "gpt2", feature = "gpt_neo", feature = "gpt_j")))]
             _ => Err(TrustformersError::Core(
-                CoreTrustformersError::runtime_error(
-                    format!(
+                CoreTrustformersError::runtime_error(format!(
                     "No causal LM models available: this build has none of the gpt2/gpt_neo/gpt_j \
                      features compiled in, so a {}-token prompt requesting up to {} new tokens \
                      cannot be generated",
                     inputs.input_ids.len(),
                     generation_config.max_length
-                )
-                    .into(),
-                ),
+                )),
             )),
         }
     }

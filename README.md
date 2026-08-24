@@ -6,7 +6,7 @@
 
 A high-performance, memory-safe Rust implementation of Hugging Face Transformers. TrustformeRS brings the power of transformer models to the Rust ecosystem with zero-cost abstractions, fearless concurrency, and deployment flexibility from edge to cloud.
 
-> **Project Status (alpha)**: TrustformeRS 0.2.1 (in development, last verified 2026-08-18) is a large Pure-Rust transformer stack — 3,029 Rust files, ~1.53M lines (~1.28M lines of code, via `tokei`) across 10 crates and 49+ transformer architectures — together with multi-platform packaging (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, and RLHF/DPO training scaffolding).
+> **Project Status (alpha)**: TrustformeRS 0.2.1 (in development, last verified 2026-08-24) is a large Pure-Rust transformer stack — 3,046 Rust files, ~1.53M lines (~1.28M lines of code, via `tokei`) across 10 crates and 49+ transformer architectures — together with multi-platform packaging (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, and RLHF/DPO training scaffolding).
 >
 > **Honest maturity note**: today's compute path is primarily **CPU and `f32`**. F16/BF16 are supported as a storage/serialization format but are upcast to `f32` for arithmetic (native low-precision kernels are on the roadmap). GPU acceleration is **real** (CUDA via the Pure-Rust `oxicuda` backend, Metal via `objc2`/`oxicuda-metal`, WebGPU via `wgpu`) but is currently wired end-to-end **only for GPT-2 and RetNet** (0.2.0 added a GPU-resident CUDA attention path for GPT-NeoX too, but it is **prefill-only** — no KV-cached decode, since its `Layer` trait carries no cache); the remaining backends (ROCm, Vulkan, OpenCL) are feature-gated and experimental, and **TPU is a placeholder, not implemented**. Several newer architectures are still being completed. See [Development Status](#-development-status) for the precise maturity of each area.
 
@@ -18,19 +18,9 @@ A high-performance, memory-safe Rust implementation of Hugging Face Transformers
 - **🔧 Control**: Explicit resource management following SciRS2's Core Usage Policy
 - **🤝 Compatibility**: Loads Hugging Face model formats directly
 
-## 📊 Performance (indicative)
+## 📊 Performance
 
-> ⚠️ The figures below are **indicative targets on the authors' reference hardware**, not the output of an automated benchmark gate, and your results will vary. Reproduce on your own machine with `cargo bench` (benchmark sources live in `benches/`). All numbers are **CPU `f32`** — GPU benchmarks are intentionally omitted until GPU coverage extends beyond GPT-2/RetNet.
-
-| Model | Task | TrustformeRS | HF Transformers | Speedup |
-|-------|------|--------------|-----------------|---------|
-| BERT-base | Inference (CPU) | 23ms | 31ms | 1.35x |
-| BERT-base | Batch=32 (CPU) | 412ms | 687ms | 1.67x |
-| GPT-2 | Generation (CPU) | 89ms | 142ms | 1.59x |
-| T5-base | Translation (CPU) | 156ms | 234ms | 1.50x |
-| ViT-base | Image Classification (CPU) | 15ms | 22ms | 1.47x |
-
-*Reference CPU: Intel i9-12900K. GPU benchmarks will be published once on-device coverage is generalized beyond GPT-2/RetNet (see roadmap).*
+No benchmark harness in this repository has produced a TrustformeRS-vs-HF-Transformers comparison number — an earlier version of this section carried a table of specific per-model millisecond figures and speedup multipliers that no automated gate in this repository ever measured. `trustformers-tokenizers`' own migration guides (`trustformers-tokenizers/docs/migration/`) removed an equivalent fabricated table for the same reason: numbers presented as measurements that no harness here produced. Benchmark sources do exist (`benches/`, plus per-crate `benches/` directories) — run `cargo bench --all-features` yourself and compare against a real HF Transformers install on your own hardware if you need a number; do not trust a number quoted here that isn't accompanied by the command that produced it.
 
 ## 🏗️ Architecture
 
@@ -38,19 +28,19 @@ TrustformeRS follows a modular workspace structure inspired by Hugging Face Tran
 
 ```
 trustformers/
-├── trustformers-core/      # Core traits and tensor abstractions  (177,666 SLoC, Stable)
-├── trustformers-models/    # 49+ model implementations           (187,233 SLoC, Alpha)
-├── trustformers-tokenizers/# BPE, WordPiece, SentencePiece       ( 45,325 SLoC, Stable)
+├── trustformers-core/      # Core traits and tensor abstractions  (178,532 SLoC, Stable)
+├── trustformers-models/    # 49+ model implementations           (188,417 SLoC, Alpha)
+├── trustformers-tokenizers/# BPE, WordPiece, SentencePiece       ( 45,324 SLoC, Stable)
 ├── trustformers-optim/     # 20+ optimizers and LR schedulers    ( 65,983 SLoC, Stable)
-├── trustformers-training/  # Distributed training, RLHF/DPO      ( 83,254 SLoC, Stable)
-├── trustformers-serve/     # REST/gRPC/GraphQL serving           (278,397 SLoC, Stable)
+├── trustformers-training/  # Distributed training, RLHF/DPO      ( 83,319 SLoC, Stable)
+├── trustformers-serve/     # REST/gRPC/GraphQL serving           (273,756 SLoC, Stable)
 ├── trustformers-wasm/      # WebAssembly + WebGPU deployment     ( 48,359 SLoC, Stable)
-├── trustformers-mobile/    # iOS/Android deployment              (110,744 SLoC, Alpha)
-├── trustformers-debug/     # Profilers, visualizers, TensorBoard ( 88,450 SLoC, Alpha)
-└── trustformers/           # High-level integration crate        (121,709 SLoC, Alpha)
+├── trustformers-mobile/    # iOS/Android deployment              (108,021 SLoC, Alpha)
+├── trustformers-debug/     # Profilers, visualizers, TensorBoard ( 88,454 SLoC, Alpha)
+└── trustformers/           # High-level integration crate        (123,252 SLoC, Alpha)
 ```
 
-**Total**: ~1.21M SLoC across these 10 crates; **3,029 Rust files, ~1.53M lines total (~1.28M lines of code)** across the full repository including bindings/examples/tooling (via `tokei`, 2026-08-18). Both figures moved since the last count (2026-07-09): several crates shrank from deleting orphaned/dead code (an unsound, never-mounted auth module cluster in `trustformers-serve`; an orphaned `performance_optimizer/core` subtree; assorted dead duplicate files), while `trustformers-models` and `trustformers-training` grew from real implementation work. 100% Pure Rust source (COOLJAPAN Policy) — default-feature builds are C/C++-free for every crate except `trustformers-serve` (accepted exception: rustls/aws-lc-rs TLS for the HTTP server).
+**Total**: ~1.20M SLoC across these 10 crates; **3,046 Rust files, ~1.53M lines total (~1.28M lines of code)** across the full repository including bindings/examples/tooling (via `tokei`, 2026-08-24). Both figures moved since the last count (2026-08-18): `trustformers-serve` and `trustformers-mobile` shrank the most — a placeholder resource-manager tree (5,972 lines) deleted outright in `trustformers-serve`, and roughly 4,800 lines of dead/duplicate scaffolding deleted from `trustformers-mobile` — while `trustformers-core`, `trustformers-models`, and `trustformers` (umbrella) grew from real implementation work (a Metal buffer-lifetime RAII type, model checkpoint-loading fixes, and dead-code-turned-real-accessors, respectively). 100% Pure Rust source (COOLJAPAN Policy) — default-feature builds are C/C++-free for every crate except `trustformers-serve` (accepted exception: rustls/aws-lc-rs TLS for the HTTP server).
 
 ### Design Principles
 
@@ -353,7 +343,7 @@ let outputs = model.forward(inputs)?;
 ## 🎯 Development Status
 
 ### In Progress (0.2.1, unreleased)
-A production-grade honesty and correctness pass across the workspace: fabricated/placeholder logic replaced with real implementations or structured errors (model checkpoint loading, OpenAI-compatible serving, cloud-provider integrations, mobile post-quantum crypto now real FIPS 203/204/205, and more), an unsound RS256 auth-bypass module deleted, five deadlock-class bugs fixed, and dependency hygiene tightened (`cargo deny check bans`/`check licenses` now pass). See [`CHANGELOG.md`](CHANGELOG.md) (the "[0.2.1] - Unreleased" section) for the full list and [`TODO.md`](TODO.md) for what is verified still open — including one currently-failing hygiene test and 7 open `cargo deny check advisories` findings that this cycle's own dependency cleanup introduced.
+A production-grade honesty and correctness pass across the workspace: fabricated/placeholder logic replaced with real implementations or structured errors (model checkpoint loading, OpenAI-compatible serving, cloud-provider integrations, mobile post-quantum crypto now real FIPS 203/204/205, and more), a placeholder `trustformers-serve` resource-manager tree deleted outright, an unsound RS256 auth-bypass module deleted, five deadlock-class bugs fixed, a Metal GPU buffer-lifetime RAII type introduced, and dependency hygiene tightened (`cargo deny check bans`/`check licenses` pass; the workspace-manifest hygiene gate this cycle's own dependency cleanup briefly broke is fixed). See [`CHANGELOG.md`](CHANGELOG.md) (the "[0.2.1] - Unreleased" section) for the full list and [`TODO.md`](TODO.md) for what is verified still open as of 2026-08-24 — currently 7 open `cargo deny check advisories` findings plus a `--features metal` compile break in `trustformers-models` this cycle's own in-progress Metal work surfaced.
 
 ### Completed Features (v0.2.0 - 2026-07-09)
 - [x] **CUDA gains a GPU-resident attention pipeline**: a new `gpu_ops::cuda::oxicuda::attention` module (QKV head-gather, RoPE, causal softmax, prefill/decode attention, KV-cache concat, residual add) gives CUDA the same fully device-resident chain the Metal backend already had. GPT-2 (`Gpt2Attention::cuda_resident_attention`) uses it for zero-host-round-trip prefill **and** incremental KV-cached decode; GPT-NeoX (`GPTNeoXAttention::cuda_resident_forward`) uses it for prefill only, since its `Layer` trait carries no KV cache.

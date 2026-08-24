@@ -58,8 +58,10 @@ rmp-serde.workspace = true
 # Additional dependencies for coverage and serialization
 unicode_categories.workspace = true
 # `serde_yaml_ng`, not `serde_yaml`: the original crate was archived by its
-# author and carries RUSTSEC-2024-0320 (unmaintained). `serde_yaml_ng` is the
-# maintained fork with the same API surface.
+# author in 2024 and receives no further fixes. (It carries no RustSec advisory
+# - RUSTSEC-2024-0320 is filed against the unrelated `yaml-rust` crate - so this
+# is a maintenance choice, not a vulnerability fix.) `serde_yaml_ng` is the
+# maintained hard fork with the same API surface.
 serde_yaml_ng.workspace = true
 # Python bindings
 pyo3 = { workspace = true, features = ["extension-module"], optional = true }

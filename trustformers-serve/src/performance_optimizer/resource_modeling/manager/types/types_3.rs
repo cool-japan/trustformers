@@ -305,42 +305,67 @@ impl ModelingOrchestrator {
         execution.step_results.insert(step.name.clone(), result);
         Ok(())
     }
-    /// Execute a step task
+    /// Execute a step task.
+    ///
+    /// A component that cannot produce its measurement on this build reports
+    /// so through its `Result`, and that outcome is recorded on the step —
+    /// [`TaskExecutionStatus::Failed`] with the reason in
+    /// [`AnalysisTaskResult::error`] — rather than aborting the workflow.
+    /// Those two fields existed and were dead: every step was stamped
+    /// `Completed` with `error: None` no matter what happened, so a workflow
+    /// either aborted or claimed every step had succeeded, and a caller
+    /// inspecting `step_results` could not tell which steps had actually
+    /// produced data.
+    ///
+    /// Errors that are not the component's own — a task panic, for instance —
+    /// still propagate; they are handled by the caller.
     async fn execute_step_task(
         coordinator: &ComponentCoordinator,
         step: &WorkflowStep,
     ) -> Result<AnalysisTaskResult> {
         let start_time = Instant::now();
-        let result_data = match step.task_type {
-            AnalysisTaskType::PerformanceProfiling => {
-                let profile = coordinator.execute_performance_profiling().await?;
-                Some(AnalysisResultData::PerformanceProfile(Box::new(profile)))
+        let outcome: Result<Option<AnalysisResultData>> = async {
+            Ok(match step.task_type {
+                AnalysisTaskType::PerformanceProfiling => {
+                    let profile = coordinator.execute_performance_profiling().await?;
+                    Some(AnalysisResultData::PerformanceProfile(Box::new(profile)))
+                },
+                AnalysisTaskType::TemperatureMonitoring => {
+                    let metrics = coordinator.execute_temperature_monitoring().await?;
+                    Some(AnalysisResultData::TemperatureMetrics(metrics))
+                },
+                AnalysisTaskType::TopologyAnalysis => {
+                    let analysis = coordinator.execute_topology_analysis().await?;
+                    Some(AnalysisResultData::TopologyAnalysis(analysis))
+                },
+                AnalysisTaskType::UtilizationTracking => {
+                    let duration = Duration::from_secs(10);
+                    let report = coordinator.execute_utilization_tracking(duration).await?;
+                    Some(AnalysisResultData::UtilizationReport(report))
+                },
+                AnalysisTaskType::HardwareDetection => {
+                    let inventory = coordinator.execute_hardware_detection().await?;
+                    Some(AnalysisResultData::HardwareInventory(inventory))
+                },
+                _ => None,
+            })
+        }
+        .await;
+
+        let (status, result_data, error) = match outcome {
+            Ok(data) => (TaskExecutionStatus::Completed, data, None),
+            Err(e) => {
+                log::debug!("Workflow step '{}' produced no result: {}", step.name, e);
+                (TaskExecutionStatus::Failed, None, Some(e.to_string()))
             },
-            AnalysisTaskType::TemperatureMonitoring => {
-                let metrics = coordinator.execute_temperature_monitoring().await?;
-                Some(AnalysisResultData::TemperatureMetrics(metrics))
-            },
-            AnalysisTaskType::TopologyAnalysis => {
-                let analysis = coordinator.execute_topology_analysis().await?;
-                Some(AnalysisResultData::TopologyAnalysis(analysis))
-            },
-            AnalysisTaskType::UtilizationTracking => {
-                let duration = Duration::from_secs(10);
-                let report = coordinator.execute_utilization_tracking(duration).await?;
-                Some(AnalysisResultData::UtilizationReport(report))
-            },
-            AnalysisTaskType::HardwareDetection => {
-                let inventory = coordinator.execute_hardware_detection().await?;
-                Some(AnalysisResultData::HardwareInventory(inventory))
-            },
-            _ => None,
         };
+
         Ok(AnalysisTaskResult {
             task_id: 0,
             task_type: step.task_type.clone(),
-            status: TaskExecutionStatus::Completed,
+            status,
             result: result_data,
-            error: None,
+            error,
             execution_duration: start_time.elapsed(),
             completed_at: Utc::now(),
             resource_usage: TaskResourceUsage {

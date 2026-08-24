@@ -200,6 +200,18 @@ impl GroundingResult {
         }
         out
     }
+
+    /// Split `query` (the original GroundingDINO-style prompt, e.g.
+    /// `"a cat . a dog"`) into the individual phrases that were requested.
+    ///
+    /// This is [`unique_phrases`](Self::unique_phrases)'s counterpart on the
+    /// *input* side: `unique_phrases` reports what the (external) model
+    /// actually returned boxes for, `requested_phrases` reports what was
+    /// asked for. Comparing the two can surface a model that grounded a
+    /// phrase nobody requested, or requested phrases it never answered.
+    pub fn requested_phrases(&self) -> Vec<String> {
+        parse_phrases(&self.query)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -389,11 +401,7 @@ impl GroundingProcessor {
             .split_whitespace()
             .map(|word| {
                 let lower = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
-                let mut h: u64 = 5381;
-                for b in lower.bytes() {
-                    h = h.wrapping_mul(33).wrapping_add(b as u64);
-                }
-                (h % 30_000) as u32 + 1
+                (djb2_hash(&lower) % 30_000) as u32 + 1
             })
             .collect()
     }
@@ -646,6 +654,30 @@ mod tests {
             "expected 3 unique phrases, got {:?}",
             phrases
         );
+    }
+
+    #[test]
+    fn test_requested_phrases_parses_the_query_not_the_boxes() {
+        // The model answered for "cat" only, but the query asked for both
+        // "cat" and "dog" - requested_phrases must report what was asked,
+        // independent of unique_phrases (what was answered).
+        let boxes = vec![GroundedBox {
+            phrase: "cat".to_string(),
+            bbox: (0.0, 0.0, 0.1, 0.1),
+            score: 0.9,
+            phrase_score: 0.8,
+        }];
+        let result = GroundingResult {
+            boxes,
+            query: "a cat . a dog".to_string(),
+            image_height: 100,
+            image_width: 100,
+        };
+        assert_eq!(
+            result.requested_phrases(),
+            vec!["a cat".to_string(), "a dog".to_string()]
+        );
+        assert_eq!(result.unique_phrases(), vec!["cat".to_string()]);
     }
 
     // --- Pipeline::ground ---

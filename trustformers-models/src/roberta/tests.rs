@@ -423,4 +423,230 @@ mod tests {
             .expect("a pooler-less checkpoint must load");
         assert!(report.is_complete());
     }
+
+    // ── Task heads (regression for the head-dropping delegation) ────────────
+
+    /// The tensors a fine-tuned `RobertaForSequenceClassification` adds on top
+    /// of the encoder.
+    fn sequence_head_tensors(config: &RobertaConfig, num_labels: usize) -> Vec<F32Tensor> {
+        let hidden = config.hidden_size;
+        vec![
+            F32Tensor::ramp("classifier.dense.weight", &[hidden, hidden], 200.0),
+            F32Tensor::ramp("classifier.dense.bias", &[hidden], 210.0),
+            F32Tensor::ramp("classifier.out_proj.weight", &[num_labels, hidden], 220.0),
+            F32Tensor::ramp("classifier.out_proj.bias", &[num_labels], 230.0),
+        ]
+    }
+
+    /// The tensors a `RobertaForMaskedLM` adds on top of the encoder.
+    fn masked_lm_head_tensors(config: &RobertaConfig) -> Vec<F32Tensor> {
+        let hidden = config.hidden_size;
+        vec![
+            F32Tensor::ramp("lm_head.dense.weight", &[hidden, hidden], 300.0),
+            F32Tensor::ramp("lm_head.dense.bias", &[hidden], 310.0),
+            F32Tensor::ramp("lm_head.layer_norm.weight", &[hidden], 320.0),
+            F32Tensor::ramp("lm_head.layer_norm.bias", &[hidden], 330.0),
+            F32Tensor::ramp(
+                "lm_head.decoder.weight",
+                &[config.vocab_size, hidden],
+                340.0,
+            ),
+            F32Tensor::ramp("lm_head.bias", &[config.vocab_size], 350.0),
+        ]
+    }
+
+    /// Regression: every task wrapper delegated to `RobertaModel::load_pretrained`,
+    /// whose unused-tensor policy tolerates `classifier.` / `lm_head.` /
+    /// `qa_outputs.`. The head was therefore dropped while the load reported
+    /// success.
+    #[test]
+    fn sequence_classification_load_pretrained_binds_the_classification_head() {
+        let config = loading_config();
+        let num_labels = 3;
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.extend(sequence_head_tensors(&config, num_labels));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model =
+            RobertaForSequenceClassification::new(config, num_labels).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        for name in [
+            "classifier.dense.weight",
+            "classifier.out_proj.weight",
+            "classifier.out_proj.bias",
+        ] {
+            assert!(
+                report.loaded.contains(&name.to_string()),
+                "{name} must be among the loaded tensors: {:?}",
+                report.loaded
+            );
+        }
+    }
+
+    #[test]
+    fn sequence_classification_load_pretrained_records_an_absent_head() {
+        let config = loading_config();
+        let bytes = fixture(&config, "roberta.").safetensors();
+
+        let mut model = RobertaForSequenceClassification::new(config, 3).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a head-less encoder checkpoint must still load");
+        assert!(
+            report.missing.contains(&"classifier.out_proj.weight".to_string()),
+            "the absent head must be named: {:?}",
+            report.missing
+        );
+    }
+
+    #[test]
+    fn sequence_classification_load_pretrained_rejects_a_head_of_the_wrong_width() {
+        let config = loading_config();
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.extend(sequence_head_tensors(&config, 9));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = RobertaForSequenceClassification::new(config, 3).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a 9-label head must not be reshaped into a 3-label model");
+        assert!(
+            err.to_string().contains("classifier.out_proj.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn masked_lm_load_pretrained_binds_the_prediction_head() {
+        let config = loading_config();
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.extend(masked_lm_head_tensors(&config));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = RobertaForMaskedLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        for name in [
+            "lm_head.dense.weight",
+            "lm_head.layer_norm.weight",
+            "lm_head.decoder.weight",
+            "lm_head.bias",
+        ] {
+            assert!(
+                report.loaded.contains(&name.to_string()),
+                "{name} must be among the loaded tensors: {:?}",
+                report.loaded
+            );
+        }
+    }
+
+    #[test]
+    fn masked_lm_load_pretrained_accepts_the_aliased_decoder_bias() {
+        let config = loading_config();
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        let mut head = masked_lm_head_tensors(&config);
+        for tensor in &mut head {
+            if tensor.name == "lm_head.bias" {
+                tensor.name = "lm_head.decoder.bias".to_string();
+            }
+        }
+        tensors.extend(head);
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = RobertaForMaskedLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("the aliased bias spelling must load");
+        assert!(
+            report.loaded.contains(&"lm_head.decoder.bias".to_string()),
+            "the aliased bias must be consumed: {:?}",
+            report.loaded
+        );
+    }
+
+    #[test]
+    fn token_classification_load_pretrained_binds_the_classifier() {
+        let config = loading_config();
+        let num_labels = 5;
+        let hidden = config.hidden_size;
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.push(F32Tensor::ramp(
+            "classifier.weight",
+            &[num_labels, hidden],
+            400.0,
+        ));
+        tensors.push(F32Tensor::ramp("classifier.bias", &[num_labels], 410.0));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model =
+            RobertaForTokenClassification::new(config, num_labels).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        assert!(report.loaded.contains(&"classifier.weight".to_string()));
+    }
+
+    #[test]
+    fn question_answering_load_pretrained_binds_the_span_head() {
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.push(F32Tensor::ramp("qa_outputs.weight", &[2, hidden], 500.0));
+        tensors.push(F32Tensor::ramp("qa_outputs.bias", &[2], 510.0));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = RobertaForQuestionAnswering::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        assert!(
+            report.loaded.contains(&"qa_outputs.weight".to_string())
+                && report.loaded.contains(&"qa_outputs.bias".to_string()),
+            "the span head must be among the loaded tensors: {:?}",
+            report.loaded
+        );
+    }
+
+    #[test]
+    fn question_answering_load_pretrained_rejects_a_span_head_of_the_wrong_width() {
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.push(F32Tensor::ramp("qa_outputs.weight", &[3, hidden], 500.0));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = RobertaForQuestionAnswering::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a 3-logit span head is not a start/end head");
+        assert!(
+            err.to_string().contains("qa_outputs.weight"),
+            "unexpected: {err}"
+        );
+    }
 }

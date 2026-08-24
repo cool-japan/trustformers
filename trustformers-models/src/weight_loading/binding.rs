@@ -14,10 +14,10 @@
 //! error naming all of them.
 
 use trustformers_core::errors::Result;
-use trustformers_core::layers::{Embedding, Linear};
+use trustformers_core::layers::{Embedding, LayerNorm, Linear};
 use trustformers_core::tensor::Tensor;
 
-use super::checkpoint::WeightBinder;
+use super::checkpoint::{Checkpoint, LoadReport, WeightBinder};
 
 /// Bind a `[out_features, in_features]` weight and an optional `[out_features]`
 /// bias into a [`Linear`].
@@ -100,6 +100,81 @@ pub fn take_norm_bias(
     dim: usize,
 ) -> Result<Option<Tensor>> {
     binder.take_shaped(&format!("{name}.bias"), &[dim])
+}
+
+/// Bind a `[out, in]` task-head projection and its bias from a checkpoint.
+///
+/// Task heads are bound *after* the backbone, straight off the parsed
+/// [`Checkpoint`] rather than through a [`WeightBinder`], because the backbone's
+/// binder has already finished and deliberately tolerated the head's namespace.
+///
+/// A head the checkpoint does not carry is legitimate — a pretrained backbone
+/// ships without a fine-tuned head — but it is recorded in
+/// [`LoadReport::missing`] so the caller can see that the layer kept its
+/// constructor initialisation. A head that *is* present must reach the model:
+/// silently leaving it behind is exactly the failure this crate is being
+/// cleaned of.
+///
+/// # Errors
+///
+/// Fails when a tensor is present with the wrong shape.
+pub fn bind_head_linear(
+    checkpoint: &Checkpoint,
+    report: &mut LoadReport,
+    name: &str,
+    weight_shape: [usize; 2],
+    layer: &mut Linear,
+) -> Result<()> {
+    let weight_name = format!("{name}.weight");
+    match checkpoint.take_shaped(&weight_name, &weight_shape)? {
+        Some(weight) => {
+            layer.set_weight(weight)?;
+            report.mark_loaded(&weight_name);
+        },
+        None => report.note_absent(&weight_name),
+    }
+
+    let bias_name = format!("{name}.bias");
+    match checkpoint.take_shaped(&bias_name, &[weight_shape[0]])? {
+        Some(bias) => {
+            layer.set_bias(bias)?;
+            report.mark_loaded(&bias_name);
+        },
+        None => report.note_absent(&bias_name),
+    }
+    Ok(())
+}
+
+/// Bind a task-head [`LayerNorm`] from a checkpoint, recording what was found.
+///
+/// # Errors
+///
+/// Fails when a tensor is present with the wrong shape.
+pub fn bind_head_layer_norm(
+    checkpoint: &Checkpoint,
+    report: &mut LoadReport,
+    name: &str,
+    hidden_size: usize,
+    norm: &mut LayerNorm,
+) -> Result<()> {
+    let weight_name = format!("{name}.weight");
+    match checkpoint.take_shaped(&weight_name, &[hidden_size])? {
+        Some(weight) => {
+            norm.set_weight(weight)?;
+            report.mark_loaded(&weight_name);
+        },
+        None => report.note_absent(&weight_name),
+    }
+
+    let bias_name = format!("{name}.bias");
+    match checkpoint.take_shaped(&bias_name, &[hidden_size])? {
+        Some(bias) => {
+            norm.set_bias(bias)?;
+            report.mark_loaded(&bias_name);
+        },
+        None => report.note_absent(&bias_name),
+    }
+    Ok(())
 }
 
 /// The tensor shapes a decoder-only transformer's layers must have.

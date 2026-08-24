@@ -3,13 +3,19 @@
 //! Main hardware modeling structures including managers, profilers, monitors,
 //! analyzers, trackers, and detectors.
 
+use super::traits_analysis::MeasurementUnavailable;
 use super::{
     config::*, detection::*, enums::*, monitoring::*, profiling::*, topology::*,
     traits::VendorDetector,
 };
+use crate::performance_optimizer::resource_modeling::hardware_detector::{
+    CpuDetectionConfig, CpuDetector, GpuDetectionConfig, GpuDetector, MemoryDetectionConfig,
+    MemoryDetector,
+};
 use crate::performance_optimizer::resource_modeling::manager::ResourceModelingConfig;
 use crate::performance_optimizer::types::{
     CacheHierarchy, GpuDeviceModel, MemoryType, NumaTopology, SystemResourceModel,
+    TemperatureMetrics,
 };
 use parking_lot::{Mutex, RwLock};
 use std::{collections::HashMap, sync::Arc};
@@ -47,8 +53,20 @@ pub struct ResourceModelingManager {
 
 /// Performance profiling engine for hardware characterization
 ///
-/// Comprehensive profiling system for characterizing hardware performance
-/// across CPU, memory, I/O, network, and GPU subsystems with caching capabilities.
+/// A coordination shim: it owns the five per-subsystem profile caches that
+/// [`ResourceModelingManager`] hands around, but it runs no benchmarks itself.
+/// The engine that does is
+/// [`resource_modeling::performance_profiler`](crate::performance_optimizer::resource_modeling::performance_profiler).
+///
+/// ## Changed in 0.2.1: `profile_*_performance` no longer returns a zeroed profile
+///
+/// Each of the five methods returned `Default::default()` for its profile
+/// type — every score, bandwidth and latency `0.0` — and reported success.
+/// `ComponentCoordinator::execute_performance_profiling` collected the five
+/// into a `PerformanceProfileResults`, stamped it with the current time and
+/// filed it as a profiling result, so downstream code could not distinguish
+/// "the machine measured zero" from "nothing was measured". They now return
+/// [`MeasurementUnavailable`].
 #[derive(Debug, Clone)]
 pub struct PerformanceProfiler {
     /// CPU profiling results
@@ -83,34 +101,48 @@ impl PerformanceProfiler {
         }
     }
 
-    /// Profile CPU performance
+    /// Profile CPU performance.
+    ///
+    /// See the type-level note: this returns [`MeasurementUnavailable`]
+    /// instead of a zeroed [`CpuProfile`].
     pub async fn profile_cpu_performance(&self) -> anyhow::Result<CpuProfile> {
-        // Placeholder implementation
-        Ok(CpuProfile::default())
+        Err(Self::no_profile("a CPU performance profile"))
     }
 
-    /// Profile memory performance
+    /// Profile memory performance.
+    ///
+    /// Returns [`MeasurementUnavailable`]; see the type-level note.
     pub async fn profile_memory_performance(&self) -> anyhow::Result<MemoryProfile> {
-        // Placeholder implementation
-        Ok(MemoryProfile::default())
+        Err(Self::no_profile("a memory performance profile"))
     }
 
-    /// Profile I/O performance
+    /// Profile I/O performance.
+    ///
+    /// Returns [`MeasurementUnavailable`]; see the type-level note.
     pub async fn profile_io_performance(&self) -> anyhow::Result<IoProfile> {
-        // Placeholder implementation
-        Ok(IoProfile::default())
+        Err(Self::no_profile("an I/O performance profile"))
     }
 
-    /// Profile network performance
+    /// Profile network performance.
+    ///
+    /// Returns [`MeasurementUnavailable`]; see the type-level note.
     pub async fn profile_network_performance(&self) -> anyhow::Result<NetworkProfile> {
-        // Placeholder implementation
-        Ok(NetworkProfile::default())
+        Err(Self::no_profile("a network performance profile"))
     }
 
-    /// Profile GPU performance
+    /// Profile GPU performance.
+    ///
+    /// Returns [`MeasurementUnavailable`]; see the type-level note.
     pub async fn profile_gpu_performance(&self) -> anyhow::Result<GpuProfile> {
-        // Placeholder implementation
-        Ok(GpuProfile::default())
+        Err(Self::no_profile("a GPU performance profile"))
+    }
+
+    fn no_profile(what: &'static str) -> anyhow::Error {
+        MeasurementUnavailable::raise(
+            what,
+            "this coordination shim runs no benchmarks; the profiling engine is \
+             resource_modeling::performance_profiler",
+        )
     }
 }
 
@@ -140,10 +172,43 @@ impl TemperatureMonitor {
         }
     }
 
-    /// Get current temperature
+    /// Read the hottest temperature the platform's thermal components report,
+    /// and append it to [`Self::temperature_history`].
+    ///
+    /// Returns [`MeasurementUnavailable`] when the platform exposes no
+    /// components, or none of them has a reading — a common case on macOS and
+    /// inside containers. It used to return the literal `45.0` °C on every
+    /// call, on every machine, which
+    /// [`ComponentCoordinator::execute_temperature_monitoring`] then compared
+    /// against its 85 °C throttling threshold: a thermal check that could
+    /// never fire.
+    ///
+    /// [`ComponentCoordinator::execute_temperature_monitoring`]: crate::performance_optimizer::resource_modeling::manager::ComponentCoordinator::execute_temperature_monitoring
     pub async fn get_current_temperature(&self) -> anyhow::Result<f32> {
-        // Placeholder implementation - would read actual temperature sensors
-        Ok(45.0) // 45°C
+        let components = sysinfo::Components::new_with_refreshed_list();
+        let hottest = components
+            .iter()
+            .filter_map(|component| component.temperature())
+            .fold(None::<f32>, |acc, t| Some(acc.map_or(t, |a| a.max(t))));
+
+        match hottest {
+            Some(temperature) => {
+                self.temperature_history.lock().push(TemperatureReading {
+                    timestamp: chrono::Utc::now(),
+                    metrics: TemperatureMetrics {
+                        cpu_temperature: temperature,
+                        gpu_temperature: None,
+                        system_temperature: temperature,
+                        thermal_throttling: temperature >= self.thresholds.critical_temperature,
+                    },
+                });
+                Ok(temperature)
+            },
+            None => Err(MeasurementUnavailable::raise(
+                "a system temperature",
+                "this platform exposes no readable thermal components",
+            )),
+        }
     }
 }
 
@@ -183,10 +248,22 @@ impl TopologyAnalyzer {
         }
     }
 
-    /// Analyze complete system topology
+    /// Analyze complete system topology.
+    ///
+    /// Returns [`MeasurementUnavailable`]. This returned `Ok(())` without
+    /// touching any of its four caches, after which
+    /// `ComponentCoordinator::execute_topology_analysis` built a
+    /// `TopologyAnalysisResults` out of `Default::default()` for every field
+    /// and reported it as an analysis result — an empty NUMA topology and
+    /// zeroed cache, memory and I/O topologies, presented as the machine's
+    /// actual layout. The live topology analyser is
+    /// [`resource_modeling::topology_analyzer`](crate::performance_optimizer::resource_modeling::topology_analyzer).
     pub async fn analyze_complete_topology(&self) -> anyhow::Result<()> {
-        // Placeholder implementation - would analyze full system topology
-        Ok(())
+        Err(MeasurementUnavailable::raise(
+            "system topology",
+            "this coordination shim performs no topology detection; the analyser is \
+             resource_modeling::topology_analyzer",
+        ))
     }
 }
 
@@ -228,10 +305,21 @@ impl ResourceUtilizationTracker {
         }
     }
 
-    /// Start monitoring resource utilization
+    /// Start monitoring resource utilization.
+    ///
+    /// Returns [`MeasurementUnavailable`]. Nothing was ever started: the five
+    /// utilisation histories stayed empty, and
+    /// `ComponentCoordinator::execute_utilization_tracking` read the `Ok(())`
+    /// as permission to emit a `UtilizationReport` whose every statistic —
+    /// average, minimum, maximum, standard deviation, p95, p99 — was `0.0`.
+    /// The live tracker is
+    /// [`resource_modeling::utilization_tracker`](crate::performance_optimizer::resource_modeling::utilization_tracker).
     pub async fn start_monitoring(&self) -> anyhow::Result<()> {
-        // Placeholder implementation - would start continuous monitoring
-        Ok(())
+        Err(MeasurementUnavailable::raise(
+            "resource utilization tracking",
+            "this coordination shim starts no sampling loop; the tracker is \
+             resource_modeling::utilization_tracker",
+        ))
     }
 }
 
@@ -261,39 +349,56 @@ impl HardwareDetector {
         }
     }
 
-    /// Detect CPU frequencies
+    /// Detect CPU base and boost frequencies, in MHz.
+    ///
+    /// Delegates to
+    /// [`hardware_detector::CpuDetector`](crate::performance_optimizer::resource_modeling::hardware_detector::CpuDetector),
+    /// which reads them from the platform. This used to answer `(2400, 3600)`
+    /// for every CPU it was ever asked about.
     pub async fn detect_cpu_frequencies(&self) -> anyhow::Result<(u32, u32)> {
-        // Placeholder implementation - would detect actual CPU frequencies
-        Ok((2400, 3600)) // Base and boost frequencies in MHz (u32, u32)
+        CpuDetector::new(CpuDetectionConfig::default())
+            .await?
+            .detect_cpu_frequencies()
+            .await
     }
 
-    /// Detect cache hierarchy
+    /// Detect the cache hierarchy.
+    ///
+    /// Delegates to
+    /// [`hardware_detector::CpuDetector`](crate::performance_optimizer::resource_modeling::hardware_detector::CpuDetector).
+    /// This used to return a fixed 32 KiB / 256 KiB / 8 MiB hierarchy with a
+    /// 64-byte line, which is a plausible x86 desktop and wrong about most
+    /// other machines.
     pub async fn detect_cache_hierarchy(&self) -> anyhow::Result<CacheHierarchy> {
-        // Placeholder implementation - would detect actual cache hierarchy
-        Ok(CacheHierarchy {
-            l1_cache_kb: 32,
-            l2_cache_kb: 256,
-            l3_cache_kb: Some(8192),
-            cache_line_size: 64,
-        })
+        CpuDetector::new(CpuDetectionConfig::default())
+            .await?
+            .detect_cache_hierarchy()
+            .await
     }
 
-    /// Detect memory characteristics
+    /// Detect memory type, speed, bandwidth and latency.
+    ///
+    /// Delegates to
+    /// [`hardware_detector::MemoryDetector`](crate::performance_optimizer::resource_modeling::hardware_detector::MemoryDetector).
+    /// This used to report DDR4 at 2400 MHz, 51.2 GB/s and 14 ns
+    /// unconditionally — including on DDR5 and on unified-memory machines.
     pub async fn detect_memory_characteristics(
         &self,
     ) -> anyhow::Result<(MemoryType, u32, f32, std::time::Duration)> {
-        // Placeholder implementation - would detect actual memory characteristics
-        Ok((
-            MemoryType::Ddr4,
-            2400,                                // Speed in MHz
-            51.2,                                // Bandwidth in GB/s
-            std::time::Duration::from_nanos(14), // Latency
-        ))
+        MemoryDetector::new(MemoryDetectionConfig::default())
+            .await?
+            .detect_memory_characteristics()
+            .await
     }
 
-    /// Detect GPU devices
+    /// Detect GPU devices.
+    ///
+    /// Delegates to
+    /// [`hardware_detector::GpuDetector`](crate::performance_optimizer::resource_modeling::hardware_detector::GpuDetector).
     pub async fn detect_gpu_devices(&self) -> anyhow::Result<Vec<GpuDeviceModel>> {
-        // Placeholder implementation - would detect actual GPU devices
-        Ok(Vec::new()) // Return empty vector as placeholder
+        GpuDetector::new(GpuDetectionConfig::default())
+            .await?
+            .detect_gpu_devices()
+            .await
     }
 }

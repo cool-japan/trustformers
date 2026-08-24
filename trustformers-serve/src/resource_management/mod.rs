@@ -48,6 +48,16 @@
 //! private item that nothing read: the fields have been removed together with
 //! the constructor arguments that fed them. The lint is enabled now, so the
 //! next unread field is reported instead of accumulating.
+//!
+//! One targeted `#[allow(dead_code)]` outlived that sweep, on
+//! `gpu_manager::manager::GpuResourceManager::create_mock_device`. Its doc
+//! comment said it was "retained for unit-test use", but nothing called it —
+//! not the discovery path, not a test. What it did was manufacture a GPU
+//! inventory: device 0 was an "NVIDIA GeForce RTX 4090" with 24 GB and CUDA
+//! 12.0, device 1 a "Tesla V100" with 32 GB, each with a capability list
+//! naming PyTorch, TensorFlow and JAX. Sixty-five lines of invented hardware
+//! one call away from the real `query_nvidia_devices` path. Deleted in 0.2.1,
+//! and with it the last `allow(dead_code)` in this module tree.
 
 pub mod allocation;
 pub mod cleanup;

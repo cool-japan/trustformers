@@ -26,8 +26,8 @@ use super::system_stats::{disk_usage_percentage, measure_host_async};
 use super::types::{
     AsyncInferenceRequest, AsyncInferenceResponse, BatchInferenceRequest, BatchInferenceResponse,
     DetailedHealthResponse, FailoverRequest, HealthResponse, InferenceRequest, InferenceResponse,
-    JobStatusResponse, MockTokenRequest, ModelLoadRequest, ModelLoadResponse, ServiceHealthInfo,
-    StatsResponse, TrustformerServer,
+    JobStatusResponse, ModelLoadRequest, ModelLoadResponse, ServiceHealthInfo, StatsResponse,
+    TokenRequest, TrustformerServer,
 };
 
 static REQUEST_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
@@ -1104,7 +1104,7 @@ pub(super) async fn model_load_endpoint(
 /// `503 Service Unavailable`; it never hands out a canned token.
 pub(super) async fn auth_token_handler(
     Extension(server): Extension<Arc<TrustformerServer>>,
-    Json(request): Json<MockTokenRequest>,
+    Json(request): Json<TokenRequest>,
 ) -> Result<Json<crate::auth::TokenResponse>, axum::http::StatusCode> {
     if request.username.is_empty() || request.password.is_empty() {
         return Err(axum::http::StatusCode::BAD_REQUEST);

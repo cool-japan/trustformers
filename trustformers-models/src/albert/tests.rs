@@ -671,4 +671,232 @@ mod tests {
             "unexpected: {err}"
         );
     }
+
+    // ── Task heads (regression for the head-dropping delegation) ────────────
+
+    /// The tensors an ALBERT masked-LM export adds on top of the encoder.
+    fn prediction_head_tensors(config: &AlbertConfig, aliased_bias: bool) -> Vec<F32Tensor> {
+        let embedding = config.embedding_size;
+        let bias_name = if aliased_bias { "predictions.decoder.bias" } else { "predictions.bias" };
+        vec![
+            F32Tensor::ramp(
+                "predictions.dense.weight",
+                &[embedding, config.hidden_size],
+                600.0,
+            ),
+            F32Tensor::ramp("predictions.dense.bias", &[embedding], 610.0),
+            F32Tensor::ramp("predictions.LayerNorm.weight", &[embedding], 620.0),
+            F32Tensor::ramp("predictions.LayerNorm.bias", &[embedding], 630.0),
+            F32Tensor::ramp(
+                "predictions.decoder.weight",
+                &[config.vocab_size, embedding],
+                640.0,
+            ),
+            F32Tensor::ramp(bias_name, &[config.vocab_size], 650.0),
+        ]
+    }
+
+    /// Regression: every task wrapper delegated to `AlbertModel::load_pretrained`,
+    /// whose unused-tensor policy tolerates `classifier.` / `qa_outputs.` /
+    /// `predictions.`. The head was therefore dropped while the load reported
+    /// success.
+    #[test]
+    fn sequence_classification_load_pretrained_binds_the_classifier_head() {
+        let config = loading_config();
+        let num_labels = 3;
+        let mut tensors = albert_tensors(&config, "albert.", true);
+        tensors.push(F32Tensor::ramp(
+            "classifier.weight",
+            &[num_labels, config.hidden_size],
+            700.0,
+        ));
+        tensors.push(F32Tensor::ramp("classifier.bias", &[num_labels], 710.0));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model =
+            AlbertForSequenceClassification::new(config, num_labels).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        assert!(
+            report.loaded.contains(&"classifier.weight".to_string())
+                && report.loaded.contains(&"classifier.bias".to_string()),
+            "the classification head must be among the loaded tensors: {:?}",
+            report.loaded
+        );
+    }
+
+    #[test]
+    fn sequence_classification_load_pretrained_records_an_absent_head() {
+        let config = loading_config();
+        let bytes = build_safetensors(&albert_tensors(&config, "albert.", true));
+
+        let mut model = AlbertForSequenceClassification::new(config, 3).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a head-less encoder checkpoint must still load");
+        assert!(
+            report.missing.contains(&"classifier.weight".to_string()),
+            "the absent head must be named: {:?}",
+            report.missing
+        );
+    }
+
+    #[test]
+    fn sequence_classification_load_pretrained_rejects_a_head_of_the_wrong_width() {
+        let config = loading_config();
+        let mut tensors = albert_tensors(&config, "albert.", true);
+        tensors.push(F32Tensor::ramp(
+            "classifier.weight",
+            &[9, config.hidden_size],
+            700.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = AlbertForSequenceClassification::new(config, 3).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a 9-label head must not be reshaped into a 3-label model");
+        assert!(
+            err.to_string().contains("classifier.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn token_classification_load_pretrained_binds_the_classifier_head() {
+        let config = loading_config();
+        let num_labels = 5;
+        let mut tensors = albert_tensors(&config, "albert.", true);
+        tensors.push(F32Tensor::ramp(
+            "classifier.weight",
+            &[num_labels, config.hidden_size],
+            720.0,
+        ));
+        tensors.push(F32Tensor::ramp("classifier.bias", &[num_labels], 730.0));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model =
+            AlbertForTokenClassification::new(config, num_labels).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        assert!(report.loaded.contains(&"classifier.weight".to_string()));
+    }
+
+    #[test]
+    fn question_answering_load_pretrained_binds_the_span_head() {
+        let config = loading_config();
+        let mut tensors = albert_tensors(&config, "albert.", true);
+        tensors.push(F32Tensor::ramp(
+            "qa_outputs.weight",
+            &[2, config.hidden_size],
+            740.0,
+        ));
+        tensors.push(F32Tensor::ramp("qa_outputs.bias", &[2], 750.0));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = AlbertForQuestionAnswering::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        assert!(
+            report.loaded.contains(&"qa_outputs.weight".to_string()),
+            "the span head must be among the loaded tensors: {:?}",
+            report.loaded
+        );
+    }
+
+    #[test]
+    fn masked_lm_load_pretrained_binds_the_prediction_head() {
+        let config = loading_config();
+        let mut tensors = albert_tensors(&config, "albert.", true);
+        tensors.extend(prediction_head_tensors(&config, false));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = AlbertForMaskedLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a matching checkpoint must load");
+        assert!(
+            report.is_complete(),
+            "every parameter must be bound, missing: {:?}",
+            report.missing
+        );
+        for name in [
+            "predictions.dense.weight",
+            "predictions.LayerNorm.weight",
+            "predictions.decoder.weight",
+            "predictions.bias",
+        ] {
+            assert!(
+                report.loaded.contains(&name.to_string()),
+                "{name} must be among the loaded tensors: {:?}",
+                report.loaded
+            );
+        }
+    }
+
+    /// ALBERT's prediction head projects down to the *embedding* width, not the
+    /// hidden width; a loader that confused the two would accept the wrong shape.
+    #[test]
+    fn masked_lm_load_pretrained_rejects_a_head_at_the_hidden_width() {
+        let config = loading_config();
+        assert_ne!(
+            config.embedding_size, config.hidden_size,
+            "this fixture only tests anything when the two widths differ"
+        );
+        let mut tensors = albert_tensors(&config, "albert.", true);
+        let mut head = prediction_head_tensors(&config, false);
+        head.retain(|t| t.name != "predictions.dense.weight");
+        head.push(F32Tensor::ramp(
+            "predictions.dense.weight",
+            &[config.hidden_size, config.hidden_size],
+            600.0,
+        ));
+        tensors.extend(head);
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = AlbertForMaskedLM::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a hidden-width projection is not the factorised head");
+        assert!(
+            err.to_string().contains("predictions.dense.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn masked_lm_load_pretrained_accepts_the_aliased_decoder_bias() {
+        let config = loading_config();
+        let mut tensors = albert_tensors(&config, "albert.", true);
+        tensors.extend(prediction_head_tensors(&config, true));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = AlbertForMaskedLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("the aliased bias spelling must load");
+        assert!(
+            report.loaded.contains(&"predictions.decoder.bias".to_string()),
+            "the aliased bias must be consumed: {:?}",
+            report.loaded
+        );
+    }
 }
