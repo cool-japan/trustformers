@@ -1083,4 +1083,170 @@ mod tests {
             "generate"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Manifest guards for this module's own dependency claim.
+    //
+    // The module doc above asserts, as a fact about the build, that these wire
+    // formats are produced with plain `serde_json` and that no OpenTelemetry SDK
+    // crate is a dependency — `opentelemetry-jaeger` in particular, which is
+    // deprecated upstream and is the root of RUSTSEC-2025-0123. Nothing else
+    // detects that claim going stale: re-adding the dependency compiles fine and
+    // leaves the doc silently lying, and `cargo deny check advisories` only turns
+    // red once RustSec has an advisory for whatever was added.
+    //
+    // These two tests read the manifests directly instead of taking a dependency
+    // of their own, so the guard cannot itself perturb the graph it is guarding.
+    // -----------------------------------------------------------------------
+
+    /// Dependency names that must not reappear in a manifest, with the reason.
+    ///
+    /// Matching is by prefix so that, e.g., `opentelemetry-otlp` and
+    /// `opentelemetry_sdk` are both caught by the `opentelemetry` entry.
+    const FORBIDDEN_DEPENDENCY_PREFIXES: &[(&str, &str)] = &[
+        (
+            "opentelemetry",
+            "this module hand-rolls the three wire formats with serde_json; the \
+             OpenTelemetry SDK crates were removed 2026-08-24 because nothing \
+             called them, and `opentelemetry-jaeger` is RUSTSEC-2025-0123",
+        ),
+        (
+            "tracing-opentelemetry",
+            "the tracing<->OpenTelemetry bridge went with the SDK crates; there \
+             is no OpenTelemetry pipeline to bridge to",
+        ),
+        (
+            "lambda-web",
+            "removed 2026-08-24 with the vestigial `lambda` feature; it pulled \
+             hyper 0.14 -> h2 0.3.27 (RUSTSEC-2026-0258) and the banned brotli \
+             crates for no working functionality",
+        ),
+        (
+            "paste",
+            "removed 2026-08-24 as a direct dev-dependency; declaring it \
+             first-hand is what made RUSTSEC-2024-0436 fire under deny.toml's \
+             `unmaintained = \"workspace\"`. Use the maintained fork `pastey` if \
+             token pasting is ever needed again",
+        ),
+    ];
+
+    /// Extract the dependency key a manifest line declares, if it declares one.
+    ///
+    /// Handles both `foo = { .. }` and `foo.workspace = true`, and ignores
+    /// comments — which matters here, because the manifests deliberately carry
+    /// long prose comments naming every one of the forbidden crates to explain
+    /// why it is absent. A naive substring scan would fire on those.
+    fn declared_dependency_name(line: &str) -> Option<&str> {
+        let code = line.split('#').next().unwrap_or("").trim();
+        if code.is_empty() || code.starts_with('[') {
+            return None;
+        }
+        let key = code.split('=').next()?.trim();
+        // `foo.workspace = true` / `foo.version = ".."` declare `foo`.
+        let name = key.split('.').next()?.trim();
+        if name.is_empty() || !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        Some(name)
+    }
+
+    /// Report every forbidden dependency a manifest's text declares.
+    fn forbidden_dependencies_in(manifest: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for line in manifest.lines() {
+            let Some(name) = declared_dependency_name(line) else {
+                continue;
+            };
+            for (prefix, reason) in FORBIDDEN_DEPENDENCY_PREFIXES {
+                if name.starts_with(prefix) {
+                    found.push(format!("  `{name}` — {reason}"));
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn test_declared_dependency_name_ignores_prose_comments() {
+        // The guard is only worth anything if it can tell a declaration from the
+        // comments that explain an absence, so pin that distinction directly.
+        assert_eq!(
+            declared_dependency_name("opentelemetry-jaeger = \"0.22\""),
+            Some("opentelemetry-jaeger")
+        );
+        assert_eq!(
+            declared_dependency_name("paste.workspace = true"),
+            Some("paste")
+        );
+        assert_eq!(
+            declared_dependency_name("# `opentelemetry-jaeger` was removed 2026-08-24"),
+            None
+        );
+        assert_eq!(declared_dependency_name("[dev-dependencies]"), None);
+        assert_eq!(declared_dependency_name("   "), None);
+        // A trailing comment must not hide a real declaration.
+        assert_eq!(
+            declared_dependency_name("lambda-web = \"0.2.1\" # still here"),
+            Some("lambda-web")
+        );
+    }
+
+    #[test]
+    fn test_serve_manifest_declares_no_opentelemetry_sdk() {
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", manifest_path.display()));
+
+        let found = forbidden_dependencies_in(&manifest);
+        assert!(
+            found.is_empty(),
+            "{} re-declares {} dependenc(ies) this module's doc comment states are \
+             absent. Either remove them, or update the doc comment and this list \
+             together — never leave the doc claiming an absence that is not real:\n{}",
+            manifest_path.display(),
+            found.len(),
+            found.join("\n")
+        );
+    }
+
+    #[test]
+    fn test_workspace_manifest_declares_no_opentelemetry_sdk() {
+        // The workspace root is this crate's parent directory in-tree. When the
+        // crate is consumed standalone (unpacked from its `.crate` archive) there
+        // is no root above it, so report inapplicability rather than failing —
+        // the same convention `trustformers-tokenizers`'s hygiene suite uses.
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|root| root.join("Cargo.toml"));
+        let Some(manifest_path) = manifest_path.filter(|path| path.is_file()) else {
+            eprintln!(
+                "test_workspace_manifest_declares_no_opentelemetry_sdk: no workspace \
+                 root above CARGO_MANIFEST_DIR; skipping"
+            );
+            return;
+        };
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", manifest_path.display()));
+        // Only guard a real workspace root, not some unrelated parent manifest.
+        if !manifest.contains("[workspace]") {
+            eprintln!(
+                "test_workspace_manifest_declares_no_opentelemetry_sdk: {} is not a \
+                 workspace root; skipping",
+                manifest_path.display()
+            );
+            return;
+        }
+
+        let found = forbidden_dependencies_in(&manifest);
+        assert!(
+            found.is_empty(),
+            "{} re-declares {} dependenc(ies) removed on 2026-08-24 to close \
+             RUSTSEC-2025-0123 / -2024-0436 / -2026-0258. A `[workspace.dependencies]` \
+             entry is what lets a member declare it, so the removal has to hold here \
+             too:\n{}",
+            manifest_path.display(),
+            found.len(),
+            found.join("\n")
+        );
+    }
 }

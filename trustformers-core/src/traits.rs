@@ -706,8 +706,23 @@ pub struct TokenizedInput {
     /// Used to identify tokens like `[CLS]`, `[SEP]`, `[PAD]` etc.
     pub special_tokens_mask: Option<Vec<u8>>,
 
-    /// Optional offset mapping showing character positions of tokens in original text.
-    /// Each tuple contains (start_pos, end_pos) character offsets.
+    /// Optional offset mapping showing where each token sits in the original text.
+    ///
+    /// Each tuple is a `(start, end)` **byte** offset into that text, so
+    /// `&text[start..end]` is the substring the token came from. Byte offsets —
+    /// not character (code point) offsets — are the in-tree convention:
+    /// every producer of this field emits byte spans, and the tokenizer tests
+    /// assert the round trip against `text.as_bytes()`.
+    ///
+    /// Callers that need character offsets (Python's `str` indexing, for
+    /// instance) convert at the boundary with
+    /// `trustformers_tokenizers::byte_offsets_to_char_offsets`, whose inverse is
+    /// `char_offsets_to_byte_offsets`. Converting anywhere other than the
+    /// boundary risks a double conversion, which is silent for ASCII and wrong
+    /// for everything else.
+    ///
+    /// Special tokens that correspond to no input text (`[CLS]`, `[SEP]`, and
+    /// friends) carry `(0, 0)`.
     pub offset_mapping: Option<Vec<(usize, usize)>>,
 
     /// Optional overflowing tokens when text exceeds max length.

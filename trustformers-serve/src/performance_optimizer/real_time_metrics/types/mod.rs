@@ -54,10 +54,12 @@ pub use config::{
 };
 
 // Re-export data structures
+// `AggregationWindow` and `CircularBuffer` used to be re-exported from here.
+// Both were unused shadow copies of the implementations in `aggregator::types`
+// and `collector::types`; see `data_structures.rs` for what each one was doing.
 pub use data_structures::{
-    AggregationWindow, BufferStatistics, CircularBuffer, DataPoint, EfficiencyMetrics,
-    LatencyStatistics, ThroughputStatistics, TimestampedMetrics, UtilizationStatistics,
-    VariabilityMeasures, WindowStatistics,
+    BufferStatistics, DataPoint, EfficiencyMetrics, LatencyStatistics, ThroughputStatistics,
+    TimestampedMetrics, UtilizationStatistics, VariabilityMeasures, WindowStatistics,
 };
 
 // Re-export metrics types

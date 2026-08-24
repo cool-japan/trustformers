@@ -258,19 +258,12 @@ macro_rules! optimized_test {
     };
 }
 
-/// Macro for tests with progress tracking
-#[macro_export]
-macro_rules! optimized_test_with_progress {
-    ($category:ident $test_name:expr, steps = $steps:expr, $test_body:expr) => {
-        paste::paste! {
-            $crate::test_utilities::[<run_ $category _test>]($test_name, |progress| async move {
-                let total_steps = $steps;
-                progress.total_progress.store(total_steps, std::sync::atomic::Ordering::SeqCst);
-                $test_body
-            }).await
-        }
-    };
-}
+// 0.2.1: `optimized_test_with_progress!` lived here. It expanded through
+// `paste::paste!` to build a `run_<category>_test` call, and `paste` was
+// removed from the workspace manifest as an unmaintained dependency
+// (RUSTSEC advisory), so the macro could no longer expand anywhere. Nothing
+// in the crate or its tests invoked it. An exported macro that cannot compile
+// is worse than no macro, so it is deleted rather than left as a trap.
 
 /// Helper trait for adding timeout optimization to existing test functions
 // reason: internal test-helper trait consumed only within this crate, where the

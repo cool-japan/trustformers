@@ -3,11 +3,13 @@
 
 pub mod analysis;
 pub mod config;
+pub mod conflict_algorithms;
 pub mod enums;
 pub mod events;
 pub mod formatters;
 pub mod metrics;
 pub mod optimization;
+pub mod pattern_algorithms;
 pub mod quality;
 pub mod resources;
 pub mod strategies;
@@ -15,11 +17,13 @@ pub mod strategies;
 // Re-export all types for backward compatibility
 pub use analysis::*;
 pub use config::*;
+pub use conflict_algorithms::*;
 pub use enums::*;
 pub use events::*;
 pub use formatters::*;
 pub use metrics::*;
 pub use optimization::*;
+pub use pattern_algorithms::*;
 pub use quality::*;
 pub use resources::*;
 pub use strategies::*;
@@ -44,15 +48,15 @@ use super::data_management::{
     ArchivalSettings, CompressionSettings, DataCharacteristics, RetentionPolicy,
 };
 use super::locking::{
-    ConflictDetectionAlgorithm, CycleDetectionAlgorithm, DeadlockDetectionAlgorithm,
-    DeadlockPreventionStrategy, DeadlockRisk, DependencyType, LockDependency, LockUsageInfo,
-    OrderedLockingStrategy, PredictiveDeadlockAlgorithm,
+    CycleDetectionAlgorithm, DeadlockDetectionAlgorithm, DeadlockPreventionStrategy, DeadlockRisk,
+    DependencyType, LockDependency, LockUsageInfo, OrderedLockingStrategy,
+    PredictiveDeadlockAlgorithm,
 };
 use super::optimization::{OptimizationObjective, OptimizationRecommendation};
 use super::patterns::{
     ConcurrencyAnalysisResult, ConcurrencyEstimationAlgorithm, ConcurrencyRequirements,
-    PatternCharacteristics, PatternDetectionAlgorithm, PatternEffectiveness, PatternType,
-    PatternUpdate, SynchronizationRequirements, ThreadInteraction,
+    PatternCharacteristics, PatternEffectiveness, PatternType, PatternUpdate,
+    SynchronizationRequirements, ThreadInteraction,
 };
 use super::performance::{EffectivenessMetrics, PerformanceMetrics, PerformanceProfile};
 use super::quality::{
@@ -60,8 +64,8 @@ use super::quality::{
     RiskAssessmentAlgorithm, RiskFactor, RiskFactorType, RiskLevel, ValidationResults,
 };
 use super::resources::{
-    ResourceAccessPattern, ResourceConflict, ResourceIntensity, ResourceMetrics,
-    ResourceUsageDataPoint, SystemResourceSnapshot,
+    ResourceAccessPattern, ResourceIntensity, ResourceMetrics, ResourceUsageDataPoint,
+    SystemResourceSnapshot,
 };
 
 // ============================================================================
@@ -752,178 +756,10 @@ impl ConcurrencyEstimationAlgorithm for MLBasedEstimationAlgorithm {
     }
 }
 
-// ============================================================================
-// CONFLICT DETECTION ALGORITHMS
-// ============================================================================
-
-#[derive(Debug)]
-pub struct StaticConflictDetectionAlgorithm {
-    pub enabled: bool,
-    pub depth: usize,
-}
-
-impl StaticConflictDetectionAlgorithm {
-    pub fn new(enabled: bool, depth: usize) -> Self {
-        Self { enabled, depth }
-    }
-}
-
-impl ConflictDetectionAlgorithm for StaticConflictDetectionAlgorithm {
-    fn detect_conflicts(
-        &self,
-        _access_patterns: &[ResourceAccessPattern],
-    ) -> TestCharacterizationResult<Vec<ResourceConflict>> {
-        // Simplified static conflict detection
-        Ok(Vec::new())
-    }
-
-    fn name(&self) -> &str {
-        "StaticConflictDetection"
-    }
-
-    fn sensitivity(&self) -> f64 {
-        0.8
-    }
-
-    fn update_parameters(
-        &mut self,
-        params: HashMap<String, f64>,
-    ) -> TestCharacterizationResult<()> {
-        if let Some(&depth) = params.get("depth") {
-            self.depth = depth as usize;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct DynamicConflictDetectionAlgorithm {
-    pub runtime_monitoring: bool,
-    pub sample_rate: f64,
-}
-
-impl DynamicConflictDetectionAlgorithm {
-    pub fn new(runtime_monitoring: bool, sample_rate: f64) -> Self {
-        Self {
-            runtime_monitoring,
-            sample_rate,
-        }
-    }
-}
-
-impl ConflictDetectionAlgorithm for DynamicConflictDetectionAlgorithm {
-    fn detect_conflicts(
-        &self,
-        _access_patterns: &[ResourceAccessPattern],
-    ) -> TestCharacterizationResult<Vec<ResourceConflict>> {
-        // Simplified dynamic conflict detection
-        Ok(Vec::new())
-    }
-
-    fn name(&self) -> &str {
-        "DynamicConflictDetection"
-    }
-
-    fn sensitivity(&self) -> f64 {
-        self.sample_rate
-    }
-
-    fn update_parameters(
-        &mut self,
-        params: HashMap<String, f64>,
-    ) -> TestCharacterizationResult<()> {
-        if let Some(&rate) = params.get("sample_rate") {
-            self.sample_rate = rate;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct PredictiveConflictDetectionAlgorithm {
-    pub prediction_horizon: usize,
-    pub accuracy_threshold: f64,
-}
-
-impl PredictiveConflictDetectionAlgorithm {
-    pub fn new(prediction_horizon: usize, accuracy_threshold: f64) -> Self {
-        Self {
-            prediction_horizon,
-            accuracy_threshold,
-        }
-    }
-}
-
-impl ConflictDetectionAlgorithm for PredictiveConflictDetectionAlgorithm {
-    fn detect_conflicts(
-        &self,
-        _access_patterns: &[ResourceAccessPattern],
-    ) -> TestCharacterizationResult<Vec<ResourceConflict>> {
-        // Simplified predictive conflict detection
-        Ok(Vec::new())
-    }
-
-    fn name(&self) -> &str {
-        "PredictiveConflictDetection"
-    }
-
-    fn sensitivity(&self) -> f64 {
-        self.accuracy_threshold
-    }
-
-    fn update_parameters(
-        &mut self,
-        params: HashMap<String, f64>,
-    ) -> TestCharacterizationResult<()> {
-        if let Some(&horizon) = params.get("prediction_horizon") {
-            self.prediction_horizon = horizon as usize;
-        }
-        if let Some(&threshold) = params.get("accuracy_threshold") {
-            self.accuracy_threshold = threshold;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct MLConflictDetectionAlgorithm {
-    pub model: String,
-    pub confidence: f64,
-}
-
-impl MLConflictDetectionAlgorithm {
-    pub fn new(model: String, confidence: f64) -> Self {
-        Self { model, confidence }
-    }
-}
-
-impl ConflictDetectionAlgorithm for MLConflictDetectionAlgorithm {
-    fn detect_conflicts(
-        &self,
-        _access_patterns: &[ResourceAccessPattern],
-    ) -> TestCharacterizationResult<Vec<ResourceConflict>> {
-        // Simplified ML-based conflict detection
-        Ok(Vec::new())
-    }
-
-    fn name(&self) -> &str {
-        "MLConflictDetection"
-    }
-
-    fn sensitivity(&self) -> f64 {
-        self.confidence
-    }
-
-    fn update_parameters(
-        &mut self,
-        params: HashMap<String, f64>,
-    ) -> TestCharacterizationResult<()> {
-        if let Some(&conf) = params.get("confidence") {
-            self.confidence = conf;
-        }
-        Ok(())
-    }
-}
+// Conflict-detection algorithms live in `conflict_algorithms.rs`. Until 0.2.1
+// they lived here and every one of them ignored its input and returned
+// `Ok(Vec::new())`; see that module for what each one now computes and why
+// the ML variant was deleted rather than fixed.
 
 // ============================================================================
 // DEADLOCK DETECTION IMPLEMENTATIONS
@@ -1778,160 +1614,9 @@ pub struct TestDateTime {
     pub timestamp_ms: i64,
 }
 
-// ============================================================================
-// PATTERN DETECTION ALGORITHMS (Re-added from original locations)
-// ============================================================================
-
-#[derive(Debug)]
-pub struct ProducerConsumerDetection {
-    pub detected: bool,
-    pub producer_count: usize,
-    pub consumer_count: usize,
-}
-
-impl ProducerConsumerDetection {
-    pub fn new() -> Self {
-        Self {
-            detected: false,
-            producer_count: 0,
-            consumer_count: 0,
-        }
-    }
-}
-
-impl Default for ProducerConsumerDetection {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PatternDetectionAlgorithm for ProducerConsumerDetection {
-    fn detect(&self) -> String {
-        if self.detected {
-            "Producer-Consumer pattern detected (confidence: 0.85)".to_string()
-        } else {
-            "No Producer-Consumer pattern detected".to_string()
-        }
-    }
-
-    fn name(&self) -> &str {
-        "ProducerConsumerDetection"
-    }
-}
-
-#[derive(Debug)]
-pub struct MasterWorkerDetection {
-    pub detected: bool,
-    pub master_count: usize,
-    pub worker_count: usize,
-}
-
-impl MasterWorkerDetection {
-    pub fn new() -> Self {
-        Self {
-            detected: false,
-            master_count: 0,
-            worker_count: 0,
-        }
-    }
-}
-
-impl Default for MasterWorkerDetection {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PatternDetectionAlgorithm for MasterWorkerDetection {
-    fn detect(&self) -> String {
-        if self.detected {
-            format!(
-                "Master-Worker pattern detected (workers: {})",
-                self.worker_count
-            )
-        } else {
-            "No Master-Worker pattern detected".to_string()
-        }
-    }
-
-    fn name(&self) -> &str {
-        "MasterWorkerDetection"
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct PipelineDetection {
-    pub detected: bool,
-    pub stages: usize,
-    pub throughput: f64,
-}
-
-impl PipelineDetection {
-    pub fn new() -> Self {
-        Self {
-            detected: false,
-            stages: 0,
-            throughput: 0.0,
-        }
-    }
-}
-
-impl Default for PipelineDetection {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PatternDetectionAlgorithm for PipelineDetection {
-    fn detect(&self) -> String {
-        if self.detected {
-            format!("Pipeline pattern detected (stages: {})", self.stages)
-        } else {
-            "No Pipeline pattern detected".to_string()
-        }
-    }
-
-    fn name(&self) -> &str {
-        "PipelineDetection"
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ForkJoinDetection {
-    pub detected: bool,
-    pub fork_points: usize,
-    pub join_points: usize,
-}
-
-impl ForkJoinDetection {
-    pub fn new() -> Self {
-        Self {
-            detected: false,
-            fork_points: 0,
-            join_points: 0,
-        }
-    }
-}
-
-impl Default for ForkJoinDetection {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PatternDetectionAlgorithm for ForkJoinDetection {
-    fn detect(&self) -> String {
-        if self.detected {
-            format!("Fork-Join pattern detected (forks: {})", self.fork_points)
-        } else {
-            "No Fork-Join pattern detected".to_string()
-        }
-    }
-
-    fn name(&self) -> &str {
-        "ForkJoinDetection"
-    }
-}
+// Concurrency-pattern detection algorithms live in `pattern_algorithms.rs`.
+// Until 0.2.1 they lived here and answered from a `detected: bool` that
+// nothing ever set, so every one of them reported "not detected" forever.
 
 // ============================================================================
 // ADDITIONAL TYPES FOR CROSS-MODULE COMPATIBILITY

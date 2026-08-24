@@ -175,18 +175,13 @@ impl TestPerformanceMonitoringService {
             test_name: test_info.test_name.clone(),
             start_time: std::time::SystemTime::now(),
             current_phase: TestPhase::Setup,
-            progress_percent: 0.0,
+            // Nothing here can observe a test's progress, and no resource
+            // sample has been taken at registration time. Both are absent
+            // rather than zero: an all-zero `ResourceUsageSnapshot` stamped
+            // with the current instant would assert a measurement nobody made.
+            progress_percent: None,
             last_update: std::time::SystemTime::now(),
-            resource_usage: ResourceUsageSnapshot {
-                cpu_percent: 0.0,
-                memory_mb: 0,
-                io_rate_mbps: 0.0,
-                network_rate_mbps: 0.0,
-                disk_usage_percent: 0.0,
-                open_files: 0,
-                active_threads: 0,
-                timestamp: std::time::SystemTime::now(),
-            },
+            resource_usage: None,
             performance_indicators: vec![],
             anomaly_flags: vec![],
         };
@@ -209,13 +204,9 @@ impl TestPerformanceMonitoringService {
                 source_id: "monitoring_service".to_string(),
                 source_name: "Test Performance Monitoring Service".to_string(),
                 source_version: Some("1.0.0".to_string()),
-                host_info: HostInfo {
-                    hostname: "localhost".to_string(),
-                    ip_address: "127.0.0.1".to_string(),
-                    operating_system: "Linux".to_string(),
-                    architecture: "x86_64".to_string(),
-                    process_id: std::process::id(),
-                },
+                // Read from the OS, not written into the source: see
+                // `HostInfo::detect`.
+                host_info: HostInfo::detect(),
             },
             severity: SeverityLevel::Info,
             data: EventData::TestEvent {
@@ -226,13 +217,9 @@ impl TestPerformanceMonitoringService {
                     execution_id: test_info.test_id.clone(),
                     parent_execution_id: None,
                     execution_environment: "test".to_string(),
-                    resource_allocation: ResourceAllocation {
-                        cpu_cores: 4,
-                        memory_mb: 1024,
-                        disk_space_mb: 10240,
-                        network_bandwidth_mbps: 100.0,
-                        gpu_allocation: None,
-                    },
+                    // Nothing allocates resources per test in this crate,
+                    // so there is no allocation to report.
+                    resource_allocation: None,
                     configuration_snapshot: std::collections::HashMap::new(),
                     dependency_versions: std::collections::HashMap::new(),
                 },
@@ -407,6 +394,20 @@ impl TestPerformanceMonitoringService {
     }
 
     /// Get the configuration this service was constructed with
+    /// The dashboard manager this service owns.
+    ///
+    /// Nothing inside the service drives it -- dashboards are created and read
+    /// by whoever owns the UI -- so this is how a caller reaches it.
+    pub fn dashboard_manager(&self) -> &Arc<DashboardManager> {
+        &self.dashboard_manager
+    }
+
+    /// The subscription manager this service owns. Likewise driven from
+    /// outside: the service itself never creates a subscription.
+    pub fn subscription_manager(&self) -> &Arc<super::subscriptions::SubscriptionManager> {
+        &self.subscription_manager
+    }
+
     pub fn config(&self) -> &TestPerformanceMonitoringConfig {
         &self.config
     }
@@ -522,6 +523,28 @@ mod tests {
 
         let status = service.get_status().await;
         assert!(!status.is_running);
+    }
+
+    /// The sub-managers must be reachable and must carry the caller's
+    /// configuration, not a default substituted for it.
+    #[tokio::test]
+    async fn sub_managers_are_reachable_and_configured() {
+        let mut config = TestPerformanceMonitoringConfig::default();
+        config.dashboard_config.refresh_interval = std::time::Duration::from_millis(4242);
+        config.subscription_config.max_subscriptions_per_user = 4242;
+
+        let service = TestPerformanceMonitoringService::new(config)
+            .await
+            .expect("async operation should succeed in test");
+
+        assert_eq!(
+            service.dashboard_manager().config().refresh_interval,
+            std::time::Duration::from_millis(4242)
+        );
+        assert_eq!(
+            service.subscription_manager().config().max_subscriptions_per_user,
+            4242
+        );
     }
 
     #[tokio::test]

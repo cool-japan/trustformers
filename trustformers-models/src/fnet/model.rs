@@ -1826,4 +1826,111 @@ mod tests {
             "unexpected: {err}"
         );
     }
+
+    // ── Contextual strictness: wrapper path vs bare-encoder path ────────────
+
+    /// A task wrapper must refuse a checkpoint entry it does not recognise
+    /// inside a namespace it binds itself.
+    ///
+    /// [`FNetModel::ALLOWED_UNUSED_PREFIXES`] tolerates `cls.` and
+    /// `classifier.` so that a *bare encoder* can be lifted out of a fine-tuned
+    /// checkpoint. The task wrappers used to inherit that tolerance even though
+    /// they bind those namespaces, so a misspelling such as
+    /// `cls.predictions.transform.dens.weight` was reported as merely
+    /// `ignored`: the load returned `Ok` and the dense layer the typo was meant
+    /// to fill kept its random initialisation. See
+    /// [`crate::weight_loading::binding::BoundNamespaces`].
+    #[test]
+    fn a_wrapper_rejects_an_unknown_tensor_inside_a_namespace_it_binds() {
+        // Masked LM: a misspelling one level below the namespace it binds.
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(prediction_head_tensors(&config, false));
+        tensors.push(F32Tensor::ramp(
+            "cls.predictions.transform.dens.weight",
+            &[hidden, hidden],
+            96.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+        let mut model = FNetForMaskedLM::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a misspelt head tensor must not be tolerated by the head's own binder");
+        let message = err.to_string();
+        assert!(
+            message.contains("cls.predictions.transform.dens.weight"),
+            "the offending name must be reported: {message}"
+        );
+        // The refusal must come from the wrapper's own namespace check, not
+        // from a shape or missing-parameter error that happens to mention the
+        // name: only `BoundNamespaces::verify` phrases it this way.
+        assert!(
+            message.contains("does not recognise inside the head namespace"),
+            "the refusal must be the bound-namespace check: {message}"
+        );
+
+        // Sequence classification: a misspelling under `classifier.`.
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(classifier_tensors(&config, 3));
+        tensors.push(F32Tensor::ramp("classifier.weigth", &[3, hidden], 97.0));
+        let bytes = build_safetensors(&tensors);
+        let mut model = FNetForSequenceClassification::new(config, 3).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a misspelt classifier tensor must be refused");
+        assert!(
+            err.to_string().contains("classifier.weigth"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// The strictness above must not turn into "every checkpoint entry must be
+    /// consumed": a pretraining checkpoint legitimately carries heads a
+    /// particular model does not bind, and the bare encoder binds none of them.
+    #[test]
+    fn namespaces_a_model_does_not_bind_stay_tolerated() {
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = fnet_tensors(&config, "fnet.");
+        tensors.extend(prediction_head_tensors(&config, false));
+        // A next-sentence head under `cls.`, which the masked-LM wrapper does
+        // not bind: it claims `cls.predictions.`, not `cls.` as a whole.
+        tensors.push(F32Tensor::ramp(
+            "cls.seq_relationship.weight",
+            &[2, hidden],
+            98.0,
+        ));
+        tensors.push(F32Tensor::ramp("cls.seq_relationship.bias", &[2], 99.0));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = FNetForMaskedLM::new(config).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a next-sentence head this model does not bind must stay tolerated");
+        assert!(
+            report.ignored.iter().any(|name| name == "cls.seq_relationship.weight"),
+            "the unbound head must be reported as ignored: {:?}",
+            report.ignored
+        );
+
+        // The same checkpoint through the bare encoder: `cls.` as a whole is not
+        // bound there, so the entire namespace stays tolerated.
+        let mut encoder = FNetModel::new(loading_config()).expect("model must build");
+        let encoder_report = encoder
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("the bare encoder must keep tolerating a head namespace it never binds");
+        for name in [
+            "cls.predictions.transform.dense.weight",
+            "cls.seq_relationship.weight",
+        ] {
+            assert!(
+                encoder_report.ignored.iter().any(|ignored| ignored == name),
+                "{name} must stay tolerated on the bare-encoder path: {:?}",
+                encoder_report.ignored
+            );
+        }
+    }
 }

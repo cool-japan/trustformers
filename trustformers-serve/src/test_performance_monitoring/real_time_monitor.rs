@@ -40,17 +40,40 @@ pub struct MonitoringState {
     pub last_heartbeat: RwLock<Option<SystemTime>>,
 }
 
-/// Information about actively monitored test
+/// Registration record for a test the monitor has been asked to watch.
+///
+/// This is written once, by [`RealTimePerformanceMonitor::register_test`], and
+/// the monitor never refreshes it: the live numbers travel on
+/// [`StreamingMetrics`] instead. Every field here is therefore either an
+/// identity, the registration instant, or something the *caller* declared --
+/// never something this module measured.
+///
+/// 0.2.1: `progress_percent` and `resource_usage` used to be plain values, and
+/// the crate's only caller filled them with `0.0` and an all-zero
+/// `ResourceUsageSnapshot` stamped `timestamp: SystemTime::now()` -- a claim
+/// that CPU, memory, I/O, network, open files and thread count had all been
+/// sampled and were all zero at that instant. They are now `Option`, and
+/// "nobody has sampled this yet" is spelled `None`.
 #[derive(Debug, Clone)]
 pub struct ActiveTestInfo {
+    /// Identifier the caller registered the test under.
     pub test_id: String,
+    /// Human-readable test name, as supplied by the caller.
     pub test_name: String,
+    /// When the caller says the test started.
     pub start_time: SystemTime,
+    /// Phase the caller declared at registration. Not tracked afterwards.
     pub current_phase: TestPhase,
-    pub progress_percent: f64,
+    /// Caller-reported progress, or `None` when no progress source exists.
+    /// Nothing in this crate can derive test progress, so today it is `None`.
+    pub progress_percent: Option<f64>,
+    /// When this record was written. Registration time: nothing updates it.
     pub last_update: SystemTime,
-    pub resource_usage: ResourceUsageSnapshot,
+    /// A resource sample the caller took, or `None` when none was taken.
+    pub resource_usage: Option<ResourceUsageSnapshot>,
+    /// Indicators the caller attached at registration.
     pub performance_indicators: Vec<LivePerformanceIndicator>,
+    /// Anomaly flags the caller attached at registration.
     pub anomaly_flags: Vec<AnomalyFlag>,
 }
 
@@ -1101,6 +1124,38 @@ mod tests {
         assert!(alert_manager.alert_rules.is_empty());
         assert!(alert_manager.active_alerts.is_empty());
         assert!(alert_manager.alert_history.is_empty());
+    }
+
+    /// Registration must store exactly what the caller declared. The monitor
+    /// has no progress source and takes no resource sample at registration, so
+    /// both stay absent rather than becoming `0.0` / an all-zero snapshot.
+    #[tokio::test]
+    async fn register_test_never_invents_progress_or_resource_usage() {
+        let monitor = RealTimePerformanceMonitor::new(RealTimeMonitoringConfig::default());
+        let info = ActiveTestInfo {
+            test_id: "register-honesty".to_string(),
+            test_name: "register honesty".to_string(),
+            start_time: SystemTime::now(),
+            current_phase: TestPhase::Setup,
+            progress_percent: None,
+            last_update: SystemTime::now(),
+            resource_usage: None,
+            performance_indicators: vec![],
+            anomaly_flags: vec![],
+        };
+
+        monitor.register_test(info).await.expect("registration should succeed");
+
+        let active = monitor.monitoring_state.active_tests.read().await;
+        let stored = active.get("register-honesty").expect("test should be registered");
+        assert!(
+            stored.progress_percent.is_none(),
+            "the monitor must not synthesise a progress figure"
+        );
+        assert!(
+            stored.resource_usage.is_none(),
+            "the monitor must not synthesise a resource sample"
+        );
     }
 
     #[tokio::test]

@@ -305,18 +305,24 @@ impl PerformanceBaseline {
         }
     }
 
-    /// Check if current metrics deviate from baseline
+    /// Whether `metrics` fall outside any bound this baseline actually has.
+    ///
+    /// A dimension with no measured bound (`None`) is skipped rather than
+    /// counted as conforming: the baseline has nothing to say about it.
     pub fn check_deviation(&self, metrics: &RealTimeMetrics) -> bool {
-        let throughput_ok = self.variability_bounds.throughput_bounds.0 <= metrics.throughput
-            && metrics.throughput <= self.variability_bounds.throughput_bounds.1;
+        let bounds = &self.variability_bounds;
+        let throughput_out = metrics.throughput < bounds.throughput_bounds.0
+            || metrics.throughput > bounds.throughput_bounds.1;
 
-        let cpu_ok = self.variability_bounds.cpu_bounds.0 <= metrics.cpu_utilization
-            && metrics.cpu_utilization <= self.variability_bounds.cpu_bounds.1;
+        let cpu_out = bounds.cpu_bounds.is_some_and(|(low, high)| {
+            metrics.cpu_utilization < low || metrics.cpu_utilization > high
+        });
 
-        let memory_ok = self.variability_bounds.memory_bounds.0 <= metrics.memory_utilization
-            && metrics.memory_utilization <= self.variability_bounds.memory_bounds.1;
+        let memory_out = bounds.memory_bounds.is_some_and(|(low, high)| {
+            metrics.memory_utilization < low || metrics.memory_utilization > high
+        });
 
-        !(throughput_ok && cpu_ok && memory_ok)
+        throughput_out || cpu_out || memory_out
     }
 
     /// Get baseline age
@@ -337,48 +343,51 @@ impl PerformanceBaseline {
 /// metrics to distinguish normal fluctuations from significant changes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariabilityBounds {
-    /// Throughput bounds (min, max)
+    /// Throughput bounds (min, max), from the window's measured standard
+    /// deviation.
     pub throughput_bounds: (f64, f64),
 
-    /// Latency bounds (min, max)
-    pub latency_bounds: (Duration, Duration),
+    /// Latency bounds (min, max), or `None` when the window carries no latency
+    /// dispersion to derive them from.
+    pub latency_bounds: Option<(Duration, Duration)>,
 
-    /// CPU utilization bounds (min, max)
-    pub cpu_bounds: (f32, f32),
+    /// CPU utilization bounds (min, max), or `None` when the window carries no
+    /// CPU dispersion.
+    pub cpu_bounds: Option<(f32, f32)>,
 
-    /// Memory utilization bounds (min, max)
-    pub memory_bounds: (f32, f32),
+    /// Memory utilization bounds (min, max), or `None` when the window carries
+    /// no memory dispersion.
+    pub memory_bounds: Option<(f32, f32)>,
 
-    /// Efficiency bounds (min, max)
-    pub efficiency_bounds: (f32, f32),
+    /// Efficiency bounds (min, max), or `None` -- which is always, because
+    /// `WindowStatistics` records no efficiency measurement at all.
+    pub efficiency_bounds: Option<(f32, f32)>,
 }
 
 impl VariabilityBounds {
-    /// Create bounds from window statistics
+    /// Create bounds from window statistics.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// Only the throughput bound was ever derived from the window: the others
+    /// were `mean * 0.1` ("10% margin") for CPU and memory, `mean_latency / 10`
+    /// for latency, and the constant `(0.5, 1.0)` for efficiency. A ten-percent
+    /// band around the mean is not a variability bound -- it is the same band
+    /// whether the metric was rock steady or all over the place.
+    /// `WindowStatistics` carries a standard deviation for throughput and for
+    /// nothing else, so the other three are now `None`.
     pub fn from_statistics(stats: &WindowStatistics) -> Self {
         let throughput_margin = stats.throughput_std_dev * 2.0; // 2 sigma
-        let cpu_margin = stats.mean_cpu_utilization * 0.1; // 10% margin
-        let memory_margin = stats.mean_memory_utilization * 0.1; // 10% margin
-        let latency_margin = stats.mean_latency / 10; // 10% margin
 
         Self {
             throughput_bounds: (
                 (stats.mean_throughput - throughput_margin).max(0.0),
                 stats.mean_throughput + throughput_margin,
             ),
-            latency_bounds: (
-                stats.mean_latency.saturating_sub(latency_margin),
-                stats.mean_latency + latency_margin,
-            ),
-            cpu_bounds: (
-                (stats.mean_cpu_utilization - cpu_margin).max(0.0),
-                (stats.mean_cpu_utilization + cpu_margin).min(100.0),
-            ),
-            memory_bounds: (
-                (stats.mean_memory_utilization - memory_margin).max(0.0),
-                (stats.mean_memory_utilization + memory_margin).min(100.0),
-            ),
-            efficiency_bounds: (0.5, 1.0), // Simplified
+            latency_bounds: None,
+            cpu_bounds: None,
+            memory_bounds: None,
+            efficiency_bounds: None,
         }
     }
 }
@@ -389,111 +398,143 @@ impl VariabilityBounds {
 /// to support reliable anomaly detection and performance comparison.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfidenceIntervals {
-    /// Confidence level (e.g., 0.95 for 95%)
+    /// Confidence level as a percentage (`95.0` means 95%).
     pub confidence_level: f32,
 
-    /// Throughput confidence interval
+    /// Confidence interval for the mean throughput.
     pub throughput_interval: (f64, f64),
 
-    /// Latency confidence interval
-    pub latency_interval: (Duration, Duration),
+    /// Latency confidence interval, or `None` when the window carries no
+    /// latency dispersion to build one from.
+    pub latency_interval: Option<(Duration, Duration)>,
 
-    /// CPU utilization confidence interval
-    pub cpu_interval: (f32, f32),
+    /// CPU utilization confidence interval, or `None` when unmeasured.
+    pub cpu_interval: Option<(f32, f32)>,
 
-    /// Memory utilization confidence interval
-    pub memory_interval: (f32, f32),
+    /// Memory utilization confidence interval, or `None` when unmeasured.
+    pub memory_interval: Option<(f32, f32)>,
 
-    /// Network throughput confidence interval
-    pub network_interval: (f64, f64),
+    /// Network throughput confidence interval, or `None` -- the window carries
+    /// no network measurement at all.
+    pub network_interval: Option<(f64, f64)>,
 
-    /// I/O operations confidence interval
-    pub io_interval: (f64, f64),
+    /// I/O operations confidence interval, or `None` -- likewise unmeasured.
+    pub io_interval: Option<(f64, f64)>,
 
-    /// Response time confidence interval
-    pub response_time_interval: (Duration, Duration),
+    /// Response time confidence interval, or `None` when unmeasured.
+    pub response_time_interval: Option<(Duration, Duration)>,
 
-    /// Error rate confidence interval
-    pub error_rate_interval: (f32, f32),
+    /// Error rate confidence interval, or `None` when unmeasured.
+    pub error_rate_interval: Option<(f32, f32)>,
 
     /// Statistical method used for calculation
     pub method: ConfidenceMethod,
 
-    /// Mean lower bound
+    /// Lower bound of the mean throughput interval.
     pub mean_lower: f64,
 
-    /// Mean upper bound
+    /// Upper bound of the mean throughput interval.
     pub mean_upper: f64,
 
-    /// Variance lower bound
-    pub variance_lower: f64,
+    /// Lower bound of the throughput variance interval, or `None` when the
+    /// window holds too few samples to build one.
+    pub variance_lower: Option<f64>,
 
-    /// Variance upper bound
-    pub variance_upper: f64,
+    /// Upper bound of the throughput variance interval, or `None`.
+    pub variance_upper: Option<f64>,
 }
 
 impl ConfidenceIntervals {
-    /// Create confidence intervals from window statistics
+    /// Build intervals from a window's measured statistics.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// Only the throughput interval was ever computed. CPU and memory used a
+    /// flat `mean * 0.05`, latency `mean / 20`, and network, I/O, response time
+    /// and error rate were the literal constants `(2_000_000.0, 8_000_000.0)`,
+    /// `(200.0, 800.0)`, `(15ms, 85ms)` and `(0.0, 3.0)` -- the same numbers
+    /// for every window ever measured. The variance interval was the point
+    /// estimate multiplied by 0.8 and 1.2. `method` claimed
+    /// `TDistribution` while the code used the normal z-score 1.96.
+    ///
+    /// `WindowStatistics` carries a standard deviation for throughput and for
+    /// nothing else, so throughput (mean and variance) is what can be reported;
+    /// the rest are `None`.
     pub fn from_statistics(stats: &WindowStatistics) -> Self {
-        // Simplified confidence interval calculation (assuming normal distribution)
-        let confidence_level = 95.0;
-        let z_score = 1.96; // for 95% confidence
+        // 95% two-sided normal quantile.
+        let z_score = 1.96;
+        let count = stats.count as f64;
 
-        let throughput_margin = (stats.throughput_std_dev / (stats.count as f64).sqrt()) * z_score;
-        let cpu_margin = stats.mean_cpu_utilization * 0.05; // Simplified
-        let memory_margin = stats.mean_memory_utilization * 0.05; // Simplified
-        let latency_margin = stats.mean_latency / 20; // Simplified
+        let throughput_margin = if count > 0.0 {
+            (stats.throughput_std_dev / count.sqrt()) * z_score
+        } else {
+            0.0
+        };
+        let lower = stats.mean_throughput - throughput_margin;
+        let upper = stats.mean_throughput + throughput_margin;
+
+        // Large-sample interval for the variance: Var(s^2) ~ 2*sigma^4/(n-1),
+        // so the margin is z * s^2 * sqrt(2/(n-1)). It needs at least two
+        // samples; with fewer there is no interval to report.
+        let variance = stats.throughput_std_dev * stats.throughput_std_dev;
+        let variance_bounds = if stats.count >= 2 {
+            let margin = z_score * variance * (2.0 / (count - 1.0)).sqrt();
+            Some(((variance - margin).max(0.0), variance + margin))
+        } else {
+            None
+        };
 
         Self {
-            confidence_level,
-            throughput_interval: (
-                stats.mean_throughput - throughput_margin,
-                stats.mean_throughput + throughput_margin,
-            ),
-            latency_interval: (
-                stats.mean_latency.saturating_sub(latency_margin),
-                stats.mean_latency + latency_margin,
-            ),
-            cpu_interval: (
-                (stats.mean_cpu_utilization - cpu_margin).max(0.0),
-                (stats.mean_cpu_utilization + cpu_margin).min(100.0),
-            ),
-            memory_interval: (
-                (stats.mean_memory_utilization - memory_margin).max(0.0),
-                (stats.mean_memory_utilization + memory_margin).min(100.0),
-            ),
-            network_interval: (2_000_000.0, 8_000_000.0), // Simplified default
-            io_interval: (200.0, 800.0),                  // Simplified default
-            response_time_interval: (Duration::from_millis(15), Duration::from_millis(85)),
-            error_rate_interval: (0.0, 3.0),
-            method: ConfidenceMethod::TDistribution,
-            mean_lower: stats.mean_throughput - throughput_margin,
-            mean_upper: stats.mean_throughput + throughput_margin,
-            variance_lower: (stats.throughput_std_dev * stats.throughput_std_dev * 0.8),
-            variance_upper: (stats.throughput_std_dev * stats.throughput_std_dev * 1.2),
+            confidence_level: 95.0,
+            throughput_interval: (lower, upper),
+            latency_interval: None,
+            cpu_interval: None,
+            memory_interval: None,
+            network_interval: None,
+            io_interval: None,
+            response_time_interval: None,
+            error_rate_interval: None,
+            method: ConfidenceMethod::Normal,
+            mean_lower: lower,
+            mean_upper: upper,
+            variance_lower: variance_bounds.map(|(low, _)| low),
+            variance_upper: variance_bounds.map(|(_, high)| high),
         }
     }
 }
 
 impl Default for ConfidenceIntervals {
+    /// Intervals with nothing measured in them.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// The default used to be a full set of plausible-looking numbers --
+    /// throughput `(90.0, 110.0)`, latency `(45ms, 55ms)`, CPU `(0.35, 0.65)`,
+    /// network `(2MB/s, 8MB/s)`, and so on -- so anything that fell back to
+    /// `Default::default()` published invented measurements that were
+    /// indistinguishable from computed ones.
     fn default() -> Self {
         Self {
-            confidence_level: 0.95,
-            throughput_interval: (90.0, 110.0),
-            latency_interval: (Duration::from_millis(45), Duration::from_millis(55)),
-            cpu_interval: (0.35, 0.65),
-            memory_interval: (0.55, 0.75),
-            network_interval: (2_000_000.0, 8_000_000.0), // 2MB/s to 8MB/s
-            io_interval: (200.0, 800.0),                  // 200 to 800 IOPS
-            response_time_interval: (Duration::from_millis(15), Duration::from_millis(85)),
-            error_rate_interval: (0.0, 3.0), // 0% to 3%
-            method: ConfidenceMethod::TDistribution,
-            mean_lower: 90.0,
-            mean_upper: 110.0,
-            variance_lower: 1.0,
-            variance_upper: 5.0,
+            confidence_level: 95.0,
+            throughput_interval: (0.0, 0.0),
+            latency_interval: None,
+            cpu_interval: None,
+            memory_interval: None,
+            network_interval: None,
+            io_interval: None,
+            response_time_interval: None,
+            error_rate_interval: None,
+            method: ConfidenceMethod::Normal,
+            mean_lower: 0.0,
+            mean_upper: 0.0,
+            variance_lower: None,
+            variance_upper: None,
         }
     }
 }
 
 // =============================================================================
+
+#[cfg(test)]
+#[path = "metrics_tests.rs"]
+mod metrics_tests;

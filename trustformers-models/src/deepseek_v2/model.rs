@@ -140,10 +140,32 @@ impl Layer for DeepSeekV2MLP {
 // Expert router
 // ---------------------------------------------------------------------------
 
+/// One token's routing decision, as produced by [`ExpertRouter::route_all`].
+///
+/// Routing in a Mixture-of-Experts layer is a *per-token* decision, so this is
+/// the unit the router works in. The full probability row is carried alongside
+/// the selection deliberately: a caller (and the regression tests) can then
+/// check the distribution itself — that it is a distribution at all, over this
+/// token's experts — rather than only which experts came out on top.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TokenRouting {
+    /// Softmax over this token's `n_routed_experts` gate logits. Length is
+    /// `n_routed_experts` and the entries sum to 1.
+    pub probabilities: Vec<f32>,
+    /// The selected expert indices, most probable first. At most
+    /// `num_experts_per_tok` of them.
+    pub experts: Vec<usize>,
+    /// The factor each selected expert's output is scaled by before it is summed
+    /// into this token's output: the selected probabilities renormalised to sum
+    /// to 1, then multiplied by `routed_scaling_factor`. Parallel to `experts`.
+    pub weights: Vec<f32>,
+}
+
 /// Lightweight top-k expert router.
 ///
-/// Computes per-expert affinity scores from a hidden vector and returns the
-/// indices of the top-`k` selected experts along with their normalised weights.
+/// Computes per-expert affinity scores from each token's hidden vector and
+/// returns, for every token independently, the indices of the top-`k` selected
+/// experts along with their normalised weights.
 pub struct ExpertRouter {
     gate: Linear,
     n_routed_experts: usize,
@@ -180,10 +202,42 @@ impl ExpertRouter {
         self.gate.parameter_count()
     }
 
-    /// Compute logits and select top-k experts.
+    /// Route every token in `input` independently.
     ///
-    /// Returns `(selected_expert_indices, normalised_weights)`.
-    pub fn route(&self, input: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
+    /// `input` is `[num_tokens, hidden_size]`; the gate produces
+    /// `[num_tokens, n_routed_experts]` logits, and **each row is softmaxed and
+    /// top-k'd on its own**. That per-row treatment is the whole point of a
+    /// Mixture-of-Experts router and it is what an earlier revision of this
+    /// method did not do: it flattened the logits, ran one softmax over all
+    /// `num_tokens * n_routed_experts` values at once (so no token's
+    /// probabilities summed to 1) and then sliced `probs[0..n_routed_experts]`,
+    /// which is token 0's row — every token in the sequence was routed to token
+    /// 0's experts with token 0's weights, and `num_experts_per_tok` described
+    /// the sequence rather than the token.
+    ///
+    /// Selection is DeepSeek-V2's GroupLimitedGreedy: rank within each of
+    /// `n_group` groups, keep `topk_group` per group, then take the global
+    /// top-`num_experts_per_tok` of those candidates.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the router is configured with zero experts or zero groups,
+    /// when the gate's output is not a contiguous `F32` tensor, or when that
+    /// output's length is not a whole number of `n_routed_experts` rows.
+    pub fn route_all(&self, input: &Tensor) -> Result<Vec<TokenRouting>> {
+        if self.n_routed_experts == 0 {
+            return Err(tensor_op_error(
+                "expert_router",
+                "n_routed_experts must be > 0 to route anything",
+            ));
+        }
+        if self.n_group == 0 {
+            return Err(tensor_op_error(
+                "expert_router",
+                "n_group must be > 0: GroupLimitedGreedy needs at least one group",
+            ));
+        }
+
         let logits_tensor = self.gate.forward(input.clone())?;
         let logits: Vec<f32> = match &logits_tensor {
             Tensor::F32(arr) => arr
@@ -193,13 +247,39 @@ impl ExpertRouter {
             _ => return Err(tensor_op_error("expert_router", "logits must be F32")),
         };
 
-        // Softmax over all routed experts
-        let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        if !logits.len().is_multiple_of(self.n_routed_experts) {
+            return Err(tensor_op_error(
+                "expert_router",
+                format!(
+                    "gate produced {} logits, which is not a whole number of rows of \
+                     n_routed_experts = {}",
+                    logits.len(),
+                    self.n_routed_experts
+                ),
+            ));
+        }
+
+        let num_tokens = logits.len() / self.n_routed_experts;
+        let mut routing = Vec::with_capacity(num_tokens);
+        for token in 0..num_tokens {
+            let start = token * self.n_routed_experts;
+            routing.push(self.route_row(&logits[start..start + self.n_routed_experts]));
+        }
+        Ok(routing)
+    }
+
+    /// Route one token from its own `n_routed_experts` gate logits.
+    fn route_row(&self, logits: &[f32]) -> TokenRouting {
+        // Softmax over this token's routed experts, so the row is a real
+        // probability distribution.
+        let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         let exp_logits: Vec<f32> = logits.iter().map(|&x| (x - max_logit).exp()).collect();
         let sum_exp: f32 = exp_logits.iter().sum();
-        let probs: Vec<f32> = if sum_exp > 0.0 {
+        let probabilities: Vec<f32> = if sum_exp > 0.0 && sum_exp.is_finite() {
             exp_logits.iter().map(|&x| x / sum_exp).collect()
         } else {
+            // Every logit was NaN or the exponentials underflowed to nothing:
+            // a uniform row is the only distribution the gate supports here.
             vec![1.0 / self.n_routed_experts as f32; self.n_routed_experts]
         };
 
@@ -210,8 +290,12 @@ impl ExpertRouter {
         for g in 0..self.n_group {
             let start = g * group_size;
             let end = (start + group_size).min(self.n_routed_experts);
-            let mut group_probs: Vec<(usize, f32)> =
-                (start..end).map(|i| (i, *probs.get(i).unwrap_or(&0.0))).collect();
+            if start >= end {
+                continue;
+            }
+            let mut group_probs: Vec<(usize, f32)> = (start..end)
+                .map(|i| (i, probabilities.get(i).copied().unwrap_or(0.0)))
+                .collect();
             group_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             candidates.extend(group_probs.into_iter().take(self.topk_group));
         }
@@ -221,15 +305,47 @@ impl ExpertRouter {
         let selected: Vec<(usize, f32)> =
             candidates.into_iter().take(self.num_experts_per_tok).collect();
 
-        // Normalise weights and apply scaling factor
+        // Normalise weights across the selected experts and apply the scaling factor
         let weight_sum: f32 = selected.iter().map(|(_, w)| w).sum();
         let norm = if weight_sum > 0.0 { weight_sum } else { 1.0 };
 
-        let indices: Vec<usize> = selected.iter().map(|(i, _)| *i).collect();
+        let experts: Vec<usize> = selected.iter().map(|(i, _)| *i).collect();
         let weights: Vec<f32> =
             selected.iter().map(|(_, w)| w / norm * self.routed_scaling_factor).collect();
 
-        Ok((indices, weights))
+        TokenRouting {
+            probabilities,
+            experts,
+            weights,
+        }
+    }
+
+    /// Route a single token.
+    ///
+    /// Returns `(selected_expert_indices, normalised_weights)` for that one
+    /// token — the convenience form of [`ExpertRouter::route_all`].
+    ///
+    /// # Errors
+    ///
+    /// Everything [`ExpertRouter::route_all`] fails on, plus an input carrying
+    /// anything other than exactly one token. Reporting one token's decision for
+    /// a whole sequence is precisely the bug this router used to have, so a
+    /// multi-token input is refused here rather than silently answered for the
+    /// first row: call [`ExpertRouter::route_all`] for a sequence.
+    pub fn route(&self, input: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
+        let mut routing = self.route_all(input)?;
+        if routing.len() != 1 {
+            return Err(tensor_op_error(
+                "expert_router",
+                format!(
+                    "route() answers for a single token but the input carries {}: use \
+                     route_all() to route a sequence",
+                    routing.len()
+                ),
+            ));
+        }
+        let decision = routing.remove(0);
+        Ok((decision.experts, decision.weights))
     }
 }
 
@@ -306,77 +422,139 @@ impl Layer for DeepSeekV2MoELayer {
     type Input = Tensor;
     type Output = Tensor;
 
+    /// Run the sparse FFN.
+    ///
+    /// Every token is routed on its own logits (see
+    /// [`ExpertRouter::route_all`]) and then **executed on its own row**: the
+    /// selected experts see only that token's hidden vector, and their outputs
+    /// are summed into that token's output row weighted by that token's gate
+    /// probabilities. Shared experts are applied to every token, as they are
+    /// always active.
+    ///
+    /// The previous revision routed once for the whole sequence and then ran
+    /// each selected expert over the *entire* input, so a sequence of `n` tokens
+    /// got token 0's expert set applied uniformly — the layer was dense in
+    /// everything but name.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the input is not a contiguous `F32` tensor, when the routed
+    /// token count does not divide the input evenly, when a selected expert
+    /// index is out of range, or when an expert returns a row of the wrong
+    /// width.
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        // --- Shared experts (always active) ---
-        let mut output: Option<Vec<f32>> = None;
-        let (input_len, input_shape) = match &input {
-            Tensor::F32(arr) => (arr.len(), arr.shape().to_vec()),
+        let (input_data, input_shape) = match &input {
+            Tensor::F32(arr) => (
+                arr.as_slice()
+                    .ok_or_else(|| {
+                        tensor_op_error("deepseek_v2_moe", "input tensor not contiguous")
+                    })?
+                    .to_vec(),
+                arr.shape().to_vec(),
+            ),
             _ => return Err(tensor_op_error("deepseek_v2_moe", "input must be F32")),
         };
+        let input_len = input_data.len();
 
+        // --- Routing: one decision per token, never one for the whole sequence ---
+        let routing = self.router.route_all(&input)?;
+        let num_tokens = routing.len();
+        if num_tokens == 0 {
+            // No rows to route: nothing to compute, and nothing to invent.
+            return Ok(input);
+        }
+        if !input_len.is_multiple_of(num_tokens) {
+            return Err(tensor_op_error(
+                "deepseek_v2_moe",
+                format!(
+                    "input of {input_len} values does not split evenly into {num_tokens} tokens"
+                ),
+            ));
+        }
+        let hidden_size = input_len / num_tokens;
+
+        let mut output = vec![0.0_f32; input_len];
+
+        // --- Shared experts (always active, every token) ---
         for expert in &self.shared_experts {
             let out = expert.forward(input.clone())?;
-            let out_slice = match &out {
-                Tensor::F32(arr) => arr
-                    .as_slice()
-                    .ok_or_else(|| {
-                        tensor_op_error("deepseek_v2_moe", "shared expert output not contiguous")
-                    })?
-                    .to_vec(),
-                _ => {
-                    return Err(tensor_op_error(
-                        "deepseek_v2_moe",
-                        "shared expert output must be F32",
-                    ))
-                },
-            };
-            match &mut output {
-                None => output = Some(out_slice),
-                Some(acc) => {
-                    for (a, b) in acc.iter_mut().zip(out_slice.iter()) {
-                        *a += b;
-                    }
-                },
+            let out_values = moe_output_values(&out, "shared expert")?;
+            if out_values.len() != input_len {
+                return Err(tensor_op_error(
+                    "deepseek_v2_moe",
+                    format!(
+                        "shared expert returned {} values for an input of {input_len}",
+                        out_values.len()
+                    ),
+                ));
+            }
+            for (accumulator, value) in output.iter_mut().zip(out_values.iter()) {
+                *accumulator += value;
             }
         }
 
-        // --- Routed experts ---
-        let (expert_indices, expert_weights) = self.router.route(&input)?;
-        for (idx, weight) in expert_indices.iter().zip(expert_weights.iter()) {
-            let expert = self
-                .routed_experts
-                .get(*idx)
-                .ok_or_else(|| tensor_op_error("deepseek_v2_moe", "expert index out of bounds"))?;
-            let out = expert.forward(input.clone())?;
-            let out_slice = match &out {
-                Tensor::F32(arr) => arr
-                    .as_slice()
-                    .ok_or_else(|| {
-                        tensor_op_error("deepseek_v2_moe", "routed expert output not contiguous")
-                    })?
-                    .to_vec(),
-                _ => {
+        // --- Routed experts (per token) ---
+        for (token_index, decision) in routing.iter().enumerate() {
+            if decision.experts.is_empty() {
+                continue;
+            }
+            let start = token_index * hidden_size;
+            let row = Tensor::from_vec(
+                input_data[start..start + hidden_size].to_vec(),
+                &[1, hidden_size],
+            )?;
+
+            for (expert_index, weight) in decision.experts.iter().zip(decision.weights.iter()) {
+                let expert = self.routed_experts.get(*expert_index).ok_or_else(|| {
+                    tensor_op_error(
+                        "deepseek_v2_moe",
+                        format!(
+                            "routed expert index {expert_index} is out of bounds for {} experts",
+                            self.routed_experts.len()
+                        ),
+                    )
+                })?;
+                let out = expert.forward(row.clone())?;
+                let out_values = moe_output_values(&out, "routed expert")?;
+                if out_values.len() != hidden_size {
                     return Err(tensor_op_error(
                         "deepseek_v2_moe",
-                        "routed expert output must be F32",
-                    ))
-                },
-            };
-            match &mut output {
-                None => output = Some(out_slice.iter().map(|&x| x * weight).collect()),
-                Some(acc) => {
-                    for (a, b) in acc.iter_mut().zip(out_slice.iter()) {
-                        *a += b * weight;
-                    }
-                },
+                        format!(
+                            "routed expert returned {} values for a token of width {hidden_size}",
+                            out_values.len()
+                        ),
+                    ));
+                }
+                for (accumulator, value) in
+                    output[start..start + hidden_size].iter_mut().zip(out_values.iter())
+                {
+                    *accumulator += value * weight;
+                }
             }
         }
 
-        let mut result = output.unwrap_or_else(|| vec![0.0_f32; input_len]);
-        result.resize(input_len, 0.0_f32);
         // Preserve original input shape
         let shape: Vec<usize> = if input_shape.is_empty() { vec![input_len] } else { input_shape };
-        Tensor::from_vec(result, &shape)
+        Tensor::from_vec(output, &shape)
+    }
+}
+
+/// Read an expert's output as a contiguous `f32` slice.
+///
+/// `what` names the expert kind so a failure says which of the two paths
+/// produced the unusable tensor.
+fn moe_output_values(tensor: &Tensor, what: &str) -> Result<Vec<f32>> {
+    match tensor {
+        Tensor::F32(arr) => Ok(arr
+            .as_slice()
+            .ok_or_else(|| {
+                tensor_op_error("deepseek_v2_moe", format!("{what} output not contiguous"))
+            })?
+            .to_vec()),
+        _ => Err(tensor_op_error(
+            "deepseek_v2_moe",
+            format!("{what} output must be F32"),
+        )),
     }
 }
 
@@ -961,6 +1139,289 @@ mod tests {
         assert!(
             cursor.is_empty(),
             "the reader must be fully consumed even when the load is refused"
+        );
+    }
+
+    // ── MoE routing tests ─────────────────────────────────────────────────────
+
+    /// Install `scale * I` as a square `Linear`'s weight, turning it into an
+    /// element-wise multiply so an expert's output can be computed by hand.
+    fn set_scaled_identity(layer: &mut Linear, size: usize, scale: f32) {
+        let mut data = vec![0.0_f32; size * size];
+        for row in 0..size {
+            data[row * size + row] = scale;
+        }
+        layer
+            .set_weight(Tensor::from_vec(data, &[size, size]).expect("identity weight tensor"))
+            .expect("installing a correctly shaped weight succeeds");
+    }
+
+    /// A 4-wide MoE layer with two routed experts and no shared experts, small
+    /// enough that every expert's output can be written down by hand.
+    fn handbuilt_moe_config() -> DeepSeekV2Config {
+        DeepSeekV2Config {
+            hidden_size: 4,
+            intermediate_size: 4,
+            n_routed_experts: 2,
+            n_shared_experts: 0,
+            num_experts_per_tok: 1,
+            n_group: 1,
+            topk_group: 2,
+            routed_scaling_factor: 1.0,
+            hidden_act: ActivationType::SiLU,
+            ..tiny_config()
+        }
+    }
+
+    /// Every token gets its own softmax over `n_routed_experts`.
+    ///
+    /// Regression: the router used to flatten the `[seq_len, n_routed_experts]`
+    /// gate logits and run **one** softmax over all `seq_len * n_routed_experts`
+    /// values, so no token's row was a probability distribution — the whole
+    /// matrix summed to 1 instead. `routed_scaling_factor` is deliberately not
+    /// 1.0 here so the "probabilities sum to 1" assertion cannot be satisfied by
+    /// the selected weights and vice versa.
+    #[test]
+    fn moe_router_gives_every_token_its_own_probability_distribution() {
+        let cfg = DeepSeekV2Config {
+            routed_scaling_factor: 2.5,
+            ..tiny_config()
+        };
+        let router = ExpertRouter::new(&cfg, Device::CPU);
+        let seq_len = 3;
+        let data: Vec<f32> =
+            (0..seq_len * cfg.hidden_size).map(|i| ((i % 9) as f32) * 0.2 - 0.7).collect();
+        let input =
+            Tensor::from_vec(data, &[seq_len, cfg.hidden_size]).expect("input tensor builds");
+
+        let routing = router.route_all(&input).expect("routing succeeds");
+        assert_eq!(routing.len(), seq_len, "one routing decision per token");
+
+        for (token, decision) in routing.iter().enumerate() {
+            assert_eq!(
+                decision.probabilities.len(),
+                cfg.n_routed_experts,
+                "token {token}: the probability row covers every routed expert"
+            );
+            let total: f32 = decision.probabilities.iter().sum();
+            assert!(
+                (total - 1.0).abs() < 1e-5,
+                "token {token}: probabilities sum to {total}, not 1.0 — the old router \
+                 softmaxed over seq_len × n_routed_experts values at once"
+            );
+            assert_eq!(
+                decision.experts.len(),
+                cfg.num_experts_per_tok,
+                "token {token}: exactly num_experts_per_tok experts are selected"
+            );
+            assert_eq!(
+                decision.weights.len(),
+                decision.experts.len(),
+                "token {token}: one weight per selected expert"
+            );
+            let weight_total: f32 = decision.weights.iter().sum();
+            assert!(
+                (weight_total - cfg.routed_scaling_factor).abs() < 1e-5,
+                "token {token}: the selected weights renormalise to routed_scaling_factor \
+                 ({}), got {weight_total}",
+                cfg.routed_scaling_factor
+            );
+        }
+    }
+
+    /// Two tokens whose gate logits point at opposite experts must be routed to
+    /// opposite experts.
+    ///
+    /// The gate is hand-built as the identity, so token `[8,0,0,0]` has its
+    /// largest logit at expert 0 and token `[0,0,0,8]` at expert 3. Under the
+    /// previous per-sequence routing both tokens received token 0's expert set.
+    #[test]
+    fn moe_router_sends_two_tokens_with_opposing_logits_to_different_experts() {
+        let cfg = DeepSeekV2Config {
+            hidden_size: 4,
+            n_routed_experts: 4,
+            num_experts_per_tok: 1,
+            n_group: 1,
+            topk_group: 4,
+            routed_scaling_factor: 1.0,
+            ..tiny_config()
+        };
+        let mut router = ExpertRouter::new(&cfg, Device::CPU);
+        set_scaled_identity(router.gate_mut(), 4, 1.0);
+
+        let input = Tensor::from_vec(vec![8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 8.0], &[2, 4])
+            .expect("input tensor builds");
+        let routing = router.route_all(&input).expect("routing succeeds");
+
+        assert_eq!(routing.len(), 2, "one routing decision per token");
+        assert_eq!(
+            routing[0].experts,
+            vec![0],
+            "the first token's largest logit is expert 0, got {:?} from {:?}",
+            routing[0].experts,
+            routing[0].probabilities
+        );
+        assert_eq!(
+            routing[1].experts,
+            vec![3],
+            "the second token's largest logit is expert 3, got {:?} from {:?}",
+            routing[1].experts,
+            routing[1].probabilities
+        );
+        assert_ne!(
+            routing[0].experts, routing[1].experts,
+            "opposing tokens must not share an expert set"
+        );
+        for (token, decision) in routing.iter().enumerate() {
+            let total: f32 = decision.probabilities.iter().sum();
+            assert!(
+                (total - 1.0).abs() < 1e-5,
+                "token {token}: probabilities sum to {total}, not 1.0"
+            );
+        }
+    }
+
+    /// `route()` answers for one token, so it refuses a sequence rather than
+    /// reporting the first row's decision for every token — the exact
+    /// substitution the previous implementation made silently.
+    #[test]
+    fn expert_router_route_refuses_a_multi_token_input() {
+        let cfg = tiny_config();
+        let router = ExpertRouter::new(&cfg, Device::CPU);
+        let input = Tensor::from_vec(vec![0.1_f32; 3 * cfg.hidden_size], &[3, cfg.hidden_size])
+            .expect("input tensor builds");
+        let error = router
+            .route(&input)
+            .expect_err("a multi-token input must be refused by the single-token entry point");
+        let message = error.to_string();
+        assert!(
+            message.contains("route_all"),
+            "the error must point at the per-sequence entry point, got: {message}"
+        );
+    }
+
+    /// Each token is *executed* by the experts it routed to, not by the first
+    /// token's experts.
+    ///
+    /// Both experts compute `scale × (silu(x) ⊙ x)` with different scales, and
+    /// the gate sends token 0 to expert 0 (scale 1) and token 1 to expert 1
+    /// (scale 3). Under the previous per-sequence routing token 1 would have
+    /// been run through expert 0 and come out three times too small — which the
+    /// final assertion pins down explicitly.
+    #[test]
+    fn moe_layer_runs_each_token_through_its_own_expert() {
+        let cfg = handbuilt_moe_config();
+        let mut layer = DeepSeekV2MoELayer::new(&cfg, Device::CPU).expect("moe layer builds");
+
+        // Gate: logit 0 reads x[0], logit 1 reads x[1].
+        layer
+            .router_mut()
+            .gate_mut()
+            .set_weight(
+                Tensor::from_vec(vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], &[2, 4])
+                    .expect("gate weight tensor"),
+            )
+            .expect("installing the gate weight succeeds");
+
+        for (index, scale) in [1.0_f32, 3.0].into_iter().enumerate() {
+            let (gate_proj, up_proj, down_proj) =
+                layer.routed_experts_mut()[index].projections_mut();
+            set_scaled_identity(gate_proj, 4, 1.0);
+            set_scaled_identity(up_proj, 4, 1.0);
+            set_scaled_identity(down_proj, 4, scale);
+        }
+
+        let input = Tensor::from_vec(vec![5.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], &[2, 4])
+            .expect("input tensor builds");
+        let output = layer.forward(input).expect("moe forward succeeds");
+        let values = output.to_vec_f32().expect("output values are readable");
+        assert_eq!(values.len(), 8, "the output keeps one row per token");
+
+        let base = silu(5.0) * 5.0;
+        assert!(
+            (values[0] - base).abs() < 1e-3,
+            "token 0 routes to expert 0 (scale 1): got {}, expected {base}",
+            values[0]
+        );
+        assert!(
+            (values[5] - 3.0 * base).abs() < 1e-2,
+            "token 1 routes to expert 1 (scale 3): got {}, expected {}",
+            values[5],
+            3.0 * base
+        );
+        assert!(
+            (values[5] - base).abs() > 1.0,
+            "token 1 came out with expert 0's scale ({}), which is the per-sequence routing bug",
+            values[5]
+        );
+    }
+
+    /// Shared experts are always active, so their contribution reaches every
+    /// token — including tokens whose routed experts contribute nothing.
+    #[test]
+    fn moe_layer_applies_shared_experts_to_every_token() {
+        let cfg = DeepSeekV2Config {
+            n_shared_experts: 1,
+            ..handbuilt_moe_config()
+        };
+        let mut layer = DeepSeekV2MoELayer::new(&cfg, Device::CPU).expect("moe layer builds");
+
+        // The one shared expert computes silu(x) ⊙ x.
+        {
+            let (gate_proj, up_proj, down_proj) = layer.shared_experts_mut()[0].projections_mut();
+            set_scaled_identity(gate_proj, 4, 1.0);
+            set_scaled_identity(up_proj, 4, 1.0);
+            set_scaled_identity(down_proj, 4, 1.0);
+        }
+        // Both routed experts contribute exactly nothing, isolating the shared path.
+        for index in 0..2 {
+            let (gate_proj, up_proj, down_proj) =
+                layer.routed_experts_mut()[index].projections_mut();
+            set_scaled_identity(gate_proj, 4, 1.0);
+            set_scaled_identity(up_proj, 4, 1.0);
+            set_scaled_identity(down_proj, 4, 0.0);
+        }
+
+        let input = Tensor::from_vec(vec![5.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0], &[2, 4])
+            .expect("input tensor builds");
+        let output = layer.forward(input).expect("moe forward succeeds");
+        let values = output.to_vec_f32().expect("output values are readable");
+
+        let base = silu(5.0) * 5.0;
+        assert!(
+            (values[0] - base).abs() < 1e-3,
+            "the shared expert must reach token 0: got {}, expected {base}",
+            values[0]
+        );
+        assert!(
+            (values[5] - base).abs() < 1e-3,
+            "the shared expert must reach token 1 too: got {}, expected {base}",
+            values[5]
+        );
+    }
+
+    /// Shape and finiteness over a multi-token sequence with the ordinary
+    /// randomly initialised experts.
+    #[test]
+    fn moe_layer_forward_preserves_shape_and_stays_finite() {
+        let cfg = tiny_config();
+        let layer = DeepSeekV2MoELayer::new(&cfg, Device::CPU).expect("moe layer builds");
+        let seq_len = 5;
+        let data: Vec<f32> =
+            (0..seq_len * cfg.hidden_size).map(|i| ((i % 11) as f32) * 0.1 - 0.5).collect();
+        let input =
+            Tensor::from_vec(data, &[seq_len, cfg.hidden_size]).expect("input tensor builds");
+
+        let output = layer.forward(input).expect("moe forward succeeds");
+        assert_eq!(
+            output.shape().to_vec(),
+            vec![seq_len, cfg.hidden_size],
+            "the MoE layer preserves the input shape"
+        );
+        let values = output.to_vec_f32().expect("output values are readable");
+        assert!(
+            values.iter().all(|v| v.is_finite()),
+            "every output value must be finite"
         );
     }
 }

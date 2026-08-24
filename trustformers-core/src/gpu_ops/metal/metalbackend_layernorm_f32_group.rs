@@ -33,12 +33,16 @@ impl MetalBackend {
     /// buffer id to the next kernel on the same queue and let
     /// `download_buffer_to_vec` take the barrier — every `commit_async` caller in
     /// `metalbackend_initialize_mps_group.rs` is of that kind. It is **not**
-    /// correct for a host-out entry point, and two such entry points still carry
-    /// the same defect this method was fixed for: `rope_f32`
-    /// (`metalbackend_rope_f32_group.rs:88`) and `softmax_causal_f32`
-    /// (`metalbackend_softmax_causal_f32_group.rs:55`) both `commit_async` and
-    /// then dereference `output_buffer.contents()` on the very next line. They
-    /// are named here rather than silently implied to be fine.
+    /// correct for a host-out entry point. Two further host-out entry points
+    /// carried the identical defect when this note was first written —
+    /// [`rope_f32`](Self::rope_f32) and
+    /// [`softmax_causal_f32`](Self::softmax_causal_f32), which both
+    /// `commit_async`-ed and then dereferenced `output_buffer.contents()` on the
+    /// very next line. Both have since been fixed the same way (commit, wait,
+    /// null-check), each with its own GPU-versus-CPU-reference regression test,
+    /// and each carries its own copy of this note. That closes the class: every
+    /// remaining `commit_async` call site in this module hands its result on as
+    /// a buffer id rather than reading it back on the host.
     pub fn layernorm_f32(
         &self,
         input: &[f32],

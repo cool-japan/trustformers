@@ -739,27 +739,37 @@ impl AlertCorrelator {
 // could not send anything. They are deleted; `NotificationChannel` in
 // `functions.rs` remains as the seam a real integration implements.
 
-/// Alert rule engine for evaluating conditions
+/// Registry of alert rules, and the evaluator that decides whether they fire.
+///
+/// 0.2.1: this held four `Arc` sub-components -- `RuleExecutor`,
+/// `ConditionEvaluator`, `RuleScheduler` and `EvaluationContext` -- constructed
+/// from a `&Default::default()` monitoring config and never used by any method
+/// on this type. Rule evaluation happens inline in [`Self::evaluate_rule`]; the
+/// four are gone rather than left implying a scheduler and an evaluation
+/// context that never ran.
 #[derive(Debug)]
 pub struct AlertRuleEngine {
     rules: Arc<RwLock<HashMap<String, AlertRule>>>,
-    rule_executor: Arc<RuleExecutor>,
-    condition_evaluator: Arc<ConditionEvaluator>,
-    rule_scheduler: Arc<RuleScheduler>,
-    evaluation_context: Arc<EvaluationContext>,
+    /// Rules that must fire before a dependent rule is considered, keyed by
+    /// dependent rule id. Registered by [`Self::set_rule_dependencies`].
     rule_dependencies: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
 impl AlertRuleEngine {
     fn new(_config: &AlertConfig) -> Self {
-        let monitoring_config = &Default::default();
         Self {
             rules: Arc::new(RwLock::new(HashMap::new())),
-            rule_executor: Arc::new(RuleExecutor::new(monitoring_config)),
-            condition_evaluator: Arc::new(ConditionEvaluator::new(monitoring_config)),
-            rule_scheduler: Arc::new(RuleScheduler::new(monitoring_config)),
-            evaluation_context: Arc::new(EvaluationContext::new()),
             rule_dependencies: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Declare that `rule_id` depends on `depends_on`.
+    pub async fn set_rule_dependencies(&self, rule_id: &str, depends_on: Vec<String>) {
+        self.rule_dependencies.write().await.insert(rule_id.to_string(), depends_on);
+    }
+
+    /// Rules `rule_id` depends on, if any were declared.
+    pub async fn rule_dependencies(&self, rule_id: &str) -> Option<Vec<String>> {
+        self.rule_dependencies.read().await.get(rule_id).cloned()
     }
     async fn get_applicable_rules(&self, test_id: &str) -> Result<Vec<AlertRule>, AlertError> {
         let rules = self.rules.read().await;
@@ -1139,6 +1149,54 @@ pub struct AlertManager {
     recovery_manager: Arc<RecoveryManager>,
 }
 impl AlertManager {
+    /// The configuration this manager was built with.
+    ///
+    /// 0.2.1: `config` was cloned into the struct and never read again, so
+    /// `AlertConfig::enabled` did not gate anything -- a manager configured
+    /// with `enabled: false` still evaluated rules and dispatched alerts.
+    /// [`Self::process_metrics`] honours it now.
+    pub fn config(&self) -> &AlertConfig {
+        &self.config
+    }
+
+    /// The threshold monitor this manager holds.
+    ///
+    /// It carries no evaluators by default (see [`ThresholdMonitor`]); this
+    /// accessor exists so a caller can register their own.
+    pub fn threshold_monitor(&self) -> &Arc<ThresholdMonitor> {
+        &self.threshold_monitor
+    }
+
+    /// The recovery-condition registry.
+    pub fn recovery_manager(&self) -> &Arc<RecoveryManager> {
+        &self.recovery_manager
+    }
+
+    /// The suppression manager, for declaring maintenance windows.
+    pub fn suppression_manager(&self) -> &Arc<SuppressionManager> {
+        &self.suppression_manager
+    }
+
+    /// The escalation policy registry.
+    pub fn escalation_manager(&self) -> &Arc<EscalationManager> {
+        &self.escalation_manager
+    }
+
+    /// The notification dispatcher, for registering channels.
+    pub fn notification_dispatcher(&self) -> &Arc<NotificationDispatcher> {
+        &self.notification_dispatcher
+    }
+
+    /// The alert store.
+    pub fn alert_store(&self) -> &Arc<AlertStore> {
+        &self.alert_store
+    }
+
+    /// The alert correlator.
+    pub fn alert_correlator(&self) -> &Arc<AlertCorrelator> {
+        &self.alert_correlator
+    }
+
     /// Create new alert manager
     pub fn new(config: AlertConfig) -> Self {
         Self {
@@ -1159,13 +1217,27 @@ impl AlertManager {
         &self,
         metrics: &StreamingMetrics,
     ) -> Result<Vec<ActiveAlert>, AlertError> {
+        if !self.config.enabled {
+            // Configured off means off: return nothing rather than quietly
+            // evaluating rules the operator disabled.
+            return Ok(Vec::new());
+        }
         let mut triggered_alerts = Vec::new();
         let applicable_rules = self.rule_engine.get_applicable_rules(&metrics.test_id).await?;
         for rule in applicable_rules {
             if let Some(alert) = self.evaluate_rule(&rule, metrics).await? {
                 if !self.suppression_manager.is_suppressed(&alert).await? {
                     self.alert_store.store_alert(&alert).await?;
-                    self.notification_dispatcher.dispatch_alert_notifications(&alert).await?;
+                    // A dispatch failure must not swallow the alert: it is
+                    // already stored and is still returned to the caller.
+                    if let Err(e) =
+                        self.notification_dispatcher.dispatch_alert_notifications(&alert).await
+                    {
+                        log::warn!(
+                            "alert {} was raised but not delivered: {e:?}",
+                            alert.alert_id
+                        );
+                    }
                     if let Some(escalation_policy_id) = &rule.escalation_policy_id {
                         self.escalation_manager
                             .schedule_escalation(&alert, escalation_policy_id)

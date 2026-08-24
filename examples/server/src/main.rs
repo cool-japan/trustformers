@@ -15,7 +15,6 @@ use axum::{
 };
 use serde::Serialize;
 use tower_http::{
-    compression::CompressionLayer,
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
@@ -125,7 +124,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/predict/qa", post(handlers::question_answering))
         .route("/predict/ner", post(handlers::token_classification))
         .route("/predict/batch", post(handlers::batch_inference))
-        .layer(CompressionLayer::new())
+        // No response-compression layer: see the comment on `tower-http` in
+        // Cargo.toml — every compression backend it offers routes through a
+        // crate this repository's `deny.toml` bans (`brotli`/`flate2`/
+        // `zstd`), so responses here are sent uncompressed rather than
+        // through a banned dependency.
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .layer(TraceLayer::new_for_http())
         .with_state(app_state);

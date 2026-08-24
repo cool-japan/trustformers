@@ -502,18 +502,30 @@ impl DeliveryEngine {
             });
         }
 
-        // Check channel health
+        // Check channel health. A channel that is not registered for health
+        // monitoring has no health signal at all -- that is neither a pass nor
+        // a failure, so delivery proceeds ungated and the absence is logged.
+        // Before 0.2.1 the monitor answered "healthy" for every name, so this
+        // gate admitted everything unconditionally.
         if self.config.enable_health_monitoring {
-            let health = self.health_monitor.get_channel_health(channel_name).await?;
-            if !health.healthy {
-                return Ok(DeliveryResult {
-                    success: false,
-                    delivered_at: None,
-                    attempts: 1,
-                    error: Some("Channel unhealthy".to_string()),
-                    latency_ms: None,
-                    response_data: HashMap::new(),
-                });
+            match self.health_monitor.get_channel_health(channel_name).await {
+                Ok(health) if !health.healthy => {
+                    return Ok(DeliveryResult {
+                        success: false,
+                        delivered_at: None,
+                        attempts: 1,
+                        error: Some("Channel unhealthy".to_string()),
+                        latency_ms: None,
+                        response_data: HashMap::new(),
+                    });
+                },
+                Ok(_) => {},
+                Err(error) => {
+                    tracing::debug!(
+                        "no health record for channel {channel_name}: {error}; delivering \
+                         without a health gate"
+                    );
+                },
             }
         }
 

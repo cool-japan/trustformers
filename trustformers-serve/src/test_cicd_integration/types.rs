@@ -96,7 +96,7 @@ pub struct EnvironmentConfig {
 }
 
 /// Environment types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnvironmentType {
     /// Local development
     Development,
@@ -118,7 +118,7 @@ pub enum EnvironmentType {
 }
 
 /// Pipeline types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PipelineType {
     /// GitHub Actions
     GitHubActions,

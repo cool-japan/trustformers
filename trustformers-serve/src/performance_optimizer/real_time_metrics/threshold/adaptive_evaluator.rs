@@ -536,7 +536,14 @@ impl ThresholdEvaluator for AdaptiveThresholdEvaluator {
         let config_clone = config.clone();
         let evaluation_clone = evaluation.clone();
         tokio::spawn(async move {
-            let effectiveness_score = if violated { 0.8 } else { 0.6 }; // Simplified scoring
+            // The only outcome signal available at evaluation time is how
+            // confidently the threshold separated this sample; whether the
+            // alert it produced turns out to be correct is not known here and
+            // never reaches this evaluator. Until 0.2.1 this fed the adaptation
+            // engine one of two constants (0.8 when violated, 0.6 otherwise),
+            // so the exponential moving average it drives tracked nothing but
+            // the violation ratio.
+            let effectiveness_score = evaluation_clone.confidence;
             if let Err(e) = evaluator
                 .update_adaptation(&config_clone, &evaluation_clone, effectiveness_score)
                 .await

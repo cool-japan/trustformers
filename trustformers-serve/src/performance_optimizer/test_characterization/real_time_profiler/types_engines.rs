@@ -6,7 +6,6 @@
 //! metrics collector and the adaptive optimizer.
 
 use super::super::profiling_pipeline::DataAggregationEngine;
-use super::super::types::optimization::OptimizationPerformanceData;
 use super::super::types::*;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -15,13 +14,13 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc,
     },
     time::{Duration, Instant},
 };
 use tokio::task::JoinHandle;
-use tokio::time::{interval, sleep};
+use tokio::time::interval;
 
 /// Real-time anomaly detection with adaptive thresholds and alerting
 ///
@@ -824,6 +823,8 @@ impl StreamingDataProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The counters live in the `types` half of this split module.
+    use super::super::types::{PerformanceCounterStats, RealTimePerformanceCounters};
 
     struct Lcg(u64);
     impl Lcg {

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::Duration};
 
 /// Environment resource limits
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EnvironmentResourceLimits {
     /// Maximum CPU cores
     pub max_cpu_cores: Option<usize>,
@@ -61,7 +61,7 @@ pub struct NetworkLimits {
 }
 
 /// Environment optimization settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EnvironmentOptimizationSettings {
     /// Auto-detect optimal parallelism
     pub auto_parallelism: bool,
@@ -86,7 +86,7 @@ pub struct EnvironmentOptimizationSettings {
 }
 
 /// Environment security settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EnvironmentSecuritySettings {
     /// Secure configuration storage
     pub secure_config_storage: bool,
@@ -108,7 +108,7 @@ pub struct EnvironmentSecuritySettings {
 }
 
 /// Environment monitoring configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EnvironmentMonitoringConfig {
     /// Metrics collection enabled
     pub metrics_enabled: bool,
@@ -133,17 +133,19 @@ pub struct EnvironmentMonitoringConfig {
 }
 
 /// Logging levels
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum LogLevel {
     Error,
     Warn,
+    /// The level assumed when a configuration does not name one.
+    #[default]
     Info,
     Debug,
     Trace,
 }
 
 /// Alert thresholds
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AlertThresholds {
     /// CPU usage threshold (%)
     pub cpu_usage_percent: Option<f64>,
@@ -162,7 +164,7 @@ pub struct AlertThresholds {
 }
 
 /// Monitoring intervals
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MonitoringIntervals {
     /// Metrics collection interval (seconds)
     pub metrics_interval_seconds: u64,

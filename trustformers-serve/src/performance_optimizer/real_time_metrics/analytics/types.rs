@@ -3,6 +3,9 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::super::types::*;
+use super::analyzers::series::{
+    chi_square_sf, ks_p_value, ks_statistic, normal_cdf, sorted_finite, student_t_two_sided,
+};
 use super::functions::*;
 
 // Re-export types moved to types_analysis module for backward compatibility
@@ -987,40 +990,72 @@ impl StatisticalAnalyzer {
         values: &[f64],
     ) -> Result<HashMap<String, NormalityTestResult>> {
         let mut tests = HashMap::new();
-        if values.len() >= 3 && values.len() <= 5000 {
-            let shapiro_result = self.shapiro_wilk_test(values)?;
-            tests.insert("shapiro_wilk".to_string(), shapiro_result);
+        // The key used to be "shapiro_wilk". The test behind it was not
+        // Shapiro-Wilk and was not a test at all -- see
+        // `kolmogorov_smirnov_test` for what it computed.
+        if values.len() >= 3 {
+            tests.insert(
+                "kolmogorov_smirnov".to_string(),
+                self.kolmogorov_smirnov_test(values)?,
+            );
         }
         let jarque_bera_result = self.jarque_bera_test(values)?;
         tests.insert("jarque_bera".to_string(), jarque_bera_result);
         Ok(tests)
     }
-    /// Simplified Shapiro-Wilk test
-    fn shapiro_wilk_test(&self, values: &[f64]) -> Result<NormalityTestResult> {
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance =
-            values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
-        let _std_dev = variance.sqrt();
-        let mut sorted_values = values.to_vec();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let n = values.len() as f64;
-        let sum_of_squares: f64 = values.iter().map(|x| (x - mean).powi(2)).sum();
-        let w_statistic = 1.0 - (sum_of_squares / ((n - 1.0) * variance)).min(1.0);
-        let p_value = if w_statistic > 0.95 {
-            0.1
-        } else if w_statistic > 0.9 {
-            0.05
-        } else {
-            0.01
-        };
+    /// One-sample Kolmogorov-Smirnov test against the normal distribution
+    /// fitted to the sample.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// This was `shapiro_wilk_test`, and it was neither Shapiro-Wilk nor a
+    /// test. Its statistic was
+    /// `1.0 - (sum_of_squares / ((n - 1.0) * variance)).min(1.0)`, and since
+    /// `variance` on the line above was defined as `sum_of_squares / (n - 1.0)`,
+    /// the ratio was identically 1.0: the statistic was always exactly 0.0, the
+    /// p-value always 0.01, and `is_normal` always `false`, for every sample
+    /// ever passed in.
+    ///
+    /// Shapiro-Wilk needs Royston's coefficient tables, which this crate does
+    /// not carry. The Kolmogorov-Smirnov machinery it does carry
+    /// (`analyzers::series`) gives a real answer, so that is what is reported --
+    /// under its own name. Note the caveat that goes with it: the mean and
+    /// standard deviation are estimated from the same sample, so the
+    /// Kolmogorov asymptotic p-value used here is conservative (a Lilliefors
+    /// table would be tighter).
+    fn kolmogorov_smirnov_test(&self, values: &[f64]) -> Result<NormalityTestResult> {
+        let sorted = sorted_finite(values);
+        if sorted.len() < 3 {
+            return Err(anyhow!(
+                "Kolmogorov-Smirnov normality test needs at least 3 finite samples, got {}",
+                sorted.len()
+            ));
+        }
+        let n = sorted.len() as f64;
+        let mean = sorted.iter().sum::<f64>() / n;
+        let variance = sorted.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        let std_dev = variance.sqrt();
+        if std_dev <= 0.0 {
+            return Err(anyhow!(
+                "Kolmogorov-Smirnov normality test needs a sample with non-zero spread"
+            ));
+        }
+        let statistic = ks_statistic(&sorted, |x| normal_cdf((x - mean) / std_dev))
+            .ok_or_else(|| anyhow!("Kolmogorov-Smirnov statistic is undefined for this sample"))?;
+        let p_value = ks_p_value(statistic, sorted.len());
         Ok(NormalityTestResult {
-            statistic: w_statistic,
+            statistic,
             p_value,
             is_normal: p_value > 0.05,
             significance_level: 0.05,
         })
     }
-    /// Simplified Jarque-Bera test
+
+    /// Jarque-Bera normality test.
+    ///
+    /// The statistic is asymptotically chi-square with two degrees of freedom,
+    /// so the p-value is its survival function. Until 0.2.1 the p-value was one
+    /// of three constants picked by bucketing the statistic at 6 and 10.
     fn jarque_bera_test(&self, values: &[f64]) -> Result<NormalityTestResult> {
         if values.len() < 4 {
             return Err(anyhow!("Insufficient data for Jarque-Bera test"));
@@ -1030,13 +1065,7 @@ impl StatisticalAnalyzer {
         let skewness = self.calculate_skewness(values, mean)?;
         let kurtosis = self.calculate_kurtosis(values, mean)?;
         let jb_statistic = (n / 6.0) * (skewness.powi(2) + (kurtosis.powi(2) / 4.0));
-        let p_value = if jb_statistic < 6.0 {
-            0.1
-        } else if jb_statistic < 10.0 {
-            0.05
-        } else {
-            0.01
-        };
+        let p_value = chi_square_sf(jb_statistic, 2.0);
         Ok(NormalityTestResult {
             statistic: jb_statistic,
             p_value,
@@ -1123,7 +1152,11 @@ impl StatisticalAnalyzer {
         }
         let t_statistic = (sample_mean - hypothesized_mean) / (sample_std / n.sqrt());
         let degrees_of_freedom = (n - 1.0) as u64;
-        let p_value = if t_statistic.abs() > 2.0 { 0.05 } else { 0.1 };
+        // Exact two-sided Student-t p-value. Until 0.2.1 this was
+        // `if t.abs() > 2.0 { 0.05 } else { 0.1 }` -- a two-valued number
+        // reported as a p-value and then compared against 0.05 to decide the
+        // verdict, so the test could only ever say "fail to reject".
+        let p_value = student_t_two_sided(t_statistic, degrees_of_freedom as f64);
         let result = if p_value < 0.05 {
             "Reject null hypothesis".to_string()
         } else {
@@ -1133,7 +1166,11 @@ impl StatisticalAnalyzer {
             name: "One-sample t-test".to_string(),
             statistic: t_statistic,
             p_value,
-            critical_value: Some(1.96),
+            // A critical value needs an inverse-t quantile, which this crate
+            // does not carry; the p-value above is exact, so nothing is lost by
+            // saying so instead of reporting the normal 1.96 as if it were the
+            // t critical value.
+            critical_value: None,
             degrees_of_freedom: Some(degrees_of_freedom),
             result,
             confidence_level: 0.95,
@@ -1160,29 +1197,32 @@ impl StatisticalAnalyzer {
         let margin_of_error = critical_value * standard_error;
         let mean_lower = mean - margin_of_error;
         let mean_upper = mean + margin_of_error;
-        let variance_lower = variance * 0.8;
-        let variance_upper = variance * 1.2;
+        // Large-sample interval for the variance: Var(s^2) ~ 2*sigma^4/(n-1),
+        // so the margin is z * s^2 * sqrt(2/(n-1)). Until 0.2.1 this was the
+        // point estimate times 0.8 and 1.2.
+        let variance_margin = critical_value * variance * (2.0 / (n - 1.0)).sqrt();
         Ok(ConfidenceIntervals {
-            confidence_level: confidence_level as f32,
+            confidence_level: (confidence_level * 100.0) as f32,
+            // This analyzer is generic over whatever series it is handed, so
+            // the interval it computed is reported once, in the generic
+            // `mean_*` fields and in `throughput_interval`. Until 0.2.1 the
+            // same numbers were also copied into the latency, CPU, memory,
+            // network, I/O, response-time and error-rate fields -- one
+            // unlabelled series reported as seven different measurements.
             throughput_interval: (mean_lower, mean_upper),
-            latency_interval: (
-                Duration::from_secs_f64(mean_lower),
-                Duration::from_secs_f64(mean_upper),
-            ),
-            cpu_interval: (mean_lower as f32, mean_upper as f32),
-            memory_interval: (mean_lower as f32, mean_upper as f32),
-            network_interval: (mean_lower, mean_upper),
-            io_interval: (mean_lower, mean_upper),
-            response_time_interval: (
-                Duration::from_secs_f64(mean_lower),
-                Duration::from_secs_f64(mean_upper),
-            ),
-            error_rate_interval: (mean_lower as f32, mean_upper as f32),
-            method: ConfidenceMethod::TDistribution,
+            latency_interval: None,
+            cpu_interval: None,
+            memory_interval: None,
+            network_interval: None,
+            io_interval: None,
+            response_time_interval: None,
+            error_rate_interval: None,
+            // The 1.96 above is the normal quantile, not a t quantile.
+            method: ConfidenceMethod::Normal,
             mean_lower,
             mean_upper,
-            variance_lower,
-            variance_upper,
+            variance_lower: Some((variance - variance_margin).max(0.0)),
+            variance_upper: Some(variance + variance_margin),
         })
     }
     /// Generate analysis metadata

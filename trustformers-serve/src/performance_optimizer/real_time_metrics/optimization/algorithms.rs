@@ -152,8 +152,12 @@ impl LiveOptimizationAlgorithm for ParallelismOptimizationAlgorithm {
         // Analyze current parallelism efficiency
         let cpu_utilization = metrics.current_cpu_utilization;
         let throughput = metrics.current_throughput;
-        // TODO: SystemState no longer has current_parallelism field
-        let current_parallelism = context.system_state.available_cores;
+        // `SystemState` carries only `available_cores`; the parallelism actually
+        // in use is on the metrics sample this method is already handed. Until
+        // 0.2.1 this read `available_cores` and called it the current
+        // parallelism, so "optimal != current" compared a target against the
+        // core count rather than against what the system was doing.
+        let current_parallelism = metrics.current_parallelism;
 
         let optimal_parallelism =
             self.calculate_optimal_parallelism(cpu_utilization, throughput, context);

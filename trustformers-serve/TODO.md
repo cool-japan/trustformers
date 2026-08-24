@@ -46,7 +46,7 @@ This is the largest crate in the `trustformers` workspace by public API surface:
 - **Security:** Authentication, TLS, GDPR compliance, encryption
 - **Deployment:** Docker, Kubernetes, Helm, service mesh integration
 - **Cloud:** AWS (EKS, S3, CloudWatch), GCP (GKE, GCS), Azure (AKS, Blob) — deployment orchestration real; per-provider inference (SageMaker/Vertex AI/Azure ML) simulated pending real SDK integration
-- **Messaging:** Kafka (production, feature-gated); RabbitMQ/Redis Streams/NATS/SQS (interface/scaffold, no-op backend — real broker wiring pending)
+- **Messaging:** Kafka (production, feature-gated); RabbitMQ/Redis Streams/NATS/SQS — **corrected 2026-08-24**: these are no longer no-op scaffolds. Real backends live in `src/message_queue/{rabbitmq,nats,redis_streams,sqs}.rs` and call the real `lapin`/`async_nats`/`redis`/AWS-SQS clients (landed 2026-08-18; see "Message Queue Integration" below). Not exercised against a live broker.
 
 ---
 
@@ -347,17 +347,30 @@ let cache_config = CacheConfig {
   - Baggage items
   - Integration with Jaeger/Zipkin
 
-**Example:**
+**Corrected 2026-08-24.** The example below used to construct a `TracingConfig`
+with `exporter: TracingExporter::Jaeger` / `jaeger_endpoint` / `sampling_rate`
+and call `server.enable_tracing(...)`. None of those exist: neither
+`TracingConfig` in this crate has an `exporter` or `jaeger_endpoint` field, and
+`grep -rn 'fn enable_tracing' src/` finds nothing. The real
+`src/tracing/request_tracer.rs` shape is:
+
 ```rust
 let tracing_config = TracingConfig {
-    exporter: TracingExporter::Jaeger,
-    jaeger_endpoint: "http://localhost:14268/api/traces".to_string(),
-    sampling_rate: 0.1, // 10% sampling
     service_name: "trustformers-serve".to_string(),
+    service_version: env!("CARGO_PKG_VERSION").to_string(),
+    sample_rate: 0.1, // 10% sampling
+    max_spans_per_trace: 1000,
+    // Carried through, but `tracing/` itself never exports: the field's own
+    // doc says "for future export use".
+    export_endpoint: Some("http://localhost:14268/api/traces".to_string()),
 };
-
-server.enable_tracing(tracing_config)?;
 ```
+
+`src/distributed_tracing/` contains a *separate* exporter that does POST spans
+to Jaeger/Zipkin/OTLP endpoints. It was **not** audited in the 2026-08-24 pass
+(the module is owned elsewhere), so treat the "Integration with Jaeger/Zipkin"
+checkbox above as describing `distributed_tracing/`, not `tracing/`, and as
+unverified.
 
 ---
 
@@ -557,6 +570,119 @@ helm install trustformers ./helm/trustformers \
 
 ---
 
+## Honesty audit — `test_performance_monitoring/`, `operator_scheduling`, `model_management/deployment` (2026-08-24)
+
+This pass removed the crate's last blanket `#![allow(dead_code)]` (25 files, done
+earlier in the same cycle) and then resolved every warning that removal exposed,
+rather than re-allowing any of them. `grep -rn '^#!\[allow(dead_code)\]' src/`
+now returns nothing, and the only crate-level allows left in `src/lib.rs` are
+clippy style lints.
+
+**Live fabrications removed**
+
+- `operator_scheduling.rs`: `try_schedule_next_task` — reached from the public
+  `submit_task` — spawned a task that slept `100 + (hash(task_id) % 1000)` ms
+  and then wrote a `TaskExecutionResult` claiming `state: Completed`, that sleep
+  as `execution_time`, and `peak_memory_usage: Some(1 MiB)` for an operator that
+  never ran; `get_task_result` returned it to callers as a measurement. Replaced
+  by an `OperatorExecutor` seam (`OperatorSchedulingService::with_executor`).
+  With no executor, tasks stay queued and no result is produced; with one, the
+  clock is read around the executor's own future and the metrics are whatever it
+  reported. `peak_memory_usage` is now `None` — nothing samples it. The dead
+  `simulate_task_execution` is deleted, and `complete_task`'s locks are scoped
+  (it re-enters `try_schedule_next_task`, and `tokio::RwLock` is not reentrant,
+  so the previous guard-holding form would have deadlocked the moment it ran).
+  The same function's concurrency gate compared
+  `DeviceResource::active_tasks` -- a field nothing in the service ever
+  increments -- against `max_concurrent_operators_per_device`, so the configured
+  cap bounded nothing; it now counts live entries in `running_tasks` for the
+  device, which is the real in-flight set. That was harmless while the old code
+  only slept and invented a result, and load-bearing the moment real bodies
+  started running.
+- `test_performance_monitoring/types/storage.rs`: `ReportStorage::get_report`
+  returned `Ok` with a `Report` whose every field was the literal `"stub"`, for
+  any id, and `ReportingSystem::export_report` handed that to callers. It now
+  returns a structured error naming the missing store. The hardcoded
+  `/tmp/reports` path is replaced by `std::env::temp_dir()`-derived path.
+- `test_performance_monitoring/service.rs`: the live event path stamped
+  `HostInfo { hostname: "localhost", ip_address: "127.0.0.1", operating_system:
+  "Linux", architecture: "x86_64" }` on every event regardless of host, and an
+  `ExecutionContext.resource_allocation` of `cpu_cores: 4, memory_mb: 1024,
+  disk_space_mb: 10240, network_bandwidth_mbps: 100.0` for every test.
+  `HostInfo::detect()` now reads the OS through `sysinfo` and the compiled
+  target triple (`ip_address` is `Option<String>`, the first non-loopback
+  interface address or `None`); `resource_allocation` is `Option` and `None`,
+  because nothing allocates per-test resources here.
+- `real_time_monitor.rs`: `ActiveTestInfo.progress_percent` and
+  `resource_usage` are now `Option`. The crate's only caller filled them with
+  `0.0` and an all-zero `ResourceUsageSnapshot` stamped `SystemTime::now()` — a
+  claim that CPU, memory, I/O, network, open files and thread count had all been
+  sampled and were all zero at that instant.
+- `analytics/types.rs`: `compare_with_baseline` refreshed baselines inline and
+  only partially — `performance_characteristics` and `confidence_interval` kept
+  whatever the first-ever sample produced, so every later delta was measured
+  against a stale memory/CPU profile. The complete `refresh_baseline` existed
+  but was never called; it is now the single refresh path.
+- `test_cicd_integration/manager.rs`: `ConfigurationManager::load_environment_config`
+  logged a line and returned `Ok(())` without reading the configuration at all.
+  It now selects the `environment_configs` block matching the detected
+  environment, and `CicdIntegrationManager::get_optimized_config` returns that
+  block's `test_config` when one is configured. `EnvironmentDetector` now
+  remembers what it detected. `ReportingIntegration::report_results` and
+  `MetricsExporter::export_metrics` remain no-ops but now say so in their docs:
+  their `Ok(())` means "nothing went wrong", not "the data was published".
+- `test_utilities.rs`: the exported `optimized_test_with_progress!` macro
+  expanded through `paste::paste!`, and `paste` was removed from the workspace
+  manifest as unmaintained, so the macro could not expand anywhere. Deleted.
+
+**Dead scaffolding deleted** (structs that were constructed from real config,
+then never read, and had no methods at all — so nothing they were named for ever
+happened): `LayoutEngine`/`UserPreferences` map/`WidgetFactory`/`WidgetUpdater`/
+`subscriptions` map/`UpdateScheduler` (dashboard.rs); `TemplateValidator`/
+`custom_templates`/`DataAggregator`/`VisualizationEngine`/`TemplateEngine`/
+`ContentProcessor`/`SchedulerEngine`/`ReportNotificationManager` (reporting.rs);
+`RetentionExecutor`/`ComplianceManager`/`QueryParser`/`QueryOptimizer`/
+`QueryExecutionEngine`/`QueryStatistics`/`partitioning_strategy`/
+`storage_optimization`/`LifecycleStateTracker`/`TransitionExecutor`/
+`LifecycleEventManager` and the whole `TimeSeriesIndexManager` type
+(historical_data/types.rs); `AnalyticsCache` field and `get_series`
+(analytics/types.rs); `subscription_templates`/`SubscriptionAnalytics`
+(subscriptions.rs); `PipelineIntegration` (test_cicd_integration/manager.rs).
+
+**Made reachable rather than deleted** (real state with a real consumer, each
+now covered by a test that a `Default::default()` regression would fail):
+`DashboardManager::config`, `ReportingSystem::config`,
+`SubscriptionManager::config`, `PerformanceAnalyticsEngine::config`,
+`CicdIntegrationManager::config`/`detected_environment`,
+`TestPerformanceMonitoringService::dashboard_manager`/`subscription_manager`,
+`DeploymentManager::evaluate_canary_step`/`rollback_canary_deployment`/
+`canary_deployment` (canary steps had no evaluator reachable from outside the
+module at all) and `impl Clone for DeploymentManager` (replacing a private
+`clone_for_background` no caller could reach).
+
+**Left honest but still inert, for a later pass**
+
+- `test_cicd_integration/manager.rs`: `ReportingIntegration::report_results`,
+  `MetricsExporter::export_metrics` and `MetricsExporter::periodic_export`
+  accept their input and drop it. Their `Ok(())` now documents that it means
+  "nothing went wrong", not "the data was published" — but a caller who wants
+  CI annotations or a metrics sink still gets neither.
+- `ReportStorage` has no writer: `get_report` correctly refuses, and nothing
+  ever puts a report where it could find one. `ReportingSystem::export_report`
+  therefore always fails today. Wiring a real store (or deleting the export
+  path) is a separate decision.
+- `ReportScheduler` records schedules that nothing fires: there is no cron
+  evaluator or timer in this crate.
+
+**Not in scope for this pass** — `src/distributed_tracing/types.rs` greps
+positive for `jaeger` and is owned elsewhere; its second, independent
+Jaeger/Zipkin/OTLP exporter has not been audited. `trustformers-serve/Cargo.toml`
+lines 261-274 explain the removal of the `paste` dependency by pointing at the
+`optimized_test_with_progress!` macro this pass deleted; that comment is now
+stale, and the manifest was outside this package's ownership.
+
+---
+
 ## Known Limitations
 
 - Maximum batch size 256 (hardware dependent)
@@ -573,7 +699,8 @@ helm install trustformers ./helm/trustformers \
 
 ## Security Notes
 
-- **Updated 2026-08-18** (superseding the 2026-07-01 `cargo audit` note below): `cargo deny check advisories` (workspace-wide, run directly this pass) currently fails with 7 findings — `opentelemetry-jaeger` unmaintained, `paste` unmaintained, `h2` unbounded-empty-DATA-frames vulnerability, an RSA "Marvin Attack" timing side-channel, two `rustls` name-constraints-acceptance vulnerabilities, and a `rustls-webpki` 0.101.7 CRL-parsing panic (RUSTSEC-2026-0104) — all reached through the AWS SDK's `rustls 0.21.12`/`rustls-webpki 0.101.7` stack. `cargo deny check bans`/`check licenses` both pass. See root `TODO.md` P0 #2.
+- **Updated 2026-08-24** (superseding the 2026-08-18 note below): `cargo deny check advisories` now **passes** — run directly from the workspace root this pass, exit status 0, output `advisories ok`. The six findings that were rooted in this crate's dependencies were closed by real removal, not by suppression: every `opentelemetry*` entry and `lambda-web` and `paste` are gone from the root manifest, and the `aws-sdk-*` crates now take `default-features = false` (which drops the `rustls 0.21.12` / `rustls-webpki 0.101.7` stack). Exactly one dated ignore remains, documented in `deny.toml` with its full unfixability chain: RUSTSEC-2023-0071 (`rsa`, reached only through `jsonwebtoken`).
+- **Superseded, kept for history — 2026-08-18**: `cargo deny check advisories` failed with 7 findings — `opentelemetry-jaeger` unmaintained, `paste` unmaintained, `h2` unbounded-empty-DATA-frames, the RSA "Marvin Attack" timing side-channel, two `rustls` name-constraints vulnerabilities, and `rustls-webpki` 0.101.7's CRL-parsing panic (RUSTSEC-2026-0104), all reached through the AWS SDK's `rustls 0.21` stack.
 - Prior note (2026-07-01, `cargo audit`, not re-verified against the tool that produced it): found 7 `rustls-webpki` advisories pulled in transitively via the AWS SDK stack (`aws-smithy-http-client` → `rustls` 0.21) and via `async-nats` 0.46 → `rustls-webpki` 0.102.8; `cargo update --dry-run` confirmed no safe patch-level fix, requiring a major version bump of the AWS SDK crates and/or `async-nats`.
 - **Deferred by explicit maintainer decision.** This is a larger cross-cutting upgrade (AWS SDK crates are unconditional dependencies throughout this crate) rather than a quick patch, so it is tracked here rather than fixed immediately. Revisit when the AWS SDK for Rust or `async-nats` ship a `rustls`/`rustls-webpki` upgrade.
 
@@ -775,4 +902,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 **APIs:** REST, gRPC (proto compilation restored in 0.1.4), GraphQL
 **Deployment:** Docker, Kubernetes, Helm
 **Cloud:** AWS, GCP, Azure (orchestration real; per-provider inference simulated — see Cloud Provider Support)
-**Messaging:** Kafka (production); RabbitMQ/Redis Streams/NATS/SQS (interface/scaffold, no-op backend)
+**Messaging:** Kafka (production); RabbitMQ/Redis Streams/NATS/SQS (real client-backed since 2026-08-18 — the "no-op backend" wording here was stale, corrected 2026-08-24)

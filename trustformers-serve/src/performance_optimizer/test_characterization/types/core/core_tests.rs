@@ -108,147 +108,29 @@ fn test_optimistic_estimation_parameters() {
 }
 
 #[test]
-fn test_ml_based_estimation_algorithm_new() {
+fn test_ml_based_estimation_algorithm_reports_what_it_actually_does() {
     let algo = MLBasedEstimationAlgorithm::new("random_forest".to_string(), 0.85);
-    assert_eq!(algo.name(), "MLBasedEstimation");
+    // No model is loaded or evaluated: the algorithm scales the analyzer's own
+    // recommendation by the configured confidence. Before 0.2.1 `name()`
+    // returned "MLBasedEstimation" for that, and `parameters()` reported a
+    // `"model" -> 1.0` entry standing in for the model identity.
+    assert_eq!(algo.name(), "ConfidenceScaledEstimation");
+    let params = algo.parameters();
+    assert!(
+        !params.contains_key("model"),
+        "a model identity is not a float: {params:?}"
+    );
+    assert!((params.get("confidence").copied().unwrap_or_default() - 0.85).abs() < f64::EPSILON);
 }
 
-// =============================================================================
-// CONFLICT DETECTION ALGORITHM TESTS
-// =============================================================================
-
-#[test]
-fn test_static_conflict_detection_new() {
-    let algo = StaticConflictDetectionAlgorithm::new(true, 3);
-    assert_eq!(algo.name(), "StaticConflictDetection");
-}
-
-#[test]
-fn test_static_conflict_detection_detect() {
-    let algo = StaticConflictDetectionAlgorithm::new(true, 3);
-    let result = algo.detect_conflicts(&[]);
-    assert!(result.is_ok());
-}
-
-#[test]
-fn test_dynamic_conflict_detection_new() {
-    let algo = DynamicConflictDetectionAlgorithm::new(true, 0.5);
-    assert_eq!(algo.name(), "DynamicConflictDetection");
-}
-
-#[test]
-fn test_dynamic_conflict_detection_detect() {
-    let algo = DynamicConflictDetectionAlgorithm::new(true, 0.5);
-    let result = algo.detect_conflicts(&[]);
-    assert!(result.is_ok());
-}
-
-#[test]
-fn test_predictive_conflict_detection_new() {
-    let algo = PredictiveConflictDetectionAlgorithm::new(10, 0.8);
-    assert_eq!(algo.name(), "PredictiveConflictDetection");
-}
-
-#[test]
-fn test_predictive_conflict_detection_detect() {
-    let algo = PredictiveConflictDetectionAlgorithm::new(10, 0.8);
-    let result = algo.detect_conflicts(&[]);
-    assert!(result.is_ok());
-}
-
-#[test]
-fn test_ml_conflict_detection_new() {
-    let algo = MLConflictDetectionAlgorithm::new("svm".to_string(), 0.85);
-    assert_eq!(algo.name(), "MLConflictDetection");
-}
-
-#[test]
-fn test_ml_conflict_detection_detect() {
-    let algo = MLConflictDetectionAlgorithm::new("svm".to_string(), 0.85);
-    let result = algo.detect_conflicts(&[]);
-    assert!(result.is_ok());
-}
-
-// =============================================================================
-// PATTERN DETECTION ALGORITHM TESTS
-// =============================================================================
-
-#[test]
-fn test_pipeline_detection_new() {
-    let det = PipelineDetection::new();
-    assert!(!det.detected);
-    assert_eq!(det.stages, 0);
-}
-
-#[test]
-fn test_pipeline_detection_default() {
-    let det = PipelineDetection::default();
-    assert!(!det.detected);
-}
-
-#[test]
-fn test_pipeline_detection_detect_no_pattern() {
-    let det = PipelineDetection::new();
-    let result = det.detect();
-    assert!(result.contains("No"));
-}
-
-#[test]
-fn test_pipeline_detection_detect_with_pattern() {
-    let det = PipelineDetection {
-        detected: true,
-        stages: 5,
-        throughput: 100.0,
-    };
-    let result = det.detect();
-    assert!(result.contains("Pipeline pattern detected"));
-    assert!(result.contains("5"));
-}
-
-#[test]
-fn test_pipeline_detection_name() {
-    let det = PipelineDetection::new();
-    assert_eq!(det.name(), "PipelineDetection");
-}
-
-#[test]
-fn test_fork_join_detection_new() {
-    let det = ForkJoinDetection::new();
-    assert!(!det.detected);
-    assert_eq!(det.fork_points, 0);
-    assert_eq!(det.join_points, 0);
-}
-
-#[test]
-fn test_fork_join_detection_default() {
-    let det = ForkJoinDetection::default();
-    assert!(!det.detected);
-}
-
-#[test]
-fn test_fork_join_detection_detect_no_pattern() {
-    let det = ForkJoinDetection::new();
-    let result = det.detect();
-    assert!(result.contains("No"));
-}
-
-#[test]
-fn test_fork_join_detection_detect_with_pattern() {
-    let det = ForkJoinDetection {
-        detected: true,
-        fork_points: 3,
-        join_points: 2,
-    };
-    let result = det.detect();
-    assert!(result.contains("Fork-Join pattern detected"));
-    assert!(result.contains("3"));
-}
-
-#[test]
-fn test_fork_join_detection_name() {
-    let det = ForkJoinDetection::new();
-    assert_eq!(det.name(), "ForkJoinDetection");
-}
+// The conflict- and pattern-detection algorithm tests that lived here were
+// deleted in 0.2.1 along with the fabrications they locked in. They asserted
+// `detect_conflicts(&[]).is_ok()` on detectors that returned `Ok(Vec::new())`
+// for every input, and `detect().contains("No")` on pattern detectors that
+// were structurally incapable of ever saying anything else. The replacements
+// live next to the implementations, in `conflict_algorithms_tests.rs` and
+// `pattern_algorithms_tests.rs`, and every one of them asserts a value derived
+// from the data supplied to the detector.
 
 // =============================================================================
 // CONTEXT FACTOR TYPE TESTS

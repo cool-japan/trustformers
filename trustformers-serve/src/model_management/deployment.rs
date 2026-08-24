@@ -402,8 +402,14 @@ impl DeploymentManager {
         Ok(())
     }
 
-    /// Evaluate current canary step and decide whether to continue
-    async fn evaluate_canary_step(&self, deployment_id: &str) -> ModelResult<()> {
+    /// Evaluate the current canary step and decide whether to continue.
+    ///
+    /// Nothing in this crate schedules this: there is no background progression
+    /// loop, so the operator (or whatever owns the deployment cadence) calls it
+    /// when a step's soak time is up. Metrics come from
+    /// [`Self::collect_canary_metrics`], which fails loudly when either side has
+    /// served no requests, so a step is never judged against invented numbers.
+    pub async fn evaluate_canary_step(&self, deployment_id: &str) -> ModelResult<()> {
         let mut deployment = {
             let deployments = self.canary_deployments.read().unwrap_or_else(|p| p.into_inner());
             deployments
@@ -471,8 +477,12 @@ impl DeploymentManager {
         Ok(())
     }
 
-    /// Rollback a canary deployment
-    async fn rollback_canary_deployment(&self, deployment_id: &str) -> ModelResult<()> {
+    /// Roll a canary deployment back to 0% traffic.
+    ///
+    /// Called automatically by [`Self::evaluate_canary_step`] when a step misses
+    /// its thresholds and `auto_rollback` is set; public so an operator can
+    /// pull the deployment back at any time.
+    pub async fn rollback_canary_deployment(&self, deployment_id: &str) -> ModelResult<()> {
         let mut deployment = {
             let deployments = self.canary_deployments.read().unwrap_or_else(|p| p.into_inner());
             deployments
@@ -757,16 +767,13 @@ impl DeploymentManager {
         }
     }
 
-    /// Clone for background tasks
-    fn clone_for_background(&self) -> DeploymentManager {
-        DeploymentManager {
-            canary_deployments: Arc::clone(&self.canary_deployments),
-            blue_green_deployments: Arc::clone(&self.blue_green_deployments),
-            ab_tests: Arc::clone(&self.ab_tests),
-            traffic_router: Arc::clone(&self.traffic_router),
-            metrics: Arc::clone(&self.metrics),
-            validators: Arc::clone(&self.validators),
-        }
+    /// The current state of one canary deployment, if it exists.
+    ///
+    /// [`Self::evaluate_canary_step`] is public but returns only `()`, so this
+    /// is how a caller reads what the evaluation decided.
+    pub fn canary_deployment(&self, deployment_id: &str) -> Option<CanaryDeployment> {
+        let deployments = self.canary_deployments.read().unwrap_or_else(|p| p.into_inner());
+        deployments.get(deployment_id).cloned()
     }
 
     /// The live request-metrics registry backing canary decisions.
@@ -783,6 +790,26 @@ impl DeploymentManager {
     pub fn register_validator(&self, check_name: &str, validator: Arc<dyn DeploymentValidator>) {
         let mut validators = self.validators.write().unwrap_or_else(|p| p.into_inner());
         validators.insert(check_name.to_string(), validator);
+    }
+}
+
+/// Every field is an `Arc`, so a clone is another handle onto the *same*
+/// deployments, router, metrics and validators -- which is what a caller
+/// driving canary steps from a spawned task needs.
+///
+/// 0.2.1: this replaces a private `clone_for_background` that did exactly this
+/// but was unreachable from outside the module, so no caller could ever get the
+/// background handle it existed to provide.
+impl Clone for DeploymentManager {
+    fn clone(&self) -> Self {
+        Self {
+            canary_deployments: Arc::clone(&self.canary_deployments),
+            blue_green_deployments: Arc::clone(&self.blue_green_deployments),
+            ab_tests: Arc::clone(&self.ab_tests),
+            traffic_router: Arc::clone(&self.traffic_router),
+            metrics: Arc::clone(&self.metrics),
+            validators: Arc::clone(&self.validators),
+        }
     }
 }
 
@@ -816,6 +843,13 @@ impl TrafficRouter {
             blue_green_active: Arc::new(RwLock::new(HashMap::new())),
             canary_baselines: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// The percentage of traffic currently routed to `model_id` as a canary,
+    /// or `None` when it has never been set.
+    pub fn canary_traffic(&self, model_id: &str) -> Option<f32> {
+        let traffic = self.canary_traffic.read().unwrap_or_else(|p| p.into_inner());
+        traffic.get(model_id).copied()
     }
 
     /// Set canary traffic percentage
@@ -939,6 +973,7 @@ impl Default for TrafficRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// Regression: canary metrics used to be a constant in which the new model
     /// always looked better. They must now come from the real counters.
@@ -971,6 +1006,95 @@ mod tests {
         // The old constants must not reappear.
         assert_ne!(canary.success_rate_new, 0.95);
         assert_ne!(canary.requests_new, 1000);
+    }
+
+    fn strict_canary_config() -> CanaryConfig {
+        CanaryConfig {
+            default_percentage: 5.0,
+            min_percentage: 5.0,
+            max_percentage: 50.0,
+            step_size: 5.0,
+            step_duration: Duration::from_secs(1),
+            success_threshold: 0.99,
+            error_threshold: 0.01,
+            auto_rollback: true,
+        }
+    }
+
+    /// A step that misses its thresholds must roll the canary back to 0%.
+    /// `evaluate_canary_step` and `rollback_canary_deployment` are the public
+    /// entry points an operator drives; nothing in this crate schedules them.
+    #[tokio::test]
+    async fn failing_canary_step_rolls_traffic_back_to_zero() {
+        let manager = DeploymentManager::new();
+        manager.traffic_router().set_canary_baseline("candidate", "baseline");
+
+        let deployment_id = manager
+            .start_canary_deployment("candidate".to_string(), 50.0, strict_canary_config())
+            .await
+            .expect("starting a canary should succeed");
+        assert_eq!(
+            manager.traffic_router().canary_traffic("candidate"),
+            Some(5.0),
+            "the first step should have moved traffic to the step size"
+        );
+
+        // Candidate is failing half its requests; baseline is clean.
+        manager.metrics().record_request("candidate", true, 100.0);
+        manager.metrics().record_request("candidate", false, 100.0);
+        manager.metrics().record_request("baseline", true, 100.0);
+
+        manager
+            .evaluate_canary_step(&deployment_id)
+            .await
+            .expect("evaluation should succeed");
+
+        let deployment = manager
+            .canary_deployment(&deployment_id)
+            .expect("deployment should still exist");
+        let step = deployment.steps.last().expect("a step should have been recorded");
+        assert!(
+            !step.success,
+            "a 50% error rate must not pass a 1% error threshold"
+        );
+        assert_eq!(
+            step.metrics.total_requests, 2,
+            "the step counts the candidate's own two requests, from the real counters"
+        );
+        assert_eq!(
+            manager.traffic_router().canary_traffic("candidate"),
+            Some(0.0),
+            "auto_rollback must pull traffic back to zero"
+        );
+    }
+
+    /// Cloning a manager shares its state rather than forking it.
+    #[tokio::test]
+    async fn clone_shares_deployment_state() {
+        let manager = DeploymentManager::new();
+        let background = manager.clone();
+
+        let deployment_id = manager
+            .start_canary_deployment("shared".to_string(), 50.0, strict_canary_config())
+            .await
+            .expect("starting a canary should succeed");
+
+        assert!(
+            background.canary_deployment(&deployment_id).is_some(),
+            "a clone must see deployments started through the original"
+        );
+        background
+            .rollback_canary_deployment(&deployment_id)
+            .await
+            .expect("rollback through the clone should succeed");
+        assert_eq!(
+            manager
+                .canary_deployment(&deployment_id)
+                .map(|deployment| deployment.status)
+                .expect("deployment should exist"),
+            DeploymentStatus::RolledBack,
+            "the original must observe the clone's rollback"
+        );
     }
 
     /// Regression: a canary with no traffic must not be evaluated at all.

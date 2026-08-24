@@ -22,33 +22,20 @@ pub struct ReportingSystem {
     report_storage: ReportStorage,
 }
 
-/// Report template management
-#[derive(Debug)]
+/// Report template management.
+///
+/// 0.2.1: dropped a `TemplateValidator` and a `custom_templates` map. The
+/// validator was a struct of rule *names* derived from the config with no
+/// method that could apply them -- no template was ever validated -- and the
+/// custom-template map was never written to or read.
+#[derive(Debug, Default)]
 pub struct ReportTemplateManager {
     templates: RwLock<HashMap<String, ReportTemplate>>,
-    template_validation: TemplateValidator,
-    custom_templates: RwLock<HashMap<String, CustomTemplate>>,
 }
 
 impl ReportTemplateManager {
-    pub fn new(config: &ReportConfig) -> Self {
-        let validation_rules = config
-            .report_sections
-            .iter()
-            .map(|section| format!("validate_section::{:?}", section))
-            .collect();
-
-        let template_validation = TemplateValidator {
-            validator_id: "default".to_string(),
-            validation_rules,
-            strict_mode: config.generate_detailed_reports,
-        };
-
-        Self {
-            templates: RwLock::new(HashMap::new()),
-            template_validation,
-            custom_templates: RwLock::new(HashMap::new()),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub async fn get_template(&self, template_id: &str) -> Result<ReportTemplate, ReportError> {
@@ -89,61 +76,21 @@ pub struct ReportSection {
     pub conditional_display: Option<ConditionalDisplay>,
 }
 
-/// Report generation engine
-#[derive(Debug)]
-pub struct ReportGenerator {
-    data_aggregator: DataAggregator,
-    visualization_engine: VisualizationEngine,
-    template_engine: TemplateEngine,
-    content_processor: ContentProcessor,
-}
+/// Report generation engine.
+///
+/// 0.2.1: dropped a `DataAggregator`, `VisualizationEngine`, `TemplateEngine`
+/// and `ContentProcessor`. Each was a bag of descriptive strings built from the
+/// config -- aggregation type, "supported" visualisation names, a template
+/// directory, transformation names -- and none of them had a single method, so
+/// nothing aggregated, rendered, expanded or transformed anything. Generation
+/// is stateless; what it produces is built entirely from the template it is
+/// handed.
+#[derive(Debug, Default)]
+pub struct ReportGenerator;
 
 impl ReportGenerator {
-    pub fn new(config: &ReportConfig) -> Self {
-        let data_aggregator = DataAggregator {
-            aggregator_id: "default".to_string(),
-            aggregation_type: if config.include_historical_data {
-                "historical_enriched".to_string()
-            } else {
-                "realtime".to_string()
-            },
-            group_by: vec!["test_suite".to_string(), "environment".to_string()],
-        };
-
-        let visualization_engine = VisualizationEngine {
-            engine_id: "default".to_string(),
-            supported_types: vec![
-                "line_chart".to_string(),
-                "bar_chart".to_string(),
-                "table".to_string(),
-            ],
-            rendering_options: HashMap::new(),
-        };
-
-        let template_engine = TemplateEngine {
-            template_dir: "/tmp/test_performance_reports".to_string(),
-            cache_enabled: config.generate_detailed_reports,
-        };
-
-        let content_processor = ContentProcessor {
-            processor_id: "default".to_string(),
-            transformations: vec![
-                "normalize_metrics".to_string(),
-                "summarize_sections".to_string(),
-            ],
-            filters: if config.generate_detailed_reports {
-                vec!["remove_sensitive_data".to_string()]
-            } else {
-                Vec::new()
-            },
-        };
-
-        Self {
-            data_aggregator,
-            visualization_engine,
-            template_engine,
-            content_processor,
-        }
+    pub fn new() -> Self {
+        Self
     }
 
     pub async fn generate_from_template(
@@ -230,42 +177,29 @@ pub struct GeneratedSection {
     pub recommendations: Vec<Recommendation>,
 }
 
-/// Report scheduling system
-#[derive(Debug)]
+/// Report scheduling system.
+///
+/// Holds the schedules an operator registered. Nothing here fires them: there
+/// is no cron evaluator or timer in this crate, so a registered schedule is a
+/// record of intent, not a running job.
+///
+/// 0.2.1: dropped a `SchedulerEngine` (an id, a concurrency number and the
+/// string `"exponential_backoff"`, with no retry code anywhere) and a
+/// `ReportNotificationManager` (a list of channel names and an empty throttle
+/// map, with nothing that notifies).
+#[derive(Debug, Default)]
 pub struct ReportScheduler {
     scheduled_reports: RwLock<HashMap<String, ScheduledReport>>,
-    scheduler_engine: SchedulerEngine,
-    notification_manager: ReportNotificationManager,
 }
 
 impl ReportScheduler {
-    pub fn new(config: &ReportConfig) -> Self {
-        let max_concurrent =
-            if config.export_formats.is_empty() { 1 } else { config.export_formats.len() };
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-        let scheduler_engine = SchedulerEngine {
-            engine_id: "default".to_string(),
-            max_concurrent,
-            retry_policy: "exponential_backoff".to_string(),
-        };
-
-        let notification_channels = if config.export_formats.is_empty() {
-            vec!["Email".to_string()]
-        } else {
-            config.export_formats.iter().map(|format| format!("{:?}", format)).collect()
-        };
-
-        let notification_manager = ReportNotificationManager {
-            manager_id: "default".to_string(),
-            notification_channels,
-            throttle_config: HashMap::new(),
-        };
-
-        Self {
-            scheduled_reports: RwLock::new(HashMap::new()),
-            scheduler_engine,
-            notification_manager,
-        }
+    /// The schedules registered so far.
+    pub async fn schedules(&self) -> Vec<ScheduledReport> {
+        self.scheduled_reports.read().await.values().cloned().collect()
     }
 
     pub async fn add_schedule(
@@ -299,13 +233,23 @@ impl ReportingSystem {
     /// Create new reporting system
     pub fn new(config: ReportConfig) -> Self {
         Self {
-            config: config.clone(),
-            template_manager: ReportTemplateManager::new(&config),
-            report_generator: ReportGenerator::new(&config),
-            report_scheduler: ReportScheduler::new(&config),
+            template_manager: ReportTemplateManager::new(),
+            report_generator: ReportGenerator::new(),
+            report_scheduler: ReportScheduler::new(),
             export_manager: ExportManager::from_report_config(&config),
             report_storage: ReportStorage::from_report_config(&config),
+            config,
         }
+    }
+
+    /// The configuration this system was built with.
+    pub fn config(&self) -> &ReportConfig {
+        &self.config
+    }
+
+    /// The schedules registered through [`Self::schedule_report`].
+    pub async fn schedules(&self) -> Vec<ScheduledReport> {
+        self.report_scheduler.schedules().await
     }
 
     /// Generate report from template
@@ -425,5 +369,35 @@ mod tests {
         let _system = ReportingSystem::new(config);
 
         // Basic creation test - succeeds if no panic
+    }
+
+    /// The caller's configuration must survive construction.
+    #[test]
+    fn system_keeps_the_configuration_it_was_given() {
+        let mut config = ReportConfig::default();
+        config.auto_generate_interval = Some(std::time::Duration::from_secs(4242));
+
+        let system = ReportingSystem::new(config);
+
+        assert_eq!(
+            system.config().auto_generate_interval,
+            Some(std::time::Duration::from_secs(4242))
+        );
+    }
+
+    /// Exporting a report that was never stored must fail, not return a stub.
+    #[tokio::test]
+    async fn exporting_an_unknown_report_fails() {
+        let system = ReportingSystem::new(ReportConfig::default());
+
+        let error = system
+            .export_report("no-such-report", ExportFormat::JSON)
+            .await
+            .expect_err("nothing has ever been stored, so there is nothing to export");
+        let rendered = format!("{:?}", error);
+        assert!(
+            !rendered.contains("stub"),
+            "an unknown report must not resolve to a stub"
+        );
     }
 }

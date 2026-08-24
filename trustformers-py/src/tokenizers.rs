@@ -264,18 +264,41 @@ fn wordpiece_batch_item(
 /// follows whichever preset is loaded: `<|endoftext|>` for the GPT-2 default
 /// `BPETokenizer::new`, `<s>`/`</s>` for `BPETokenizer::from_roberta_files`.
 ///
+/// # Offsets
+///
+/// `offset_mapping` is populated for real, built from the two independent
+/// `BPETokenizer::encode` calls below -- each already returns real
+/// per-sequence byte offsets (see that method's own doc). The four boundary
+/// positions this function inserts (`bos`, the two `eos` separators, the
+/// trailing `eos`) report `(0, 0)`, HuggingFace's convention for a special
+/// token with no source span. The first sequence's spans index `text`; the
+/// second sequence's index `text2` -- **not** a combined coordinate space --
+/// matching `WordPieceTokenizer::encode_pair`'s per-sequence convention (see
+/// `pipelines/span.rs`'s module doc for the byte-offset convention itself).
+/// `special_tokens_mask` is populated the same way, flagging exactly those
+/// four boundary positions, so a caller can tell a real token's `(0, 0)`
+/// apart from a boundary token's (which cannot otherwise be distinguished
+/// from the offsets alone).
+///
 /// This bypasses `BPETokenizer::encode_pair` entirely rather than calling it:
 /// that method's own implementation is `format!("{} {}", text, text2)`,
-/// re-encoded as a single string -- no separator token at all, and
-/// `token_type_ids: None` -- which silently merges the two sequences'
-/// boundary instead of marking it.
+/// re-encoded as a single string -- no separator token at all, its
+/// `offset_mapping` indexes that joined string rather than either original
+/// sequence, and its `token_type_ids` stays `None` -- which silently merges
+/// the two sequences' boundary instead of marking it.
 ///
 /// # Errors
 ///
-/// Fails when either sequence fails to tokenize, or when the tokenizer's
+/// Fails when either sequence fails to tokenize, when the tokenizer's
 /// configured `bos_token`/`eos_token` is not in its own vocabulary (there is
 /// then no id to place for it, and silently substituting `unk_token` would
-/// fabricate a boundary token that was never actually there).
+/// fabricate a boundary token that was never actually there), or when an
+/// `encode` call's `offset_mapping` does not have exactly one entry per
+/// token. `BPETokenizer::encode` always keeps them in lockstep today, but
+/// this is checked rather than assumed: a silent mismatch here would return
+/// spans that look precise while no longer corresponding to the tokens they
+/// claim to describe, which is exactly the kind of fabrication this crate's
+/// honesty policy refuses to let through.
 fn bpe_pair_encoding(
     tokenizer: &BPETokenizer,
     text: &str,
@@ -297,13 +320,66 @@ fn bpe_pair_encoding(
     let first = tokenizer.encode(text).map_err(|e| format!("Encoding failed: {e}"))?;
     let second = tokenizer.encode(text2).map_err(|e| format!("Encoding failed: {e}"))?;
 
-    let mut input_ids = Vec::with_capacity(first.input_ids.len() + second.input_ids.len() + 4);
+    let first_offsets = first.offset_mapping.ok_or_else(|| {
+        "BPETokenizer::encode did not return an offset mapping for the first sequence \
+         (expected Some(..) unconditionally)"
+            .to_string()
+    })?;
+    if first_offsets.len() != first.input_ids.len() {
+        return Err(format!(
+            "the first sequence's offset mapping has {} entries but {} tokens; refusing to \
+             return spans that may not correspond to the right token",
+            first_offsets.len(),
+            first.input_ids.len()
+        ));
+    }
+    let second_offsets = second.offset_mapping.ok_or_else(|| {
+        "BPETokenizer::encode did not return an offset mapping for the second sequence \
+         (expected Some(..) unconditionally)"
+            .to_string()
+    })?;
+    if second_offsets.len() != second.input_ids.len() {
+        return Err(format!(
+            "the second sequence's offset mapping has {} entries but {} tokens; refusing to \
+             return spans that may not correspond to the right token",
+            second_offsets.len(),
+            second.input_ids.len()
+        ));
+    }
+
+    // HuggingFace's convention for a special token with no source span.
+    const BOUNDARY_SPAN: (usize, usize) = (0, 0);
+
+    let first_len = first.input_ids.len();
+    let second_len = second.input_ids.len();
+    let total_len = first_len + second_len + 4;
+
+    let mut input_ids = Vec::with_capacity(total_len);
+    let mut offset_mapping = Vec::with_capacity(total_len);
+    let mut special_tokens_mask = Vec::with_capacity(total_len);
+
     input_ids.push(bos_id);
+    offset_mapping.push(BOUNDARY_SPAN);
+    special_tokens_mask.push(1u8);
+
     input_ids.extend(first.input_ids);
+    offset_mapping.extend(first_offsets);
+    special_tokens_mask.extend(std::iter::repeat_n(0u8, first_len));
+
     input_ids.push(eos_id);
+    offset_mapping.push(BOUNDARY_SPAN);
+    special_tokens_mask.push(1u8);
     input_ids.push(eos_id);
+    offset_mapping.push(BOUNDARY_SPAN);
+    special_tokens_mask.push(1u8);
+
     input_ids.extend(second.input_ids);
+    offset_mapping.extend(second_offsets);
+    special_tokens_mask.extend(std::iter::repeat_n(0u8, second_len));
+
     input_ids.push(eos_id);
+    offset_mapping.push(BOUNDARY_SPAN);
+    special_tokens_mask.push(1u8);
 
     let attention_mask = vec![1u8; input_ids.len()];
     let token_type_ids = vec![0u32; input_ids.len()];
@@ -312,8 +388,8 @@ fn bpe_pair_encoding(
         input_ids,
         attention_mask,
         token_type_ids: Some(token_type_ids),
-        special_tokens_mask: None,
-        offset_mapping: None,
+        special_tokens_mask: Some(special_tokens_mask),
+        offset_mapping: Some(offset_mapping),
         overflowing_tokens: None,
     })
 }
@@ -1518,6 +1594,103 @@ mod pair_encoding_tests {
         let same = bpe_pair_encoding(&tokenizer, "h", "h").expect("pair encodes");
         let different = bpe_pair_encoding(&tokenizer, "h", "hi").expect("pair encodes");
         assert_ne!(same.input_ids, different.input_ids);
+    }
+
+    // ---- offset_mapping (previously hardcoded `None`; see the function's own doc) ----
+
+    #[test]
+    fn bpe_pair_encoding_offset_mapping_has_one_entry_per_token() {
+        let tokenizer = bpe_fixture_with_eot_in_vocab();
+        let output = bpe_pair_encoding(&tokenizer, "hi", "hi").expect("pair encodes");
+        let offsets = output.offset_mapping.expect("offset_mapping must be populated");
+        assert_eq!(
+            offsets.len(),
+            output.input_ids.len(),
+            "offset_mapping must have exactly one entry per token, got {} offsets for {} tokens",
+            offsets.len(),
+            output.input_ids.len()
+        );
+    }
+
+    /// Ground truth measured directly against `BPETokenizer::encode` (not
+    /// assumed): with this fixture's empty merge table, byte-level BPE
+    /// tokenizes one raw byte at a time, and `tokenize_with_offsets` widens
+    /// each piece's span out to the enclosing character boundary -- so a
+    /// multi-byte character's several byte-pieces all report the *same*
+    /// widened span (see that method's own doc for why). "café" (5 bytes:
+    /// c, a, f, then é's 2 bytes) therefore yields 5 tokens over 4 distinct
+    /// spans, and "北京" (6 bytes: two 3-byte characters) yields 6 tokens
+    /// over 2 distinct spans. Repeated consecutive spans here are correct,
+    /// not a bug.
+    ///
+    /// This also locks the four boundary positions (`bos`, the two `eos`
+    /// separators, the trailing `eos`) at `(0, 0)` -- HuggingFace's
+    /// convention for a special token with no source span, matching
+    /// `WordPieceTokenizer::encode_pair`'s `SPECIAL_TOKEN_SPAN`.
+    #[test]
+    fn bpe_pair_encoding_offsets_match_measured_ground_truth() {
+        let tokenizer = bpe_fixture_with_eot_in_vocab();
+        let output = bpe_pair_encoding(&tokenizer, "café", "北京").expect("pair encodes");
+
+        // <bos> c a f é é <eos> <eos> 北 北 北 京 京 京 <eos> = 1+5+2+6+1 = 15
+        assert_eq!(output.input_ids.len(), 15, "{:?}", output.input_ids);
+
+        let offsets = output.offset_mapping.expect("offset_mapping must be populated");
+        let expected = vec![
+            (0, 0), // bos
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 5),
+            (3, 5), // c a f é é -- indexes "café"
+            (0, 0),
+            (0, 0), // eos eos
+            (0, 3),
+            (0, 3),
+            (0, 3),
+            (3, 6),
+            (3, 6),
+            (3, 6), // 北 北 北 京 京 京 -- indexes "北京"
+            (0, 0), // eos
+        ];
+        assert_eq!(offsets, expected, "{:?}", offsets);
+    }
+
+    /// Falsifies the specific bug this fix replaces: a naive implementation
+    /// could shift the second sequence's offsets into a combined
+    /// `text` + `text2` coordinate space (the way `BPETokenizer::encode_pair`
+    /// -- deliberately not called here -- indexes its own joined string).
+    /// Slicing `text2` directly at the second segment's reported spans must
+    /// recover `text2`'s real characters; the value a `text.len()`-shifted
+    /// bug would have reported is not even a valid slice of the (shorter)
+    /// `text2`.
+    #[test]
+    fn bpe_pair_encoding_second_sequence_offsets_index_text2_not_a_combined_string() {
+        let tokenizer = bpe_fixture_with_eot_in_vocab();
+        let text = "café";
+        let text2 = "北京";
+        let output = bpe_pair_encoding(&tokenizer, text, text2).expect("pair encodes");
+        let offsets = output.offset_mapping.expect("offset_mapping must be populated");
+
+        // Positions 8..=13 are the second segment (bos=0, café=1..=5,
+        // eos,eos=6,7, 北京=8..=13, eos=14).
+        let second_segment = &offsets[8..14];
+        assert_eq!(text2.get(second_segment[0].0..second_segment[0].1), Some("北"));
+        assert_eq!(text2.get(second_segment[3].0..second_segment[3].1), Some("京"));
+
+        let bogus_shift = text.len(); // what a combined-coordinate-space bug would add
+        assert!(
+            text2.get(bogus_shift..bogus_shift + 3).is_none(),
+            "a text.len()-shifted offset must not even be a valid text2 slice"
+        );
+    }
+
+    #[test]
+    fn bpe_pair_encoding_special_tokens_mask_flags_exactly_the_four_boundary_positions() {
+        let tokenizer = bpe_fixture_with_eot_in_vocab();
+        let output = bpe_pair_encoding(&tokenizer, "hi", "hi").expect("pair encodes");
+        let mask = output.special_tokens_mask.expect("special_tokens_mask must be populated");
+        assert_eq!(mask, vec![1, 0, 0, 1, 1, 0, 0, 1], "{:?}", mask);
     }
 }
 

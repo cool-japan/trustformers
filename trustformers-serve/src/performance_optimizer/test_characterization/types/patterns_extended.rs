@@ -395,7 +395,6 @@ impl Default for SharingRequirements {
             max_concurrent_shares: 1,
             sharing_mode: SharingMode::Exclusive,
             isolation_level: IsolationLevel::None,
-            // TODO: SynchronizationRequirements struct fields changed
             synchronization_requirements: SynchronizationRequirements {
                 synchronization_points: Vec::new(),
                 lock_usage_patterns: Vec::new(),
@@ -898,18 +897,27 @@ pub trait ThreadAnalysisAlgorithm: std::fmt::Debug + Send + Sync {
     }
 }
 
+/// Recognises one concurrency pattern in a test's recorded execution data.
+///
+/// ## Changed in 0.2.1
+///
+/// `detect` used to take no arguments and return a `String`, which left every
+/// implementation answering from its own fields rather than from the test it
+/// was supposed to be analysing — and those fields were never written, so the
+/// answer was constant. It now receives the execution data and returns the
+/// pattern it found, `None` when the shape is genuinely absent from the
+/// recorded interactions, or an error when there is nothing recorded to
+/// analyse. Implementations live in
+/// [`core::pattern_algorithms`](super::core::pattern_algorithms).
 pub trait PatternDetectionAlgorithm: std::fmt::Debug + Send + Sync {
-    fn detect(&self) -> String;
+    /// Looks for this algorithm's pattern in `test_data`.
+    fn detect(
+        &self,
+        test_data: &super::core::TestExecutionData,
+    ) -> super::core::TestCharacterizationResult<Option<ConcurrencyPattern>>;
 
     /// Get algorithm name
-    fn name(&self) -> &str {
-        "PatternDetectionAlgorithm"
-    }
-
-    /// Detect patterns and return analysis
-    fn detect_patterns(&self) -> String {
-        self.detect()
-    }
+    fn name(&self) -> &str;
 }
 
 impl ConcurrencyAnalysisPipeline {

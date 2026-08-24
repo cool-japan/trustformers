@@ -649,4 +649,142 @@ mod tests {
             "unexpected: {err}"
         );
     }
+
+    // ── Contextual strictness: wrapper path vs bare-encoder path ────────────
+
+    /// A task wrapper must refuse a checkpoint entry it does not recognise
+    /// inside a namespace it binds itself.
+    ///
+    /// RoBERTa's bare encoder reuses `BertModel::unused_tensor_policy()`, which
+    /// tolerates `classifier.`, `lm_head.` and `qa_outputs.` so that an encoder
+    /// can be lifted out of a fine-tuned checkpoint. The task wrappers used to
+    /// inherit that tolerance even though they bind those namespaces, so a
+    /// misspelling landed in `ignored`, the load returned `Ok`, and the layer
+    /// the typo was meant to fill kept its random initialisation. See
+    /// [`crate::weight_loading::binding::BoundNamespaces`].
+    #[test]
+    fn a_wrapper_rejects_an_unknown_tensor_inside_a_namespace_it_binds() {
+        // Sequence classification: a misspelt `classifier.out_proj.weight`.
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.extend(sequence_head_tensors(&config, 3));
+        tensors.push(F32Tensor::ramp(
+            "classifier.out_prj.weight",
+            &[3, hidden],
+            240.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+        let mut model = RobertaForSequenceClassification::new(config, 3).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a misspelt classifier tensor must not be tolerated by its own binder");
+        let message = err.to_string();
+        assert!(
+            message.contains("classifier.out_prj.weight"),
+            "the offending name must be reported: {message}"
+        );
+        // The refusal must come from the wrapper's own namespace check, not
+        // from a shape or missing-parameter error that happens to mention the
+        // name: only `BoundNamespaces::verify` phrases it this way.
+        assert!(
+            message.contains("does not recognise inside the head namespace"),
+            "the refusal must be the bound-namespace check: {message}"
+        );
+
+        // Token classification binds the same namespace with flat names.
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.push(F32Tensor::ramp("classifier.weight", &[5, hidden], 400.0));
+        tensors.push(F32Tensor::ramp("classifier.bias", &[5], 410.0));
+        tensors.push(F32Tensor::ramp(
+            "classifier.extra_head.weight",
+            &[5, hidden],
+            420.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+        let mut model = RobertaForTokenClassification::new(config, 5).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an unknown tensor under the bound classifier namespace must be refused");
+        assert!(
+            err.to_string().contains("classifier.extra_head.weight"),
+            "unexpected: {err}"
+        );
+
+        // Masked LM: a misspelling inside `lm_head.`.
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.extend(masked_lm_head_tensors(&config));
+        tensors.push(F32Tensor::ramp(
+            "lm_head.layer_norm.weigth",
+            &[hidden],
+            360.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+        let mut model = RobertaForMaskedLM::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a misspelt prediction-head tensor must be refused");
+        assert!(
+            err.to_string().contains("lm_head.layer_norm.weigth"),
+            "unexpected: {err}"
+        );
+
+        // Question answering: a misspelling under `qa_outputs.`.
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.push(F32Tensor::ramp("qa_outputs.weight", &[2, hidden], 500.0));
+        tensors.push(F32Tensor::ramp("qa_outputs.bias", &[2], 510.0));
+        tensors.push(F32Tensor::ramp("qa_outputs.baias", &[2], 520.0));
+        let bytes = build_safetensors(&tensors);
+        let mut model = RobertaForQuestionAnswering::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a misspelt span-head tensor must be refused");
+        assert!(
+            err.to_string().contains("qa_outputs.baias"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// The strictness above must not turn into "every checkpoint entry must be
+    /// consumed": a checkpoint legitimately carries heads a particular model
+    /// does not bind, and the bare encoder binds none of them at all.
+    #[test]
+    fn namespaces_a_model_does_not_bind_stay_tolerated() {
+        let config = loading_config();
+        let mut tensors = fixture(&config, "roberta.").tensors();
+        tensors.extend(sequence_head_tensors(&config, 3));
+        // A masked-LM head the classification wrapper does not bind at all.
+        tensors.extend(masked_lm_head_tensors(&config));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = RobertaForSequenceClassification::new(config, 3).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a masked-LM head this model does not bind must stay tolerated");
+        assert!(
+            report.ignored.iter().any(|name| name == "lm_head.dense.weight"),
+            "the unbound head must be reported as ignored: {:?}",
+            report.ignored
+        );
+
+        // The same checkpoint through the bare encoder: it binds neither head,
+        // so both namespaces stay tolerated exactly as before.
+        let mut encoder = RobertaModel::new(loading_config()).expect("model must build");
+        let encoder_report = encoder
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("the bare encoder must keep tolerating head namespaces it never binds");
+        for name in ["classifier.out_proj.weight", "lm_head.dense.weight"] {
+            assert!(
+                encoder_report.ignored.iter().any(|ignored| ignored == name),
+                "{name} must stay tolerated on the bare-encoder path: {:?}",
+                encoder_report.ignored
+            );
+        }
+    }
 }

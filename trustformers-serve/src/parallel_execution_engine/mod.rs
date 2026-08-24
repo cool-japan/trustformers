@@ -25,6 +25,8 @@ mod engine_tests;
 #[cfg(test)]
 mod functions_tests;
 #[cfg(test)]
+mod resources_tests;
+#[cfg(test)]
 mod scheduling_tests;
 #[cfg(test)]
 mod types_tests;

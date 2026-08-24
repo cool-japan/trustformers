@@ -94,7 +94,9 @@ Python bindings.
 
 - ✅ Byte-level encoding, merge-table lookup (`HashMap`), regex-free byte fallback for unknown characters
 - ✅ `from_files(vocab_path, merges_path)` and `from_roberta_files(vocab_path, merges_path)` loaders
-- ✅ `tokenize_with_offsets` for character-offset tracking
+- ✅ `tokenize_with_offsets` for byte-offset tracking (spans index `text.as_bytes()`, so
+  `&text[start..end]` is the token's source substring; convert with
+  `byte_offsets_to_char_offsets` when a caller needs code-point indices)
 - ✅ Training via `training::BPETrainer`
 
 **Example:**
@@ -428,12 +430,14 @@ Reference docs live under `docs/migration/`:
   - Files: trustformers-tokenizers/src/normalizer.rs only.
   - Tests: assert on a real compatibility-decomposition case that changes under NFKC/NFKD but is a no-op under plain NFC/NFD.
   - Risk: none — lowest-risk item in the whole batch.
-- [~] Build tokenizer alignment visualizer (planned 2026-07-05)
-  - Goal: visualize token<->source-text alignment using real byte offsets (existing TokenVisualizer hardcodes None because it's generic against a trait with no offset method, even though real offsets already exist elsewhere).
-  - Design: build a new visualizer consuming the concrete offset-bearing types directly (BPETokenizer::tokenize_with_offsets, TokenizerImpl::encode_with_offsets) rather than widening the generic Tokenizer trait (too high blast radius). Copy (do not depend on) trustformers-debug's ~40-line HTML/JSON/ASCII three-format pattern.
-  - Files: trustformers-tokenizers/src/visualization.rs, src/alignment.rs.
-  - Tests: invariant test that computed byte ranges exactly tile 0..text.len() with no gaps/overlaps.
-  - Risk: low — confirmed no dependency cycle risk; just don't add trustformers-debug as a dependency, copy the small pattern.
+- [ ] Build tokenizer alignment visualizer (planned 2026-07-05; **premise, design and file list corrected 2026-08-24** — the entry below described a tree that no longer exists)
+  - Still true: `TokenVisualizer` shows no alignment. `src/visualization.rs:154-155` hardcodes `start_char: None` / `end_char: None`, with the comment "Would need offset mapping from tokenizer".
+  - **Stale, corrected**: that comment's reason is no longer the reason. `extract_token_info` already receives a `&TokenizedInput`, and `TokenizedInput::offset_mapping` is now populated with real **byte** spans by `WordPieceTokenizer` and `BPETokenizer` (single sequences and pairs), by the protobuf / messagepack / python-bridge / sequence-packing paths, and end-to-end through `src/offsets.rs` (725 lines: `AlignmentBuilder`, `ByteSpan`, `byte_offsets_to_char_offsets`, `char_offsets_to_byte_offsets`, all re-exported from `lib.rs`). The offsets are in the struct the visualizer is handed — no trait widening and no separate concrete-type visualizer is needed.
+  - **Stale, corrected**: the previous entry listed `src/alignment.rs` as a file to write. It exists (738 lines, `Word` / `TokenAlignment` / `AlignmentEngine`, mounted at `lib.rs:17` and re-exported at `lib.rs:91`), and it reconstructs alignment by re-scanning the text with `char_indices()` rather than by reading the offsets the tokenizer already produced. Whether it should now be rebuilt on `offset_mapping`, or left as the no-offsets fallback for tokenizer families that still return `None`, is an open design question — not a file to create.
+  - Remaining work: read `tokenized.offset_mapping` in `extract_token_info` and fill `start_char`/`end_char` from it (naming note: those two fields are named for *characters* but every producer emits bytes — either convert with `byte_offsets_to_char_offsets` or rename the fields, and say which in the doc), leaving `None` only when the tokenizer genuinely supplied no mapping. Then decide `alignment.rs`'s relationship to `offsets.rs`.
+  - Files: `trustformers-tokenizers/src/visualization.rs` (and possibly `src/alignment.rs`, see above).
+  - Tests: byte ranges of the content tokens tile the source with no gaps or overlaps; specials stay `None`; a tokenizer family that returns no mapping still renders.
+  - Risk: low. No new dependency; don't add `trustformers-debug`, copy its small three-format pattern if a renderer is wanted.
 - [x] Delete unused hangul dependency — **done, verified 2026-08-18**: `rg hangul trustformers-tokenizers/Cargo.toml` finds nothing; `cargo tree -i hangul` would report not-found. This item was still open in this file despite the removal already having landed (CHANGELOG 0.2.0).
 - [ ] Automatic tokenizer repair/optimization
 

@@ -259,18 +259,10 @@ impl Default for ResourceConflict {
             conflicting_tests: Vec::new(),
             resource_id: String::new(),
             probability: 0.0,
-            performance_impact: ConflictImpact {
-                performance_degradation: 0.0,
-                reliability_impact: 0.0,
-                resource_impact: HashMap::new(),
-                user_experience_impact: 0.0,
-                stability_impact: 0.0,
-                recovery_time: Duration::from_secs(0),
-                cascade_potential: 0.0,
-                mitigation_effectiveness: 1.0,
-                long_term_effects: Vec::new(),
-                confidence: 1.0,
-            },
+            // A default conflict carries no measurements at all: the optional
+            // fields stay `None` and `confidence` stays 0.0 rather than
+            // claiming a fully-confident zero-impact assessment.
+            performance_impact: ConflictImpact::default(),
             resolutions: Vec::new(),
             detected_at: Instant::now(),
             confidence: 0.0,

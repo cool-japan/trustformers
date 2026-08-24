@@ -1,6 +1,7 @@
 //! Tests for real-time profiler types
 
 use super::types::*;
+use super::types_engines::*;
 
 /// Simple LCG for deterministic pseudo-random values
 struct Lcg {

@@ -2,7 +2,6 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::super::profiling_pipeline::DataAggregationEngine;
 use super::super::types::optimization::OptimizationPerformanceData;
 use super::super::types::*;
 use super::functions::DEFAULT_METRICS_BUFFER_SIZE;
@@ -15,7 +14,6 @@ use super::types_engines::{
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::{

@@ -94,15 +94,15 @@ pub use performance_modeling::{ModelAccuracyMetrics, PerformancePrediction, Vali
 pub use real_time_metrics::aggregator::RealTimeDataAggregator;
 pub use real_time_metrics::monitor::ParallelPerformanceMonitor;
 pub use real_time_metrics::{
-    LiveOptimizationEngine,
-    MetricsCollectionConfig,
-    NotificationManager,
-    OptimizationEngineConfig,
-    RealTimeMetricsCollector,
-    ThresholdConfig,
-    // AlertManager,  // Disabled: Only stub implementation in monitor module
-    // ThresholdMonitor,  // Disabled: Part of threshold module which is not implemented
+    LiveOptimizationEngine, MetricsCollectionConfig, NotificationManager, OptimizationEngineConfig,
+    RealTimeMetricsCollector, ThresholdConfig,
 };
+// The two commented-out entries that stood in the list above were stale:
+// `AlertManager` was described as "only stub implementation in monitor module"
+// -- the stub is deleted, and the real one is re-exported here -- and
+// `ThresholdMonitor` as "part of threshold module which is not implemented",
+// which the 1,200-line `real_time_metrics::threshold::monitor` disproves.
+pub use real_time_metrics::threshold::{AlertManager, ThresholdMonitor};
 pub use recommendations::{
     BatchingRecommendation, OptimizationRecommendations, ResourceOptimizationRecommendation,
 };

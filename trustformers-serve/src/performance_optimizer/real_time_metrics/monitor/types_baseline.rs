@@ -127,21 +127,25 @@ impl BaselineManager {
                 error_rate_lower: 0.0,
                 error_rate_upper: 0.0,
             },
+            // `force_refresh` clears the baseline; nothing has been measured
+            // yet, which is what `sample_count: 0` and the `Pending` validation
+            // status above say. The intervals that can be absent are absent
+            // rather than zero-width.
             confidence_intervals: ConfidenceIntervals {
-                confidence_level: 0.95,
+                confidence_level: 95.0,
                 throughput_interval: (0.0, 0.0),
-                latency_interval: (Duration::from_secs(0), Duration::from_secs(0)),
-                cpu_interval: (0.0, 0.0),
-                memory_interval: (0.0, 0.0),
-                network_interval: (0.0, 0.0),
-                io_interval: (0.0, 0.0),
-                response_time_interval: (Duration::from_secs(0), Duration::from_secs(0)),
-                error_rate_interval: (0.0, 0.0),
+                latency_interval: None,
+                cpu_interval: None,
+                memory_interval: None,
+                network_interval: None,
+                io_interval: None,
+                response_time_interval: None,
+                error_rate_interval: None,
                 method: ConfidenceMethod::StandardError,
                 mean_lower: 0.0,
                 mean_upper: 0.0,
-                variance_lower: 0.0,
-                variance_upper: 0.0,
+                variance_lower: None,
+                variance_upper: None,
             },
         };
         info!("Baseline forcefully refreshed");

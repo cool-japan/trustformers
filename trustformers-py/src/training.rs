@@ -478,15 +478,31 @@ impl PyLRScheduler {
         }
     }
 
-    /// Get learning rate for current step
+    /// Get learning rate for current step.
+    ///
+    /// Uses `saturating_sub` for both subtractions rather than plain `-`:
+    /// `current_step` and `num_training_steps` are independent `usize`
+    /// arguments with no cross-validation at construction (`current_step` is
+    /// caller-supplied per call; `warmup_steps`/`num_training_steps` are
+    /// caller-supplied in `new`), so either `current_step > num_training_steps`
+    /// (training queried past its configured end) or `warmup_steps >
+    /// num_training_steps` (a nonsensical but constructible configuration)
+    /// previously underflowed this `usize` subtraction -- a panic in debug
+    /// builds, silently wrapping to a huge value in release. Both are now
+    /// clamped to zero, which reports a `0.0` learning rate (training is
+    /// over / already decayed to nothing) instead of crashing or fabricating
+    /// a wrapped-around rate.
     fn get_lr(&self, current_step: usize) -> f32 {
         // Simple linear schedule with warmup
         if current_step < self.warmup_steps {
             current_step as f32 / self.warmup_steps as f32
         } else {
-            let remaining_steps = self.num_training_steps - current_step;
-            let remaining_ratio =
-                remaining_steps as f32 / (self.num_training_steps - self.warmup_steps) as f32;
+            let remaining_steps = self.num_training_steps.saturating_sub(current_step);
+            let decay_steps = self.num_training_steps.saturating_sub(self.warmup_steps);
+            if decay_steps == 0 {
+                return 0.0;
+            }
+            let remaining_ratio = remaining_steps as f32 / decay_steps as f32;
             remaining_ratio.max(0.0)
         }
     }
@@ -616,5 +632,59 @@ impl PyEarlyStopping {
             "EarlyStopping(patience={}, min_delta={}, mode='{}', counter={})",
             self.patience, self.min_delta, self.mode, self.counter
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- PyLRScheduler::get_lr ----
+
+    /// Regression: previously `self.num_training_steps - current_step`
+    /// underflowed this `usize` subtraction (a panic in debug builds,
+    /// silently wrapping to a huge value in release) whenever a caller
+    /// queried a step past the configured end -- entirely reachable from
+    /// Python, since `get_lr` accepts any `current_step` with no upper
+    /// bound.
+    #[test]
+    fn get_lr_does_not_panic_when_current_step_exceeds_num_training_steps() {
+        let scheduler = PyLRScheduler::new("linear", 10, 100);
+        let lr = scheduler.get_lr(10_000);
+        assert_eq!(lr, 0.0, "training queried far past its end should report a zero rate");
+    }
+
+    /// Regression: previously `self.num_training_steps - self.warmup_steps`
+    /// underflowed whenever a caller constructed a scheduler with
+    /// `warmup_steps > num_training_steps` -- nothing in `new` validates the
+    /// relationship, so this is directly constructible from Python -- and
+    /// then queried any step at or past `warmup_steps`.
+    #[test]
+    fn get_lr_does_not_panic_when_warmup_steps_exceeds_num_training_steps() {
+        let scheduler = PyLRScheduler::new("linear", 2000, 1000);
+        let lr = scheduler.get_lr(2000);
+        assert_eq!(
+            lr, 0.0,
+            "a nonsensical warmup > total-steps configuration should report zero, not panic"
+        );
+    }
+
+    /// Confirms the underflow fix did not change behavior for a valid
+    /// configuration (`warmup_steps <= num_training_steps`, queried within
+    /// range): `saturating_sub` is identical to `-` whenever the subtraction
+    /// would not have underflowed anyway.
+    #[test]
+    fn get_lr_still_decays_linearly_for_a_valid_configuration() {
+        let scheduler = PyLRScheduler::new("linear", 0, 100);
+        assert_eq!(scheduler.get_lr(0), 1.0);
+        assert_eq!(scheduler.get_lr(100), 0.0);
+        assert!((scheduler.get_lr(50) - 0.5).abs() < 1e-6, "{}", scheduler.get_lr(50));
+    }
+
+    #[test]
+    fn get_lr_ramps_up_linearly_during_warmup() {
+        let scheduler = PyLRScheduler::new("linear", 10, 100);
+        assert_eq!(scheduler.get_lr(0), 0.0);
+        assert!((scheduler.get_lr(5) - 0.5).abs() < 1e-6, "{}", scheduler.get_lr(5));
     }
 }

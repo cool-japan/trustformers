@@ -293,37 +293,11 @@ fn test_prediction_model_train_reports_it_has_no_storage() {
     );
 }
 
-#[test]
-fn test_producer_consumer_detection_default() {
-    let detection = ProducerConsumerDetection::default();
-    assert!(!detection.detected);
-    assert_eq!(detection.producer_count, 0);
-    assert_eq!(detection.consumer_count, 0);
-}
-
-#[test]
-fn test_master_worker_detection_default() {
-    let detection = MasterWorkerDetection::default();
-    assert!(!detection.detected);
-    assert_eq!(detection.master_count, 0);
-    assert_eq!(detection.worker_count, 0);
-}
-
-#[test]
-fn test_pipeline_detection_default() {
-    let detection = PipelineDetection::default();
-    assert!(!detection.detected);
-    assert_eq!(detection.stages, 0);
-    assert!((detection.throughput - 0.0).abs() < 1e-9);
-}
-
-#[test]
-fn test_fork_join_detection_default() {
-    let detection = ForkJoinDetection::default();
-    assert!(!detection.detected);
-    assert_eq!(detection.fork_points, 0);
-    assert_eq!(detection.join_points, 0);
-}
+// The four `*_detection_default` tests that stood here asserted that a freshly
+// constructed pattern detector had `detected == false` and zero counts -- i.e.
+// they locked in the state that made every detector answer "not detected"
+// forever. Detection is now a function of the execution data, the detectors
+// hold no state, and the real tests live in `pattern_algorithms_tests.rs`.
 
 #[test]
 fn test_priority_calculator_fields() {

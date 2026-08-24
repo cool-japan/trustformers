@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 /// Operator scheduling service configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -411,6 +411,37 @@ impl Ord for PriorityTask {
     }
 }
 
+/// One scheduled operator task, in its running form.
+///
+/// Resolving to `Ok(metrics)` means the task ran to completion and the executor
+/// measured `metrics`; an executor that measures nothing returns an empty map.
+/// `Err(message)` means it failed, and `message` is recorded verbatim as the
+/// result's `error_message`.
+pub type OperatorTaskFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = std::result::Result<HashMap<String, f64>, String>> + Send>,
+>;
+
+/// Runs the operator tasks this service schedules.
+///
+/// The scheduler decides *what* runs *where*; it has no way to turn an
+/// [`OperatorTask`] into something runnable on its own. An `OperatorExecutor`
+/// provides that mapping.
+///
+/// 0.2.1: without this seam the scheduler had no executor at all, and
+/// `try_schedule_next_task` covered for that by spawning a task that slept for
+/// `100 + (hash(task_id) % 1000)` milliseconds and then wrote a
+/// [`TaskExecutionResult`] claiming `state: Completed`, that sleep as
+/// `execution_time`, and `peak_memory_usage: Some(1 MiB)` -- for an operator
+/// that never ran. `get_task_result` handed that to callers as a measurement.
+/// There is deliberately no default implementation: a service with no executor
+/// leaves work queued rather than manufacturing outcomes for it.
+pub trait OperatorExecutor: Send + Sync + std::fmt::Debug {
+    /// Return the runnable body for `task` on `device`, or `None` when this
+    /// executor cannot run it. `None` makes the scheduler record a real failed
+    /// result instead of inventing a successful one.
+    fn execute(&self, task: &OperatorTask, device: DeviceType) -> Option<OperatorTaskFuture>;
+}
+
 /// Operator scheduling service
 pub struct OperatorSchedulingService {
     config: OperatorSchedulingConfig,
@@ -421,6 +452,9 @@ pub struct OperatorSchedulingService {
     task_results: Arc<RwLock<HashMap<String, TaskExecutionResult>>>,
     dependency_graph: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     scheduling_history: Arc<RwLock<Vec<SchedulingDecision>>>,
+    /// What actually runs the scheduled tasks. `None` means nothing can run:
+    /// tasks queue up and no results are produced for them.
+    executor: Option<Arc<dyn OperatorExecutor>>,
 }
 
 impl OperatorSchedulingService {
@@ -447,7 +481,28 @@ impl OperatorSchedulingService {
             task_results: Arc::new(RwLock::new(HashMap::new())),
             dependency_graph: Arc::new(RwLock::new(HashMap::new())),
             scheduling_history: Arc::new(RwLock::new(Vec::new())),
+            executor: None,
         }
+    }
+
+    /// Create a scheduling service that can actually run what it schedules.
+    ///
+    /// Without an executor the service still validates, orders and queues
+    /// tasks -- it simply never starts one, and `get_task_result` keeps
+    /// returning `None` because nothing has run.
+    pub fn with_executor(
+        config: OperatorSchedulingConfig,
+        executor: Arc<dyn OperatorExecutor>,
+    ) -> Self {
+        Self {
+            executor: Some(executor),
+            ..Self::new(config)
+        }
+    }
+
+    /// The executor that runs scheduled tasks, if one was supplied.
+    pub fn executor(&self) -> Option<&Arc<dyn OperatorExecutor>> {
+        self.executor.as_ref()
     }
 
     /// Register a device for scheduling
@@ -518,127 +573,200 @@ impl OperatorSchedulingService {
         Ok(())
     }
 
-    /// Try to schedule the next task for a device
-    async fn try_schedule_next_task(
+    /// Try to start the next queued task for a device.
+    ///
+    /// Returns a boxed, explicitly-`Send` future rather than being an
+    /// `async fn`: the completion path calls back into this function, so an
+    /// inferred future type would make `Send` depend on itself and the
+    /// compiler would refuse to prove it. Declaring it here breaks that cycle.
+    #[allow(clippy::type_complexity)]
+    fn try_schedule_next_task(
         &self,
         device: DeviceType,
-    ) -> Result<(), OperatorSchedulingError> {
-        // Check device availability first
-        let device_available = {
-            let devices = self.device_resources.read().await;
-            if let Some(device_resource) = devices.get(&device) {
-                device_resource.is_available
-                    && device_resource.active_tasks
-                        < self.config.max_concurrent_operators_per_device
-            } else {
-                return Err(OperatorSchedulingError::DeviceUnavailable(device));
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), OperatorSchedulingError>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            // How many bodies this device is running right now.
+            //
+            // 0.2.1: this used to read `DeviceResource::active_tasks`, which
+            // nothing in this service ever increments -- it is only ever set by
+            // an operator through `update_device_resource`, and starts at
+            // whatever they registered. The comparison against
+            // `max_concurrent_operators_per_device` was therefore against a
+            // constant, and the configured cap gated nothing. `running_tasks`
+            // is the real in-flight set: an entry is inserted immediately
+            // before the body is spawned and removed by `complete_task`.
+            //
+            // Best-effort, and deliberately documented as such: the count is
+            // taken before the reservation, so two concurrent callers can both
+            // pass the check for the last slot. A single call starts at most
+            // one body, so the cap holds exactly for the common sequential
+            // submit/complete path.
+            let in_flight = {
+                let running = self.running_tasks.read().await;
+                running.values().filter(|(_, running_on, _)| *running_on == device).count()
+            };
+
+            // Check device availability first
+            let device_available = {
+                let devices = self.device_resources.read().await;
+                if let Some(device_resource) = devices.get(&device) {
+                    device_resource.is_available
+                        && in_flight < self.config.max_concurrent_operators_per_device
+                } else {
+                    return Err(OperatorSchedulingError::DeviceUnavailable(device));
+                }
+            };
+
+            if !device_available {
+                return Ok(());
             }
-        };
 
-        if !device_available {
-            return Ok(());
-        }
+            // Nothing can run without an executor. Leave the queue untouched rather
+            // than dequeuing work that would then have to be accounted for.
+            let Some(executor) = self.executor.clone() else {
+                debug!(
+                    "No OperatorExecutor configured; tasks for device {:?} stay queued",
+                    device
+                );
+                return Ok(());
+            };
 
-        // Get next task from queue
-        let task_to_schedule = {
-            let mut queues = self.task_queues.write().await;
-            if let Some(queue) = queues.get_mut(&device) {
-                // Try to find a task whose dependencies are satisfied
-                let mut checked_tasks = Vec::new();
-                let mut found_task = None;
+            // Get next task from queue
+            let task_to_schedule = {
+                let mut queues = self.task_queues.write().await;
+                if let Some(queue) = queues.get_mut(&device) {
+                    // Try to find a task whose dependencies are satisfied
+                    let mut checked_tasks = Vec::new();
+                    let mut found_task = None;
 
-                while let Some(priority_task) = queue.pop() {
-                    let task = priority_task.task.clone();
+                    while let Some(priority_task) = queue.pop() {
+                        let task = priority_task.task.clone();
 
-                    // Check dependencies without holding locks
-                    if self.config.enable_dependency_aware_scheduling {
-                        // Check if task dependencies are satisfied
-                        let dependencies_satisfied = self.are_dependencies_satisfied(&task).await;
+                        // Check dependencies without holding locks
+                        if self.config.enable_dependency_aware_scheduling {
+                            // Check if task dependencies are satisfied
+                            let dependencies_satisfied =
+                                self.are_dependencies_satisfied(&task).await;
 
-                        if dependencies_satisfied {
+                            if dependencies_satisfied {
+                                found_task = Some(task);
+                                break;
+                            } else {
+                                // Dependencies not satisfied, check next task
+                                checked_tasks.push(priority_task);
+                            }
+                        } else {
+                            // When dependency checking is disabled, take the first available task
                             found_task = Some(task);
                             break;
-                        } else {
-                            // Dependencies not satisfied, check next task
-                            checked_tasks.push(priority_task);
                         }
-                    } else {
-                        // When dependency checking is disabled, take the first available task
-                        found_task = Some(task);
-                        break;
                     }
+
+                    // Put back unchecked tasks
+                    for task in checked_tasks {
+                        queue.push(task);
+                    }
+
+                    found_task
+                } else {
+                    None
                 }
+            };
 
-                // Put back unchecked tasks
-                for task in checked_tasks {
-                    queue.push(task);
-                }
+            if let Some(task) = task_to_schedule {
+                let task_id = task.id.clone();
 
-                found_task
-            } else {
-                None
-            }
-        };
-
-        if let Some(task) = task_to_schedule {
-            // Start task execution
-            let start_time = SystemTime::now();
-            {
-                let mut running = self.running_tasks.write().await;
-                running.insert(task.id.clone(), (task.clone(), device, start_time));
-            }
-
-            info!(
-                "Starting execution of task {} on device {:?}",
-                task.id, device
-            );
-
-            // In a real implementation, this would trigger actual task execution
-            // For now, we'll simulate it directly without spawning
-            let task_id = task.id.clone();
-            // Call simulate_task_execution directly to avoid Send issues
-            tokio::task::spawn({
-                let scheduler = self.clone();
-                async move {
-                    // Use hash-based randomness (Send-safe)
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    task_id.hash(&mut hasher);
-                    let hash_value = hasher.finish();
-
-                    // Simple simulation without complex async operations
-                    let execution_time = Duration::from_millis(100 + (hash_value % 1000));
-                    tokio::time::sleep(execution_time).await;
-
-                    // Complete the task with basic result
+                // Ask the executor for a body before claiming the task as running:
+                // an executor that does not know this task must not leave it
+                // sitting in `running_tasks` forever.
+                let Some(body) = executor.execute(&task, device) else {
                     let result = TaskExecutionResult {
                         task_id: task_id.clone(),
-                        state: TaskState::Completed,
-                        execution_time,
+                        state: TaskState::Failed,
+                        execution_time: Duration::ZERO,
                         executed_on: device,
-                        peak_memory_usage: Some(1024 * 1024),
-                        error_message: None,
+                        peak_memory_usage: None,
+                        error_message: Some(format!(
+                            "the configured OperatorExecutor has no body for task {task_id}"
+                        )),
                         performance_metrics: HashMap::new(),
                         completed_at: SystemTime::now(),
                     };
-
-                    // Update task results directly without complex operations
+                    warn!("Cannot execute task {}: executor supplied no body", task_id);
+                    // Recorded inline rather than through `complete_task`: the task
+                    // was never entered into `running_tasks`, and calling back into
+                    // `complete_task` here would make this function's future
+                    // recurse into its own type. The remaining queue entries are
+                    // picked up by the next submission or completion.
                     {
-                        let mut results = scheduler.task_results.write().await;
+                        let mut results = self.task_results.write().await;
                         results.insert(task_id.clone(), result.clone());
                     }
+                    self.update_completion_stats(&result).await;
+                    return Ok(());
+                };
 
-                    // Update basic stats
-                    {
-                        let mut stats = scheduler.stats.write().await;
-                        stats.tasks_completed += 1;
-                    }
+                // Start task execution
+                let start_time = SystemTime::now();
+                {
+                    let mut running = self.running_tasks.write().await;
+                    running.insert(task.id.clone(), (task.clone(), device, start_time));
                 }
-            });
-        }
 
-        Ok(())
+                info!(
+                    "Starting execution of task {} on device {:?}",
+                    task.id, device
+                );
+
+                tokio::task::spawn({
+                    let scheduler = self.clone();
+                    async move {
+                        // Every number below is taken from this run: the clock is
+                        // read around the executor's own future, and the metrics
+                        // are whatever that future reported.
+                        let started = Instant::now();
+                        let outcome = body.await;
+                        let execution_time = started.elapsed();
+
+                        let result = match outcome {
+                            Ok(performance_metrics) => TaskExecutionResult {
+                                task_id: task_id.clone(),
+                                state: TaskState::Completed,
+                                execution_time,
+                                executed_on: device,
+                                // Nothing here samples the task's peak RSS.
+                                peak_memory_usage: None,
+                                error_message: None,
+                                performance_metrics,
+                                completed_at: SystemTime::now(),
+                            },
+                            Err(error_message) => TaskExecutionResult {
+                                task_id: task_id.clone(),
+                                state: TaskState::Failed,
+                                execution_time,
+                                executed_on: device,
+                                peak_memory_usage: None,
+                                error_message: Some(error_message),
+                                performance_metrics: HashMap::new(),
+                                completed_at: SystemTime::now(),
+                            },
+                        };
+
+                        // Type-erased so the future of `complete_task` -- which
+                        // schedules the next task, which spawns this block again --
+                        // does not recurse into its own type.
+                        let completion: std::pin::Pin<
+                            Box<dyn std::future::Future<Output = ()> + Send>,
+                        > = Box::pin(scheduler.complete_task(task_id, result));
+                        completion.await;
+                    }
+                });
+            }
+
+            Ok(())
+        })
     }
 
     /// Make scheduling decision for a task
@@ -858,41 +986,25 @@ impl OperatorSchedulingService {
         true
     }
 
-    /// Simulate task execution (for testing/demo purposes)
-    async fn simulate_task_execution(&self, task_id: String, device: DeviceType) {
-        // Use hash-based randomness (Send-safe)
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        task_id.hash(&mut hasher);
-        let hash_value = hasher.finish();
-        let execution_time = Duration::from_millis(100 + (hash_value % 1000));
-        tokio::time::sleep(execution_time).await;
-
-        // Complete the task
-        let result = TaskExecutionResult {
-            task_id: task_id.clone(),
-            state: TaskState::Completed,
-            execution_time,
-            executed_on: device,
-            peak_memory_usage: Some(1024 * 1024), // 1MB placeholder
-            error_message: None,
-            performance_metrics: HashMap::new(),
-            completed_at: SystemTime::now(),
-        };
-
-        self.complete_task(task_id, result).await;
-    }
-
-    /// Complete task execution
+    /// Record the outcome of a task the executor finished, then look for more
+    /// work on the device it freed.
+    ///
+    /// Each lock is scoped: `try_schedule_next_task` re-enters
+    /// `running_tasks`, `task_results` and `task_queues`, and `tokio`'s
+    /// `RwLock` is not reentrant, so holding a guard across that call
+    /// deadlocks the scheduler.
     async fn complete_task(&self, task_id: String, result: TaskExecutionResult) {
         // Remove from running tasks
-        let mut running = self.running_tasks.write().await;
-        running.remove(&task_id);
+        {
+            let mut running = self.running_tasks.write().await;
+            running.remove(&task_id);
+        }
 
         // Store result
-        let mut results = self.task_results.write().await;
-        results.insert(task_id.clone(), result.clone());
+        {
+            let mut results = self.task_results.write().await;
+            results.insert(task_id.clone(), result.clone());
+        }
 
         // Update statistics
         self.update_completion_stats(&result).await;
@@ -1025,6 +1137,7 @@ impl Clone for OperatorSchedulingService {
             task_results: Arc::clone(&self.task_results),
             dependency_graph: Arc::clone(&self.dependency_graph),
             scheduling_history: Arc::clone(&self.scheduling_history),
+            executor: self.executor.clone(),
         }
     }
 }
@@ -1087,7 +1200,239 @@ impl OperatorSchedulingService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::time::SystemTime;
+
+    /// Test executor that records what it was asked to run and sleeps a known
+    /// amount so the scheduler's measured `execution_time` can be checked
+    /// against something real.
+    #[derive(Debug)]
+    struct RecordingExecutor {
+        ran: Arc<AtomicUsize>,
+        body_duration: Duration,
+        /// When false, the executor declines every task.
+        knows_tasks: bool,
+    }
+
+    impl OperatorExecutor for RecordingExecutor {
+        fn execute(&self, _task: &OperatorTask, _device: DeviceType) -> Option<OperatorTaskFuture> {
+            if !self.knows_tasks {
+                return None;
+            }
+            let ran = Arc::clone(&self.ran);
+            let body_duration = self.body_duration;
+            Some(Box::pin(async move {
+                tokio::time::sleep(body_duration).await;
+                ran.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(HashMap::from([("flops".to_string(), 42.0)]))
+            }))
+        }
+    }
+
+    fn cpu_resource() -> DeviceResource {
+        DeviceResource {
+            device: DeviceType::CPU,
+            memory_used: 0,
+            memory_total: 1024 * 1024 * 1024,
+            cpu_utilization: 0.0,
+            gpu_utilization: 0.0,
+            active_tasks: 0,
+            queued_tasks: 0,
+            is_available: true,
+            last_updated: SystemTime::now(),
+        }
+    }
+
+    fn simple_task(id: &str) -> OperatorTask {
+        OperatorTask {
+            id: id.to_string(),
+            name: format!("task {id}"),
+            operation_type: OperationType::MatMul,
+            priority: TaskPriority::Normal,
+            estimated_duration_ms: None,
+            memory_requirements: None,
+            cpu_requirements: None,
+            gpu_requirements: None,
+            preferred_device: Some(DeviceType::CPU),
+            dependencies: Vec::new(),
+            deadline: None,
+            created_at: SystemTime::now(),
+            metadata: HashMap::new(),
+            device_affinity: HashMap::new(),
+        }
+    }
+
+    async fn await_result(
+        service: &OperatorSchedulingService,
+        task_id: &str,
+    ) -> Option<TaskExecutionResult> {
+        // Generous budget: these tests share a machine with whatever else the
+        // suite is running, so the poll window is sized for a loaded host
+        // rather than for the body durations alone.
+        for _ in 0..500 {
+            if let Some(result) = service.get_task_result(task_id).await {
+                return Some(result);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        None
+    }
+
+    /// The scheduler must run the executor's body and report what it measured.
+    #[tokio::test]
+    async fn executor_body_really_runs_and_its_measurements_are_reported() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let service = OperatorSchedulingService::with_executor(
+            OperatorSchedulingConfig::default(),
+            Arc::new(RecordingExecutor {
+                ran: Arc::clone(&ran),
+                body_duration: Duration::from_millis(60),
+                knows_tasks: true,
+            }),
+        );
+        service
+            .register_device(DeviceType::CPU, cpu_resource())
+            .await
+            .expect("device registration should succeed");
+
+        service
+            .submit_task(simple_task("runs-for-real"))
+            .await
+            .expect("submit should succeed");
+
+        let result = await_result(&service, "runs-for-real").await.expect("result should appear");
+        assert_eq!(
+            ran.load(AtomicOrdering::SeqCst),
+            1,
+            "the body must have executed exactly once"
+        );
+        assert_eq!(result.state, TaskState::Completed);
+        assert!(
+            result.execution_time >= Duration::from_millis(50),
+            "execution_time must be measured around the real body, got {:?}",
+            result.execution_time
+        );
+        assert_eq!(
+            result.performance_metrics.get("flops"),
+            Some(&42.0),
+            "metrics must come from the executor"
+        );
+        assert!(
+            result.peak_memory_usage.is_none(),
+            "nothing samples peak memory, so it must be absent rather than 1 MiB"
+        );
+        assert!(result.error_message.is_none());
+    }
+
+    /// With no executor nothing can run, so no result may appear.
+    #[tokio::test]
+    async fn without_an_executor_no_result_is_manufactured() {
+        let service = OperatorSchedulingService::new(OperatorSchedulingConfig::default());
+        service
+            .register_device(DeviceType::CPU, cpu_resource())
+            .await
+            .expect("device registration should succeed");
+
+        service
+            .submit_task(simple_task("never-runs"))
+            .await
+            .expect("submit should succeed");
+
+        // Long enough that the deleted simulation (100..1100 ms) would have
+        // fired and written a fabricated "Completed" result.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+
+        assert!(
+            service.get_task_result("never-runs").await.is_none(),
+            "a scheduler with no executor must not produce results"
+        );
+        let stats = service.get_stats().await;
+        assert_eq!(
+            stats.tasks_completed, 0,
+            "nothing ran, so nothing completed"
+        );
+        assert_eq!(
+            stats.total_tasks_scheduled, 1,
+            "the task is still queued, though"
+        );
+    }
+
+    /// The configured per-device concurrency cap must actually bound how many
+    /// bodies run at once.
+    #[tokio::test]
+    async fn the_configured_concurrency_cap_is_enforced() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let mut config = OperatorSchedulingConfig::default();
+        config.max_concurrent_operators_per_device = 1;
+        let service = OperatorSchedulingService::with_executor(
+            config,
+            Arc::new(RecordingExecutor {
+                ran: Arc::clone(&ran),
+                // Long enough that the "still running" checks below cannot
+                // race the body's completion on a loaded machine.
+                body_duration: Duration::from_millis(1000),
+                knows_tasks: true,
+            }),
+        );
+        service
+            .register_device(DeviceType::CPU, cpu_resource())
+            .await
+            .expect("device registration should succeed");
+
+        service.submit_task(simple_task("first")).await.expect("submit should succeed");
+        service.submit_task(simple_task("second")).await.expect("submit should succeed");
+
+        // The first body is still running, so the cap of 1 must have kept the
+        // second one queued rather than starting it too.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            ran.load(AtomicOrdering::SeqCst),
+            0,
+            "neither body has finished yet, so nothing may have completed"
+        );
+        assert!(
+            service.get_task_result("second").await.is_none(),
+            "the second task must not have run while the cap was reached"
+        );
+
+        // Once the first completes it releases the slot and the second starts.
+        let second = await_result(&service, "second").await.expect("second should eventually run");
+        assert_eq!(second.state, TaskState::Completed);
+        assert_eq!(
+            ran.load(AtomicOrdering::SeqCst),
+            2,
+            "both bodies must run in the end"
+        );
+    }
+
+    /// An executor that declines a task yields a real failure, not a success.
+    #[tokio::test]
+    async fn declined_task_is_recorded_as_failed() {
+        let service = OperatorSchedulingService::with_executor(
+            OperatorSchedulingConfig::default(),
+            Arc::new(RecordingExecutor {
+                ran: Arc::new(AtomicUsize::new(0)),
+                body_duration: Duration::ZERO,
+                knows_tasks: false,
+            }),
+        );
+        service
+            .register_device(DeviceType::CPU, cpu_resource())
+            .await
+            .expect("device registration should succeed");
+
+        service
+            .submit_task(simple_task("unknown-task"))
+            .await
+            .expect("submit should succeed");
+
+        let result = await_result(&service, "unknown-task").await.expect("result should appear");
+        assert_eq!(result.state, TaskState::Failed);
+        assert!(
+            result.error_message.is_some_and(|m| m.contains("no body")),
+            "the failure must say why"
+        );
+    }
 
     #[tokio::test]
     async fn test_operator_scheduling_service_creation() {

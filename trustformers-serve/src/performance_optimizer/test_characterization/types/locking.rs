@@ -226,28 +226,39 @@ pub struct ConflictHistory {
     pub total_conflicts: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// What a detected conflict costs.
+///
+/// ## Changed in 0.2.1
+///
+/// Every field here used to be an unconditional `f64`/`Duration`, so a detector
+/// that could not observe (say) reliability still had to write a number, and
+/// `0.0` was indistinguishable from a measured "no impact". The fields that no
+/// in-tree analysis measures are now `Option`, and `None` means exactly "this
+/// was not measured". Nothing in the crate reads these fields today; they are
+/// carried for reporting, which is why writing an invented zero into them was
+/// worth removing rather than papering over.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConflictImpact {
-    /// Performance degradation factor
+    /// Measured performance degradation factor.
     pub performance_degradation: f64,
-    /// Reliability impact
-    pub reliability_impact: f64,
-    /// Resource utilization impact
+    /// Reliability impact, or `None` when the analysis could not measure it.
+    pub reliability_impact: Option<f64>,
+    /// Per-resource utilization impact that was measured.
     pub resource_impact: HashMap<String, f64>,
-    /// User experience impact
-    pub user_experience_impact: f64,
-    /// System stability impact
-    pub stability_impact: f64,
-    /// Recovery time estimation
+    /// User-experience impact, or `None` when it was not measured.
+    pub user_experience_impact: Option<f64>,
+    /// System-stability impact, or `None` when it was not measured.
+    pub stability_impact: Option<f64>,
+    /// Recovery time, or `None` when no recovery was timed.
     #[serde(skip)]
-    pub recovery_time: Duration,
-    /// Cascade potential
-    pub cascade_potential: f64,
-    /// Mitigation effectiveness
-    pub mitigation_effectiveness: f64,
-    /// Long-term effects
+    pub recovery_time: Option<Duration>,
+    /// Cascade potential, or `None` when it was not estimated.
+    pub cascade_potential: Option<f64>,
+    /// Mitigation effectiveness, or `None` when no mitigation was measured.
+    pub mitigation_effectiveness: Option<f64>,
+    /// Long-term effects that were identified.
     pub long_term_effects: Vec<String>,
-    /// Impact confidence
+    /// Confidence in this impact assessment.
     pub confidence: f64,
 }
 

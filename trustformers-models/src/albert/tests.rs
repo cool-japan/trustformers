@@ -899,4 +899,143 @@ mod tests {
             report.loaded
         );
     }
+
+    // ── Contextual strictness: wrapper path vs bare-encoder path ────────────
+
+    /// A task wrapper must refuse a checkpoint entry it does not recognise
+    /// inside a namespace it binds itself.
+    ///
+    /// `AlbertModel::ALLOWED_UNUSED_PREFIXES` tolerates `classifier.`,
+    /// `qa_outputs.` and `predictions.` so that a *bare encoder* can be lifted
+    /// out of a fine-tuned checkpoint. Each task wrapper used to inherit that
+    /// tolerance even though it binds one of those namespaces, so a misspelling
+    /// such as `classifier.weigth` was reported as merely `ignored`: the load
+    /// returned `Ok` and the layer the typo was meant to fill kept its random
+    /// initialisation. See [`crate::weight_loading::binding::BoundNamespaces`].
+    #[test]
+    fn a_wrapper_rejects_an_unknown_tensor_inside_a_namespace_it_binds() {
+        // Sequence classification: a misspelling one level under `classifier.`.
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = albert_tensors(&config, "albert.", true);
+        tensors.push(F32Tensor::ramp("classifier.weight", &[3, hidden], 700.0));
+        tensors.push(F32Tensor::ramp("classifier.bias", &[3], 710.0));
+        tensors.push(F32Tensor::ramp("classifier.weigth", &[3, hidden], 720.0));
+        let bytes = build_safetensors(&tensors);
+        let mut model = AlbertForSequenceClassification::new(config, 3).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a misspelt classifier tensor must not be tolerated by its own binder");
+        let message = err.to_string();
+        assert!(
+            message.contains("classifier.weigth"),
+            "the offending name must be reported: {message}"
+        );
+        // The refusal must come from the wrapper's own namespace check, not
+        // from a shape or missing-parameter error that happens to mention the
+        // name: only `BoundNamespaces::verify` phrases it this way.
+        assert!(
+            message.contains("does not recognise inside the head namespace"),
+            "the refusal must be the bound-namespace check: {message}"
+        );
+
+        // Token classification binds the same namespace.
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = albert_tensors(&config, "albert.", true);
+        tensors.push(F32Tensor::ramp("classifier.weight", &[5, hidden], 720.0));
+        tensors.push(F32Tensor::ramp("classifier.bias", &[5], 730.0));
+        tensors.push(F32Tensor::ramp(
+            "classifier.extra_head.weight",
+            &[5, hidden],
+            740.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+        let mut model = AlbertForTokenClassification::new(config, 5).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("an unknown tensor under the bound classifier namespace must be refused");
+        assert!(
+            err.to_string().contains("classifier.extra_head.weight"),
+            "unexpected: {err}"
+        );
+
+        // Question answering: a misspelling under `qa_outputs.`.
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = albert_tensors(&config, "albert.", true);
+        tensors.push(F32Tensor::ramp("qa_outputs.weight", &[2, hidden], 740.0));
+        tensors.push(F32Tensor::ramp("qa_outputs.bias", &[2], 750.0));
+        tensors.push(F32Tensor::ramp("qa_outputs.baias", &[2], 760.0));
+        let bytes = build_safetensors(&tensors);
+        let mut model = AlbertForQuestionAnswering::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a misspelt span-head tensor must be refused");
+        assert!(
+            err.to_string().contains("qa_outputs.baias"),
+            "unexpected: {err}"
+        );
+
+        // Masked LM: a misspelling inside `predictions.`.
+        let config = loading_config();
+        let embedding = config.embedding_size;
+        let hidden = config.hidden_size;
+        let mut tensors = albert_tensors(&config, "albert.", true);
+        tensors.extend(prediction_head_tensors(&config, false));
+        tensors.push(F32Tensor::ramp(
+            "predictions.dense.weigth",
+            &[embedding, hidden],
+            770.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+        let mut model = AlbertForMaskedLM::new(config).expect("model must build");
+        let err = model
+            .load_pretrained(&mut bytes.as_slice())
+            .expect_err("a misspelt prediction-head tensor must be refused");
+        assert!(
+            err.to_string().contains("predictions.dense.weigth"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// The strictness above must not turn into "every checkpoint entry must be
+    /// consumed": a pretraining or fine-tuned checkpoint legitimately carries
+    /// heads a particular model does not bind, and the bare encoder binds none
+    /// of them at all.
+    #[test]
+    fn namespaces_a_model_does_not_bind_stay_tolerated() {
+        let config = loading_config();
+        let hidden = config.hidden_size;
+        let mut tensors = albert_tensors(&config, "albert.", true);
+        tensors.push(F32Tensor::ramp("classifier.weight", &[3, hidden], 700.0));
+        tensors.push(F32Tensor::ramp("classifier.bias", &[3], 710.0));
+        // A masked-LM head the classification wrapper does not bind at all.
+        tensors.extend(prediction_head_tensors(&config, false));
+        let bytes = build_safetensors(&tensors);
+
+        let mut model = AlbertForSequenceClassification::new(config, 3).expect("model must build");
+        let report = model
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("a prediction head this model does not bind must stay tolerated");
+        assert!(
+            report.ignored.iter().any(|name| name == "predictions.dense.weight"),
+            "the unbound head must be reported as ignored: {:?}",
+            report.ignored
+        );
+
+        // The same checkpoint through the bare encoder: it binds neither head,
+        // so both namespaces stay tolerated exactly as before.
+        let mut encoder = AlbertModel::new(loading_config()).expect("model must build");
+        let encoder_report = encoder
+            .load_pretrained_report(&mut bytes.as_slice())
+            .expect("the bare encoder must keep tolerating head namespaces it never binds");
+        for name in ["classifier.weight", "predictions.dense.weight"] {
+            assert!(
+                encoder_report.ignored.iter().any(|ignored| ignored == name),
+                "{name} must stay tolerated on the bare-encoder path: {:?}",
+                encoder_report.ignored
+            );
+        }
+    }
 }

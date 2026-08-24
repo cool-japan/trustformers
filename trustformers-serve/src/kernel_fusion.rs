@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -394,23 +394,16 @@ pub struct KernelFusionService {
     kernel_registry: Arc<RwLock<HashMap<Uuid, ComputeKernel>>>,
     /// Fused kernel cache
     fused_kernel_cache: Arc<RwLock<HashMap<Vec<Uuid>, FusedKernel>>>,
-    /// Fusion pattern analyzer
-    pattern_analyzer: Arc<Mutex<FusionPatternAnalyzer>>,
-    /// Performance tracker
+    // 0.2.1: a `pattern_analyzer: Arc<Mutex<FusionPatternAnalyzer>>` field
+    // lived here. `FusionPatternAnalyzer`'s three maps -- historical patterns,
+    // effectiveness scores and adaptive thresholds -- were created empty and
+    // never inserted into or read, so no pattern was ever learned and no
+    // threshold ever adapted. The field and the analyzer are gone;
+    // `FusionPattern` stays as the public shape a real analyzer would produce.
+    /// Fusion opportunities identified by the most recent analysis pass.
     performance_tracker: Arc<Mutex<PerformanceTracker>>,
     /// Service statistics
     stats: Arc<KernelFusionStats>,
-}
-
-/// Fusion pattern analyzer
-#[derive(Debug)]
-pub struct FusionPatternAnalyzer {
-    /// Historical fusion patterns
-    patterns: VecDeque<FusionPattern>,
-    /// Pattern effectiveness scores
-    pattern_scores: HashMap<String, f32>,
-    /// Adaptive thresholds
-    adaptive_thresholds: HashMap<FusionStrategy, f32>,
 }
 
 /// Fusion pattern representation
@@ -428,14 +421,18 @@ pub struct FusionPattern {
     pub avg_improvement: f32,
 }
 
-/// Performance tracking system
-#[derive(Debug)]
+/// Fusion opportunities identified by the most recent analysis pass.
+///
+/// 0.2.1: this type also carried `execution_history: VecDeque<ExecutionRecord>`
+/// and `baselines: HashMap<Uuid, PerformanceBaseline>`, both created empty and
+/// never written -- this service registers and fuses kernels, it never executes
+/// one, so there was no execution to record and no baseline to measure against.
+/// Both are deleted; `ExecutionRecord` and `PerformanceBaseline` stay as the
+/// public shapes a real executor would fill in. Only `opportunities` is
+/// genuinely written (by `analyze_fusion_opportunities`) and now readable.
+#[derive(Debug, Default)]
 pub struct PerformanceTracker {
-    /// Execution history
-    execution_history: VecDeque<ExecutionRecord>,
-    /// Performance baselines
-    baselines: HashMap<Uuid, PerformanceBaseline>,
-    /// Optimization opportunities
+    /// Optimization opportunities from the last analysis pass.
     opportunities: Vec<FusionOpportunity>,
 }
 
@@ -504,7 +501,6 @@ impl KernelFusionService {
             config,
             kernel_registry: Arc::new(RwLock::new(HashMap::new())),
             fused_kernel_cache: Arc::new(RwLock::new(HashMap::new())),
-            pattern_analyzer: Arc::new(Mutex::new(FusionPatternAnalyzer::default())),
             performance_tracker: Arc::new(Mutex::new(PerformanceTracker::default())),
             stats: Arc::new(KernelFusionStats::default()),
         })
@@ -946,37 +942,21 @@ impl KernelFusionService {
         self.config = new_config;
         Ok(())
     }
-}
 
-impl FusionPatternAnalyzer {
-    fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl Default for FusionPatternAnalyzer {
-    fn default() -> Self {
-        Self {
-            patterns: VecDeque::new(),
-            pattern_scores: HashMap::new(),
-            adaptive_thresholds: HashMap::new(),
-        }
+    /// Fusion opportunities from the most recent
+    /// [`Self::analyze_fusion_opportunities`] call.
+    ///
+    /// 0.2.1: `PerformanceTracker::opportunities` was written by that method
+    /// and had no reader, so the analysis result was stored and unreachable.
+    pub async fn last_analysis_opportunities(&self) -> Vec<FusionOpportunity> {
+        self.performance_tracker.lock().await.opportunities().to_vec()
     }
 }
 
 impl PerformanceTracker {
-    fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl Default for PerformanceTracker {
-    fn default() -> Self {
-        Self {
-            execution_history: VecDeque::new(),
-            baselines: HashMap::new(),
-            opportunities: Vec::new(),
-        }
+    /// Opportunities recorded by the most recent analysis pass.
+    pub fn opportunities(&self) -> &[FusionOpportunity] {
+        &self.opportunities
     }
 }
 

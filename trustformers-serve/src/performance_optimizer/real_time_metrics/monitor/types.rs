@@ -364,19 +364,16 @@ impl AnomalyEvent {
         self.score * self.confidence
     }
 }
-#[derive(Debug)]
-pub struct AlertManager;
-impl AlertManager {
-    pub async fn new() -> Result<Self> {
-        Ok(Self)
-    }
-    pub async fn start(&self) -> Result<()> {
-        Ok(())
-    }
-    pub async fn shutdown(&self) -> Result<()> {
-        Ok(())
-    }
-}
+// `AlertManager` was deleted from this module in 0.2.1. It was an empty unit
+// struct whose `new`/`start`/`shutdown` all returned `Ok(())` and which was
+// never asked to route anything: `ParallelPerformanceMonitor` held one, started
+// it, shut it down, and never called it in between, so the monitor advertised
+// alerting it did not do. Detected anomalies are published on the monitor's
+// event broadcaster (`subscribe_to_events`), which is real. The crate's real
+// alert manager -- processors, notification channels, suppression, correlation
+// -- is `real_time_metrics::threshold::AlertManager`; routing anomalies into it
+// needs an `AlertEvent`, which requires the `ThresholdConfig` an anomaly does
+// not have, so that wiring is deliberately not faked here.
 /// Threshold-based anomaly detection using configurable thresholds
 #[derive(Debug)]
 pub struct ThresholdAnomalyDetector {
@@ -769,8 +766,6 @@ pub struct ParallelPerformanceMonitor {
     active: Arc<AtomicBool>,
     /// Performance impact monitor
     impact_monitor: Arc<PerformanceImpactMonitor>,
-    /// Alert manager for threshold-based alerts
-    alert_manager: Arc<AlertManager>,
     /// Statistical processor for advanced analytics
     stats_processor: Arc<StatisticalProcessor>,
 }
@@ -834,8 +829,6 @@ impl ParallelPerformanceMonitor {
                 .await
                 .context("Failed to initialize performance impact monitor")?,
         );
-        let alert_manager =
-            Arc::new(AlertManager::new().await.context("Failed to initialize alert manager")?);
         let stats_processor = Arc::new(
             StatisticalProcessor::new()
                 .await
@@ -853,7 +846,6 @@ impl ParallelPerformanceMonitor {
             monitoring_stats: Arc::new(MonitoringStatistics::default()),
             active: Arc::new(AtomicBool::new(false)),
             impact_monitor,
-            alert_manager,
             stats_processor,
         };
         info!("ParallelPerformanceMonitor initialized successfully");
@@ -917,7 +909,6 @@ impl ParallelPerformanceMonitor {
             .start_monitoring()
             .await
             .context("Failed to start performance impact monitoring")?;
-        self.alert_manager.start().await.context("Failed to start alert manager")?;
         let config = self.cloned_config();
         let mut threads = self.monitor_threads.lock();
         for i in 0..config.thread_count {
@@ -1118,9 +1109,6 @@ impl ParallelPerformanceMonitor {
         }
         if let Err(e) = self.impact_monitor.shutdown().await {
             error!("Failed to shutdown impact monitor: {}", e);
-        }
-        if let Err(e) = self.alert_manager.shutdown().await {
-            error!("Failed to shutdown alert manager: {}", e);
         }
         let event = MonitoringEvent::new(
             MonitoringEventType::MonitoringShutdown,
@@ -1648,7 +1636,6 @@ impl ParallelPerformanceMonitor {
             monitoring_stats: Arc::clone(&self.monitoring_stats),
             active: Arc::clone(&self.active),
             impact_monitor: Arc::clone(&self.impact_monitor),
-            alert_manager: Arc::clone(&self.alert_manager),
             stats_processor: Arc::clone(&self.stats_processor),
         }
     }

@@ -823,7 +823,9 @@ impl AggregationWindow {
             std_dev,
             min,
             max,
-            outlier_count: 0,
+            // Until 0.2.1 this was a hardcoded 0, so every window reported
+            // "no outliers" whatever the samples looked like.
+            outlier_count: count_outliers(&throughputs, mean, std_dev),
             mean_throughput: mean,
             throughput_std_dev: std_dev,
             mean_latency,
@@ -1140,4 +1142,17 @@ impl DataCompressor {
     async fn new() -> Result<Self> {
         Ok(Self {})
     }
+}
+
+/// Samples further than three standard deviations from the mean.
+///
+/// The three-sigma rule is a stated convention, not a measurement; what is
+/// measured is how many of the window's own samples fall outside it. A window
+/// with no dispersion has no outliers by this rule.
+fn count_outliers(values: &[f64], mean: f64, std_dev: f64) -> usize {
+    if std_dev <= 0.0 {
+        return 0;
+    }
+    let limit = 3.0 * std_dev;
+    values.iter().filter(|value| (**value - mean).abs() > limit).count()
 }

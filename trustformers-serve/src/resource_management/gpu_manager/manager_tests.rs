@@ -189,4 +189,25 @@ mod tests {
             "discovery must not inject a fake RTX 4090"
         );
     }
+
+    /// A benchmark score must come from a kernel that ran. With no GPU compute
+    /// backend in this build, `run_benchmark` must refuse rather than
+    /// synthesise a score.
+    #[tokio::test]
+    async fn run_benchmark_refuses_instead_of_inventing_a_score() {
+        use super::super::performance_tracker::GpuPerformanceTracker;
+
+        let tracker = GpuPerformanceTracker::new();
+        let error = tracker
+            .run_benchmark(0, GpuBenchmarkType::Compute)
+            .await
+            .expect_err("no backend can launch the kernel, so no score may be reported");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("not implemented")
+                || rendered.contains("DeviceNotFound")
+                || rendered.contains("not found"),
+            "the refusal must say why, got: {rendered}"
+        );
+    }
 }

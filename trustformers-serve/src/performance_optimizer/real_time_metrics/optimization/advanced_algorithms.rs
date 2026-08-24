@@ -665,8 +665,12 @@ impl LiveOptimizationAlgorithm for ThreadPoolOptimizationAlgorithm {
     ) -> Result<Vec<OptimizationRecommendation>, RealTimeMetricsError> {
         let mut recommendations = Vec::new();
 
-        // TODO: SystemState no longer has current_parallelism field
-        let current_threads = context.system_state.available_cores;
+        // The thread count in use comes from the metrics sample; `available_cores`
+        // is the ceiling, not the current value. Until 0.2.1 this read
+        // `available_cores`, which made the `current_threads <
+        // context.system_state.available_cores` guard below compare a value
+        // against itself -- the whole scale-up branch was unreachable.
+        let current_threads = metrics.current_parallelism;
         let cpu_utilization = metrics.current_cpu_utilization;
 
         // Suggest thread pool adjustments based on CPU utilization and throughput

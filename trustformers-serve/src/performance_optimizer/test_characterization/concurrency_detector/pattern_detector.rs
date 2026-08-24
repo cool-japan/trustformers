@@ -17,71 +17,12 @@ pub struct ConcurrencyPatternDetector {
     detection_algorithms: Arc<Mutex<Vec<Box<dyn PatternDetectionAlgorithm + Send + Sync>>>>,
 }
 
-/// Builds a ConcurrencyPattern from a pattern type string with real computed values
-fn build_pattern_from_string(pattern_str: &str) -> ConcurrencyPattern {
-    let (description, characteristics, applicability, confidence, thread_count) = match pattern_str
-    {
-        "ProducerConsumer" => (
-            "Producer-Consumer concurrency pattern".to_string(),
-            vec![
-                "Queue-based".to_string(),
-                "Bounded channel".to_string(),
-                "Decoupled producers and consumers".to_string(),
-            ],
-            0.85_f64,
-            0.80_f64,
-            4_usize,
-        ),
-        "MasterWorker" => (
-            "Master-Worker concurrency pattern".to_string(),
-            vec![
-                "Centralized task distribution".to_string(),
-                "Worker thread pool".to_string(),
-                "Task queue management".to_string(),
-            ],
-            0.90_f64,
-            0.85_f64,
-            8_usize,
-        ),
-        "Pipeline" => (
-            "Pipeline concurrency pattern".to_string(),
-            vec![
-                "Sequential stage processing".to_string(),
-                "Inter-stage buffering".to_string(),
-                "Throughput-optimized execution".to_string(),
-            ],
-            0.80_f64,
-            0.75_f64,
-            6_usize,
-        ),
-        "ForkJoin" => (
-            "Fork-Join concurrency pattern".to_string(),
-            vec![
-                "Parallel task splitting".to_string(),
-                "Result aggregation".to_string(),
-                "Recursive decomposition".to_string(),
-            ],
-            0.75_f64,
-            0.78_f64,
-            4_usize,
-        ),
-        other => (
-            format!("{} concurrency pattern", other),
-            vec![format!("Custom pattern: {}", other)],
-            0.5_f64,
-            0.45_f64,
-            2_usize,
-        ),
-    };
-    ConcurrencyPattern {
-        pattern_type: pattern_str.to_string(),
-        description,
-        characteristics,
-        applicability,
-        confidence,
-        thread_count,
-    }
-}
+// `build_pattern_from_string` was deleted in 0.2.1. It turned a detector's
+// output string into a `ConcurrencyPattern` by looking the pattern name up in a
+// table of invented numbers -- confidence 0.85/0.90/0.80/0.75, thread_count
+// 4/8/6/4, applicability 0.85/0.90/0.80/0.75 -- none of which came from the
+// test being analysed. The detectors now return a `ConcurrencyPattern` whose
+// every field is measured from the recorded thread interactions.
 
 /// Parses a pattern type string into the ConcurrencyPatternType enum
 fn pattern_type_from_str(s: &str) -> ConcurrencyPatternType {
@@ -111,12 +52,25 @@ impl ConcurrencyPatternDetector {
         })
     }
 
-    /// Detects concurrency patterns in test execution data
+    /// Detects concurrency patterns in test execution data.
+    ///
+    /// Returns an error when the test recorded no thread interactions: with
+    /// nothing to analyse, no pattern can be confirmed and none can be ruled
+    /// out. Before 0.2.1 this method ignored `test_data` outright and reported
+    /// "no pattern detected" with confidence 1.0 for every test.
     pub async fn detect_concurrency_patterns(
         &self,
-        _test_data: &TestExecutionData,
+        test_data: &TestExecutionData,
     ) -> Result<PatternAnalysisResult> {
         let start_time = Utc::now();
+
+        if test_data.thread_interactions.is_empty() {
+            anyhow::bail!(
+                "test '{}' recorded no thread interactions; concurrency-pattern analysis has \
+                 nothing to examine",
+                test_data.test_id
+            );
+        }
 
         // Execute synchronously to avoid lifetime issues with mutex guards
         let detection_results: Vec<_> = {
@@ -126,8 +80,7 @@ impl ConcurrencyPatternDetector {
                 .map(|algorithm| {
                     let algorithm_name = algorithm.name().to_string();
                     let detection_start = Instant::now();
-                    let result_string = algorithm.detect_patterns();
-                    let result: Result<Vec<String>> = Ok(vec![result_string]);
+                    let result = algorithm.detect(test_data);
                     let detection_duration = detection_start.elapsed();
                     (algorithm_name, result, detection_duration)
                 })
@@ -135,26 +88,23 @@ impl ConcurrencyPatternDetector {
         };
 
         // Collect detection results
-        let mut detected_patterns_strings = Vec::new();
         let mut detected_patterns_structs = Vec::new(); // For helper methods
         let mut algorithm_results = Vec::new();
 
         for (algorithm_name, result, duration) in detection_results {
             match result {
-                Ok(mut patterns) => {
-                    let pattern_structs: Vec<ConcurrencyPattern> = patterns
-                        .iter()
-                        .map(|pattern_str| build_pattern_from_string(pattern_str))
-                        .collect();
-
+                Ok(found) => {
+                    let pattern_structs: Vec<ConcurrencyPattern> = found.into_iter().collect();
                     algorithm_results.push(PatternAlgorithmResult {
                         algorithm: algorithm_name,
-                        patterns: patterns.clone(),
+                        patterns: pattern_structs
+                            .iter()
+                            .map(|pattern| pattern.pattern_type.clone())
+                            .collect(),
                         detection_duration: duration,
                         confidence: self.calculate_pattern_detection_confidence(&pattern_structs)
                             as f64,
                     });
-                    detected_patterns_strings.append(&mut patterns);
                     detected_patterns_structs.extend(pattern_structs);
                 },
                 Err(e) => {
@@ -715,39 +665,98 @@ impl ConcurrencyPatternDetector {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_build_pattern_from_string_known_type() {
-        let p = build_pattern_from_string("ProducerConsumer");
+    // `test_build_pattern_from_string_known_type` and `..._unknown_type` were
+    // deleted in 0.2.1. They asserted that the lookup table's invented
+    // confidence/applicability/thread_count sat "above placeholder 0.5" -- they
+    // were regression tests *for* the fabrication. The detectors' real
+    // behaviour is covered in `types/core/pattern_algorithms_tests.rs`, and the
+    // end-to-end path is covered below.
+
+    /// Builds a data-flow interaction for the end-to-end tests.
+    fn flow(source_thread: u64, target_thread: u64) -> ThreadInteraction {
+        ThreadInteraction {
+            source_thread,
+            target_thread,
+            interaction_type: InteractionType::DataExchange,
+            frequency: 4.0,
+            analysis_duration: Duration::from_millis(1),
+            data_patterns: Vec::new(),
+            sync_requirements: Vec::new(),
+            performance_impact: 0.0,
+            optimization_opportunities: Vec::new(),
+            safety_considerations: Vec::new(),
+            from_thread: source_thread,
+            to_thread: target_thread,
+            timestamp: Utc::now(),
+            resource: String::new(),
+            strength: 1.0,
+        }
+    }
+
+    /// A pattern fixture with values that are stated, not implied to be
+    /// measured.
+    fn fixture_pattern() -> ConcurrencyPattern {
+        ConcurrencyPattern {
+            pattern_type: "ProducerConsumer".to_string(),
+            description: "fixture".to_string(),
+            characteristics: vec!["fixture".to_string()],
+            applicability: 0.5,
+            confidence: 0.8,
+            thread_count: 3,
+        }
+    }
+
+    /// Regression: `detect_concurrency_patterns` ignored its `test_data`
+    /// argument entirely and reported "no patterns, confidence 1.0" for every
+    /// test ever passed to it. With nothing recorded it must now say so.
+    #[tokio::test]
+    async fn detect_concurrency_patterns_refuses_a_test_with_no_interactions() {
+        let detector = ConcurrencyPatternDetector::new(PatternDetectionConfig {
+            detection_enabled: true,
+            min_confidence: 0.5,
+            max_patterns_to_detect: 10,
+        })
+        .await
+        .expect("detector constructs");
+        let data = TestExecutionData {
+            test_id: "empty".to_string(),
+            ..TestExecutionData::default()
+        };
+        let error = detector
+            .detect_concurrency_patterns(&data)
+            .await
+            .expect_err("no interactions means nothing to analyse");
         assert!(
-            p.applicability > 0.5,
-            "applicability should be above placeholder 0.5"
-        );
-        assert!(
-            p.confidence > 0.5,
-            "confidence should be above placeholder 0.5"
-        );
-        assert!(
-            p.thread_count > 1,
-            "thread_count should be above placeholder 1"
-        );
-        assert!(
-            !p.characteristics.is_empty(),
-            "characteristics should be non-empty"
-        );
-        assert_ne!(
-            p.description, "ProducerConsumer",
-            "description should be human-readable"
+            error.to_string().contains("no thread interactions"),
+            "{error}"
         );
     }
 
-    #[test]
-    fn test_build_pattern_from_string_unknown_type() {
-        let p = build_pattern_from_string("MyCustomPattern");
-        assert_eq!(p.pattern_type, "MyCustomPattern");
-        assert!(
-            p.confidence < 0.6,
-            "unknown patterns should have lower confidence"
-        );
+    /// Regression: the detected patterns' thread counts came from a lookup
+    /// table (4/8/6/4), not from the test. A four-thread scatter/gather must
+    /// report four threads.
+    #[tokio::test]
+    async fn detect_concurrency_patterns_measures_the_supplied_graph() {
+        let detector = ConcurrencyPatternDetector::new(PatternDetectionConfig {
+            detection_enabled: true,
+            min_confidence: 0.5,
+            max_patterns_to_detect: 10,
+        })
+        .await
+        .expect("detector constructs");
+        let data = TestExecutionData {
+            test_id: "fork_join".to_string(),
+            thread_interactions: vec![flow(1, 2), flow(1, 3), flow(2, 4), flow(3, 4)],
+            ..TestExecutionData::default()
+        };
+        let result = detector.detect_concurrency_patterns(&data).await.expect("analysis runs");
+        let fork_join = result
+            .detected_patterns
+            .iter()
+            .find(|pattern| pattern.pattern_type == "ForkJoin")
+            .expect("the scatter/gather shape is present");
+        assert_eq!(fork_join.thread_count, 4);
+        assert!(fork_join.confidence > 0.0);
     }
 
     #[tokio::test]
@@ -759,7 +768,7 @@ mod tests {
         };
         let detector = ConcurrencyPatternDetector::new(config).await.unwrap();
         let patterns = vec![ClassifiedConcurrencyPattern {
-            pattern: build_pattern_from_string("ProducerConsumer"),
+            pattern: fixture_pattern(),
             optimization_potential: 0.8,
             classification: PatternClassification {
                 classification_type: "ProducerConsumer".to_string(),

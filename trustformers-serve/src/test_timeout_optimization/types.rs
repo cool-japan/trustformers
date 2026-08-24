@@ -550,6 +550,16 @@ impl TestTimeoutFramework {
         let progress_monitor = tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(config.early_termination.progress_check_interval);
+            // 0.2.1: `tokio::time::interval`'s first tick completes
+            // immediately, so the loop below used to judge staleness at t=0 --
+            // before the test body had run at all and before any progress
+            // report was possible. With `progress_rate()` returning 0.0 until
+            // two samples exist, that made every test look stalled the instant
+            // it started, and the `select!` below raced the test body against a
+            // stall verdict it could not yet have earned. Consume that
+            // immediate tick so the first real check happens one full interval
+            // in.
+            interval.tick().await;
             loop {
                 interval.tick().await;
                 if progress_clone.is_stalled(

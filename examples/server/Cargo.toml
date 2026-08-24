@@ -4,6 +4,13 @@ version = "0.2.1"
 edition = "2021"
 rust-version = "1.89"
 publish = false
+# Matches the root `[workspace.package]` license and this crate's own
+# README.md `## License` section. A non-member cannot inherit
+# `license.workspace = true` (same reason `version`/`edition` are literal
+# above), and the field was simply missing before — `cargo deny check
+# licenses` (run from this directory) failed with `unlicensed` for exactly
+# that reason.
+license = "Apache-2.0"
 
 # This directory lives inside the repository tree but is listed in the root
 # `[workspace] exclude` list, so it is NOT a workspace member. A non-member
@@ -35,8 +42,24 @@ all = "warn"
 # Web framework. Versions mirror the repository root's
 # `[workspace.dependencies]` pins (`trustformers-serve` depends on the same
 # majors) rather than the stale 0.6-era pins the previous manifest carried.
+#
+# `tower-http`'s feature set intentionally excludes every `compression-*` /
+# `decompression-*` feature: all four backends (`compression-br` ->
+# `brotli`, `compression-deflate` / `compression-gzip` -> `flate2`,
+# `compression-zstd` -> `zstd`/`zstd-sys`) route through `async-compression`
+# to a crate this repository's `deny.toml` explicitly bans — there is no
+# compliant compression backend to opt into, only banned ones. A previous
+# version of this manifest enabled `compression-full` and `main.rs` installed
+# `CompressionLayer`; `cargo deny check bans` (run from this directory) failed
+# on `brotli`, `brotli-decompressor`, `flate2`, `zstd`, `zstd-safe`, and
+# `zstd-sys`, all reachable only through that one feature. Matches
+# `examples/grpc-server/Cargo.toml`'s documented removal of tonic's `gzip`
+# feature for the same reason (its comment: "`flate2` is banned by the
+# COOLJAPAN pure-Rust policy"), and the repository root's own
+# `[workspace.dependencies]` entry for `tower-http`, which also carries only
+# `cors`/`trace`.
 axum = { version = "0.8.9", features = ["macros"] }
-tower-http = { version = "0.7", features = ["cors", "trace", "compression-full"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 
 # Async runtime
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }

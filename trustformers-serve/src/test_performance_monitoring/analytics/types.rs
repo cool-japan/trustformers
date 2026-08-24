@@ -398,27 +398,24 @@ impl BaselineManager {
             let new_baseline = self.create_baseline(test_id, metrics_data);
             self.active_baselines.insert(test_id.to_string(), new_baseline);
         }
-        let (baseline_id, baseline_clone) = {
-            let baseline = self.active_baselines.get_mut(test_id).ok_or_else(|| {
+        // 0.2.1: this used to refresh the baseline inline, and only partially --
+        // sample size, timestamp and the statistical summary were updated while
+        // `performance_characteristics` and `confidence_interval` kept whatever
+        // the very first sample produced, so every later delta was measured
+        // against a stale memory/CPU profile. `refresh_baseline`, which updates
+        // all four consistently, existed but was never called; it is now the
+        // single refresh path.
+        let baseline_clone = {
+            let mut baseline = self.active_baselines.get(test_id).cloned().ok_or_else(|| {
                 AnalyticsError::BaselineComparisonError {
                     reason: "baseline missing after insertion".to_string(),
                 }
             })?;
-            if !metrics_data.is_empty() {
-                baseline.sample_size =
-                    baseline.sample_size.saturating_add(metrics_data.len() as u64);
-                baseline.last_updated = SystemTime::now();
-                let execution_times = collect_execution_times(metrics_data);
-                if !execution_times.is_empty() {
-                    let analyzer = StatisticalAnalyzer::new(&AnalyticsConfig::default());
-                    if let Ok(summary) = analyzer.calculate_descriptive_statistics(&execution_times)
-                    {
-                        baseline.statistical_summary = summary.clone();
-                    }
-                }
-            }
-            (baseline.baseline_id.clone(), baseline.clone())
+            self.refresh_baseline(&mut baseline, metrics_data);
+            self.active_baselines.insert(test_id.to_string(), baseline.clone());
+            baseline
         };
+        let baseline_id = baseline_clone.baseline_id.clone();
         let latest = metrics_data.last().ok_or(AnalyticsError::InsufficientData {
             required: 1,
             available: 0,
@@ -707,23 +704,18 @@ pub struct RecommendationEngine {
 }
 /// Analytics cache for computed results
 #[derive(Debug)]
+/// Shape of an analytics memoisation layer.
+///
+/// 0.2.1: `PerformanceAnalyticsEngine` used to hold one of these. Nothing ever
+/// inserted into or read from any of its four maps, so it memoised nothing; the
+/// field is gone. The type is kept as the declared shape for a real cache,
+/// not as something the engine has.
 pub struct AnalyticsCache {
     pub statistical_cache: HashMap<String, CachedStatistics>,
     pub trend_cache: HashMap<String, CachedTrend>,
     pub anomaly_cache: HashMap<String, CachedAnomalies>,
     pub recommendation_cache: HashMap<String, CachedRecommendations>,
     pub cache_ttl: Duration,
-}
-impl AnalyticsCache {
-    fn new(config: &AnalyticsConfig) -> Self {
-        Self {
-            statistical_cache: HashMap::new(),
-            trend_cache: HashMap::new(),
-            anomaly_cache: HashMap::new(),
-            recommendation_cache: HashMap::new(),
-            cache_ttl: config.analysis_interval.max(Duration::from_secs(60)),
-        }
-    }
 }
 /// Cached optimization recommendations
 #[derive(Debug, Clone)]
@@ -840,7 +832,6 @@ pub struct PerformanceAnalyticsEngine {
     optimization_advisor: OptimizationAdvisor,
     baseline_manager: BaselineManager,
     historical_data_cache: HistoricalDataCache,
-    analytics_cache: AnalyticsCache,
 }
 impl PerformanceAnalyticsEngine {
     /// Create new analytics engine with configuration
@@ -853,8 +844,12 @@ impl PerformanceAnalyticsEngine {
             optimization_advisor: OptimizationAdvisor::new(&config),
             baseline_manager: BaselineManager::new(&config),
             historical_data_cache: HistoricalDataCache::new(&config),
-            analytics_cache: AnalyticsCache::new(&config),
         }
+    }
+
+    /// The configuration this engine was built with.
+    pub fn config(&self) -> &AnalyticsConfig {
+        &self.config
     }
     /// Perform comprehensive analytics on test performance data
     pub async fn analyze_performance(
@@ -1452,9 +1447,6 @@ impl HistoricalDataCache {
         series.push(point, self.cache_config.max_entries);
         self.cache_statistics.total_accesses =
             self.cache_statistics.total_accesses.saturating_add(1);
-    }
-    fn get_series(&self, series_key: &str) -> Option<&TimeSeries> {
-        self.time_series_data.get(series_key)
     }
     fn values_for(&self, series_key: &str) -> Option<Vec<f64>> {
         self.time_series_data

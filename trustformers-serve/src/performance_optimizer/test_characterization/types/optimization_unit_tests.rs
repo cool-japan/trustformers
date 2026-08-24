@@ -3,9 +3,7 @@
 //! Split out of `optimization.rs` in 0.2.1 to keep that file under the
 //! 2000-line limit; the tests are unchanged apart from the module move.
 
-use super::optimization::*;
 use super::performance::PerformanceMetrics;
-
 use super::*;
 
 struct Lcg(u64);
