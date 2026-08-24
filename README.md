@@ -40,7 +40,7 @@ trustformers/
 └── trustformers/           # High-level integration crate        (123,252 SLoC, Alpha)
 ```
 
-**Total**: ~1.20M SLoC across these 10 crates; **3,046 Rust files, ~1.53M lines total (~1.28M lines of code)** across the full repository including bindings/examples/tooling (via `tokei`, 2026-08-24). Both figures moved since the last count (2026-08-18): `trustformers-serve` and `trustformers-mobile` shrank the most — a placeholder resource-manager tree (5,972 lines) deleted outright in `trustformers-serve`, and roughly 4,800 lines of dead/duplicate scaffolding deleted from `trustformers-mobile` — while `trustformers-core`, `trustformers-models`, and `trustformers` (umbrella) grew from real implementation work (a Metal buffer-lifetime RAII type, model checkpoint-loading fixes, and dead-code-turned-real-accessors, respectively). 100% Pure Rust source (COOLJAPAN Policy) — default-feature builds are C/C++-free for every crate except `trustformers-serve` (accepted exception: rustls/aws-lc-rs TLS for the HTTP server).
+**Total**: ~1.20M SLoC across these 10 crates; **3,046 Rust files, ~1.53M lines total (~1.28M lines of code)** across the full repository including bindings/examples/tooling (via `tokei`, 2026-08-24). Both workspace-wide figures use the same `tokei` invocation shape as the 2026-08-18 count they're compared against, so that comparison is apples-to-apples: `trustformers-serve` and `trustformers-mobile` shrank the most — a placeholder resource-manager tree (5,972 lines) deleted outright in `trustformers-serve`, and roughly 4,800 lines of dead/duplicate scaffolding deleted from `trustformers-mobile` — while `trustformers-core`, `trustformers-models`, and `trustformers` (umbrella) grew from real implementation work (a Metal buffer-lifetime RAII type, model checkpoint-loading fixes, and dead-code-turned-real-accessors, respectively). The **per-crate** figures in the tree above are less certain: three crates no wave touched this cycle (`trustformers-wasm`, `trustformers-debug`, `trustformers-tokenizers`) all show a double-digit-percent *decrease* from their last-recorded per-crate figure despite no known code deletion — most likely a difference in how the per-crate number was computed this time (e.g. `tokei <crate-dir>` scope) rather than an undocumented removal, but this was not individually confirmed for any of the three. 100% Pure Rust source (COOLJAPAN Policy) — default-feature builds are C/C++-free for every crate except `trustformers-serve` (accepted exception: rustls/aws-lc-rs TLS for the HTTP server).
 
 ### Design Principles
 
@@ -94,19 +94,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 use trustformers::pipeline;
 
-// All pipelines are fully implemented and ready to use!
 // `pipeline(task, model, options)` — pass `None, None` for the defaults.
 let classifier = pipeline("sentiment-analysis", None, None)?;
 let result = classifier.__call__("I love writing Rust code!".to_string())?;
 // Output: PipelineOutput::Classification([ClassificationOutput { label: "POSITIVE", score: 0.999 }])
 
-// Also available:
+// This crate ships 38 task-specific pipeline modules; they are not uniformly real. The
+// 7 below (spot-checked 2026-08-24: each calls a real AutoModelType::*.forward(...), not
+// a canned response) are the commonly-used NLP set and are real:
 // - text-generation
 // - token-classification (NER)
 // - question-answering
 // - fill-mask
 // - summarization
 // - translation
+//
+// 10 of the 38 — audio_generation, document_classification, feature_extraction,
+// image_segmentation, speech_recognition, table_question_answering, text_to_image,
+// video_classification, visual_grounding, zero_shot_audio_classification — are mock
+// pipelines pending real model backends (see trustformers/TODO.md's "Mock Pipelines"
+// note). The remaining ~21 were not individually re-verified this pass.
 ```
 
 ## 🏛️ Model Zoo

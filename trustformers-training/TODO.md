@@ -1,6 +1,6 @@
 # trustformers-training TODO List
 
-**Version:** 0.2.1 | **Last reviewed:** 2026-07-09
+**Version:** 0.2.1 (unreleased) | **Last reviewed:** 2026-08-24 (file-split and SLoC-total items refreshed; the detailed "72 compiled files / 58,207 SLoC / 1,673 public API items" breakdown below is unchanged since 2026-07-09 and is now stale on the file count specifically — this wave split 2 of those 72 files into 15, see the file-size correction below)
 
 ## Overview
 
@@ -14,11 +14,11 @@ plus elastic and multi-cloud orchestration).
 
 ## Current Status (verified 2026-07-01)
 
-- **~1,010 tests passing** (workspace-wide: 18,102 passed / 0 failed, 0 clippy warnings, 0 rustdoc warnings; this crate's own count updated 2026-07-09 to include the 83 tests in the newly-mounted `hpo` module)
-- **1,673 public API items** reachable from `lib.rs` (72 compiled `.rs` files, 58,207 SLoC; the full `src/` tree on disk is 83,317 lines across 101 files, ~25,110 of which are orphaned/unwired — file/SLoC counts refreshed via `tokei`, 2026-07-09)
+- **~1,010 tests passing** as of 2026-07-09, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24)
+- **1,673 public API items** reachable from `lib.rs` as of 2026-07-09, not re-verified — the underlying file count (72 compiled `.rs` files) is stale: this wave split 2 of those files (`data_pipeline.rs`, `auto_parallelism.rs`) into 15 files total, so the true compiled-file count today is higher, not recounted. Whole-crate SLoC (compiled + orphaned, `tokei`, verified 2026-08-24): **83,319** — close to but not identical to the 2026-07-09 "full `src/` tree on disk is 83,317 lines" figure, consistent with real edits since (not itself evidence the orphaned-code inventory below is stale, but it wasn't re-run this pass).
 - **0 stub/placeholder implementations** (`todo!()`/`unimplemented!()`/TODO/FIXME/HACK/XXX/"placeholder") in compiled code
 - **0 `.unwrap()` calls** in compiled production code
-- No file in the compiled tree exceeds the workspace's 2000-line refactor threshold (largest: `auto_parallelism.rs` at 1,610 lines)
+- No file in the compiled tree exceeds the workspace's 2000-line refactor threshold. **Corrected 2026-08-24**: `auto_parallelism.rs` (this line's previous "largest, 1,610 lines" example) grew to 2,030 lines between 2026-07-09 and 2026-08-18 and was split this wave into a 6-file `auto_parallelism/` directory module (largest sub-file: `selector.rs` at 1,355 lines); `data_pipeline.rs` (2,143 lines by 2026-08-18) was likewise split into a 9-file `data_pipeline/` directory. Both directories' largest files stay under the limit — see root `TODO.md` for the current largest-files-in-the-workspace figures.
 - Status: **Alpha** — see "Known Issues" below for why this crate is not labeled Stable despite the test count
 
 This file replaces the previous TODO.md's checklist with one re-verified against the actual source
@@ -153,7 +153,7 @@ trustformers-optim `pytorch_compat.rs`).
 - [x] Expert parallelism (MoE-style routing): `ExpertParallelism`, `TokenRouting` (`expert_parallelism.rs`)
 - [x] Ring attention for long-sequence distributed attention (`ring_attention.rs`)
 - [x] Hardware-aware automatic parallelism strategy selection: `AutoParallelismSelector` from
-  `HardwareConstraints`/`ModelConstraints`/`NetworkTopology` (`auto_parallelism.rs`) — note this is strategy
+  `HardwareConstraints`/`ModelConstraints`/`NetworkTopology` (`auto_parallelism/`, split from a single `auto_parallelism.rs` this wave) — note this is strategy
   *selection*, not general hyperparameter tuning from hardware
 - [x] Elastic training coordinator: worker heartbeats, scaling decisions, mid-training checkpoints
   (`elastic_training.rs`)
@@ -197,10 +197,10 @@ trustformers-optim `pytorch_compat.rs`).
 
 ### Curriculum Learning & Data Pipeline
 - [x] Curriculum learning (length/difficulty/self-paced): `CurriculumLearningManager`, `PacingFunction` —
-  lives in `data_pipeline.rs`, **not** the orphaned top-level `curriculum/` directory
-- [x] Active learning: `ActiveLearningManager`, `QueryStrategy` (`data_pipeline.rs`)
-- [x] Augmentation (image/text/audio/token) with adaptive scheduling (`data_pipeline.rs`)
-- [x] Multi-modal handling and data validation (`data_pipeline.rs`)
+  lives in `data_pipeline/` (a directory module since this wave's file split; previously `data_pipeline.rs`), **not** the orphaned top-level `curriculum/` directory
+- [x] Active learning: `ActiveLearningManager`, `QueryStrategy` (`data_pipeline/`)
+- [x] Augmentation (image/text/audio/token) with adaptive scheduling (`data_pipeline/`)
+- [x] Multi-modal handling and data validation (`data_pipeline/`)
 
 ### Hyperparameter Tuning (`hyperopt` module)
 - [x] Grid search, random search (`GridSearch`, `RandomSearch`)
@@ -295,7 +295,7 @@ trustformers-optim `pytorch_compat.rs`).
 
 ### Code Standards
 - **Use trustformers-core abstractions only**
-- **File size limit:** <2000 lines per file (currently satisfied — largest reachable file is 1,610 lines)
+- **File size limit:** <2000 lines per file (currently satisfied — verified 2026-08-24 via a full-workspace `wc -l` sweep; the "1,610 lines" figure this line previously cited for the largest file is stale, see the Current Status section above for what happened to it)
 - **Error handling:** Use `Result<T, TrustformersError>` / the crate's own `TrainingError`/`TrainingResult`
 - **Testing:** Integration tests for distributed training
 - **Naming:** snake_case for all identifiers

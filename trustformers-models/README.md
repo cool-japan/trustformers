@@ -2,13 +2,13 @@
 
 Comprehensive transformer model implementations for NLP, vision, speech, and multimodal tasks — plus a large surrounding toolkit (quantization, distillation, NAS, continual/meta learning, serving, dev tools).
 
-**Version:** 0.2.1 (Alpha) | **Date:** 2026-08-18 | **Tests:** 1,681 passed, 0 failed, 28 skipped (`cargo nextest run -p trustformers-models`, default features) | **SLoC:** 187,233 (`tokei`, 2026-08-18) | **Public API items:** ~5,165 (not re-counted this pass)
+**Version:** 0.2.1 (Alpha, unreleased) | **Date:** 2026-08-24 | **Tests:** 1,681 passed, 0 failed, 28 skipped as of 2026-08-18, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24) | **SLoC:** 188,417 (`tokei`, verified 2026-08-24) | **Public API items:** ~5,165 (not re-counted this pass)
 
 ## Current State
 
 This is the **largest model-coverage crate in the TrustformeRS workspace**: 55 architecture-specific Cargo feature flags plus a handful of always-on bonus architectures, all built on `trustformers-core` abstractions. There are **0 genuine stub/placeholder implementations** (verified by source scan — no `todo!()`/`unimplemented!()`/`FIXME` in production code paths) and no file exceeds the workspace's 2,000-line refactor threshold.
 
-The crate is comprehensive and close to uniform in maturity: weight loading from real HuggingFace checkpoints is complete for 53 of 55 architectures; the remaining 2 return a clean, specific "not yet implemented" error instead of loading real weights for a documented architectural reason (see [Weight Loading](#weight-loading) and [Known Limitations](#known-limitations) below). Default feature is just `bert`, which is fully complete (config, model, all four task heads, weight loading, doctested examples).
+The crate is comprehensive and close to uniform in maturity: weight loading from real HuggingFace checkpoints is complete for 51 of 55 architectures (corrected 2026-08-24 from a previously-claimed 53 — `deepseek_v2` and `s4` were double-counted as complete when they weren't, see below); the remaining 4 return a clean, specific error instead of loading real weights, three for a documented architectural reason and one (`deepseek_v2`) as an honesty fix for what used to be fake success (see [Weight Loading](#weight-loading) and [Known Limitations](#known-limitations) below). Default feature is just `bert`, which is fully complete (config, model, all four task heads, weight loading, doctested examples).
 
 ## Implemented Architectures
 
@@ -50,7 +50,7 @@ The crate is comprehensive and close to uniform in maturity: weight loading from
 ### State-Space, Linear- and Efficient-Attention Models
 - **Mamba** / **Mamba-2** (`mamba`, `mamba2`) — selective state-space models, O(N)
 - **RWKV** — linear attention, O(N) train / O(1) inference step
-- **S4** — HiPPO-initialized structured state space, O(N log N) via FFT
+- **S4** — HiPPO-initialized structured state space, O(N log N) via FFT. **No checkpoint-loading path as of 2026-08-24** (see [Weight Loading](#weight-loading)): a fake loader that skipped every tensor while returning `Ok(())` was deleted this wave rather than fixed. Random-init/from-scratch use is unaffected.
 - **RetNet** — multi-scale retention, O(N) inference
 - **Hyena** — implicit long convolutions, O(N log N)
 - **FNet** — Fourier-transform token mixing (no learned attention)
@@ -118,12 +118,14 @@ This mirrors the crate's own doctested example (`src/bert/mod.rs`). Task heads f
 
 HuggingFace-format loading (SafeTensors, PyTorch, JSON configs) plus GGUF, memory-mapped, streaming, and distributed loaders live in `weight_loading/` (8 focused modules, largest 981 lines, well under the 2,000-line policy limit).
 
-**Status** (updated 2026-08-18): complete for 53 of the 55 feature-gated architectures, including `swin` and `deit` (each has a real `load_pretrained_report` binding a `Checkpoint` via architecture-specific tensor-naming logic, with dedicated tests) and `llama3`/`mistral_v3`/`phi2`/`yi`/`starcoder2` (all previously listed here as unimplemented; all now call the same real `Checkpoint`-based loading as every other architecture). Two verified exceptions remain, each returning a descriptive `Err(...)` naming the specific reason instead of loading real weights:
+**Status** (updated 2026-08-24, correcting the 2026-08-18 figure below): complete for 51 of the 55 feature-gated architectures, including `swin` and `deit` (each has a real `load_pretrained_report` binding a `Checkpoint` via architecture-specific tensor-naming logic, with dedicated tests) and `llama3`/`mistral_v3`/`phi2`/`yi`/`starcoder2` (all previously listed here as unimplemented; all now call the same real `Checkpoint`-based loading as every other architecture). Four verified exceptions remain:
 
-- `llama3_2` (Llama-3.2 vision): Mllama tile/aspect-ratio embeddings and gated cross-attention aren't modelled, so a checkpoint can't be bound faithfully.
-- `deepseek` (DeepSeek-V2's fused MLA projections and `kv_a_layernorm` aren't modelled — `deepseek_v2` is unaffected).
+- `llama3_2` (Llama-3.2 vision): Mllama tile/aspect-ratio embeddings and gated cross-attention aren't modelled, so a checkpoint can't be bound faithfully. Documented architectural gap, returns `Err(...)`.
+- `deepseek` (DeepSeek-V1's fused MLA projections and `kv_a_layernorm` aren't modelled). Documented architectural gap, returns `Err(...)`.
+- **`deepseek_v2`** (corrected 2026-08-24 — previously, wrongly, described here as "unaffected" by the v1 gap): its loader used to report fake success on any non-empty input buffer without binding real weights; this wave replaced that with a documented `Err(...)` instead. Still no real MLA+MoE checkpoint binder — an honesty fix, not a completion.
+- **`s4`** (corrected 2026-08-24, newly added to this list): its ~290-line loader — which validated and skipped every tensor while still returning `Ok(())` — was deleted rather than fixed this wave. There is currently no loading path for this architecture at all, so it doesn't even reach the "returns a descriptive `Err(...)`" bar the other three meet.
 
-These are handled errors, not panics or `todo!()`/`unimplemented!()` — hence they don't count against the "0 stubs" figure — but functionally, pretrained-checkpoint loading isn't yet available for these two. Random-initialization / from-scratch construction and forward passes work normally for both.
+The three `Err(...)`-returning architectures give handled errors, not panics or `todo!()`/`unimplemented!()` — hence they don't count against the "0 stubs" figure — but functionally, pretrained-checkpoint loading isn't yet available for any of these four. Random-initialization / from-scratch construction and forward passes work normally for all four.
 
 GPT-2's contrastive-search generation is implemented as of this update (greedy, sampling, top-k/top-p, beam search, and contrastive search all work).
 
@@ -166,7 +168,7 @@ trustformers-models/
 
 ## Known Limitations
 
-- **Weight-loading gaps** (updated 2026-08-18): only 2 of 55 feature-gated architectures (`llama3_2`, `deepseek`) return a handled error instead of loading real checkpoints, each for a documented architectural reason (see [Weight Loading](#weight-loading)). `swin`/`deit` now have a full loading path, same as every other architecture.
+- **Weight-loading gaps** (corrected 2026-08-24, was wrongly "2 of 55" as of 2026-08-18): 4 of 55 feature-gated architectures have no working checkpoint loader today — `llama3_2` and `deepseek` (v1) each for a documented architectural reason; `deepseek_v2` because its loader's fake-success bug was fixed into an honest error rather than a real binder; `s4` because its fake-`Ok(())` loader was deleted rather than fixed, leaving no loading path at all (see [Weight Loading](#weight-loading)). `swin`/`deit` do have a full loading path, same as every other architecture.
 - **GPU coverage**: `cuda`/`metal` features exist and forward to `trustformers-core`, but within this crate real GPU-resident `#[cfg(feature = "cuda"/"metal")]` code paths currently exist only for `gpt2` and `gpt_neox`; the rest run on CPU (`f32`) regardless of GPU features being enabled, consistent with the workspace-wide GPU maturity notes in the top-level README.
 - **No `AutoModel`/`from_pretrained` dispatcher** in this crate (see [Quick Start](#quick-start)).
 

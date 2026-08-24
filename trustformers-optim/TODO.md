@@ -1,6 +1,6 @@
 # trustformers-optim TODO List
 
-**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~995 | **SLoC:** 50,431 | **Updated:** 2026-07-09
+**Version:** 0.2.1 (unreleased) | **Status:** Stable | **Tests:** ~995 as of 2026-07-09, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24) | **SLoC:** 65,983 (`tokei`, verified 2026-08-24 — up from 50,431 on 2026-07-09) | **Updated:** 2026-08-24 (SLoC/date/two stale-checkbox corrections only; narrative largely unreviewed since 2026-07-09)
 
 ## Overview
 
@@ -226,12 +226,9 @@ let optimizer = AdEMAMix::for_llm_training();
 - [x] Additional adaptive/variance-reduced optimizers, each with their own `*Config` type
       (`ProdigyConfig`, `NovoGradConfig`, `LancBiOConfig`, `AMacPConfig`, `EVAConfig`)
 
-#### Research-preview simplified reference implementations: GENIE, LoRA-RITE, SOFO
+#### GENIE, LoRA-RITE, SOFO
 - [x] Functional and tested (real momentum-style parameter updates, not `unimplemented!()`/`todo!()`)
-- [ ] **Not yet at full paper fidelity** — `src/genie_stub.rs`, `src/lora_rite_stub.rs`, and
-      `src/sofo_stub.rs` self-document as simplified implementations pending "proper tensor
-      operations"/"full LoRA-specific operations"/"forward-mode differentiation" respectively. Several
-      stats getters (e.g. `GENIE::get_osgr_stats`) currently return empty placeholders.
+- **Corrected 2026-08-24**: this section previously described these as living in `src/genie_stub.rs`, `src/lora_rite_stub.rs`, `src/sofo_stub.rs`, self-documenting as simplified/pending implementations, with stats getters (e.g. `GENIE::get_osgr_stats`) "currently return[ing] empty placeholders". None of that holds today: the files are `src/genie.rs`, `src/lora_rite.rs`, `src/sofo.rs` (no `_stub` suffix — renamed at some point, not tracked to a specific wave in this pass); none of their module doc comments carry "simplified"/"pending"/"placeholder"/"stub"/"TODO" language (checked by direct grep); and `GENIE::get_osgr_stats` computes a real per-parameter mean from `self.state.osgr_ema` rather than returning an empty map by construction (it can be empty only if there's genuinely no OSGR data yet, which is a legitimate empty-input case, not a placeholder). Full paper-fidelity for all three was not independently re-assessed this pass — only the specific "stub"/"empty placeholder" claims above, which no longer hold.
 
 ---
 
@@ -264,7 +261,7 @@ let optimizer = Adam8bit::new(1e-4); // single-argument constructor (learning_ra
 
 #### Adam4bit
 - [x] 4-bit optimizer state via `QuantizationMethod` (e.g. NF4), ~8x memory reduction
-- [~] Add AdamW4bit mirroring Adam4bit, with decoupled weight decay (planned 2026-07-05, implement AFTER the save_state/load_state trait-defaults item below)
+- [x] Add AdamW4bit mirroring Adam4bit, with decoupled weight decay — **done, verified 2026-08-24**: `AdamW4bit` exists in `src/quantized_advanced.rs` with real `Optimizer`/`StatefulOptimizer` impls and 3 tests; not tracked to a specific wave in this pass (planned 2026-07-05, completed sometime before 2026-08-24)
   - Goal: AdamW4bit alongside the existing Adam4bit, with decoupled (AdamW-style) weight decay instead of Adam4bit's coupled decay.
   - Design: structurally mirror Adam4bit exactly (same QuantizedTensor/NF4 block-wise quantization — this crate's "4-bit" storage is f32-backed with codebook values, not literally nibble-packed; that's a pre-existing crate-wide simplification, out of scope to fix here). Only formula difference: apply weight decay directly to the parameter before the Adam update, instead of folding it into the gradient. Implement a COMPLETE load_state_dict — Adam4bit's own version was found broken (only restores learning_rate) — do not copy that bug.
   - Files: trustformers-optim/src/quantized_advanced.rs (new struct+impl), lib.rs (extend existing pub use block).
@@ -345,7 +342,7 @@ GradientProcessor::clip_by_value(&mut grad, -0.5, 0.5); // element-wise clip
 #### Optimizer State Management
 - [x] `StatefulOptimizer::state_dict(&self) -> Result<HashMap<String, Tensor>>` and
       `load_state_dict(&mut self, state: HashMap<String, Tensor>) -> Result<()>`
-- [~] Add save_state/load_state default trait methods on StatefulOptimizer (planned 2026-07-05, implement BEFORE AdamW4bit above)
+- [x] Add save_state/load_state default trait methods on StatefulOptimizer — **done, verified 2026-08-24**: `StatefulOptimizer` (`traits.rs`) provides default `save_state`/`load_state` methods with a round-trip regression test; not tracked to a specific wave in this pass (planned 2026-07-05, completed sometime before 2026-08-24)
   - Goal: every one of the ~29 StatefulOptimizer implementors gets a working save_state(path)/load_state(path) for free.
   - Design: add a small private TensorSnapshot { data: Vec<f32>, shape: Vec<usize> } type (derive Serialize/Deserialize) to traits.rs — needed because Tensor itself has no Serialize/Deserialize impl anywhere in trustformers-core. Add 2 default trait methods on StatefulOptimizer: save_state converts state_dict()'s HashMap<String,Tensor> to HashMap<String,TensorSnapshot>, encodes with oxicode::serde::encode_to_vec (NOT bincode, per COOLJAPAN policy — already a declared-but-unused workspace dependency of this crate), writes to disk; load_state reverses it. Mirror the existing oxicode save/load pattern already used in trustformers-core/src/checkpoint/formats.rs and trustformers-tokenizers/src/binary_format.rs.
   - Files: trustformers-optim/src/traits.rs only.

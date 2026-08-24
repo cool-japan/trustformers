@@ -1,6 +1,6 @@
 # trustformers TODO List
 
-**Version:** 0.2.1 | **Status:** Alpha | **Updated:** 2026-07-09
+**Version:** 0.2.1 (unreleased) | **Status:** Alpha | **Updated:** 2026-08-24 (SLoC/test figures below refreshed; narrative sections largely last touched 2026-07-01/07-09, see inline dates)
 
 ## Overview
 
@@ -42,10 +42,11 @@ The `trustformers` crate is the main integration crate providing high-level APIs
   - **Result (re-verified 2026-07-09):** `pub mod cache;`, `pub mod finetuning;`, `pub mod loading;` all present in `trustformers/src/lib.rs`; `cargo check -p trustformers --all-features` compiles clean (0 warnings). 61 embedded `#[test]` functions across the 4 source files (versioned_cache.rs, adapter.rs, lora.rs, parallel_loader.rs) now compile and run.
 - [x] **MODEL SEARCH** - see the "Model Search" section below for the current status and implementation location.
 
-### Metrics (re-verified 2026-07-01)
+### Metrics (SLoC/tests refreshed 2026-08-24; narrative below re-verified 2026-07-01, not redone this pass)
 
-- **SLoC:** ~109,369 (Rust code lines, via `tokei`; up from the previously recorded ~62,500 — reflects substantial growth in `src/pipeline/` and `src/auto/`)
-- **Tests:** ~2,261 (part of a workspace-wide 18,102 passed / 0 failed / 119 skipped run; 0 clippy warnings, 0 rustdoc warnings)
+- **SLoC:** 123,252 (`tokei`, verified 2026-08-24 — up from ~109,369 on 2026-07-01; this cycle's `src/hub_offline_packs.rs` split into a 6-file directory module, plus several dead-code items turned into real accessors, both contribute)
+- **Tests:** ~2,261 as of 2026-07-01, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24)
+- **File-size policy, checked 2026-08-24**: `src/hub_offline_packs.rs` (previously flagged elsewhere as exceeding 2,000 lines at 2,009 lines) is now split into `src/hub_offline_packs/` (6 files). Three files not previously tracked here now exceed the 2,000-line limit: `src/hub_ui.rs` (2,026), `src/hub.rs` (2,013), `src/pipeline/conversational/summarization.rs` (2,001) — see root `TODO.md` P1 for detail.
 - **Doctests:** 5 passed, 164 ignored (intentionally `rust,ignore` — see README.md Testing section)
 - **Pipeline modules:** 54 `pub mod` declarations under `src/pipeline/` (38 task pipelines, 6 backends, 10 composition/optimization modules) — re-verified 2026-07-09 against `grep -c "^pub mod " src/pipeline/mod.rs`
 - **Public API exports (prelude):** 76 under default features (`bert` + `async`); 83 with `hub` also enabled

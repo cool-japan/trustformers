@@ -4,17 +4,17 @@ Training infrastructure for TrustformeRS.
 
 ## Current State
 
-**Version:** 0.2.1 | **Status:** Alpha | **Updated:** 2026-07-09
+**Version:** 0.2.1 (unreleased) | **Status:** Alpha | **Updated:** 2026-08-24
 
 This crate provides HuggingFace-`Trainer`-inspired training infrastructure: a core `Trainer`/`TrainingArguments` loop (plus a simpler `SimpleTrainer` builder API), mixed-precision/AMP, quantization-aware training, RLHF (PPO/DPO), few-shot and meta-learning, continual learning, hyperparameter optimization, a large data-pipeline/augmentation/curriculum system, and a family of distributed/parallel-training abstractions (tensor, sequence, 3D, expert and ring-attention parallelism, plus elastic and multi-cloud orchestration).
 
-- **~1,010 tests passing** (workspace-wide: 18,102 passed / 0 failed, 0 clippy warnings, 0 rustdoc warnings — verified 2026-07-01)
-- **1,673 public API items** (`pub fn`/`struct`/`enum`/`trait`, incl. impl-block methods) reachable from `lib.rs`
-- **58,207 SLoC** actually compiled into the crate (72 `.rs` files wired into the module tree; the full `src/` tree on disk is 83,317 lines across 101 files — see [Verification Notes](#verification-notes))
-- **0 stub/placeholder implementations** (`todo!()`/`unimplemented!()`/TODO/FIXME/HACK/XXX/"placeholder", searched case-insensitively) in the compiled source
-- **0 `.unwrap()` calls** in the compiled production source
+- **~1,010 tests** as of 2026-07-01, not independently re-run this pass — see the workspace root `README.md`/`TODO.md` for the current baseline (20,629 passed / 43 skipped / 0 failed workspace-wide, default features, 2026-08-24)
+- **1,673 public API items** (`pub fn`/`struct`/`enum`/`trait`, incl. impl-block methods) reachable from `lib.rs` as of 2026-07-09, not re-verified — the underlying compiled-file count (72 files) is stale, see below
+- **83,319 SLoC** for the whole crate (`tokei`, verified 2026-08-24). The 2026-07-09 "58,207 SLoC / 72 compiled files vs. 83,317 total / 101 files" split (see [Verification Notes](#verification-notes)) is not recomputed this pass: this wave split 2 of those 72 compiled files (`data_pipeline.rs`, `auto_parallelism.rs`) into 15 files, so the compiled-file count is higher than 72 today, exact number not recounted.
+- **0 stub/placeholder implementations** (`todo!()`/`unimplemented!()`/TODO/FIXME/HACK/XXX/"placeholder", searched case-insensitively) in the compiled source as of 2026-07-01, not re-verified
+- **0 `.unwrap()` calls** in the compiled production source as of 2026-07-01, not re-verified
 
-> **Honest maturity note**: The non-distributed core (the `Trainer`/`SimpleTrainer` loop, losses/metrics, mixed precision, QAT, RLHF, few-shot/meta-learning, continual learning, hyperparameter optimization, and the training-stability/monitoring stack) is genuinely implemented, tested, and free of stubs. The **distributed/multi-node story is weaker than earlier drafts of this document claimed**: there is no ZeRO optimizer (stages 1/2/3) anywhere in the source, and the `NCCL`/`Gloo`/`MPI` backends in `distributed.rs` are in-process simulations of the collective-communication API (`all_reduce`/`broadcast`/`reduce`/`barrier` scale tensors locally; the source comments say explicitly "in a real implementation, this would call `ncclAllReduce`/`MPI_Allreduce`/..."). There is also a substantial amount of code sitting in `src/` that is **not wired into the crate at all** — see [Verification Notes](#verification-notes) and `TODO.md`. This crate is therefore labeled **Alpha** rather than Stable: the tested, reachable surface is solid, but the headline distributed-training claims need to be read with that caveat, and 0.1.x semver means the API can still move.
+> **Honest maturity note (corrected 2026-08-24)**: the non-distributed core (the `Trainer`/`SimpleTrainer` loop, losses/metrics, mixed precision, QAT, RLHF, few-shot/meta-learning, continual learning, hyperparameter optimization, and the training-stability/monitoring stack) is genuinely implemented, tested, and free of stubs. **The distributed story is stronger than this note previously claimed** — that older text (through 2026-08-18) said "there is no ZeRO optimizer anywhere in the source" and that `NCCL`/`Gloo`/`MPI` "are in-process simulations", neither of which is true today: `distributed_zero.rs`/`distributed_zero/` implement ZeRO (optimizer-state/gradient/parameter partitioning, mounted via `pub mod distributed_zero;`, with its own tests), and `distributed.rs`'s `NCCL`/`Gloo`/`MPI` backends no longer simulate collectives — a `broadcast` implementation that used to corrupt its input via an unconditional `scalar_mul(0.99)` is gone, and requesting one of those three backends returns a structured "unavailable" error naming the real, working TCP-based process-group backend instead (verified today: a test named `nccl_gloo_and_mpi_are_reported_unavailable_not_simulated` exists in `distributed.rs` and passes). There is still a substantial amount of code sitting in `src/` that is **not wired into the crate at all** — see [Verification Notes](#verification-notes) and `TODO.md`, not re-verified this pass. This crate is labeled **Alpha** rather than Stable on that basis, and because 0.x semver means the API can still move — not because of a fabricated-collectives concern that no longer applies.
 
 ## Features
 
@@ -189,7 +189,7 @@ trustformers-training/
 │   ├── distributed.rs           # DataParallelTrainer + NCCL/Gloo/MPI/Simulated ProcessGroups
 │   ├── tensor_parallelism.rs, sequence_parallelism.rs
 │   ├── parallelism_3d.rs        # Combined data+tensor+pipeline, GPipe/PipeDream/1F1B scheduling
-│   ├── expert_parallelism.rs, ring_attention.rs, auto_parallelism.rs
+│   ├── expert_parallelism.rs, ring_attention.rs, auto_parallelism/ (split from a single file this wave)
 │   ├── elastic_training.rs, multicloud.rs, resource_scheduling.rs
 │   ├── mixed_precision.rs, qat.rs
 │   ├── rlhf/                    # ppo.rs, dpo.rs, reward_model.rs, feedback.rs, config.rs, trainer.rs
@@ -197,7 +197,7 @@ trustformers-training/
 │   ├── continual/                # ewc.rs, progressive_networks.rs, memory_replay.rs, task_boundary.rs
 │   ├── hyperopt/                 # tuner.rs, sampler.rs, strategies.rs, surrogate_models.rs, ...
 │   ├── hpo/                      # multi_objective.rs (NSGA-II Pareto front), auto_lr.rs (AutoLrSelector/LrRangeTest)
-│   ├── data_pipeline.rs          # Curriculum, active learning, augmentation, multi-modal, validation
+│   ├── data_pipeline/            # Curriculum, active learning, augmentation, multi-modal, validation (split from a single data_pipeline.rs this wave)
 │   ├── experiment_management.rs, framework_integration.rs   # A/B testing, W&B/MLflow/ClearML/Neptune/TensorBoard
 │   ├── advanced_stability_monitor.rs, gradient_anomaly_recovery.rs
 │   ├── adaptive_gradient_scaling.rs, adaptive_learning_rate.rs
@@ -209,13 +209,13 @@ trustformers-training/
 
 ## Testing
 
-- **~1,010 tests passing** (workspace-wide: 18,102 passed / 0 failed, 0 clippy warnings, 0 rustdoc warnings — verified 2026-07-01)
+- **~1,010 tests** as of 2026-07-01, not independently re-run this pass — see the workspace root `README.md`/`TODO.md` for the current baseline (20,629 passed / 43 skipped / 0 failed workspace-wide, default features, 2026-08-24)
 - Covers the training loop, distributed abstractions, mixed precision/QAT, RLHF (PPO/DPO), few-shot/continual learning, hyperparameter search (incl. `hpo`'s multi-objective Pareto-front search and auto-LR range tests), data pipeline, and the stability/monitoring stack
 - `examples/` contains illustrative programs, but at least one (`examples/basic_training/simple_classification.rs`) references types (`TrainerConfig`, `TrainingArgs`, `MetricResult`) that no longer match the current public API — see `TODO.md`
 
 ## Verification Notes
 
-While documenting this crate we found a meaningful amount of code under `src/` that exists on disk but is **not** referenced by any `mod` declaration in `lib.rs`, and is therefore not compiled into the crate: 20 top-level directories (`dpo/`, `ppo/`, `kto/`, `lora/`, `ewc/`, `curriculum/`, `orpo/`, `simpo/`, `ipo/`, `spin/`, `grpo/`, `raft/`, `reinforce/`, `distillation/`, `model_merging/`, `constitutional_ai/`, `contrastive_search/`, `token_dpo/`, `online_dpo/`, `reward_modeling/`) plus 5 top-level files (`async_checkpoint.rs`, `distributed_overlap.rs`, `losses_tests.rs`, `metrics_tests.rs`, `training_args_tests.rs`) — roughly 25,110 lines across 29 files (verified via `tokei`, 2026-07-09). Their functionality generally overlaps with (and appears superseded by) modules that *are* wired in, e.g. `rlhf::ppo`/`rlhf::dpo` vs. the orphaned top-level `ppo/`/`dpo/`, or `data_pipeline`'s curriculum types vs. the orphaned top-level `curriculum/`. (The `hpo/` directory, previously in this orphaned list, was mounted via `pub mod hpo;` in the 0.2.0 release and is no longer orphaned; the orphaned root-level `mod.rs` was deleted the same release rather than wired in, since everything it declared already existed, more completely, in `lib.rs`.) All statistics in this README (SLoC, public API count, test coverage) describe only the reachable, compiled 72-file tree. See `TODO.md` for details.
+While documenting this crate we found a meaningful amount of code under `src/` that exists on disk but is **not** referenced by any `mod` declaration in `lib.rs`, and is therefore not compiled into the crate: 20 top-level directories (`dpo/`, `ppo/`, `kto/`, `lora/`, `ewc/`, `curriculum/`, `orpo/`, `simpo/`, `ipo/`, `spin/`, `grpo/`, `raft/`, `reinforce/`, `distillation/`, `model_merging/`, `constitutional_ai/`, `contrastive_search/`, `token_dpo/`, `online_dpo/`, `reward_modeling/`) plus 5 top-level files (`async_checkpoint.rs`, `distributed_overlap.rs`, `losses_tests.rs`, `metrics_tests.rs`, `training_args_tests.rs`) — roughly 25,110 lines across 29 files (verified via `tokei`, 2026-07-09). Their functionality generally overlaps with (and appears superseded by) modules that *are* wired in, e.g. `rlhf::ppo`/`rlhf::dpo` vs. the orphaned top-level `ppo/`/`dpo/`, or `data_pipeline`'s curriculum types vs. the orphaned top-level `curriculum/`. (The `hpo/` directory, previously in this orphaned list, was mounted via `pub mod hpo;` in the 0.2.0 release and is no longer orphaned; the orphaned root-level `mod.rs` was deleted the same release rather than wired in, since everything it declared already existed, more completely, in `lib.rs`.) The public-API-count and test-coverage statistics in this README describe only the reachable, compiled tree (72 files as of 2026-07-09; higher today after this wave's `data_pipeline.rs`/`auto_parallelism.rs` splits, not recounted). The one exception is the whole-crate 83,319 SLoC figure at the top, which is a fresh 2026-08-24 `tokei` total across all of `src/` including the orphaned code described in this section — it is not the "reachable only" figure the older 58,207 number was. See `TODO.md` for details.
 
 ## License
 

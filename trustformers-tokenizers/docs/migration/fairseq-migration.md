@@ -1,5 +1,7 @@
 # Migrating from Fairseq to TrustformeRS
 
+> **Accuracy note (2026-08-24):** the same-pattern fabrication grep that found problems in this directory's other five migration guides (see their own banners) found 0 hits here. That grep was shaped around symbols found in the tiktoken guide's fabrications (`ModelManager`, `ShadowToken`, `estimate_cost`, and similar) — it is evidence this file doesn't repeat *that specific* pattern, not a full method-by-method audit against `trustformers-tokenizers/src/`. Verify any specific method name you plan to depend on against the source before relying on it.
+
 This guide will help you migrate from Facebook's Fairseq tokenization system to TrustformeRS Tokenizers while maintaining compatibility with machine translation workflows and gaining significant performance improvements for sequence-to-sequence tasks.
 
 ## Why Migrate from Fairseq?

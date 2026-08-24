@@ -18,7 +18,7 @@ The `trustformers-wasm` crate enables browser and edge deployment of transformer
 
 ## Current Status
 
-**Version:** 0.2.1 | **Date:** 2026-07-09 | **Status:** Stable
+**Version:** 0.2.1 (unreleased) | **Date:** 2026-08-24 (SLoC figure near the end of this file refreshed to 48,359 via `tokei`; this crate had no wave-4 work item, so the rest is unreviewed since 2026-07-09) | **Status:** Stable
 
 ### Implementation Status
 ✅ **STABLE** - Complete WASM infrastructure
@@ -734,5 +734,5 @@ full = ["web-workers", "shared-memory", "kernel-fusion", "async-executor", "inde
 **Version:** 0.2.1
 **Status:** Stable
 **Test Suite:** ~130 tests, 100% pass rate (workspace-wide `cargo nextest run --workspace --all-features` on 2026-07-01: 18,102 passed / 0 failed / 119 skipped; 0 clippy warnings; 0 rustdoc warnings)
-**SLoC:** 55,721
+**SLoC:** 48,359 (`tokei`, verified 2026-08-24; was 55,721 on 2026-07-09 — not investigated, no wave-4 work item touched this crate)
 **Key Features:** WebGPU backend (web-sys/js-sys based, no wgpu crate, real CPU fallback), Web Workers, IndexedDB caching, BERT WASM model, React/Vue/Angular/Web Components, streaming inference, SIMD, WebNN, GGUF quantization, kernel fusion, memory coalescing, progressive loading, Core ML export

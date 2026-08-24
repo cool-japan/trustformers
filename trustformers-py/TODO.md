@@ -223,14 +223,16 @@ model = AutoModel.from_pretrained("gpt2", device="mps")
 
 **PyTorch-compatible training loop**
 
-- ✅ **Features**
+> **Accuracy note (2026-08-24, added by the documentation pass, not independently re-verified beyond this one method)**: `PyTrainer`/`PyTrainingArguments` are real, registered Python classes (constructible today), but `src/training.rs`'s `PyTrainer::train()` is still fabricated — its own source comment reads "In a real implementation, we'd run the training loop here / For now, return a mock training result", and it unconditionally returns `train_loss: 0.5`, `total_steps: 1000` regardless of the model, data, or configuration passed in. The ✅ "Trainer API" checkmark and the example below reflect the class/API surface existing, not `.train()` actually training anything or returning real metrics. See root `TODO.md`'s trustformers-py section.
+
+- ✅ **Features** (class/API surface only — see the accuracy note above for `.train()` specifically)
   - Trainer API
   - Distributed Data Parallel (DDP)
   - Mixed precision training (AMP)
   - Gradient accumulation
   - Learning rate scheduling
 
-**Example:**
+**Example** (constructs and calls without erroring; the returned metrics are fabricated, see above):
 ```python
 from trustformers import Trainer, TrainingArguments
 

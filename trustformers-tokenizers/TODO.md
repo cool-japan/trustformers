@@ -21,7 +21,7 @@ Python bindings.
 
 ## Current Status
 
-**Version:** 0.2.1 | **Date:** 2026-07-09 | **Status:** Stable
+**Version:** 0.2.1 (unreleased) | **Date:** 2026-08-24 (SLoC and the migration-docs correction above refreshed; remainder largely last reviewed 2026-07-09) | **Status:** Stable
 
 ### Implementation Status
 ✅ **STABLE** — 24 tokenizer types implemented and tested, 0 genuine stub/placeholder implementations
@@ -40,7 +40,7 @@ Python bindings.
 - **Test Count:** `cargo nextest run -p trustformers-tokenizers` (2026-08-18, default features) — 620 tests, 619 passed, **1 FAILED**, 0 skipped. Workspace-wide baseline reported to this documentation pass: 20,629 passed / 43 skipped / 0 failed (`cargo nextest run --workspace`, default features) — that baseline predates the one failure below, which was found while writing this file; see root `TODO.md` P0 #1.
 - **Pass Rate:** 99.8% in this crate right now, not 100% — `workspace_hygiene::workspace_dependency_table_has_no_unused_entries` fails: `trustformers-serve` dropped 7 cloud-SDK dependencies with no remaining consumer, and root `Cargo.toml`'s `[workspace.dependencies]` still declares all 7. This crate's test is correctly catching a real, current problem in a manifest this crate does not own; see root `TODO.md` for the fix (delete the 7 lines from root `Cargo.toml`).
 - **Public API Surface:** ~1,341 `pub fn`/`struct`/`enum`/`trait` items (+2 for `NFKCNormalizer`/`NFKDNormalizer`, added 2026-07-09)
-- **SLoC:** 51,372 (`tokei src/`, 68 files, 2026-07-01)
+- **SLoC:** 45,324 (`tokei`, whole crate, verified 2026-08-24; the 2026-07-01 figure was `src/` only, 68 files, not directly comparable)
 - **Coverage:** Encoding/decoding, special tokens, edge cases, language-specific, domain-specific
 
 ---
@@ -343,14 +343,14 @@ Reference docs live under `docs/migration/`:
 - ✅ `docs/examples.md`
 - ✅ `docs/custom-tokenizer-tutorial.md`
 - ✅ `docs/ml-framework-integration.md`
-- ✅ `docs/migration/` (6 guides, see above)
+- ⚠️ `docs/migration/` (6 guides, see above) — **corrected 2026-08-24**: this checkmark previously implied the whole set was done/accurate. It isn't: `tiktoken-migration.md` was found to describe ~30 methods/types that don't exist on the real `TiktokenTokenizer` (batching, caching config, chat templating, cost estimation, a whole Python-bindings section for a tokenizer with no Python binding, and more) and has been rewritten from the real source this pass. The other five guides plus `migration/README.md` carry smaller amounts of the same problem (a same-pattern grep found roughly 12/9/2/2/0/1 hits respectively) and now each carry a dated accuracy banner rather than a full rewrite — see the item below, which already flagged the performance-table half of this but not the API-fabrication half.
 - ✅ Rustdoc for public APIs (0 rustdoc warnings workspace-wide, verified 2026-07-01)
 - [~] Write tokenizer-selection, performance-tuning, and troubleshooting guides (planned 2026-07-05)
   - Goal: one combined deliverable (confirmed not 3 separate asks — TODO.md names all 3 in one line at two locations).
   - Design: 3 new files under docs/. Follow docs/migration/README.md's STRUCTURE (tables, checklists, troubleshooting section) but NOT its content practice — that file was found to contain fabricated benchmark numbers and references to APIs that don't exist anywhere in src/. Every code sample in the new docs must be grep-verified against a real `pub fn` signature before inclusion. Use README.md's honest style as the tone template instead.
   - Files: new docs/tokenizer-selection-guide.md, docs/performance-tuning-guide.md, docs/troubleshooting-guide.md.
   - Tests: grep every method name used in the new docs against `grep -rn "pub fn <name>" src/` before finalizing.
-  - Risk: repeating docs/migration/README.md's fabrication pattern — explicitly guard against it. (2026-08-18: that pattern was found and fixed this pass — the migration guides' invented performance tables are removed. The 3 new guide files below still don't exist; this remains genuinely open.)
+  - Risk: repeating docs/migration/README.md's fabrication pattern — explicitly guard against it. (2026-08-18: the invented-performance-table half of that pattern was found and fixed. 2026-08-24: a second, larger half of the same pattern was found — fabricated API methods/types, not just numbers — and `tiktoken-migration.md` was rewritten to fix it; the other five guides got dated accuracy banners instead of a full rewrite, see "Documentation" above. The 3 new guide files below still don't exist; this remains genuinely open.)
 
 ---
 

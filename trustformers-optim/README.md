@@ -1,6 +1,6 @@
 # trustformers-optim
 
-**Version:** 0.2.1 | **Status:** Stable | **Tests:** ~995 | **SLoC:** 50,431 | **Public API:** ~1,925 items | **Updated:** 2026-07-09
+**Version:** 0.2.1 (unreleased) | **Status:** Stable | **Tests:** ~995 as of 2026-07-09, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24) | **SLoC:** 65,983 (`tokei`, verified 2026-08-24) | **Public API:** ~1,925 items as of 2026-07-09, not re-verified | **Updated:** 2026-08-24 (SLoC/date and the `genie`/`lora_rite`/`sofo` filename correction below only; remainder unreviewed since 2026-07-09)
 
 Comprehensive optimization algorithms, learning rate schedulers, and distributed/advanced training
 infrastructure for training transformer models in the TrustformeRS ecosystem.
@@ -280,8 +280,9 @@ trustformers-optim/src/
 │   bge_adam_optimized.rs, prodigy.rs, novograd.rs,
 │   lancbio.rs, amacp.rs, eva.rs,
 │   advanced_2025_research.rs
-├── genie_stub.rs, lora_rite_stub.rs,        # simplified reference implementations
-│   sofo_stub.rs
+├── genie.rs, lora_rite.rs, sofo.rs          # GENIE / LoRA-RITE / SOFO (renamed from *_stub.rs by
+│                                             # 2026-08-24; none of the three's doc comments carry
+│                                             # "simplified"/"pending"/"placeholder" language today)
 ├── schedule_free.rs                         # Schedule-Free Adam/SGD
 ├── quantized.rs, quantized_advanced.rs,     # 8-bit / 4-bit optimizer state
 │   per_layer_quant.rs
