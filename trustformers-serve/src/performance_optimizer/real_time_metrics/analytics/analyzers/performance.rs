@@ -32,7 +32,7 @@ use super::super::types::{
 use super::distribution::{best_family, quartiles};
 use super::series::{
     autocorrelation, extract_series, linear_fit, mean, pearson, percentile_sorted, sample_std_dev,
-    sample_variance, sorted_finite, student_t_two_sided, MetricSeries,
+    sample_variance, slope_p_value, sorted_finite, varies_materially, MetricSeries,
 };
 use crate::performance_optimizer::test_characterization::pattern_engine::SeverityLevel;
 
@@ -582,11 +582,7 @@ fn trend_direction(values: &[f64]) -> TrendDirection {
     let Some(fit) = linear_fit(values) else {
         return TrendDirection::Unknown;
     };
-    if fit.slope_std_error <= 0.0 {
-        return TrendDirection::Stable;
-    }
-    let t = fit.slope / fit.slope_std_error;
-    let p_value = student_t_two_sided(t, values.len() as f64 - 2.0);
+    let p_value = slope_p_value(&fit, values.len());
     if p_value >= 0.05 {
         // No significant drift: distinguish a steady series from a noisy one by
         // its coefficient of variation.
@@ -761,11 +757,7 @@ fn latency_trends(values: &[f64], step: Duration) -> Vec<LatencyTrend> {
     let Some(fit) = linear_fit(values) else {
         return Vec::new();
     };
-    if fit.slope_std_error <= 0.0 {
-        return Vec::new();
-    }
-    let t = fit.slope / fit.slope_std_error;
-    let p_value = student_t_two_sided(t, values.len() as f64 - 2.0);
+    let p_value = slope_p_value(&fit, values.len());
     if p_value >= 0.05 {
         return Vec::new();
     }
@@ -788,11 +780,7 @@ fn efficiency_trends(series: &[MetricSeries]) -> Vec<EfficiencyTrend> {
         .filter(|s| s.values.len() >= MIN_SAMPLES)
         .filter_map(|entry| {
             let fit = linear_fit(&entry.values)?;
-            if fit.slope_std_error <= 0.0 {
-                return None;
-            }
-            let t = fit.slope / fit.slope_std_error;
-            let p_value = student_t_two_sided(t, entry.values.len() as f64 - 2.0);
+            let p_value = slope_p_value(&fit, entry.values.len());
             if p_value >= 0.05 {
                 return None;
             }
@@ -816,7 +804,7 @@ fn anomalous_periods(entry: &MetricSeries, timestamps: &[DateTime<Utc>]) -> Vec<
     let (Some(m), Some(sd)) = (mean(&entry.values), sample_std_dev(&entry.values)) else {
         return Vec::new();
     };
-    if sd <= 0.0 {
+    if !varies_materially(&entry.values) {
         return Vec::new();
     }
     entry

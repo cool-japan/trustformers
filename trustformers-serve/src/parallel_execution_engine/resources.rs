@@ -273,6 +273,42 @@ impl ResourceManager {
         Ok(allocation)
     }
 
+    /// Release exactly one allocation by its id, returning it with its real
+    /// elapsed duration filled in.
+    ///
+    /// Prefer this over [`Self::release_resources_for_test`] whenever the
+    /// allocation id is known: the `test_id` a reservation is filed under comes
+    /// from `metadata.resource_usage.test_id`, which is not guaranteed to equal
+    /// the `base_context.test_name` a completed execution reports, so releasing
+    /// by name can miss the reservation and leak capacity.
+    pub async fn release_allocation(&self, allocation_id: &str) -> Option<ResourceAllocation> {
+        let now = chrono::Utc::now();
+        let (allocation, test_id) = {
+            let mut allocations = self.allocations.lock();
+            let state = allocations.remove(allocation_id)?;
+            let test_id = state.metadata.get("test_id").cloned().unwrap_or_default();
+            let mut allocation = state.allocated;
+            allocation.deallocated_at = Some(now);
+            allocation.duration =
+                (now - state.allocated_at).to_std().unwrap_or(std::time::Duration::ZERO);
+            (allocation, test_id)
+        };
+        self.allocation_history.lock().push(AllocationEvent {
+            timestamp: now,
+            resource_id: allocation.resource_id.clone(),
+            resource_type: allocation.resource_type.clone(),
+            test_id,
+            event_type: "Deallocated".to_string(),
+            details: HashMap::new(),
+        });
+        Some(allocation)
+    }
+
+    /// Ids of every allocation currently held.
+    pub fn live_allocation_ids(&self) -> Vec<String> {
+        self.allocations.lock().keys().cloned().collect()
+    }
+
     /// Release every allocation held for `test_id`, returning the released
     /// allocations with their real elapsed durations filled in.
     ///

@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Deployment Strategies
 //!
 //! Handles canary deployments, blue-green deployments, and A/B testing for model rollouts.

@@ -5,7 +5,7 @@ use crate::models::{
 use crate::tokenizers::{PyBPETokenizer, PyWordPieceTokenizer};
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::PyDict;
 use pyo3::IntoPyObjectExt;
 
 /// Owned Python reference alias (pyo3 0.28 removed the `PyObject` type alias from
@@ -527,11 +527,13 @@ impl PyAutoModelForMaskedLM {
 /// Pipeline factory function.
 ///
 /// Routes every task name [`crate::pipelines::canonical_task`] knows to its
-/// pipeline class, and lets that class decide whether it can be built: the
-/// two span-level pipelines refuse construction with a structured
-/// `NotImplementedError` rather than returning invented spans, and the two
-/// real pipelines refuse a model that does not carry the head their task
-/// needs.
+/// pipeline class, and lets that class decide whether the given `model`
+/// carries the head its task needs -- a mismatch is a `TypeError` from the
+/// pipeline class's own `__init__`, not a surprise at call time. All four
+/// tasks (`text-generation`, `text-classification`, `token-classification`,
+/// `question-answering`) run real inference today; `question-answering`
+/// additionally requires its tokenizer to be a `WordPieceTokenizer` (see
+/// `pipelines::qa_requires_wordpiece`).
 ///
 /// This used to route only `text-generation` and `text-classification`, so
 /// `pipeline("ner", ...)` reported "Unknown task" even though a (fake)
@@ -571,9 +573,7 @@ pub fn pipeline(
         PipelineTask::TextGeneration => "gpt2",
         PipelineTask::TextClassification => "bert-base-uncased",
         PipelineTask::TokenClassification => "bert-base-cased",
-        PipelineTask::QuestionAnswering => {
-            "bert-large-uncased-whole-word-masking-finetuned-squad"
-        },
+        PipelineTask::QuestionAnswering => "bert-large-uncased-whole-word-masking-finetuned-squad",
     };
 
     let model = match model {
@@ -583,7 +583,20 @@ pub fn pipeline(
                 PyBertForSequenceClassification::from_pretrained(py, default_model, None)?
                     .into_py_any(py)?
             },
-            _ => PyAutoModel::from_pretrained(py, default_model, None)?,
+            // Both span pipelines need their task head, not a bare encoder:
+            // `PyAutoModel::from_pretrained` resolves to a headless
+            // `BertModel`, which the `.cast::<PyBertFor...>()` inside
+            // `PyTokenClassificationPipeline::new`/
+            // `PyQuestionAnsweringPipeline::new` would then always reject.
+            PipelineTask::TokenClassification => {
+                PyBertForTokenClassification::from_pretrained(py, default_model, None)?
+                    .into_py_any(py)?
+            },
+            PipelineTask::QuestionAnswering => {
+                PyBertForQuestionAnswering::from_pretrained(py, default_model, None)?
+                    .into_py_any(py)?
+            },
+            PipelineTask::TextGeneration => PyAutoModel::from_pretrained(py, default_model, None)?,
         },
     };
     let tokenizer = match tokenizer {
@@ -604,11 +617,11 @@ pub fn pipeline(
             Py::new(py, parts).and_then(|pipeline| pipeline.into_py_any(py))
         },
         PipelineTask::TokenClassification => {
-            let parts = PyTokenClassificationPipeline::new(&PyTuple::empty(py), None)?;
+            let parts = PyTokenClassificationPipeline::new(model_bound, tokenizer_bound, device)?;
             Py::new(py, parts).and_then(|pipeline| pipeline.into_py_any(py))
         },
         PipelineTask::QuestionAnswering => {
-            let parts = PyQuestionAnsweringPipeline::new(&PyTuple::empty(py), None)?;
+            let parts = PyQuestionAnsweringPipeline::new(model_bound, tokenizer_bound, device)?;
             Py::new(py, parts).and_then(|pipeline| pipeline.into_py_any(py))
         },
     }

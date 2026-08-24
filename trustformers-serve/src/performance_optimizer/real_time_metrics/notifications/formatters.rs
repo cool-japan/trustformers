@@ -299,9 +299,13 @@ impl MessageFormatter {
         self.template_engine.render(template_str, vars).await
     }
 
+    /// Return one of the built-in notification templates.
+    ///
+    /// These are the templates this crate ships; no persistent template store
+    /// is configured, and an unknown name is an error rather than a silently
+    /// substituted default. The previous comment ("would load from persistent
+    /// storage / for now, return a default") implied these were stand-ins.
     async fn load_template(&self, template_name: &str) -> Result<CompiledTemplate> {
-        // In a real implementation, this would load from persistent storage
-        // For now, return a default template based on name
         let template = match template_name {
             "default_alert" => CompiledTemplate {
                 name: template_name.to_string(),

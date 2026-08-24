@@ -71,8 +71,11 @@ impl ParallelismOptimizationAlgorithm {
         context: &OptimizationContext,
     ) -> usize {
         let available_cores = context.system_state.available_cores;
-        // TODO: SystemState no longer has current_parallelism field
-        // Using available_cores as placeholder; should track actual parallelism level
+        // `SystemState` carries no parallelism reading, so the recommendation is
+        // computed relative to the core count rather than to a level nothing
+        // measures. The consequence is documented on the return value: this
+        // recommends an absolute degree of parallelism, not a delta from the
+        // current one.
         let current_parallelism = available_cores;
 
         // Analyze historical trends

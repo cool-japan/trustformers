@@ -18,11 +18,7 @@ impl std::fmt::Debug for NotificationDispatcher {
                 "notification_channels",
                 &format!("<{} channels>", self.notification_channels.len()),
             )
-            .field("dispatch_queue", &self.dispatch_queue)
-            .field("rate_limiter", &self.rate_limiter)
-            .field("template_engine", &self.template_engine)
-            .field("delivery_tracker", &self.delivery_tracker)
-            .field("notification_metrics", &self.notification_metrics)
+            .field("sent_per_channel", &self.sent_per_channel)
             .finish()
     }
 }

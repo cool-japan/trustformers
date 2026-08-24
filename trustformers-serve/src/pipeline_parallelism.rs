@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Pipeline Parallelism for TrustformeRS Inference Server
 //!
 //! Implements pipeline parallelism to enable efficient processing of large models
@@ -7,7 +5,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -306,10 +304,14 @@ pub struct RequestTracker {
 pub struct StageAssignmentStrategy {
     /// Current round-robin index
     rr_index: AtomicUsize,
-    /// Stage load tracking
-    stage_loads: HashMap<StageId, AtomicUsize>,
-    /// Performance history for adaptive assignment
-    performance_history: VecDeque<StagePerformanceSnapshot>,
+    // 0.2.1: `stage_loads: HashMap<StageId, AtomicUsize>` and
+    // `performance_history: VecDeque<StagePerformanceSnapshot>` lived here.
+    // Both were constructed empty and never inserted into or read, so
+    // "adaptive assignment" had no history to adapt from and load tracking
+    // tracked nothing; only `rr_index` ever moved. Both are deleted rather than
+    // left as containers that are permanently empty.
+    // `StagePerformanceSnapshot` stays: it is the public shape a real
+    // history would hold.
 }
 
 /// Performance snapshot for adaptive assignment
@@ -766,8 +768,6 @@ impl StageAssignmentStrategy {
     fn new() -> Self {
         Self {
             rr_index: AtomicUsize::new(0),
-            stage_loads: HashMap::new(),
-            performance_history: VecDeque::new(),
         }
     }
 }

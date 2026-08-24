@@ -15,7 +15,7 @@ use crate::test_parallelization::{
 use crate::test_timeout_optimization::{TestExecutionResult, TestTimeoutFramework};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::HashMap,
@@ -419,6 +419,10 @@ impl ParallelExecutionEngine {
     ) -> Result<Vec<ParallelExecutionOutcome>> {
         let mut results = Vec::new();
         let mut active_executions: JoinSet<Result<ParallelExecutionOutcome>> = JoinSet::new();
+        // Every reservation this session handed out, so a task that panics or
+        // is cancelled cannot leak its capacity: the sweep below reclaims
+        // whatever is still held when the loop finishes.
+        let mut spawned_allocations: Vec<String> = Vec::new();
         loop {
             if self.should_stop_execution() {
                 break;
@@ -432,17 +436,17 @@ impl ParallelExecutionEngine {
                                 .resource_manager
                                 .allocate_resources(&scheduled_test.resource_requirements, &test_id)
                                 .await?;
+                            let allocation_id = allocation.resource_id.clone();
                             match self.build_execution_task(scheduled_test, allocation) {
                                 Ok(task) => {
+                                    spawned_allocations.push(allocation_id);
                                     active_executions.spawn(task);
                                 },
                                 Err(e) => {
                                     // The runner does not know this test. Hand
                                     // the reservation straight back rather than
                                     // leaking it, and surface the reason.
-                                    self.resource_manager
-                                        .release_resources_for_test(&test_id)
-                                        .await;
+                                    self.resource_manager.release_allocation(&allocation_id).await;
                                     return Err(e);
                                 },
                             }
@@ -480,6 +484,19 @@ impl ParallelExecutionEngine {
         while let Some(joined) = active_executions.join_next().await {
             self.absorb_completion(joined, &mut results).await;
         }
+
+        // Reclaim anything a panicked or cancelled task left reserved. A task
+        // that never returned an outcome still holds its slot, and without this
+        // the manager would refuse forever once enough tasks had died.
+        for allocation_id in spawned_allocations {
+            if let Some(leaked) = self.resource_manager.release_allocation(&allocation_id).await {
+                warn!(
+                    "Reclaimed allocation {} left held by a test that produced no outcome",
+                    leaked.resource_id
+                );
+            }
+        }
+
         debug!(
             "Session {session_id} produced {} execution outcome(s)",
             results.len()
@@ -499,13 +516,10 @@ impl ParallelExecutionEngine {
     ) {
         match joined {
             Ok(Ok(mut outcome)) => {
-                let test_name = outcome.result.context.test_name.clone();
-                // Hand the reserved capacity back so queued tests can use it,
-                // and take the released allocation with its real duration.
-                let released = self.resource_manager.release_resources_for_test(&test_name).await;
-                if let Some(allocation) = released
-                    .into_iter()
-                    .find(|allocation| allocation.resource_id == outcome.allocation.resource_id)
+                // Release by allocation id, not by test name: the two are
+                // filed under different fields and need not agree.
+                if let Some(allocation) =
+                    self.resource_manager.release_allocation(&outcome.allocation.resource_id).await
                 {
                     outcome.allocation = allocation;
                 }

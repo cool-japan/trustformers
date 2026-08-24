@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Test Utilities for Timeout Optimization
 //!
 //! This module provides convenient utilities and helper functions for test developers

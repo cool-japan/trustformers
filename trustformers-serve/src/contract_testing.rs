@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -315,11 +313,38 @@ impl ContractTestingFramework {
         contracts.get(id).cloned()
     }
 
+    /// The configuration this framework was built with.
+    ///
+    /// 0.2.1: the `config` field was stored and never read, so every knob in
+    /// [`ContractTestConfig`] was inert -- `enabled: false` still ran tests,
+    /// `strict_mode` never tightened anything and `test_timeout_ms` bounded
+    /// nothing. `enabled`, `strict_mode` and `test_timeout_ms` are honoured by
+    /// [`Self::run_contract_tests`] now; `version_tolerance`, `parallel_tests`,
+    /// `auto_generate_contracts`, `contract_storage_path` and `mock_responses`
+    /// are still carried without a consumer, which this accessor at least makes
+    /// visible to the caller.
+    pub fn config(&self) -> &ContractTestConfig {
+        &self.config
+    }
+
     /// Run contract tests for a specific contract
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when contract testing is disabled by configuration,
+    /// when `contract_id` is unknown, or when the run exceeds the configured
+    /// `test_timeout_ms`.
     pub async fn run_contract_tests(
         &self,
         contract_id: &str,
     ) -> Result<ContractTestResult, Box<dyn std::error::Error>> {
+        if !self.config.enabled {
+            return Err("contract testing is disabled by configuration \
+                        (ContractTestConfig::enabled is false)"
+                .into());
+        }
+        let deadline = std::time::Duration::from_millis(self.config.test_timeout_ms);
+        let started = std::time::Instant::now();
         let contract = self.get_contract(contract_id).await.ok_or("Contract not found")?;
 
         let test_id = Uuid::new_v4().to_string();
@@ -383,7 +408,18 @@ impl ContractTestingFramework {
         let success_rate =
             if total_tests > 0 { passed as f64 / total_tests as f64 * 100.0 } else { 0.0 };
 
-        let status = if failed > 0 {
+        if started.elapsed() > deadline {
+            return Err(format!(
+                "contract test run for {contract_id} exceeded the configured timeout of {}ms \
+                 (took {}ms)",
+                self.config.test_timeout_ms,
+                started.elapsed().as_millis()
+            )
+            .into());
+        }
+
+        // Strict mode is what the flag says it is: a warning is a failure.
+        let status = if failed > 0 || (self.config.strict_mode && warnings_count > 0) {
             TestStatus::Failed
         } else if warnings_count > 0 {
             TestStatus::Warning
@@ -1362,5 +1398,25 @@ mod tests {
         for t in types {
             assert!(!format!("{:?}", t).is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn test_disabled_config_refuses_to_run() {
+        // 0.2.1 regression guard: `enabled` used to be stored and ignored.
+        let config = ContractTestConfig {
+            enabled: false,
+            ..ContractTestConfig::default()
+        };
+        let framework = ContractTestingFramework::new(config);
+        assert!(!framework.config().enabled);
+        let result = framework.run_contract_tests("anything").await;
+        let message = match result {
+            Ok(_) => panic!("a disabled framework must refuse to run"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            message.contains("disabled by configuration"),
+            "error must name the config flag, got: {message}"
+        );
     }
 }

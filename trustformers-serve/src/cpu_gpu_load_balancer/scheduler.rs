@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Task Scheduling and Resource Assignment
 //!
 //! This module handles intelligent task scheduling and processor assignment
@@ -7,6 +5,7 @@
 
 use anyhow::Result;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
     config::{LoadBalancerConfig, LoadBalancingStrategy},
@@ -36,11 +35,19 @@ pub trait TaskScheduler {
     ) -> f32;
 }
 
-/// Default task scheduler implementation
+/// Default task scheduler implementation.
+///
+/// 0.2.1: the round-robin counters used to be plain `usize` fields, which
+/// [`TaskScheduler::assign_processor`] could not advance because it takes
+/// `&self`. The real `assign_round_robin` was therefore never called, and the
+/// `RoundRobin` strategy silently degraded to `task.id.len() % 2 == 0` -- a
+/// hash of the task *name*, which is not a rotation at all and pinned every
+/// task with an odd-length id onto the GPU. The counters are atomics now and
+/// the strategy really rotates.
 pub struct DefaultTaskScheduler {
     config: LoadBalancerConfig,
-    cpu_counter: usize,
-    gpu_counter: usize,
+    cpu_counter: AtomicUsize,
+    gpu_counter: AtomicUsize,
 }
 
 impl DefaultTaskScheduler {
@@ -48,19 +55,36 @@ impl DefaultTaskScheduler {
     pub fn new(config: LoadBalancerConfig) -> Self {
         Self {
             config,
-            cpu_counter: 0,
-            gpu_counter: 0,
+            cpu_counter: AtomicUsize::new(0),
+            gpu_counter: AtomicUsize::new(0),
         }
     }
 
-    /// Update round-robin counters
-    pub fn update_counters(&mut self, assigned_type: ProcessorType) {
+    /// Advance the round-robin counter for the processor kind just assigned.
+    pub fn update_counters(&self, assigned_type: ProcessorType) {
         match assigned_type {
             ProcessorType::CPU => {
-                self.cpu_counter = (self.cpu_counter + 1) % self.config.cpu_pool_size
+                let pool = self.config.cpu_pool_size.max(1);
+                let _ =
+                    self.cpu_counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                        Some((current + 1) % pool)
+                    });
             },
-            ProcessorType::GPU => self.gpu_counter += 1, // GPU counter can grow unbounded
+            // GPU counter can grow unbounded; it only ever feeds a modulo.
+            ProcessorType::GPU => {
+                self.gpu_counter.fetch_add(1, Ordering::SeqCst);
+            },
         }
+    }
+
+    /// Number of CPU assignments made so far, modulo the CPU pool size.
+    pub fn cpu_rotation(&self) -> usize {
+        self.cpu_counter.load(Ordering::SeqCst)
+    }
+
+    /// Number of GPU assignments made so far.
+    pub fn gpu_assignments(&self) -> usize {
+        self.gpu_counter.load(Ordering::SeqCst)
     }
 
     /// Get best CPU resource
@@ -91,20 +115,20 @@ impl DefaultTaskScheduler {
             .map(|(idx, _)| idx)
     }
 
-    /// Apply round-robin assignment
+    /// Apply round-robin assignment, advancing the rotation as it goes.
     fn assign_round_robin(
-        &mut self,
+        &self,
         resources: &[ProcessorResource],
     ) -> Option<(ProcessorType, usize)> {
-        // Alternate between CPU and GPU
-        if self.cpu_counter.is_multiple_of(2) {
+        // Alternate between CPU and GPU on the real rotation counter.
+        if self.cpu_counter.load(Ordering::SeqCst).is_multiple_of(2) {
             if let Some(cpu_idx) = resources
                 .iter()
                 .enumerate()
                 .find(|(_, r)| r.processor_type == ProcessorType::CPU && r.is_available())
                 .map(|(idx, _)| idx)
             {
-                self.cpu_counter += 1;
+                self.update_counters(ProcessorType::CPU);
                 return Some((ProcessorType::CPU, cpu_idx));
             }
         }
@@ -116,7 +140,7 @@ impl DefaultTaskScheduler {
             .find(|(_, r)| r.processor_type == ProcessorType::GPU && r.is_available())
             .map(|(idx, _)| idx)
         {
-            self.gpu_counter += 1;
+            self.update_counters(ProcessorType::GPU);
             return Some((ProcessorType::GPU, gpu_idx));
         }
 
@@ -173,19 +197,7 @@ impl TaskScheduler for DefaultTaskScheduler {
 
         // Apply strategy-based assignment
         match self.config.strategy {
-            LoadBalancingStrategy::RoundRobin => {
-                // Note: This modifies state, but we're treating it as immutable for simplicity
-                // In real implementation, this would need mutable access
-                if task.id.len().is_multiple_of(2) {
-                    if let Some(cpu_idx) = self.get_best_cpu(resources, task) {
-                        return Some((ProcessorType::CPU, cpu_idx));
-                    }
-                }
-                if let Some(gpu_idx) = self.get_best_gpu(resources, task) {
-                    return Some((ProcessorType::GPU, gpu_idx));
-                }
-                self.get_best_cpu(resources, task).map(|idx| (ProcessorType::CPU, idx))
-            },
+            LoadBalancingStrategy::RoundRobin => self.assign_round_robin(resources),
 
             LoadBalancingStrategy::LeastLoaded => resources
                 .iter()
@@ -727,5 +739,27 @@ mod tests {
         let cpu_eff = scheduler.calculate_processor_efficiency(&task, &cpu);
         // GPU should have higher efficiency for GPU-suitable tasks
         assert!(gpu_eff > cpu_eff);
+    }
+
+    #[test]
+    fn test_round_robin_strategy_actually_rotates() {
+        // 0.2.1 regression guard: the RoundRobin branch used to key off
+        // `task.id.len() % 2`, so the same task id always landed on the same
+        // processor and the rotation counter never moved.
+        let config = make_config_with_strategy(LoadBalancingStrategy::RoundRobin);
+        let scheduler = DefaultTaskScheduler::new(config);
+        let resources = vec![
+            make_cpu_resource(0, 0.1, 4 * 1024 * 1024 * 1024),
+            make_gpu_resource(1, 0.1, 4 * 1024 * 1024 * 1024),
+        ];
+        let task = ComputeTask::new("same-id".to_string(), TaskType::Inference);
+
+        let first = scheduler.assign_processor(&task, &resources);
+        let second = scheduler.assign_processor(&task, &resources);
+        assert_eq!(first, Some((ProcessorType::CPU, 0)));
+        // The identical task must not land on CPU twice in a row.
+        assert_eq!(second, Some((ProcessorType::GPU, 1)));
+        assert_eq!(scheduler.cpu_rotation(), 1);
+        assert_eq!(scheduler.gpu_assignments(), 1);
     }
 }

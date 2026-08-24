@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! CI/CD integration manager implementation
 
 use anyhow::Result;

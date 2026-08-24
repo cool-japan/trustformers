@@ -21,8 +21,8 @@ use super::super::types::{
 };
 use super::super::types::{TrendAnalysisResult, TrendComponent, TrendDataPoint};
 use super::series::{
-    autocorrelation, extract_series, linear_fit, mean, sample_std_dev, student_t_two_sided,
-    MetricSeries,
+    autocorrelation, extract_series, linear_fit, mean, sample_std_dev, slope_p_value,
+    student_t_two_sided, MetricSeries,
 };
 
 /// Minimum samples before a slope estimate has residual degrees of freedom.
@@ -83,11 +83,7 @@ impl TrendAnalyzer {
             let Some(fit) = linear_fit(&entry.values) else {
                 continue;
             };
-            if fit.slope_std_error <= 0.0 {
-                continue;
-            }
-            let t = fit.slope / fit.slope_std_error;
-            let significance = 1.0 - student_t_two_sided(t, entry.values.len() as f64 - 2.0);
+            let significance = 1.0 - slope_p_value(&fit, entry.values.len());
             let direction = if significance < 0.95 {
                 TrendDirection::Stable
             } else if fit.slope > 0.0 {

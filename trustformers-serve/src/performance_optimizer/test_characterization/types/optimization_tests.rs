@@ -266,15 +266,27 @@ fn test_feasibility_analyzer() {
 }
 
 #[test]
-fn test_flow_control_manager() {
-    let manager = FlowControlManager {
-        control_enabled: true,
-        flow_rate_limit: 1000.0,
-        backpressure_enabled: true,
-        control_policies: vec!["rate_limit".to_string()],
-    };
+fn test_flow_control_manager_start_stop_is_observable() {
+    let mut manager = FlowControlManager::new();
+    manager.flow_rate_limit = 1000.0;
+    manager.control_policies = vec!["rate_limit".to_string()];
+
     assert!(manager.control_enabled);
     assert!(manager.flow_rate_limit > 0.0);
+
+    // Configured but not started: flow control is not in force.
+    assert!(!manager.is_active());
+
+    manager.start_control().expect("control is enabled");
+    assert!(manager.is_active());
+
+    manager.stop_control().expect("stop always succeeds");
+    assert!(!manager.is_active());
+
+    // A disabled manager refuses to start rather than silently reporting success.
+    manager.control_enabled = false;
+    assert!(manager.start_control().is_err());
+    assert!(!manager.is_active());
 }
 
 #[test]

@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Core Encryption Service Implementation
 
 use super::cipher;
@@ -9,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 /// Main encryption service
@@ -17,7 +15,12 @@ use uuid::Uuid;
 pub struct EncryptionService {
     pub config: EncryptionConfig,
     key_store: Arc<RwLock<HashMap<String, EncryptionKey>>>,
-    dek_cache: Arc<Mutex<HashMap<String, DataEncryptionKey>>>,
+    // 0.2.1: a `dek_cache: Arc<Mutex<HashMap<String, DataEncryptionKey>>>`
+    // field lived here. This service has no envelope-encryption path at all --
+    // `DataEncryptionKey` is constructed nowhere outside a unit test -- so the
+    // cache was created empty and never read or written. It is deleted rather
+    // than kept as a cache that can never hit. `DataEncryptionKey` stays: it is
+    // the public shape an envelope-encryption implementation would use.
     stats: Arc<EncryptionStats>,
 }
 
@@ -121,7 +124,6 @@ impl EncryptionService {
         let service = Self {
             config,
             key_store: Arc::new(RwLock::new(HashMap::new())),
-            dek_cache: Arc::new(Mutex::new(HashMap::new())),
             stats: Arc::new(EncryptionStats::new()),
         };
 

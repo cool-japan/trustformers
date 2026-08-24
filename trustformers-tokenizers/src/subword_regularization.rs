@@ -144,6 +144,13 @@ impl<T: Tokenizer> SubwordRegularizer<T> {
         // simply "all real tokens".
         let attention_mask = vec![1u8; input_ids.len()];
 
+        // `offset_mapping` is deliberately absent rather than approximated.
+        // The wrapped tokenizer's per-fragment offsets index each *fragment*,
+        // and re-basing them onto the original text would also have to drop
+        // exactly the spans that `strip_prefix_ids`/`strip_suffix_ids` remove
+        // and re-anchor the envelope tokens' empty spans; none of that is done
+        // here, so `None` ("this encoding has no offset mapping") is the
+        // honest answer, not a shifted guess.
         Ok(TokenizedInput {
             input_ids,
             attention_mask,

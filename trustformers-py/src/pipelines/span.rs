@@ -28,32 +28,27 @@
 //! silently return the *wrong* substring rather than erroring, because both
 //! are usually still valid ranges, just of the wrong text. See the
 //! `..._by_byte_offsets...` tests below for both directions of this locked
-//! down with non-ASCII fixtures. Wiring this module up to a real
-//! offset-producing tokenizer and reporting HuggingFace-shaped `start`/`end`
-//! keys would need one more conversion step (byte offset -> codepoint
-//! offset, e.g. by counting `char_indices()` up to each byte position) that
-//! does not exist anywhere in this crate today; nothing here performs it
-//! silently.
+//! down with non-ASCII fixtures.
 //!
-//! Neither function is reachable from Python today. Both require a real
-//! `offset_mapping`, and every tokenizer this crate wraps
-//! (`WordPieceTokenizer`, `BPETokenizer`) still sets
-//! `TokenizedInput::offset_mapping` to `None` unconditionally (see
-//! `pipelines::span_pipeline_unavailable` for the up-to-date verification),
-//! so `PyTokenClassificationPipeline`/`PyQuestionAnsweringPipeline` refuse to
-//! construct rather than wrap a tokenizer that can never supply one. This
-//! module is the complete extraction algorithm on the *other* side of that
-//! gap -- given real (byte) offsets from any source, it produces real
-//! entities/answers today -- so it is `#[allow(dead_code)]` at the two public
-//! entry points (exercised by the tests below, not by any live caller)
-//! rather than deleted: remove the `#[allow(dead_code)]` and wire these in
-//! the moment a real offset-producing tokenizer exists in this crate (and
-//! add the byte->codepoint conversion above if the wiring reports
-//! HuggingFace-shaped output).
+//! Both functions are wired into the live pipelines today
+//! (`PyTokenClassificationPipeline`/`PyQuestionAnsweringPipeline` in
+//! `pipelines/mod.rs`, via [`classify_tokens_with_bert`]/[`answer_with_bert`]
+//! below): `WordPieceTokenizer`/`BPETokenizer`'s `Tokenizer::encode`/
+//! `encode_pair` populate a real `offset_mapping` unconditionally (verified
+//! 2026-08-24 by reading `trustformers-tokenizers` directly -- see those two
+//! entry points' own doc comments). The byte->codepoint conversion this doc
+//! comment used to say did not exist anywhere in this crate now does:
+//! `trustformers_tokenizers::byte_offsets_to_char_offsets`, applied once, at
+//! the Python dict-construction boundary in `pipelines/mod.rs` (`HfEntity`/
+//! `HfAnswer`) -- not here. This module's own `Entity`/`QaAnswer` stay
+//! byte-offset, matching this crate's in-tree convention; only the outermost
+//! HuggingFace-facing layer reports characters.
 
 use crate::pipelines::scoring::softmax;
 use trustformers_core::errors::{runtime_error, TrustformersError};
 use trustformers_core::tensor::Tensor;
+use trustformers_core::traits::{Model, TokenizedInput};
+use trustformers_models::bert::{BertForQuestionAnswering, BertForTokenClassification};
 
 /// One named entity, as `aggregation_strategy='simple'` reports it.
 #[derive(Debug, Clone, PartialEq)]
@@ -185,7 +180,6 @@ fn slice_text(text: &str, start: usize, end: usize) -> Result<String, Trustforme
 /// See [`per_token_predictions`]; also fails when `offsets.len()` does not
 /// match the logits' row count, or when an offset does not land on a
 /// character boundary of `text`.
-#[allow(dead_code)] // see this module's doc comment: not yet reachable from a constructible pipeline
 pub(crate) fn aggregate_entities_simple(
     logits: &Tensor,
     offsets: &[(usize, usize)],
@@ -257,7 +251,6 @@ pub(crate) fn aggregate_entities_simple(
 /// positions as `offsets`, when `context_range` is empty or out of bounds, or
 /// when the winning span's offsets do not land on a character boundary of
 /// `text`.
-#[allow(dead_code)] // see this module's doc comment: not yet reachable from a constructible pipeline
 pub(crate) fn extract_answer(
     start_logits: &Tensor,
     end_logits: &Tensor,
@@ -321,10 +314,132 @@ pub(crate) fn extract_answer(
     })
 }
 
+/// Named-entity recognition, end to end: a real forward pass through a
+/// loaded [`BertForTokenClassification`] head, then
+/// [`aggregate_entities_simple`] over its logits and `input`'s real offset
+/// mapping.
+///
+/// The non-Python half of `TokenClassificationPipeline.__call__` -- kept
+/// here, free of the Python C API, so the pipeline's actual behaviour (not
+/// just its plumbing) is unit-testable with a plain `cargo test`, matching
+/// `scoring::classify_with_bert`'s split for `text-classification`.
+///
+/// # Errors
+///
+/// Fails when `input` is empty, when it carries no `offset_mapping` (every
+/// `Tokenizer::encode`/`encode_pair` in this crate populates one today; this
+/// guards against a future tokenizer that does not), or per
+/// [`aggregate_entities_simple`].
+pub(crate) fn classify_tokens_with_bert(
+    model: &BertForTokenClassification,
+    input: TokenizedInput,
+    text: &str,
+    labels: &[String],
+) -> Result<Vec<Entity>, TrustformersError> {
+    if input.input_ids.is_empty() {
+        return Err(runtime_error(
+            "the tokenizer produced no tokens for this text, so there is nothing to classify"
+                .to_string(),
+        ));
+    }
+    let offsets = input.offset_mapping.clone().ok_or_else(|| {
+        runtime_error(
+            "the tokenizer did not produce an offset_mapping, which this pipeline requires to \
+             report entity spans"
+                .to_string(),
+        )
+    })?;
+
+    let outputs = model.forward(input)?;
+    aggregate_entities_simple(&outputs.logits, &offsets, text, labels)
+}
+
+/// Extractive question answering, end to end: a real forward pass through a
+/// loaded [`BertForQuestionAnswering`] head, then [`extract_answer`] over its
+/// `start_logits`/`end_logits`, `input`'s real offset mapping, and the
+/// context span located from `input`'s `token_type_ids`.
+///
+/// `input` must come from `Tokenizer::encode_pair(question, context)` --
+/// `context` here must be that same call's second argument, since
+/// `encode_pair`'s own contract is that offsets tagged `token_type_ids == 1`
+/// index it (see `WordPieceTokenizer::encode_pair`'s doc comment). The
+/// context span is every position with `token_type_ids == 1` *and* a
+/// non-`(0, 0)` offset: the trailing `[SEP]` also carries `token_type_ids ==
+/// 1`, but its `(0, 0)` offset marks it special, matching every other
+/// special/padding token in this crate's convention (a real token starting
+/// at byte 0 always has a non-empty span, so `(0, 0)` is unambiguous).
+///
+/// The non-Python half of `QuestionAnsweringPipeline.__call__` -- kept here
+/// for the same testability reason as [`classify_tokens_with_bert`].
+///
+/// # Errors
+///
+/// Fails when `input` is empty, when it carries no `offset_mapping` or
+/// `token_type_ids`, when no position is tagged as context (an empty second
+/// sequence, or a tokenizer that never sets `token_type_ids` to `1`), or per
+/// [`extract_answer`].
+pub(crate) fn answer_with_bert(
+    model: &BertForQuestionAnswering,
+    input: TokenizedInput,
+    context: &str,
+    max_answer_len: usize,
+) -> Result<QaAnswer, TrustformersError> {
+    if input.input_ids.is_empty() {
+        return Err(runtime_error(
+            "the tokenizer produced no tokens for this question/context pair, so there is \
+             nothing to answer from"
+                .to_string(),
+        ));
+    }
+    let offsets = input.offset_mapping.clone().ok_or_else(|| {
+        runtime_error(
+            "the tokenizer did not produce an offset_mapping, which this pipeline requires to \
+             report the answer span"
+                .to_string(),
+        )
+    })?;
+    let token_type_ids = input.token_type_ids.clone().ok_or_else(|| {
+        runtime_error(
+            "the tokenizer did not produce token_type_ids, which this pipeline requires to find \
+             the context span within the encoded question+context pair"
+                .to_string(),
+        )
+    })?;
+
+    let context_positions: Vec<usize> = (0..offsets.len())
+        .filter(|&index| token_type_ids.get(index) == Some(&1) && offsets[index] != (0, 0))
+        .collect();
+    let context_range = match (context_positions.first(), context_positions.last()) {
+        (Some(&first), Some(&last)) => first..(last + 1),
+        _ => {
+            return Err(runtime_error(
+                "the encoded input has no context tokens: token_type_ids never mark a \
+                 non-special second-sequence position, which means the context text tokenized \
+                 to nothing"
+                    .to_string(),
+            ))
+        },
+    };
+
+    let outputs = model.forward(input)?;
+    extract_answer(
+        &outputs.start_logits,
+        &outputs.end_logits,
+        &offsets,
+        context_range,
+        context,
+        max_answer_len,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use scirs2_core::ndarray::{ArrayD, IxDyn};
+    use std::collections::HashMap;
+    use trustformers_core::traits::Tokenizer;
+    use trustformers_models::bert::BertConfig;
+    use trustformers_tokenizers::wordpiece::WordPieceTokenizer;
 
     fn logits(shape: &[usize], values: Vec<f32>) -> Tensor {
         Tensor::F32(ArrayD::from_shape_vec(IxDyn(shape), values).expect("fixture shape matches"))
@@ -332,6 +447,54 @@ mod tests {
 
     fn labels(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    // ---- fixtures for classify_tokens_with_bert / answer_with_bert: a real
+    // WordPieceTokenizer (cased, so there is no accent-stripping/lowercasing
+    // to reason about) whose vocabulary holds only the five special tokens --
+    // every real word therefore falls back to a single `[UNK]` token spanning
+    // the *whole word* (see this module's doc comment: "A word collapsed to
+    // [UNK] ... reports the whole word's span"), which is exactly the real,
+    // documented behavior this test locks down, not a simplification of it.
+
+    fn tiny_vocab() -> HashMap<String, u32> {
+        [
+            ("[PAD]", 0u32),
+            ("[UNK]", 1),
+            ("[CLS]", 2),
+            ("[SEP]", 3),
+            ("[MASK]", 4),
+        ]
+        .into_iter()
+        .map(|(token, id)| (token.to_string(), id))
+        .collect()
+    }
+
+    fn tiny_wordpiece() -> WordPieceTokenizer {
+        WordPieceTokenizer::new(tiny_vocab(), false)
+    }
+
+    fn tiny_bert_config() -> BertConfig {
+        BertConfig {
+            vocab_size: 64,
+            hidden_size: 16,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            intermediate_size: 32,
+            hidden_dropout_prob: 0.0,
+            attention_probs_dropout_prob: 0.0,
+            max_position_embeddings: 32,
+            ..BertConfig::default()
+        }
+    }
+
+    fn tiny_token_classifier(num_labels: usize) -> BertForTokenClassification {
+        BertForTokenClassification::new(tiny_bert_config(), num_labels)
+            .expect("tiny BERT token-classifier config is valid")
+    }
+
+    fn tiny_qa_model() -> BertForQuestionAnswering {
+        BertForQuestionAnswering::new(tiny_bert_config()).expect("tiny BERT QA config is valid")
     }
 
     // ---- aggregate_entities_simple ----
@@ -681,5 +844,141 @@ mod tests {
             answer.chars().count(),
             "byte length and character count must differ for this fixture, or the test proves nothing"
         );
+    }
+
+    // ---- classify_tokens_with_bert / answer_with_bert: the real, wired-up
+    // path (real WordPieceTokenizer -> real forward pass -> real extraction),
+    // not the hand-crafted-offsets fixtures above. This is what actually
+    // backs `TokenClassificationPipeline`/`QuestionAnsweringPipeline` today.
+
+    /// A real end-to-end forward pass, using a label set with **no `"O"`**
+    /// label: `entity_type()` strips the `B-`/`I-` prefix from both
+    /// `"B-MISC"` and `"I-MISC"`, so every non-special token joins the same
+    /// `"MISC"` group regardless of which of the two the model's (randomly
+    /// initialized) head actually predicts per token -- there is no
+    /// "outside" class it could predict instead. That makes "exactly one
+    /// entity, spanning every content token" a structural guarantee, not a
+    /// property of the untrained weights, so this is deterministic without
+    /// needing to control the forward pass at all.
+    #[test]
+    fn classify_tokens_with_bert_runs_a_real_forward_pass_and_slices_the_real_text() {
+        let tokenizer = tiny_wordpiece();
+        let model = tiny_token_classifier(2);
+        let label_names = labels(&["B-MISC", "I-MISC"]);
+        let text = "El café está en el centro";
+
+        let input = tokenizer.encode(text).expect("the real tokenizer encodes real text");
+        let entities = classify_tokens_with_bert(&model, input, text, &label_names)
+            .expect("a real forward pass plus real aggregation succeeds");
+
+        assert_eq!(
+            entities.len(),
+            1,
+            "with no O label every content token merges into one MISC entity, got {entities:?}"
+        );
+        assert_eq!(entities[0].entity_group, "MISC");
+        // The whole point: this text's real WordPiece offsets (every real
+        // word falls back to one whole-word [UNK], see the fixture doc
+        // comment above) must recover the *exact* original text, accents
+        // included -- not a normalized, re-encoded, or [UNK]-corrupted copy.
+        assert_eq!(entities[0].word, text);
+        assert_eq!(entities[0].start, 0);
+        assert_eq!(entities[0].end, text.len());
+    }
+
+    /// A tokenizer that never produces `[UNK]`-worthy input (an empty
+    /// string) tokenizes to zero content tokens; `classify_tokens_with_bert`
+    /// must reject that up front rather than handing an empty logits tensor
+    /// to a forward pass that was never designed to see one.
+    #[test]
+    fn classify_tokens_with_bert_rejects_a_text_with_no_tokens_at_all() {
+        // A vocabulary with no [CLS]/[SEP] behaves as if encode() itself
+        // failed; instead, exercise the empty-input_ids guard directly via a
+        // hand-built empty TokenizedInput, matching classify_with_bert's own
+        // `rejects_an_empty_tokenization` precedent in scoring.rs.
+        let model = tiny_token_classifier(2);
+        let empty = TokenizedInput {
+            input_ids: vec![],
+            attention_mask: vec![],
+            token_type_ids: None,
+            special_tokens_mask: None,
+            offset_mapping: Some(vec![]),
+            overflowing_tokens: None,
+        };
+        assert!(
+            classify_tokens_with_bert(&model, empty, "", &labels(&["B-MISC", "I-MISC"])).is_err()
+        );
+    }
+
+    /// `answer_with_bert` must reject an `input` whose `offset_mapping` was
+    /// never populated -- a defensive guard against a future tokenizer that
+    /// does not set one, since every tokenizer in this crate does today.
+    #[test]
+    fn answer_with_bert_rejects_a_missing_offset_mapping() {
+        let model = tiny_qa_model();
+        let input = TokenizedInput {
+            input_ids: vec![2, 1, 3, 1, 3],
+            attention_mask: vec![1; 5],
+            token_type_ids: Some(vec![0, 0, 0, 1, 1]),
+            special_tokens_mask: None,
+            offset_mapping: None,
+            overflowing_tokens: None,
+        };
+        assert!(answer_with_bert(&model, input, "x", 10).is_err());
+    }
+
+    /// A single-word context tokenizes to exactly one content token, so
+    /// `context_range` (derived from real `token_type_ids`) covers exactly
+    /// one position -- the *only* valid `(start, end)` candidate `extract_
+    /// answer` can consider, regardless of the model's (randomly
+    /// initialized, uncontrolled) logits. This is also the module's
+    /// multi-byte fixture, now exercised through the real tokenizer and a
+    /// real forward pass rather than hand-crafted offsets: "café" is 4
+    /// Unicode scalar values but 5 UTF-8 bytes, so a correct implementation
+    /// must report a 5-wide span.
+    #[test]
+    fn answer_with_bert_runs_a_real_forward_pass_and_restricts_to_the_context() {
+        let tokenizer = tiny_wordpiece();
+        let model = tiny_qa_model();
+        let question = "What is this?";
+        let context = "café";
+
+        let input = tokenizer
+            .encode_pair(question, context)
+            .expect("the real tokenizer encodes a real question/context pair");
+        let answer = answer_with_bert(&model, input, context, 10)
+            .expect("a real forward pass plus real extraction succeeds");
+
+        assert_eq!(
+            answer.answer, "café",
+            "a single-token context has exactly one possible answer span, whatever the logits say"
+        );
+        assert_eq!(answer.start, 0);
+        assert_eq!(answer.end, "café".len());
+        assert_eq!(
+            answer.end - answer.start,
+            5,
+            "span width must be café's BYTE length (5), not its 4-character count"
+        );
+        assert_ne!(
+            answer.end - answer.start,
+            "café".chars().count(),
+            "byte length and character count must differ for this fixture, or the test proves nothing"
+        );
+    }
+
+    /// A context that tokenizes to nothing (an all-whitespace string, so
+    /// `basic_tokenize` produces zero words) leaves no position with
+    /// `token_type_ids == 1` and a non-`(0, 0)` offset -- `answer_with_bert`
+    /// must reject that rather than searching an empty (or worse, the
+    /// question's own) range.
+    #[test]
+    fn answer_with_bert_rejects_a_context_with_no_content_tokens() {
+        let tokenizer = tiny_wordpiece();
+        let model = tiny_qa_model();
+        let input = tokenizer
+            .encode_pair("a real question", "   ")
+            .expect("the real tokenizer encodes a whitespace-only context");
+        assert!(answer_with_bert(&model, input, "   ", 10).is_err());
     }
 }

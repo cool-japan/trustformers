@@ -229,11 +229,10 @@ pub fn matrix_exponential(matrix: &Array2<f32>) -> Result<Array2<f32>> {
             "matrix exponential requires finite entries".to_string(),
         ));
     }
-    let squarings = if norm > 0.5 {
-        (norm / 0.5).log2().ceil().max(0.0).min(60.0) as u32
-    } else {
-        0
-    };
+    // `norm` is finite (checked above) and greater than 0.5 in this branch, so
+    // the logarithm is finite and positive; the upper bound keeps the squaring
+    // loop and the 2^-k scale factor in range.
+    let squarings = if norm > 0.5 { (norm / 0.5).log2().ceil().clamp(0.0, 60.0) as u32 } else { 0 };
     let scale = 2.0_f64.powi(-(squarings as i32));
 
     let mut scaled = vec![0.0_f64; n * n];

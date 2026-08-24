@@ -1022,7 +1022,6 @@ impl PatternAnomalyDetector {
         Self {
             patterns: Vec::new(),
             match_threshold: 0.8,
-            anomalies_detected: 0,
         }
     }
 }
@@ -1034,19 +1033,64 @@ impl Default for PatternAnomalyDetector {
 }
 
 impl AnomalyDetector for PatternAnomalyDetector {
-    fn detect(&self) -> String {
+    fn describe(&self) -> String {
         format!(
-            "Pattern anomaly detector (patterns={}, threshold={:.2}, detected={})",
-            self.patterns.len(),
+            "Pattern anomaly detector: flags a metric whose coefficient of variation exceeds \
+             {:.2} ({} metric(s) watched; all when empty)",
             self.match_threshold,
-            self.anomalies_detected
+            self.patterns.len()
         )
     }
 
-    fn detect_anomalies(&self) -> TestCharacterizationResult<Vec<AnomalyInfo>> {
-        // Placeholder implementation - in real use, this would match patterns against data
-        // For now, return empty vec indicating no anomalies detected
-        Ok(Vec::new())
+    fn detect_anomalies(
+        &self,
+        observations: super::analysis::InsightObservations<'_>,
+        _baseline: &super::core::BaselineModel,
+    ) -> TestCharacterizationResult<Vec<AnomalyInfo>> {
+        if self.match_threshold <= 0.0 {
+            return Err(super::core::TestCharacterizationError::InvalidInput {
+                message: "match threshold must be positive".to_string(),
+                field: "match_threshold".to_string(),
+                value: self.match_threshold.to_string(),
+            });
+        }
+        let mut anomalies = Vec::new();
+        for key in observations.keys() {
+            if !self.patterns.is_empty() && !self.patterns.contains(&key) {
+                continue;
+            }
+            let values = observations.series(&key);
+            if values.len() < 3 {
+                continue;
+            }
+            let count = values.len() as f64;
+            let mean = values.iter().sum::<f64>() / count;
+            if mean.abs() <= f64::EPSILON {
+                // A mean of zero makes the coefficient of variation undefined.
+                continue;
+            }
+            let variance =
+                values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (count - 1.0);
+            let coefficient_of_variation = variance.sqrt() / mean.abs();
+            if coefficient_of_variation <= self.match_threshold {
+                continue;
+            }
+            anomalies.push(super::analysis::anomaly_from_deviation(
+                "pattern",
+                super::analysis::AnomalyType::Pattern,
+                &key,
+                coefficient_of_variation / self.match_threshold,
+                format!(
+                    "`{}` scattered with a coefficient of variation of {:.4} over {} samples \
+                     (threshold {:.2})",
+                    key,
+                    coefficient_of_variation,
+                    values.len(),
+                    self.match_threshold
+                ),
+            ));
+        }
+        Ok(anomalies)
     }
 }
 

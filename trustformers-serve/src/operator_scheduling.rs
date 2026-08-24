@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Operator Scheduling Module
 //!
 //! Provides intelligent scheduling of computational operators for optimal resource

@@ -17,8 +17,8 @@ use super::super::super::types::data_structures::TimestampedMetrics;
 use super::super::types::{DetectedPattern, PatternAnalysisResult, PatternType};
 use super::super::types::{PatternClassification, PatternRelationship, RelationshipType};
 use super::series::{
-    autocorrelation, extract_series, linear_fit, mean, pearson, sample_std_dev,
-    student_t_two_sided, MetricSeries,
+    autocorrelation, extract_series, linear_fit, mean, pearson, sample_std_dev, slope_p_value,
+    student_t_two_sided, varies_materially, MetricSeries,
 };
 
 /// Minimum samples before any pattern claim is defensible.
@@ -143,9 +143,8 @@ fn detect_for_series(
     let total_duration = step * values.len() as u32;
 
     if let Some(fit) = linear_fit(values) {
-        if fit.slope_std_error > 0.0 {
-            let t = fit.slope / fit.slope_std_error;
-            let p_value = student_t_two_sided(t, values.len() as f64 - 2.0);
+        {
+            let p_value = slope_p_value(&fit, values.len());
             if p_value < 0.05 && fit.r_squared > 0.1 {
                 let mut characteristics = HashMap::new();
                 characteristics.insert("slope_per_sample".to_string(), fit.slope);
@@ -196,7 +195,7 @@ fn detect_for_series(
     }
 
     if let (Some(m), Some(sd)) = (mean(values), sample_std_dev(values)) {
-        if sd > 0.0 {
+        if varies_materially(values) {
             let mut occurrences = Vec::new();
             let mut peak_z = 0.0f64;
             for (index, value) in values.iter().enumerate() {
@@ -263,6 +262,9 @@ fn level_shift(values: &[f64]) -> Option<LevelShift> {
     let midpoint = values.len() / 2;
     let first = values.get(..midpoint)?;
     let second = values.get(midpoint..)?;
+    if !varies_materially(values) {
+        return None;
+    }
     let (m1, m2) = (mean(first)?, mean(second)?);
     let (sd1, sd2) = (sample_std_dev(first)?, sample_std_dev(second)?);
     let (n1, n2) = (first.len() as f64, second.len() as f64);

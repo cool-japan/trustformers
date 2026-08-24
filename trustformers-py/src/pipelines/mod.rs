@@ -19,34 +19,49 @@
 //!   [`trustformers_models::bert::BertForSequenceClassification`] forward pass
 //!   and reports a real softmax over its logits, labelled from the
 //!   checkpoint's `id2label`.
-//! * `token-classification` and `question-answering` refuse construction with
-//!   a structured `NotImplementedError` that says exactly what is missing --
-//!   see [`PyTokenClassificationPipeline`]. As of this pass, real
-//!   `BertForTokenClassification`/`BertForQuestionAnswering` Python wrappers
-//!   exist (`crate::models::PyBertForTokenClassification`/
-//!   `PyBertForQuestionAnswering`) and can be called directly for real
-//!   per-position logits, and the `simple`-aggregation NER/QA extraction math
-//!   itself is real and tested too (`span::aggregate_entities_simple`/
-//!   `span::extract_answer`) -- what still blocks the *pipeline* (which must
-//!   report HuggingFace's character-level `start`/`end` keys) is that
-//!   `trustformers-tokenizers`'s `WordPieceTokenizer`/`BPETokenizer` still set
-//!   `TokenizedInput::offset_mapping` to `None` unconditionally (re-verified
-//!   2026-08-24; see [`span_pipeline_unavailable`]), so `span`'s two
-//!   functions have no real offsets to be handed today and are not yet wired
-//!   into a live pipeline.
+//! * `token-classification` runs a real
+//!   [`trustformers_models::bert::BertForTokenClassification`] forward pass,
+//!   aggregates it with `aggregation_strategy='simple'`
+//!   (`span::classify_tokens_with_bert`/`span::aggregate_entities_simple`),
+//!   and reports real `entity_group`/`score`/`word`/`start`/`end` entries.
+//! * `question-answering` runs a real
+//!   [`trustformers_models::bert::BertForQuestionAnswering`] forward pass and
+//!   extracts the real joint-argmax answer span
+//!   (`span::answer_with_bert`/`span::extract_answer`).
+//!
+//! Both span pipelines became real once `trustformers-tokenizers`'s
+//! `WordPieceTokenizer`/`BPETokenizer` started populating a real
+//! `offset_mapping` (verified 2026-08-24 by reading that crate directly, not
+//! by trusting a handoff note -- `Tokenizer::encode`/`encode_pair` both
+//! return `Some(offsets)` unconditionally today). `span`'s extraction math
+//! reports **byte** offsets, matching this crate's in-tree convention; the
+//! HuggingFace-facing `start`/`end` keys these pipelines report are
+//! **character** offsets, converted once at this module's Python boundary
+//! (see [`HfEntity`]/[`HfAnswer`]) with
+//! `trustformers_tokenizers::byte_offsets_to_char_offsets` -- not silently,
+//! and not inside `span` itself, which stays byte-offset throughout.
+//!
+//! `question-answering` requires a `WordPieceTokenizer`: see
+//! [`qa_requires_wordpiece`] for why a `BPETokenizer` is rejected instead of
+//! (mis)supported.
 
 mod scoring;
 mod span;
 
-use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::PyDict;
 use pyo3::IntoPyObjectExt;
 
 use crate::models::generation::{continuation_tokens, generate_with_gpt2, SamplingOptions};
-use crate::models::{PyBertForSequenceClassification, PyGPT2LMHeadModel};
+use crate::models::{
+    PyBertForQuestionAnswering, PyBertForSequenceClassification, PyBertForTokenClassification,
+    PyGPT2LMHeadModel,
+};
 use crate::tokenizers::{PyBPETokenizer, PyWordPieceTokenizer};
 use scoring::{classify_with_bert, ScoredLabel};
+use span::{Entity, QaAnswer};
+use trustformers_core::errors::TrustformersError;
 use trustformers_core::traits::{TokenizedInput, Tokenizer};
 
 /// Owned Python reference alias (pyo3 0.28 removed the `PyObject` type alias from
@@ -447,101 +462,266 @@ impl PyTextClassificationPipeline {
 // token-classification / question-answering
 // ---------------------------------------------------------------------------
 
-/// Why the two span-level pipelines cannot be built yet.
+/// Convert `entities`' real **byte** offsets (this crate's in-tree
+/// convention; see `span`'s module doc) to HuggingFace's real **character**
+/// offsets, once, at this Python boundary -- explicitly, not silently.
+/// `span::Entity` itself is never mutated in place: it stays byte-offset,
+/// matching its own documented contract.
 ///
-/// This used to cite two gaps: no Python wrapper for the underlying BERT task
-/// model, and no character offsets from this crate's tokenizers. The first
-/// gap is closed -- `crate::models::PyBertForTokenClassification` and
-/// `PyBertForQuestionAnswering` are real, callable Python classes today (real
-/// forward pass, real logits, real loss when labels/positions are given). The
-/// second gap is not: re-verified 2026-08-24 by reading
-/// `trustformers-tokenizers` directly (not trusting any handoff note) --
-/// `WordPieceTokenizer::encode`/`encode_pair` (`src/wordpiece.rs`, what BERT
-/// checkpoints use) still construct every `TokenizedInput` with
-/// `offset_mapping: None`, unconditionally, with no offset-computing code path
-/// anywhere in the file. `BPETokenizer` (`src/bpe.rs`) gained a real, tested
-/// `tokenize_with_offsets` helper this wave, but it is (a) not part of the
-/// `Tokenizer` trait `encode`/`encode_pair` this crate's `PipelineTokenizer`
-/// actually calls -- those two still hardcode `offset_mapping: None` exactly
-/// as before -- and (b) BPE-only, so it would not help BERT/WordPiece checkpoints
-/// in any case. Reporting token indices under HuggingFace's `start`/`end` keys
-/// -- which are *character* offsets -- would be wrong in a way callers cannot
-/// detect: this crate's own offset convention (`span::slice_text`,
-/// `BPETokenizer::tokenize_with_offsets`) is *byte* offsets, not character
-/// offsets (see `span`'s module doc), so even a real offset-producing
-/// tokenizer would need an extra byte->codepoint conversion step, not
-/// implemented anywhere here, before its output could honestly fill these
-/// keys. So this pipeline refuses to construct rather than build an object
-/// that can only ever fail, or worse, silently mis-report spans.
-fn span_pipeline_unavailable(task: &str, model_name: &str, head_name: &str) -> PyErr {
-    PyNotImplementedError::new_err(format!(
-        "the '{task}' pipeline is not available. `trustformers_models::bert::{model_name}` is a \
-         real model with a real {head_name} head, and this crate now exposes a real Python \
-         wrapper for it (`trustformers.{model_name}`) -- call it directly for real per-position \
-         logits. But this HuggingFace-shaped pipeline still cannot report the character-level \
-         `start`/`end` keys HuggingFace's output format needs: trustformers-tokenizers's \
-         WordPieceTokenizer and BPETokenizer `Tokenizer`-trait `encode`/`encode_pair` methods \
-         (what this crate's tokenizer wrappers call) both still set \
-         `TokenizedInput::offset_mapping` to `None` unconditionally (re-verified 2026-08-24). This \
-         is a refusal rather than the placeholder result the pipeline used to return."
+/// # Errors
+///
+/// Fails when an entity's byte offsets do not land on `text`'s character
+/// boundaries (they always do for offsets this crate's own tokenizers
+/// produced from `text` itself; see
+/// `trustformers_tokenizers::byte_offsets_to_char_offsets`).
+fn entities_with_char_offsets(
+    text: &str,
+    entities: Vec<Entity>,
+) -> Result<Vec<HfEntity>, TrustformersError> {
+    if entities.is_empty() {
+        return Ok(Vec::new());
+    }
+    let byte_spans: Vec<(usize, usize)> =
+        entities.iter().map(|entity| (entity.start, entity.end)).collect();
+    let char_spans = trustformers_tokenizers::byte_offsets_to_char_offsets(text, &byte_spans)?;
+    Ok(entities
+        .into_iter()
+        .zip(char_spans)
+        .map(|(entity, (start, end))| HfEntity {
+            word: entity.word,
+            entity_group: entity.entity_group,
+            score: entity.score,
+            start,
+            end,
+        })
+        .collect())
+}
+
+/// The same byte->character conversion as [`entities_with_char_offsets`], for
+/// one [`QaAnswer`].
+fn answer_with_char_offsets(
+    context: &str,
+    answer: QaAnswer,
+) -> Result<HfAnswer, TrustformersError> {
+    let char_spans = trustformers_tokenizers::byte_offsets_to_char_offsets(
+        context,
+        &[(answer.start, answer.end)],
+    )?;
+    let (start, end) = char_spans[0];
+    Ok(HfAnswer {
+        answer: answer.answer,
+        score: answer.score,
+        start,
+        end,
+    })
+}
+
+/// Why a `BPETokenizer` cannot back the `question-answering` pipeline.
+///
+/// `BPETokenizer::encode_pair` joins the question and context into one
+/// string with a single space and re-encodes it as a single sequence: no
+/// separator token, no `token_type_ids`, and its `offset_mapping` indexes
+/// that *joined* string rather than either original sequence on its own (see
+/// the `trustformers-tokenizers` handoff this pass built on). Without
+/// `token_type_ids` there is no reliable way to know where the context
+/// begins among the encoded positions -- and `BertForQuestionAnswering`, the
+/// only question-answering head this crate wraps, is a WordPiece-family
+/// model in any case, so there is no real checkpoint this would ever need to
+/// serve.
+fn qa_requires_wordpiece(tokenizer: &Bound<'_, PyAny>) -> PyErr {
+    PyTypeError::new_err(format!(
+        "question-answering requires a WordPieceTokenizer, got {}. BPETokenizer::encode_pair \
+         joins the question and context into one string with a single space and reports offsets \
+         into that joined string, not per-sequence offsets with a real separator token, so there \
+         is no reliable way to find where the context begins in the encoded sequence -- and \
+         BertForQuestionAnswering (the only question-answering head in this crate) is a \
+         WordPiece-family model in any case.",
+        type_name(tokenizer)
     ))
 }
 
-/// Token classification (NER) pipeline.
+/// Token classification (NER) pipeline: real per-token forward pass through a
+/// [`crate::models::PyBertForTokenClassification`] head, aggregated with
+/// `aggregation_strategy='simple'` and reported at real character offsets.
 ///
-/// Construction always fails; see [`span_pipeline_unavailable`]. The class
-/// stays registered so `trustformers.TokenClassificationPipeline` keeps
-/// resolving, but it can no longer hand back the fixed `B-PER` / `"John"` /
-/// `0..4` entity it used to invent for every input. For real per-token
-/// inference without HuggingFace's `start`/`end` character offsets, call
-/// `trustformers.BertForTokenClassification` directly instead of this
-/// pipeline.
+/// Used to always refuse construction (`trustformers-tokenizers` had no
+/// offset mapping); before that, it answered a fixed `B-PER` entity named
+/// `"John"` at characters `0..4` for every input. Neither survives: a model
+/// without a per-token head is a `TypeError` from `__init__`, and every
+/// `entity_group`/`score`/`word`/`start`/`end` below comes from a real
+/// forward pass over the actual input text.
 #[pyclass(name = "TokenClassificationPipeline", module = "trustformers", extends = PyPipeline)]
-pub struct PyTokenClassificationPipeline;
+pub struct PyTokenClassificationPipeline {
+    /// The token-classification head, resolved at construction.
+    model: Py<PyBertForTokenClassification>,
+    /// The tokenizer, resolved at construction. Either `WordPieceTokenizer`
+    /// or `BPETokenizer` works here: NER needs only `Tokenizer::encode`'s
+    /// single-sequence offsets, which both now produce for real.
+    tokenizer: PipelineTokenizer,
+}
 
-#[pymethods]
 impl PyTokenClassificationPipeline {
-    /// Refuse construction with a structured `NotImplementedError`.
-    #[new]
-    #[pyo3(signature = (*args, **kwargs))]
-    pub fn new(
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<(Self, PyPipeline)> {
-        let _ = (args, kwargs);
-        Err(span_pipeline_unavailable(
-            "token-classification",
-            "BertForTokenClassification",
-            "per-token classification",
-        ))
+    /// Classify one text: real tokenization, real forward pass, real
+    /// `simple`-strategy aggregation, real byte->character conversion.
+    fn classify(&self, py: Python<'_>, text: &str) -> PyResult<Vec<HfEntity>> {
+        let encoded = self.tokenizer.encode(py, text)?;
+        let model = self.model.try_borrow(py)?;
+        let entities =
+            span::classify_tokens_with_bert(model.model(), encoded, text, model.labels())
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        entities_with_char_offsets(text, entities).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 }
 
-/// Question answering pipeline.
+#[pymethods]
+impl PyTokenClassificationPipeline {
+    /// Create a new token-classification (NER) pipeline.
+    #[new]
+    #[pyo3(signature = (model, tokenizer, device=None))]
+    pub fn new(
+        model: &Bound<'_, PyAny>,
+        tokenizer: &Bound<'_, PyAny>,
+        device: Option<&str>,
+    ) -> PyResult<(Self, PyPipeline)> {
+        let head = model.cast::<PyBertForTokenClassification>().map_err(|_| {
+            PyTypeError::new_err(format!(
+                "token-classification requires a BertForTokenClassification, got {}",
+                type_name(model)
+            ))
+        })?;
+        let resolved_tokenizer = PipelineTokenizer::resolve(tokenizer)?;
+
+        Ok((
+            PyTokenClassificationPipeline {
+                model: head.clone().unbind(),
+                tokenizer: resolved_tokenizer,
+            },
+            PyPipeline::base(model, tokenizer, device),
+        ))
+    }
+
+    /// Tag text with named entities.
+    ///
+    /// Only `aggregation_strategy='simple'` is implemented (the default): an
+    /// unrecognised strategy is rejected outright rather than silently
+    /// treated as `'simple'`.
+    #[pyo3(signature = (text_inputs, aggregation_strategy=None, **kwargs))]
+    pub fn __call__(
+        &self,
+        py: Python<'_>,
+        text_inputs: TextInputs,
+        aggregation_strategy: Option<String>,
+        kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyObject> {
+        reject_unsupported_kwargs(kwargs)?;
+        if let Some(strategy) = aggregation_strategy.as_deref() {
+            if strategy != "simple" {
+                return Err(PyValueError::new_err(format!(
+                    "aggregation_strategy '{strategy}' is not supported; only 'simple' \
+                     (contiguous same-type tokens merged into one entity) is implemented"
+                )));
+            }
+        }
+
+        match text_inputs {
+            TextInputs::Single(text) => self.classify(py, &text)?.into_py_any(py),
+            TextInputs::Batch(texts) => texts
+                .iter()
+                .map(|text| self.classify(py, text))
+                .collect::<PyResult<Vec<Vec<HfEntity>>>>()?
+                .into_py_any(py),
+        }
+    }
+}
+
+/// Question answering pipeline: real forward pass through a
+/// [`crate::models::PyBertForQuestionAnswering`] head, extracting the real
+/// joint-argmax answer span and reporting it at real character offsets.
 ///
-/// Construction always fails; see [`span_pipeline_unavailable`]. It used to
-/// answer the literal string `"Example answer"` with `score: 0.85` for every
-/// question. For real start/end logits without HuggingFace's `start`/`end`
-/// character offsets, call `trustformers.BertForQuestionAnswering` directly
-/// instead of this pipeline.
+/// Used to always refuse construction; before that, it answered the literal
+/// string `"Example answer"` with `score: 0.85` for every question. Neither
+/// survives: `answer`/`score`/`start`/`end` below come from a real forward
+/// pass restricted to the real context span.
+///
+/// The tokenizer must be a `WordPieceTokenizer`; see
+/// [`qa_requires_wordpiece`] for why `BPETokenizer` is rejected rather than
+/// (mis)supported.
 #[pyclass(name = "QuestionAnsweringPipeline", module = "trustformers", extends = PyPipeline)]
-pub struct PyQuestionAnsweringPipeline;
+pub struct PyQuestionAnsweringPipeline {
+    /// The question-answering head, resolved at construction.
+    model: Py<PyBertForQuestionAnswering>,
+    /// The tokenizer, resolved at construction. `WordPieceTokenizer` only --
+    /// see [`qa_requires_wordpiece`].
+    tokenizer: Py<PyWordPieceTokenizer>,
+}
+
+impl PyQuestionAnsweringPipeline {
+    /// Answer one question against one context: real pair tokenization, real
+    /// forward pass, real extraction, real byte->character conversion.
+    fn answer(
+        &self,
+        py: Python<'_>,
+        question: &str,
+        context: &str,
+        max_answer_len: usize,
+    ) -> PyResult<HfAnswer> {
+        let encoded = self
+            .tokenizer
+            .try_borrow(py)?
+            .tokenizer()
+            .encode_pair(question, context)
+            .map_err(|e| PyValueError::new_err(format!("Tokenization failed: {e}")))?;
+        let model = self.model.try_borrow(py)?;
+        let answer = span::answer_with_bert(model.model(), encoded, context, max_answer_len)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        answer_with_char_offsets(context, answer).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+}
 
 #[pymethods]
 impl PyQuestionAnsweringPipeline {
-    /// Refuse construction with a structured `NotImplementedError`.
+    /// Create a new question-answering pipeline.
     #[new]
-    #[pyo3(signature = (*args, **kwargs))]
+    #[pyo3(signature = (model, tokenizer, device=None))]
     pub fn new(
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
+        model: &Bound<'_, PyAny>,
+        tokenizer: &Bound<'_, PyAny>,
+        device: Option<&str>,
     ) -> PyResult<(Self, PyPipeline)> {
-        let _ = (args, kwargs);
-        Err(span_pipeline_unavailable(
-            "question-answering",
-            "BertForQuestionAnswering",
-            "span-prediction",
+        let head = model.cast::<PyBertForQuestionAnswering>().map_err(|_| {
+            PyTypeError::new_err(format!(
+                "question-answering requires a BertForQuestionAnswering, got {}",
+                type_name(model)
+            ))
+        })?;
+        let wordpiece = tokenizer
+            .cast::<PyWordPieceTokenizer>()
+            .map_err(|_| qa_requires_wordpiece(tokenizer))?;
+
+        Ok((
+            PyQuestionAnsweringPipeline {
+                model: head.clone().unbind(),
+                tokenizer: wordpiece.clone().unbind(),
+            },
+            PyPipeline::base(model, tokenizer, device),
         ))
+    }
+
+    /// Extract an answer to `question` from `context`.
+    ///
+    /// `max_answer_len` bounds the answer span's *token* width (HuggingFace's
+    /// own default is 15).
+    #[pyo3(signature = (question, context, max_answer_len=15, **kwargs))]
+    pub fn __call__(
+        &self,
+        py: Python<'_>,
+        question: String,
+        context: String,
+        max_answer_len: usize,
+        kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyObject> {
+        reject_unsupported_kwargs(kwargs)?;
+        self.answer(py, &question, &context, max_answer_len)?.into_py_any(py)
     }
 }
 
@@ -594,6 +774,80 @@ impl<'py> IntoPyObject<'py> for ScoredLabel {
     }
 }
 
+/// One named entity as `TokenClassificationPipeline.__call__` reports it to
+/// Python: HuggingFace's own `aggregation_strategy='simple'` keys
+/// (`entity_group`/`score`/`word`/`start`/`end`), with `start`/`end` in
+/// Unicode **characters** -- converted from `span::Entity`'s native byte
+/// offsets by [`entities_with_char_offsets`], once, at this module's Python
+/// boundary. `word` is unaffected by the conversion (already the correct
+/// surface text either way).
+#[derive(Debug, Clone, PartialEq)]
+struct HfEntity {
+    /// The entity's surface text, unchanged by the byte->character
+    /// conversion (which only touches `start`/`end`).
+    word: String,
+    /// The entity type, `B-`/`I-` prefix stripped (see
+    /// `span::entity_type`).
+    entity_group: String,
+    /// Mean softmax probability of the winning label across the entity's
+    /// tokens.
+    score: f32,
+    /// Start **character** offset in the original text (inclusive) --
+    /// HuggingFace's convention, so `text[start:end]` indexes correctly in
+    /// Python.
+    start: usize,
+    /// End **character** offset in the original text (exclusive).
+    end: usize,
+}
+
+impl<'py> IntoPyObject<'py> for HfEntity {
+    type Target = PyDict;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        let dict = PyDict::new(py);
+        dict.set_item("entity_group", self.entity_group)?;
+        dict.set_item("score", self.score)?;
+        dict.set_item("word", self.word)?;
+        dict.set_item("start", self.start)?;
+        dict.set_item("end", self.end)?;
+        Ok(dict)
+    }
+}
+
+/// One extracted answer as `QuestionAnsweringPipeline.__call__` reports it to
+/// Python -- HuggingFace's own `score`/`start`/`end`/`answer` keys, with
+/// `start`/`end` in Unicode **characters** (see [`HfEntity`]'s doc comment
+/// for the same conversion, applied here by [`answer_with_char_offsets`]).
+#[derive(Debug, Clone, PartialEq)]
+struct HfAnswer {
+    /// The answer's surface text, sliced from the original context.
+    answer: String,
+    /// `softmax(start_logits)[start] * softmax(end_logits)[end]` at the
+    /// chosen span.
+    score: f32,
+    /// Start **character** offset in the original context (inclusive).
+    start: usize,
+    /// End **character** offset in the original context (exclusive).
+    end: usize,
+}
+
+impl<'py> IntoPyObject<'py> for HfAnswer {
+    type Target = PyDict;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        let dict = PyDict::new(py);
+        dict.set_item("score", self.score)?;
+        dict.set_item("start", self.start)?;
+        dict.set_item("end", self.end)?;
+        dict.set_item("answer", self.answer)?;
+        Ok(dict)
+    }
+}
+
 #[cfg(test)]
 mod task_tests {
     use super::*;
@@ -640,5 +894,159 @@ mod task_tests {
                 "advertised task '{task}' does not resolve"
             );
         }
+    }
+
+    // ---- entities_with_char_offsets / answer_with_char_offsets: the
+    // byte->character conversion this module's Python boundary applies --
+    // the exact functions `PyTokenClassificationPipeline::classify`/
+    // `PyQuestionAnsweringPipeline::answer` call live. `span::Entity`'s own
+    // pure tests already lock down that its *byte* offsets are correct (see
+    // `slices_multibyte_accented_text_by_byte_offsets_not_char_counts`); what
+    // is new here is the conversion this module adds on top, using the same
+    // multi-byte fixtures so the two are directly comparable.
+
+    /// The discriminating assertion for this pass's byte/character fix:
+    /// `span::Entity`'s pure test asserts "café" is a **5-byte-wide** span;
+    /// this asserts the *converted* `HfEntity` -- what Python actually
+    /// receives -- reports the **same** span **4 characters wide**, and that
+    /// slicing `text` by *characters* at that width recovers "café" exactly
+    /// (which byte-slicing at a 4-wide range would not: it would cut the
+    /// last byte off "é").
+    #[test]
+    fn entities_with_char_offsets_converts_byte_widths_to_character_widths() {
+        let text = "El café está en el centro";
+        let byte_start = text.find("café").expect("fixture contains café");
+        let byte_end = byte_start + "café".len();
+        assert_eq!(byte_end - byte_start, 5, "café is 5 UTF-8 bytes wide");
+
+        let entity = Entity {
+            word: "café".to_string(),
+            entity_group: "MISC".to_string(),
+            score: 0.99,
+            start: byte_start,
+            end: byte_end,
+        };
+
+        let converted =
+            entities_with_char_offsets(text, vec![entity]).expect("valid byte offsets convert");
+        assert_eq!(converted.len(), 1);
+        let entity = &converted[0];
+
+        assert_eq!(
+            entity.end - entity.start,
+            4,
+            "café must convert to a 4-CHARACTER-wide span"
+        );
+        assert_ne!(
+            entity.end - entity.start,
+            byte_end - byte_start,
+            "the converted width must differ from the original byte width, or this test proves \
+             nothing"
+        );
+        // The property that actually matters to a Python caller: character
+        // slicing at the converted offsets recovers the real word.
+        let sliced: String =
+            text.chars().skip(entity.start).take(entity.end - entity.start).collect();
+        assert_eq!(sliced, entity.word);
+        assert_eq!(
+            entity.word, "café",
+            "the conversion must not alter the surface text itself"
+        );
+    }
+
+    /// The same discriminator, for a CJK fixture mixed with ASCII: "東京" is
+    /// 6 UTF-8 bytes but 2 characters. Also covers more than one entity in a
+    /// single call, and an entity that is not the first thing in the text
+    /// (so the character-index arithmetic must count from the true start of
+    /// `text`, not from the entity's own span).
+    #[test]
+    fn entities_with_char_offsets_handles_a_cjk_fixture_and_multiple_entities() {
+        let text = "Tim visited 東京 last year";
+        let tim_start = 0;
+        let tim_end = "Tim".len();
+        let tokyo_start = text.find("東京").expect("fixture contains 東京");
+        let tokyo_end = tokyo_start + "東京".len();
+        assert_eq!(tokyo_end - tokyo_start, 6, "東京 is 6 UTF-8 bytes wide");
+
+        let entities = vec![
+            Entity {
+                word: "Tim".to_string(),
+                entity_group: "PER".to_string(),
+                score: 0.9,
+                start: tim_start,
+                end: tim_end,
+            },
+            Entity {
+                word: "東京".to_string(),
+                entity_group: "LOC".to_string(),
+                score: 0.95,
+                start: tokyo_start,
+                end: tokyo_end,
+            },
+        ];
+
+        let converted =
+            entities_with_char_offsets(text, entities).expect("valid byte offsets convert");
+        assert_eq!(converted.len(), 2);
+
+        // ASCII prefix: byte and character offsets agree.
+        assert_eq!(converted[0].start, tim_start);
+        assert_eq!(converted[0].end, tim_end);
+
+        // The CJK entity: 2 characters wide, not 6.
+        assert_eq!(
+            converted[1].end - converted[1].start,
+            2,
+            "東京 must convert to a 2-CHARACTER span"
+        );
+        let sliced: String = text
+            .chars()
+            .skip(converted[1].start)
+            .take(converted[1].end - converted[1].start)
+            .collect();
+        assert_eq!(sliced, "東京");
+    }
+
+    /// An empty entity list must convert to an empty list, not an error --
+    /// `byte_offsets_to_char_offsets` is never called with an empty slice in
+    /// the first place.
+    #[test]
+    fn entities_with_char_offsets_of_an_empty_list_is_empty() {
+        assert_eq!(
+            entities_with_char_offsets("anything", vec![]).expect("empty list converts"),
+            vec![]
+        );
+    }
+
+    /// The same conversion, for `QaAnswer` -> `HfAnswer`: byte-wide "café"
+    /// must convert to a character-wide span whose text still slices
+    /// correctly.
+    #[test]
+    fn answer_with_char_offsets_converts_byte_widths_to_character_widths() {
+        let context = "the café is closed";
+        let byte_start = context.find("café").expect("fixture contains café");
+        let byte_end = byte_start + "café".len();
+
+        let answer = QaAnswer {
+            answer: "café".to_string(),
+            score: 0.8,
+            start: byte_start,
+            end: byte_end,
+        };
+        let converted =
+            answer_with_char_offsets(context, answer).expect("valid byte offsets convert");
+
+        assert_eq!(
+            converted.end - converted.start,
+            4,
+            "café must convert to a 4-CHARACTER-wide span"
+        );
+        let sliced: String = context
+            .chars()
+            .skip(converted.start)
+            .take(converted.end - converted.start)
+            .collect();
+        assert_eq!(sliced, "café");
+        assert_eq!(converted.answer, "café");
     }
 }

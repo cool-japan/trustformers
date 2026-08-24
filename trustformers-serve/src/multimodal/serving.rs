@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Multi-modal serving — image+text request handling
 //!
 //! Provides validated multi-modal request/response types and a processor

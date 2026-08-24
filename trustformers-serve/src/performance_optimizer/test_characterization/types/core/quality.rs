@@ -37,14 +37,17 @@ impl SafetyValidationRule for IsolationSafetyRule {
     }
 }
 
+/// Flags readings outside a configured band.
+///
+/// The `anomalies_detected` counter was removed in 0.2.1: nothing ever
+/// incremented it, so it reported zero detections forever while
+/// `detect_anomalies` returned an empty vector regardless of its input.
 #[derive(Debug, Clone)]
 pub struct ThresholdAnomalyDetector {
     /// Upper threshold
     pub upper_threshold: f64,
     /// Lower threshold
     pub lower_threshold: f64,
-    /// Anomalies detected
-    pub anomalies_detected: u64,
 }
 
 impl ThresholdAnomalyDetector {
@@ -53,7 +56,6 @@ impl ThresholdAnomalyDetector {
         Self {
             upper_threshold: 100.0,
             lower_threshold: 0.0,
-            anomalies_detected: 0,
         }
     }
 }
@@ -65,17 +67,49 @@ impl Default for ThresholdAnomalyDetector {
 }
 
 impl super::super::analysis::AnomalyDetector for ThresholdAnomalyDetector {
-    fn detect(&self) -> String {
+    fn describe(&self) -> String {
         format!(
-            "Threshold anomaly detector (upper={:.2}, lower={:.2}, detected={})",
-            self.upper_threshold, self.lower_threshold, self.anomalies_detected
+            "Threshold anomaly detector: flags readings outside [{:.2}, {:.2}]",
+            self.lower_threshold, self.upper_threshold
         )
     }
 
-    fn detect_anomalies(&self) -> TestCharacterizationResult<Vec<AnomalyInfo>> {
-        // Placeholder implementation - in real use, this would check values against thresholds
-        // For now, return empty vec indicating no anomalies detected
-        Ok(Vec::new())
+    fn detect_anomalies(
+        &self,
+        observations: super::super::analysis::InsightObservations<'_>,
+        _baseline: &super::BaselineModel,
+    ) -> TestCharacterizationResult<Vec<AnomalyInfo>> {
+        if self.upper_threshold <= self.lower_threshold {
+            return Err(super::TestCharacterizationError::InvalidInput {
+                message: "upper threshold must exceed the lower threshold".to_string(),
+                field: "upper_threshold".to_string(),
+                value: self.upper_threshold.to_string(),
+            });
+        }
+        let band = self.upper_threshold - self.lower_threshold;
+        let mut anomalies = Vec::new();
+        for key in observations.keys() {
+            for value in observations.series(&key) {
+                let excess = if value > self.upper_threshold {
+                    value - self.upper_threshold
+                } else if value < self.lower_threshold {
+                    self.lower_threshold - value
+                } else {
+                    continue;
+                };
+                anomalies.push(super::super::analysis::anomaly_from_deviation(
+                    "threshold",
+                    super::super::analysis::AnomalyType::Statistical,
+                    &key,
+                    1.0 + excess / band,
+                    format!(
+                        "`{}` read {:.4}, outside the configured band [{:.2}, {:.2}]",
+                        key, value, self.lower_threshold, self.upper_threshold
+                    ),
+                ));
+            }
+        }
+        Ok(anomalies)
     }
 }
 

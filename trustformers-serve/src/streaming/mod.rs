@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Streaming Support for Real-time Inference
 //!
 //! This module provides streaming capabilities for real-time model inference,
@@ -63,7 +61,6 @@ impl StreamingService {
         let (tx, rx) = mpsc::channel(self.config.buffer_size);
 
         let stream = ActiveStream {
-            id: stream_id,
             stream_type,
             request_id,
             sender: tx,
@@ -79,6 +76,15 @@ impl StreamingService {
             receiver: rx,
             stream_type,
         })
+    }
+
+    /// The request id a live stream is serving, if the stream is still open.
+    ///
+    /// 0.2.1: `ActiveStream::request_id` was recorded on every stream and never
+    /// read again, so the association between a stream and its request was
+    /// captured but unreachable.
+    pub async fn stream_request_id(&self, stream_id: Uuid) -> Option<Uuid> {
+        self.active_streams.read().await.get(&stream_id).map(|stream| stream.request_id)
     }
 
     /// Send data to a stream
@@ -209,8 +215,11 @@ pub struct StreamHandle {
 /// Active stream information
 #[derive(Debug)]
 struct ActiveStream {
-    id: Uuid,
+    // 0.2.1: an `id: Uuid` field lived here and was never read -- the
+    // `active_streams` map is keyed by exactly that id.
     stream_type: StreamType,
+    /// The request this stream is serving, exposed by
+    /// [`StreamingService::stream_request_id`].
     request_id: Uuid,
     sender: mpsc::Sender<StreamData>,
     started_at: std::time::Instant,
@@ -343,6 +352,14 @@ impl StreamAccumulator {
         }
         self.full_text.push_str(token);
         self.token_count += 1;
+    }
+
+    /// Wall-clock millisecond offset at which this accumulator started.
+    ///
+    /// The caller needs this to turn an absolute timestamp into the
+    /// `elapsed_ms` that [`Self::push_token`] expects.
+    pub fn started_at_ms(&self) -> f64 {
+        self.started_at_ms
     }
 
     /// Tokens generated per second.  Returns 0.0 if `total_ms` is zero.

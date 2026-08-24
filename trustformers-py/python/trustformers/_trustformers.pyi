@@ -176,10 +176,11 @@ class BertForTokenClassification(PreTrainedModel):
     predicts `num_labels` logits at *every* sequence position. Real forward
     pass, real logits, real loss when `labels` is given.
 
-    No pipeline wraps this yet: `pipeline("token-classification")` still
-    raises `NotImplementedError` because this crate's tokenizers do not
-    produce the character-level offsets HuggingFace's pipeline output needs.
-    Call this class directly for per-token logits instead.
+    `TokenClassificationPipeline`/`pipeline("token-classification")` wraps
+    this class directly for real end-to-end NER (real per-token logits,
+    aggregated with `aggregation_strategy='simple'`, reported at real
+    character offsets). Call this class directly instead when raw per-token
+    logits -- without aggregation or offset conversion -- are what's needed.
     """
 
     def __init__(self, config: Optional[Any] = None, num_labels: int = 2) -> None: ...
@@ -223,10 +224,11 @@ class BertForQuestionAnswering(PreTrainedModel):
     `end_positions` are given (both, or neither -- HuggingFace's own
     contract).
 
-    No pipeline wraps this yet: `pipeline("question-answering")` still raises
-    `NotImplementedError` for the same offset-mapping reason as
-    `BertForTokenClassification`. Call this class directly for real
-    start/end logits instead.
+    `QuestionAnsweringPipeline`/`pipeline("question-answering")` wraps this
+    class directly for real end-to-end extraction (real joint-argmax answer
+    span, reported at real character offsets). That pipeline requires a
+    `WordPieceTokenizer` specifically (see `QuestionAnsweringPipeline`
+    below). Call this class directly for raw start/end logits instead.
     """
 
     def __init__(self, config: Optional[Any] = None) -> None: ...
@@ -527,26 +529,71 @@ class TextClassificationPipeline:
     ]: ...
 
 class TokenClassificationPipeline:
-    """Not available: construction always raises NotImplementedError.
+    """Named-entity recognition over a real BERT token-classification head.
 
-    `BertForTokenClassification` (see above) is now a real, callable Python
-    wrapper -- that gap is closed. What still blocks this pipeline: it must
-    report HuggingFace's character-level `start` / `end` keys, and this
-    package's tokenizers (`WordPieceTokenizer`, `BPETokenizer`) still do not
-    produce an offset mapping. Call `BertForTokenClassification` directly for
-    real per-token logits without character offsets.
+    A model without a per-token head (i.e. not a `BertForTokenClassification`)
+    is a `TypeError` from `__init__`. The tokenizer may be either
+    `WordPieceTokenizer` or `BPETokenizer`: NER only needs
+    `Tokenizer.encode`'s single-sequence offsets, which both produce for
+    real.
+
+    `start`/`end` are Unicode **character** offsets (HuggingFace's own
+    convention, so `text[start:end]` indexes correctly in Python) -- this
+    package's internal offset convention is bytes; the conversion happens
+    once, at this pipeline's Python boundary.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+    def __init__(
+        self,
+        model: BertForTokenClassification,
+        tokenizer: Union[WordPieceTokenizer, BPETokenizer],
+        device: Optional[str] = None,
+    ) -> None: ...
+
+    # Only aggregation_strategy='simple' (the default) is implemented; any
+    # other value raises ValueError rather than being silently treated as
+    # 'simple'. A single `str` returns List[Dict]; a list of `str` returns
+    # List[List[Dict]]. Each Dict has keys entity_group/score/word/start/end.
+    def __call__(
+        self,
+        text_inputs: Union[str, List[str]],
+        aggregation_strategy: Optional[str] = None,
+    ) -> Union[
+        List[Dict[str, Union[str, float, int]]],
+        List[List[Dict[str, Union[str, float, int]]]],
+    ]: ...
 
 class QuestionAnsweringPipeline:
-    """Not available: construction always raises NotImplementedError.
+    """Extractive question answering over a real BERT QA head.
 
-    See `TokenClassificationPipeline` for why -- the wrapper
-    (`BertForQuestionAnswering`) is real, the tokenizer offset mapping is not.
+    A model without a span-prediction head (i.e. not a
+    `BertForQuestionAnswering`) is a `TypeError` from `__init__` -- and so is
+    a tokenizer that is not a `WordPieceTokenizer`: `BPETokenizer.encode_pair`
+    joins the question and context into one string with a single space and
+    reports offsets into *that* joined string, not per-sequence offsets with
+    a real separator token, so there is no reliable way to find where the
+    context begins.
+
+    `start`/`end` are Unicode **character** offsets into `context`, converted
+    from this package's native byte offsets at this pipeline's Python
+    boundary (see `TokenClassificationPipeline`).
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+    def __init__(
+        self,
+        model: BertForQuestionAnswering,
+        tokenizer: WordPieceTokenizer,
+        device: Optional[str] = None,
+    ) -> None: ...
+
+    # max_answer_len bounds the answer span's *token* width (HuggingFace's
+    # own default is 15). Returns one Dict with keys score/start/end/answer.
+    def __call__(
+        self,
+        question: str,
+        context: str,
+        max_answer_len: int = 15,
+    ) -> Dict[str, Union[str, float, int]]: ...
 
 # `model` and `tokenizer` are model/tokenizer *objects*, not names. When either
 # is omitted it is loaded from a default checkpoint path, which must resolve
@@ -557,7 +604,12 @@ def pipeline(
     tokenizer: Optional[Any] = None,
     device: Optional[str] = None,
     **kwargs: Any,
-) -> Union[TextGenerationPipeline, TextClassificationPipeline]: ...
+) -> Union[
+    TextGenerationPipeline,
+    TextClassificationPipeline,
+    TokenClassificationPipeline,
+    QuestionAnsweringPipeline,
+]: ...
 
 # Training
 #

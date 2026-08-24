@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Health Check and High Availability Module
 //!
 //! Provides health monitoring, circuit breaker patterns, and high availability
@@ -96,11 +94,15 @@ impl HighAvailabilityService {
 
         // Check circuit breaker state
         if !circuit_breaker.can_execute().await {
+            // The breaker stopped a call that would have hit a failing service.
+            self.metrics.record_failure_prevented().await;
             return Err(anyhow::anyhow!(
                 "Circuit breaker open for service: {}",
                 service_name
             ));
         }
+
+        self.metrics.record_request_protected().await;
 
         // Execute with retry policy
         let retry_policy = self.get_retry_policy(service_name.clone()).await;
@@ -109,10 +111,23 @@ impl HighAvailabilityService {
         // Update circuit breaker based on result
         match &result {
             Ok(_) => circuit_breaker.record_success().await,
-            Err(_) => circuit_breaker.record_failure().await,
+            Err(_) => {
+                circuit_breaker.record_failure().await;
+                self.metrics.record_retry_attempt().await;
+            },
         }
 
         result.map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
+    /// Counters accumulated by this service.
+    ///
+    /// 0.2.1: the `metrics` field was constructed and never touched again, so
+    /// `HAMetrics`' four `record_*` methods had no callers and every counter
+    /// was permanently zero. They are recorded on the real protected-execution
+    /// path now, and this accessor exposes them.
+    pub async fn metrics_snapshot(&self) -> HAMetricsSnapshot {
+        self.metrics.snapshot().await
     }
 
     /// Get or create retry policy for service
@@ -313,6 +328,29 @@ impl HAMetrics {
     pub async fn record_retry_attempt(&self) {
         *self.retry_attempts.write().await += 1;
     }
+
+    /// Read all four counters at once.
+    pub async fn snapshot(&self) -> HAMetricsSnapshot {
+        HAMetricsSnapshot {
+            requests_protected: *self.requests_protected.read().await,
+            failures_prevented: *self.failures_prevented.read().await,
+            successful_failovers: *self.successful_failovers.read().await,
+            retry_attempts: *self.retry_attempts.read().await,
+        }
+    }
+}
+
+/// A point-in-time read of [`HAMetrics`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HAMetricsSnapshot {
+    /// Calls admitted through a closed circuit breaker.
+    pub requests_protected: u64,
+    /// Calls refused by an open circuit breaker.
+    pub failures_prevented: u64,
+    /// Failovers that completed successfully.
+    pub successful_failovers: u64,
+    /// Protected calls that ended in failure after the retry policy ran.
+    pub retry_attempts: u64,
 }
 
 #[cfg(test)]

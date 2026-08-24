@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! SSE (Server-Sent Events) streaming for real-time token generation
 //!
 //! This module provides token-by-token SSE streaming with OpenAI-compatible

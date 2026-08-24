@@ -181,10 +181,13 @@ impl RealTimeReport {
         }
     }
 
-    /// Add a section to the report
+    /// Append a named section to the report body.
+    ///
+    /// The report body is a Markdown string, so a section is a heading plus its
+    /// content; that is the whole structure this type has. Before 0.2.1 the
+    /// same line carried a comment claiming a "real implementation" would add
+    /// structured sections, implying the append was a stand-in for something.
     pub fn add_section(&mut self, section_name: &str, section_content: &str) {
-        // Placeholder implementation
-        // In a real implementation, this would add structured sections to the report
         self.summary.push_str(&format!("\n\n## {}\n{}", section_name, section_content));
     }
 }

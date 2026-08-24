@@ -25,7 +25,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::task::JoinHandle;
 
 /// Rebalancing configuration
 #[derive(Debug, Clone)]

@@ -30,7 +30,10 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -722,14 +725,16 @@ impl ConcurrencyEstimationAlgorithm for MLBasedEstimationAlgorithm {
         &self,
         analysis_result: &ConcurrencyAnalysisResult,
     ) -> TestCharacterizationResult<usize> {
-        // Use ML-based estimation (simplified for now)
+        // This scales the analyzer's own recommendation by a configured
+        // confidence factor. No model is loaded or evaluated -- see `name()`,
+        // which says so rather than claiming an ML estimator.
         let base_estimate = analysis_result.recommended_concurrency;
-        let ml_adjusted = (base_estimate as f64 * self.confidence) as usize;
-        Ok(ml_adjusted.max(1))
+        let scaled = (base_estimate as f64 * self.confidence) as usize;
+        Ok(scaled.max(1))
     }
 
     fn name(&self) -> &str {
-        "MLBasedEstimation"
+        "ConfidenceScaledEstimation"
     }
 
     fn confidence(&self, _analysis_result: &ConcurrencyAnalysisResult) -> f64 {
@@ -737,9 +742,12 @@ impl ConcurrencyEstimationAlgorithm for MLBasedEstimationAlgorithm {
     }
 
     fn parameters(&self) -> HashMap<String, f64> {
+        // The model identity is the string `self.model`; encoding it as the
+        // float 1.0 (as this did before 0.2.1) told the caller nothing and read
+        // as a measured parameter. Only the genuinely numeric parameter is
+        // reported; `name()` carries the identity.
         let mut params = HashMap::new();
         params.insert("confidence".to_string(), self.confidence);
-        params.insert("model".to_string(), 1.0); // Placeholder for model identifier
         params
     }
 }
@@ -1387,20 +1395,84 @@ pub struct BaselineModel {
 }
 
 impl BaselineModel {
-    /// Create a new BaselineModel with default settings
+    /// Create an empty baseline that describes nothing yet.
     pub fn new() -> Self {
         Self {
-            model_type: String::from("default"),
+            model_type: String::from("empty"),
             parameters: HashMap::new(),
             created_at: Utc::now(),
         }
     }
 
-    /// Update the baseline model with recent data
-    pub async fn update_with_recent_data(&mut self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would fetch recent data and update model parameters
+    /// Rebuild the baseline from an observed sample window.
+    ///
+    /// Before 0.2.1 this took no data and returned `Ok(())` without touching a
+    /// single parameter, and its one caller discarded the model it was called
+    /// on anyway. It now stores the mean, standard deviation and sample count of
+    /// every metric key present in `samples`, keyed `<metric>.mean`,
+    /// `<metric>.std_dev` and `<metric>.count`.
+    ///
+    /// Returns an error when the window is too small for an unbiased standard
+    /// deviation rather than recording a zero spread that every detector would
+    /// then have to special-case.
+    pub fn update_with_recent_data(
+        &mut self,
+        samples: &[RealTimeMetrics],
+    ) -> TestCharacterizationResult<()> {
+        if samples.len() < 2 {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "a baseline needs at least two samples for a sample standard deviation"
+                    .to_string(),
+                field: "samples".to_string(),
+                value: samples.len().to_string(),
+            });
+        }
+        let mut keys: Vec<String> =
+            samples.iter().flat_map(|sample| sample.metrics.keys().cloned()).collect();
+        keys.sort();
+        keys.dedup();
+
+        let mut parameters = HashMap::new();
+        for key in keys {
+            let values: Vec<f64> = samples
+                .iter()
+                .filter_map(|sample| sample.metrics.get(&key).copied())
+                .filter(|value| value.is_finite())
+                .collect();
+            if values.len() < 2 {
+                continue;
+            }
+            let count = values.len() as f64;
+            let mean = values.iter().sum::<f64>() / count;
+            let variance =
+                values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (count - 1.0);
+            parameters.insert(format!("{}.mean", key), mean);
+            parameters.insert(format!("{}.std_dev", key), variance.sqrt());
+            parameters.insert(format!("{}.count", key), count);
+        }
+        if parameters.is_empty() {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "no metric key in the window carried two finite readings".to_string(),
+                field: "samples".to_string(),
+                value: samples.len().to_string(),
+            });
+        }
+        self.model_type = "window_mean_std".to_string();
+        self.parameters = parameters;
+        self.created_at = Utc::now();
         Ok(())
+    }
+
+    /// Mean and standard deviation recorded for `metric`, if any.
+    pub fn statistics_for(&self, metric: &str) -> Option<(f64, f64)> {
+        let mean = *self.parameters.get(&format!("{}.mean", metric))?;
+        let std_dev = *self.parameters.get(&format!("{}.std_dev", metric))?;
+        Some((mean, std_dev))
+    }
+
+    /// True when the baseline has never been fitted to a window.
+    pub fn is_empty(&self) -> bool {
+        self.parameters.is_empty()
     }
 }
 
@@ -1410,10 +1482,17 @@ impl Default for BaselineModel {
     }
 }
 
+/// Detects monotone drift in a streaming metric window.
+///
+/// `running` is a real, shared flag: `start_detection` and `stop_detection`
+/// flip it and `is_running` reports it, so a caller can observe the lifecycle.
+/// Before 0.2.1 both were `Ok(())` no-ops and `detect_patterns` took no data
+/// and returned an empty vector.
 #[derive(Debug, Clone)]
 pub struct RealTimePatternDetector {
     pub detection_enabled: bool,
     pub min_confidence: f64,
+    running: Arc<AtomicBool>,
 }
 
 impl RealTimePatternDetector {
@@ -1422,25 +1501,121 @@ impl RealTimePatternDetector {
         Self {
             detection_enabled: true,
             min_confidence: 0.8,
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Start pattern detection
+    /// Start pattern detection.
     pub async fn start_detection(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
+        if !self.detection_enabled {
+            return Err(TestCharacterizationError::NotSupported {
+                message: "pattern detection is disabled by configuration".to_string(),
+                component: "RealTimePatternDetector".to_string(),
+            });
+        }
+        self.running.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Stop pattern detection
+    /// Stop pattern detection.
     pub async fn stop_detection(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
+        self.running.store(false, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Detect patterns in streaming data
-    pub async fn detect_patterns(&self) -> TestCharacterizationResult<Vec<DetectedPattern>> {
-        // Placeholder implementation
-        Ok(Vec::new())
+    /// True between `start_detection` and `stop_detection`.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
+    /// Detect monotone drift in each metric of `samples`.
+    ///
+    /// A metric is reported when the fraction of consecutive steps moving in the
+    /// same direction reaches `min_confidence`; that fraction is the pattern's
+    /// confidence. An empty or short window yields no pattern.
+    pub async fn detect_patterns(
+        &self,
+        samples: &[RealTimeMetrics],
+    ) -> TestCharacterizationResult<Vec<DetectedPattern>> {
+        if !self.running.load(Ordering::Relaxed) {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "detector is not running; call start_detection first".to_string(),
+                field: "running".to_string(),
+                value: "false".to_string(),
+            });
+        }
+        let mut keys: Vec<String> =
+            samples.iter().flat_map(|sample| sample.metrics.keys().cloned()).collect();
+        keys.sort();
+        keys.dedup();
+
+        let mut patterns = Vec::new();
+        for key in keys {
+            let values: Vec<f64> = samples
+                .iter()
+                .filter_map(|sample| sample.metrics.get(&key).copied())
+                .filter(|value| value.is_finite())
+                .collect();
+            if values.len() < 3 {
+                continue;
+            }
+            let mut rising = 0usize;
+            let mut falling = 0usize;
+            for pair in values.windows(2) {
+                let (Some(previous), Some(current)) = (pair.first(), pair.get(1)) else {
+                    continue;
+                };
+                if current > previous {
+                    rising += 1;
+                } else if current < previous {
+                    falling += 1;
+                }
+            }
+            let steps = (values.len() - 1) as f64;
+            let (direction, agreeing) =
+                if rising >= falling { ("rising", rising) } else { ("falling", falling) };
+            let confidence = agreeing as f64 / steps;
+            if confidence < self.min_confidence {
+                continue;
+            }
+            let mut performance_characteristics = HashMap::new();
+            performance_characteristics.insert("rising_steps".to_string(), rising as f64);
+            performance_characteristics.insert("falling_steps".to_string(), falling as f64);
+            performance_characteristics.insert("total_steps".to_string(), steps);
+            patterns.push(DetectedPattern {
+                pattern_id: format!("drift:{}", key),
+                pattern_type: PatternType::Temporal,
+                name: format!("monotone_{}:{}", direction, key),
+                description: format!(
+                    "`{}` moved {} in {} of {} consecutive steps",
+                    key, direction, agreeing, steps as usize
+                ),
+                confidence,
+                characteristics: PatternCharacteristics {
+                    performance_characteristics,
+                    ..PatternCharacteristics::default()
+                },
+                detected_at: Instant::now(),
+                source: "RealTimePatternDetector".to_string(),
+                // The pattern spans the whole window exactly once.
+                frequency: 1.0,
+                // Stability is the same agreement fraction as the confidence:
+                // the share of steps that kept the direction.
+                stability: confidence,
+                // No out-of-sample check is run, so no predictive power is
+                // claimed.
+                predictive_power: 0.0,
+                // The detector sees a metric window, not test identities.
+                associated_tests: Vec::new(),
+                performance_implications: HashMap::new(),
+                // Deciding what to do about a drift is not this detector's job.
+                optimization_opportunities: Vec::new(),
+                optimization_potential: 0.0,
+                tags: vec!["monotone_drift".to_string(), direction.to_string()],
+                metadata: HashMap::new(),
+            });
+        }
+        Ok(patterns)
     }
 }
 
@@ -1450,11 +1625,16 @@ impl Default for RealTimePatternDetector {
     }
 }
 
+/// Computes summary statistics over the tail of a streaming metric window.
+///
+/// `running` is a real, shared flag that `start_analysis` and `stop_analysis`
+/// flip. Before 0.2.1 both were `Ok(())` no-ops and `analyze_stream` took no
+/// data, returning a `statistics` map that nothing ever wrote to.
 #[derive(Debug, Clone)]
 pub struct StreamingStatisticalAnalyzer {
     pub window_size: usize,
-    pub statistics: HashMap<String, f64>,
     pub algorithm: String,
+    running: Arc<AtomicBool>,
 }
 
 impl StreamingStatisticalAnalyzer {
@@ -1462,27 +1642,80 @@ impl StreamingStatisticalAnalyzer {
     pub fn new() -> Self {
         Self {
             window_size: 100,
-            statistics: HashMap::new(),
-            algorithm: "default".to_string(),
+            algorithm: "mean_min_max_std_dev".to_string(),
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Start statistical analysis
+    /// Start statistical analysis.
     pub async fn start_analysis(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
+        self.running.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Stop statistical analysis
+    /// Stop statistical analysis.
     pub async fn stop_analysis(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
+        self.running.store(false, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Analyze streaming data
-    pub async fn analyze_stream(&self) -> TestCharacterizationResult<HashMap<String, f64>> {
-        // Placeholder implementation - return current statistics
-        Ok(self.statistics.clone())
+    /// True between `start_analysis` and `stop_analysis`.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
+    /// Summarise the last `window_size` samples.
+    ///
+    /// Produces `<metric>.mean`, `.min`, `.max`, `.std_dev` and `.count` for
+    /// every metric key with at least one finite reading; `.std_dev` is omitted
+    /// where fewer than two readings exist.
+    pub async fn analyze_stream(
+        &self,
+        samples: &[RealTimeMetrics],
+    ) -> TestCharacterizationResult<HashMap<String, f64>> {
+        if !self.running.load(Ordering::Relaxed) {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "analyzer is not running; call start_analysis first".to_string(),
+                field: "running".to_string(),
+                value: "false".to_string(),
+            });
+        }
+        let start = samples.len().saturating_sub(self.window_size);
+        let window = samples.get(start..).unwrap_or(&[]);
+        let mut keys: Vec<String> =
+            window.iter().flat_map(|sample| sample.metrics.keys().cloned()).collect();
+        keys.sort();
+        keys.dedup();
+
+        let mut statistics = HashMap::new();
+        for key in keys {
+            let values: Vec<f64> = window
+                .iter()
+                .filter_map(|sample| sample.metrics.get(&key).copied())
+                .filter(|value| value.is_finite())
+                .collect();
+            let Some(first) = values.first().copied() else {
+                continue;
+            };
+            let count = values.len() as f64;
+            let mean = values.iter().sum::<f64>() / count;
+            let mut min = first;
+            let mut max = first;
+            for value in &values {
+                min = min.min(*value);
+                max = max.max(*value);
+            }
+            statistics.insert(format!("{}.count", key), count);
+            statistics.insert(format!("{}.mean", key), mean);
+            statistics.insert(format!("{}.min", key), min);
+            statistics.insert(format!("{}.max", key), max);
+            if values.len() >= 2 {
+                let variance =
+                    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1.0);
+                statistics.insert(format!("{}.std_dev", key), variance.sqrt());
+            }
+        }
+        Ok(statistics)
     }
 }
 

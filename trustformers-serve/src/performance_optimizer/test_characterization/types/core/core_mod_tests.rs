@@ -407,11 +407,45 @@ fn test_isolation_safety_rule_validate() {
 }
 
 #[test]
-fn test_threshold_anomaly_detector_default() {
+fn test_threshold_anomaly_detector_flags_only_out_of_band_readings() {
+    use crate::performance_optimizer::test_characterization::types::analysis::{
+        AnomalyDetector, InsightObservations,
+    };
+    use crate::performance_optimizer::test_characterization::types::core::{
+        BaselineModel, RealTimeMetrics,
+    };
+
     let detector = ThresholdAnomalyDetector::default();
     assert!((detector.upper_threshold - 100.0).abs() < 1e-9);
     assert!((detector.lower_threshold - 0.0).abs() < 1e-9);
-    assert_eq!(detector.anomalies_detected, 0);
+
+    let baseline = BaselineModel::new();
+
+    // Nothing observed, nothing flagged.
+    assert!(detector
+        .detect_anomalies(InsightObservations::new(&[]), &baseline)
+        .expect("an empty window is a valid input")
+        .is_empty());
+
+    let mut inside = RealTimeMetrics::new();
+    inside.metrics.insert("queue_depth".to_string(), 50.0);
+    let mut above = RealTimeMetrics::new();
+    above.metrics.insert("queue_depth".to_string(), 150.0);
+    let mut below = RealTimeMetrics::new();
+    below.metrics.insert("queue_depth".to_string(), -25.0);
+    let samples = vec![inside, above, below];
+
+    let anomalies = detector
+        .detect_anomalies(InsightObservations::new(&samples), &baseline)
+        .expect("a populated window is a valid input");
+    assert_eq!(
+        anomalies.len(),
+        2,
+        "50.0 sits inside [0, 100] and must not be flagged"
+    );
+    assert!(anomalies
+        .iter()
+        .all(|a| a.affected_resources == vec!["queue_depth".to_string()]));
 }
 
 #[test]

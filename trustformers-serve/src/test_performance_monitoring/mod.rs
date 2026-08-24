@@ -19,7 +19,6 @@
 //! - `service`: Main service integration and coordination
 //!
 
-// Allow dead code for monitoring infrastructure under development
 //! # Usage
 //!
 //! All functionality is available through the main service interface:

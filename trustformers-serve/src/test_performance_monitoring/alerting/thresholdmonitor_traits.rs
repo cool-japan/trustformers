@@ -18,10 +18,7 @@ impl std::fmt::Debug for ThresholdMonitor {
                 "threshold_evaluators",
                 &format!("<{} evaluators>", self.threshold_evaluators.len()),
             )
-            .field("monitoring_scheduler", &self.monitoring_scheduler)
-            .field("threshold_cache", &self.threshold_cache)
-            .field("evaluation_metrics", &self.evaluation_metrics)
-            .field("real_time_processor", &self.real_time_processor)
+            .field("evaluations", &self.evaluations)
             .finish()
     }
 }

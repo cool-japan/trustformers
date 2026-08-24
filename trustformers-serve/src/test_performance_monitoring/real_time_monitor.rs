@@ -330,12 +330,14 @@ pub struct StreamQuality {
 pub enum StreamingEvent {
     MetricsUpdate {
         test_id: String,
-        metrics: StreamingMetrics,
+        /// Boxed: this is by far the largest payload of the enum, and every
+        /// other variant would otherwise be padded to its size.
+        metrics: Box<StreamingMetrics>,
         timestamp: SystemTime,
     },
     TestStarted {
         test_id: String,
-        test_info: ActiveTestInfo,
+        test_info: Box<ActiveTestInfo>,
     },
     TestCompleted {
         test_id: String,
@@ -709,10 +711,10 @@ impl RealTimePerformanceMonitor {
 
         // Send test started event
         let test_id = test_info.test_id.clone();
-        let _ = self
-            .stream_manager
-            .stream_sender
-            .send(StreamingEvent::TestStarted { test_id, test_info });
+        let _ = self.stream_manager.stream_sender.send(StreamingEvent::TestStarted {
+            test_id,
+            test_info: Box::new(test_info),
+        });
 
         self.monitoring_state.total_tests_monitored.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -849,7 +851,7 @@ impl RealTimePerformanceMonitor {
                     // Send streaming event
                     let _ = stream_manager.stream_sender.send(StreamingEvent::MetricsUpdate {
                         test_id: test_id.to_string(),
-                        metrics: metrics.clone(),
+                        metrics: Box::new(metrics.clone()),
                         timestamp: SystemTime::now(),
                     });
 
@@ -934,15 +936,23 @@ impl<T> CircularBuffer<T> {
         self.total_items_added += 1;
     }
 
-    fn len(&self) -> usize {
+    /// Number of items currently buffered.
+    pub fn len(&self) -> usize {
         self.buffer.len()
     }
 
-    fn capacity(&self) -> usize {
+    /// Whether the buffer currently holds no items.
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    /// Maximum number of items retained before the oldest is dropped.
+    pub fn capacity(&self) -> usize {
         self.capacity
     }
 
-    fn total_added(&self) -> u64 {
+    /// Total items ever pushed, including those since evicted.
+    pub fn total_added(&self) -> u64 {
         self.total_items_added
     }
 }

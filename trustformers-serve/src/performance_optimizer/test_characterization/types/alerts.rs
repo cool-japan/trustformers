@@ -7,7 +7,9 @@ use std::{
 };
 
 // Import commonly used types from core
-use super::core::{PriorityLevel, TestCharacterizationResult, UrgencyLevel};
+use super::core::{
+    PriorityLevel, TestCharacterizationError, TestCharacterizationResult, UrgencyLevel,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AlertSeverity {
@@ -398,6 +400,10 @@ pub struct DashboardSubscription {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Retained dashboard updates before the oldest is dropped.
+const MAX_QUEUED_DASHBOARD_UPDATES: usize = 256;
+
+/// Queues dashboard updates for a renderer that this crate does not provide.
 #[derive(Debug, Clone)]
 pub struct DashboardUpdater {
     /// Update interval
@@ -408,6 +414,7 @@ pub struct DashboardUpdater {
     pub last_update: chrono::DateTime<chrono::Utc>,
     /// Update queue
     pub update_queue: Arc<Mutex<VecDeque<String>>>,
+    updating: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -1116,28 +1123,68 @@ impl DashboardUpdater {
             auto_update: true,
             last_update: chrono::Utc::now(),
             update_queue: Arc::new(Mutex::new(VecDeque::new())),
+            updating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
-    /// Start dashboard updates
-    pub async fn start_updates(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would start the dashboard update loop
+    /// Start queueing dashboard updates.
+    ///
+    /// Before 0.2.1 this, `stop_updates` and `update_dashboard` were all
+    /// `Ok(())` no-ops: `update_queue` existed but nothing ever pushed to it, so
+    /// a caller could not tell a delivered update from a discarded one.
+    pub fn start_updates(&self) -> TestCharacterizationResult<()> {
+        self.updating.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Stop dashboard updates
-    pub async fn stop_updates(&self) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would stop the dashboard update loop
+    /// Stop queueing dashboard updates.
+    pub fn stop_updates(&self) -> TestCharacterizationResult<()> {
+        self.updating.store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    /// Update the dashboard with new data
-    pub async fn update_dashboard(&self, _data: &DashboardData) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        // In a real implementation, this would push updates to the dashboard
+    /// Whether updates are being queued right now.
+    pub fn is_updating(&self) -> bool {
+        self.updating.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Queue one dashboard update.
+    ///
+    /// The update is serialised into `update_queue`, which
+    /// [`Self::drain_pending_updates`] reads back. Nothing renders a dashboard
+    /// in this crate, so a queued update is exactly that -- queued, not
+    /// displayed.
+    pub fn update_dashboard(&self, data: &DashboardData) -> TestCharacterizationResult<()> {
+        if !self.is_updating() {
+            return Err(TestCharacterizationError::InvalidInput {
+                message: "dashboard updater is not running; call start_updates first".to_string(),
+                field: "updating".to_string(),
+                value: "false".to_string(),
+            });
+        }
+        let summary = format!(
+            "{}: {} data point(s), {} metric(s), {} alert(s)",
+            data.last_updated.to_rfc3339(),
+            data.data_points.len(),
+            data.metrics.len(),
+            data.alerts.len()
+        );
+        let mut queue = self.update_queue.lock();
+        queue.push_back(summary);
+        while queue.len() > MAX_QUEUED_DASHBOARD_UPDATES {
+            queue.pop_front();
+        }
         Ok(())
+    }
+
+    /// Take every queued update, leaving the queue empty.
+    pub fn drain_pending_updates(&self) -> Vec<String> {
+        self.update_queue.lock().drain(..).collect()
+    }
+
+    /// Number of updates waiting in the queue.
+    pub fn pending_update_count(&self) -> usize {
+        self.update_queue.lock().len()
     }
 }
 

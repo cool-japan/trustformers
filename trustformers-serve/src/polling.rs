@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Long Polling Support
 //!
 //! Provides long polling functionality for real-time updates and notifications
@@ -134,12 +132,9 @@ pub struct PollEventWithId {
 /// Active polling connection
 #[derive(Debug)]
 struct PollingConnection {
-    /// Connection ID
-    id: String,
-
-    /// Client ID
-    client_id: Option<String>,
-
+    // 0.2.1: `id: String` and `client_id: Option<String>` lived here and were
+    // written on every connection but never read -- `connections` is keyed by
+    // exactly that id, and nothing consults the client id.
     /// Event types subscribed to
     event_types: Vec<String>,
 
@@ -305,8 +300,6 @@ impl LongPollingService {
         let (response_sender, _response_receiver) = oneshot::channel();
 
         let connection = PollingConnection {
-            id: connection_id.clone(),
-            client_id: request.client_id,
             event_types: request.event_types,
             response_sender,
             start_time: Instant::now(),

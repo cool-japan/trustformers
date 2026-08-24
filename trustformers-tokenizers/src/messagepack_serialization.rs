@@ -69,6 +69,13 @@ pub struct MessagePackTokenizerConfig {
     pub training_config: Option<HashMap<String, Vec<u8>>>,
 }
 
+/// Narrow a byte offset to the MessagePack wire type, saturating rather than
+/// wrapping so a >4 GiB offset can never come back as a small, plausible-
+/// looking wrong position.
+fn saturating_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 /// MessagePack-compatible tokenized input representation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagePackTokenizedInput {
@@ -207,37 +214,78 @@ impl MessagePackSerializer {
 
     /// Serialize a tokenized input to MessagePack format
     pub fn serialize_tokenized_input(&self, input: &TokenizedInput) -> Result<Vec<u8>> {
-        let msgpack_input = MessagePackTokenizedInput {
-            input_ids: input.input_ids.clone(),
-            attention_mask: Some(input.attention_mask.iter().map(|&x| x as u32).collect()),
-            token_type_ids: input.token_type_ids.clone(),
-            special_tokens_mask: None,
-            offsets: None,
-            tokens: Vec::new(),
-            overflow: false,
-            sequence_length: input.input_ids.len() as u32,
-            metadata: HashMap::new(),
-        };
+        let msgpack_input = Self::to_messagepack_input(input);
 
         self.serialize_to_messagepack(&msgpack_input)
     }
 
+    /// Project a `TokenizedInput` onto the MessagePack wire shape.
+    ///
+    /// Every field the wire shape has and the input carries is carried across.
+    /// `special_tokens_mask`/`offsets` used to be hardcoded to `None` and
+    /// `overflow` to `false` even though the wire struct has all three and the
+    /// input supplies them (`WordPieceTokenizer` populates the special-tokens
+    /// mask; it and `BPETokenizer` populate the offset mapping on every
+    /// encode), which reported "this encoding has no offsets" about encodings
+    /// that do.
+    ///
+    /// The wire type for an offset is `u32`, so a byte offset at or beyond
+    /// 4 GiB saturates rather than wrapping to a small, plausible-looking
+    /// wrong number. `tokens`/`metadata` stay empty because `TokenizedInput`
+    /// carries neither.
+    fn to_messagepack_input(input: &TokenizedInput) -> MessagePackTokenizedInput {
+        MessagePackTokenizedInput {
+            input_ids: input.input_ids.clone(),
+            attention_mask: Some(input.attention_mask.iter().map(|&x| x as u32).collect()),
+            token_type_ids: input.token_type_ids.clone(),
+            special_tokens_mask: input
+                .special_tokens_mask
+                .as_ref()
+                .map(|mask| mask.iter().map(|&flag| flag as u32).collect()),
+            offsets: input.offset_mapping.as_ref().map(|offsets| {
+                offsets
+                    .iter()
+                    .map(|&(start, end)| (saturating_u32(start), saturating_u32(end)))
+                    .collect()
+            }),
+            tokens: Vec::new(),
+            overflow: input.overflowing_tokens.is_some(),
+            sequence_length: input.input_ids.len() as u32,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Rebuild a `TokenizedInput` from the MessagePack wire shape.
+    ///
+    /// The inverse of [`Self::to_messagepack_input`]. `overflowing_tokens`
+    /// stays `None` even when `overflow` is set: the wire shape records only
+    /// the flag, never the dropped ids, so there is nothing to reconstruct
+    /// them from and inventing a list would be worse than reporting none.
+    fn from_messagepack_input(msgpack_input: MessagePackTokenizedInput) -> TokenizedInput {
+        let input_ids_len = msgpack_input.input_ids.len();
+        TokenizedInput {
+            input_ids: msgpack_input.input_ids,
+            attention_mask: msgpack_input
+                .attention_mask
+                .unwrap_or_else(|| vec![1; input_ids_len])
+                .into_iter()
+                .map(|x| x as u8)
+                .collect(),
+            token_type_ids: msgpack_input.token_type_ids,
+            special_tokens_mask: msgpack_input
+                .special_tokens_mask
+                .map(|mask| mask.into_iter().map(|flag| flag as u8).collect()),
+            offset_mapping: msgpack_input.offsets.map(|offsets| {
+                offsets.into_iter().map(|(start, end)| (start as usize, end as usize)).collect()
+            }),
+            overflowing_tokens: None,
+        }
+    }
+
     /// Serialize a TokenizedInput batch to MessagePack format
     pub fn serialize_tokenized_batch(&self, batch: &[TokenizedInput]) -> Result<Vec<u8>> {
-        let msgpack_batch: Vec<MessagePackTokenizedInput> = batch
-            .iter()
-            .map(|input| MessagePackTokenizedInput {
-                input_ids: input.input_ids.clone(),
-                attention_mask: Some(input.attention_mask.iter().map(|&x| x as u32).collect()),
-                token_type_ids: input.token_type_ids.clone(),
-                special_tokens_mask: None,
-                offsets: None,
-                tokens: Vec::new(),
-                overflow: false,
-                sequence_length: input.input_ids.len() as u32,
-                metadata: HashMap::new(),
-            })
-            .collect();
+        let msgpack_batch: Vec<MessagePackTokenizedInput> =
+            batch.iter().map(Self::to_messagepack_input).collect();
 
         self.serialize_to_messagepack(&msgpack_batch)
     }
@@ -251,20 +299,7 @@ impl MessagePackSerializer {
     pub fn deserialize_tokenized_input(&self, data: &[u8]) -> Result<TokenizedInput> {
         let msgpack_input: MessagePackTokenizedInput = self.deserialize_from_messagepack(data)?;
 
-        let input_ids_len = msgpack_input.input_ids.len();
-        Ok(TokenizedInput {
-            input_ids: msgpack_input.input_ids,
-            attention_mask: msgpack_input
-                .attention_mask
-                .unwrap_or_else(|| vec![1; input_ids_len])
-                .into_iter()
-                .map(|x| x as u8)
-                .collect(),
-            token_type_ids: msgpack_input.token_type_ids,
-            special_tokens_mask: None,
-            offset_mapping: None,
-            overflowing_tokens: None,
-        })
+        Ok(Self::from_messagepack_input(msgpack_input))
     }
 
     /// Deserialize a batch of tokenized inputs from MessagePack format
@@ -272,25 +307,7 @@ impl MessagePackSerializer {
         let msgpack_batch: Vec<MessagePackTokenizedInput> =
             self.deserialize_from_messagepack(data)?;
 
-        Ok(msgpack_batch
-            .into_iter()
-            .map(|msgpack_input| {
-                let input_ids_len = msgpack_input.input_ids.len();
-                TokenizedInput {
-                    input_ids: msgpack_input.input_ids,
-                    attention_mask: msgpack_input
-                        .attention_mask
-                        .unwrap_or_else(|| vec![1; input_ids_len])
-                        .into_iter()
-                        .map(|x| x as u8)
-                        .collect(),
-                    token_type_ids: msgpack_input.token_type_ids,
-                    special_tokens_mask: None,
-                    offset_mapping: None,
-                    overflowing_tokens: None,
-                }
-            })
-            .collect())
+        Ok(msgpack_batch.into_iter().map(Self::from_messagepack_input).collect())
     }
 
     /// Save a tokenizer to a MessagePack file
@@ -668,6 +685,48 @@ mod tests {
         assert_eq!(input.input_ids, deserialized.input_ids);
         assert_eq!(input.attention_mask, deserialized.attention_mask);
         assert_eq!(input.token_type_ids, deserialized.token_type_ids);
+    }
+
+    /// Regression: serialization used to drop the offset mapping and the
+    /// special-tokens mask (hardcoded `None`) and to report `overflow: false`
+    /// unconditionally, even though the wire shape carries all three and the
+    /// WordPiece/BPE encoders now supply them.
+    #[test]
+    fn test_serialize_tokenized_input_carries_offsets_and_masks() {
+        let serializer = MessagePackSerializer::default();
+
+        let input = TokenizedInput {
+            input_ids: vec![2, 7, 9, 3],
+            attention_mask: vec![1, 1, 1, 1],
+            token_type_ids: Some(vec![0, 0, 0, 0]),
+            special_tokens_mask: Some(vec![1, 0, 0, 1]),
+            offset_mapping: Some(vec![(0, 0), (0, 5), (6, 11), (0, 0)]),
+            overflowing_tokens: Some(vec![42]),
+        };
+
+        let serialized = serializer
+            .serialize_tokenized_input(&input)
+            .expect("serialization must succeed");
+        let deserialized = serializer
+            .deserialize_tokenized_input(&serialized)
+            .expect("deserialization must succeed");
+
+        assert_eq!(deserialized.offset_mapping, input.offset_mapping);
+        assert_eq!(deserialized.special_tokens_mask, input.special_tokens_mask);
+        // The wire shape records only an overflow *flag*, never the dropped
+        // ids, so they honestly come back as absent rather than invented.
+        assert_eq!(deserialized.overflowing_tokens, None);
+
+        // A batch takes the same path.
+        let batch_bytes = serializer
+            .serialize_tokenized_batch(std::slice::from_ref(&input))
+            .expect("batch serialization must succeed");
+        let batch = serializer
+            .deserialize_tokenized_batch(&batch_bytes)
+            .expect("batch deserialization must succeed");
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].offset_mapping, input.offset_mapping);
+        assert_eq!(batch[0].special_tokens_mask, input.special_tokens_mask);
     }
 
     #[test]

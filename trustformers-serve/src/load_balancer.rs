@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -332,9 +330,11 @@ enum CircuitState {
 /// Hash ring node for consistent hashing
 #[derive(Debug, Clone)]
 struct HashRingNode {
+    // 0.2.1: a `virtual_node_id: u32` field lived here. It was written on every
+    // insertion and never read: the ring is looked up purely by `hash`, which
+    // already derives from `instance_id` and the replica index.
     hash: u64,
     instance_id: String,
-    virtual_node_id: u32,
 }
 
 /// Load balancer metrics
@@ -811,7 +811,6 @@ impl LoadBalancer {
                     state.hash_ring.push(HashRingNode {
                         hash,
                         instance_id: instance.id.clone(),
-                        virtual_node_id: i,
                     });
                 }
             }

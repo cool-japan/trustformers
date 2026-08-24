@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Custom Metrics Collection System
 //!
 //! Advanced metrics collection beyond basic Prometheus metrics, including
@@ -377,8 +375,13 @@ pub struct CustomMetricsCollector {
     metrics_storage: Arc<RwLock<HashMap<String, VecDeque<CustomMetric>>>>,
     /// Real-time analytics
     analytics: Arc<Mutex<RealTimeAnalytics>>,
-    /// Performance profiler
-    profiler: Arc<Mutex<PerformanceProfile>>,
+    // 0.2.1: a `profiler: Arc<Mutex<PerformanceProfile>>` field lived here. It
+    // was constructed with four empty vectors and never written to or read
+    // again, so it could only ever have reported "no call traces, no hot spots,
+    // no bottlenecks" -- an empty profile presented as a measured one. Nothing
+    // in this crate traces calls or allocations, so the field is gone rather
+    // than kept as permanently-empty state. `PerformanceProfile` itself stays:
+    // it is a public type a real profiler can fill in.
     /// Prometheus metrics
     prometheus_metrics: Arc<PrometheusMetrics>,
     /// Collection statistics
@@ -427,18 +430,10 @@ impl CustomMetricsCollector {
             anomalies: Vec::new(),
         };
 
-        let profiler = PerformanceProfile {
-            call_traces: Vec::new(),
-            memory_patterns: Vec::new(),
-            hot_spots: Vec::new(),
-            bottlenecks: Vec::new(),
-        };
-
         Ok(Self {
             config,
             metrics_storage: Arc::new(RwLock::new(HashMap::new())),
             analytics: Arc::new(Mutex::new(analytics)),
-            profiler: Arc::new(Mutex::new(profiler)),
             prometheus_metrics: Arc::new(PrometheusMetrics::new()),
             stats: Arc::new(CollectionStats::default()),
             active_metrics: Arc::new(RwLock::new(HashSet::new())),
@@ -778,10 +773,105 @@ impl CustomMetricsCollector {
         }
     }
 
-    async fn update_prometheus_metrics(&self, _metric: &CustomMetric) -> Result<()> {
-        // Update Prometheus metrics based on custom metric type
-        // This is simplified - in practice would handle different metric types
+    /// Record `metric` into this collector's Prometheus registry.
+    ///
+    /// 0.2.1: this was `Ok(())` with the argument bound to `_metric`. Every
+    /// metric passed through `record_metric` was silently discarded while the
+    /// caller treated the call as a successful export, and the three
+    /// `PrometheusMetrics` maps stayed permanently empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CustomMetricsError::ExportError`] when a Prometheus collector
+    /// cannot be created for the metric's name (an invalid metric name, for
+    /// instance).
+    async fn update_prometheus_metrics(&self, metric: &CustomMetric) -> Result<()> {
+        let name = self.get_metric_name(metric);
+        let value = self.get_metric_value(metric);
+        match metric {
+            // Business metrics are monotonic totals, so they accumulate into a
+            // counter. A negative delta cannot be represented by a counter and
+            // is rejected rather than silently dropped or made positive.
+            CustomMetric::Business { .. } => {
+                if value < 0.0 {
+                    return Err(CustomMetricsError::ExportError {
+                        message: format!(
+                            "business metric {name} carried a negative value ({value}); a \
+                             Prometheus counter cannot decrease"
+                        ),
+                    }
+                    .into());
+                }
+                let mut counters = self.prometheus_metrics.custom_counters.write().await;
+                if !counters.contains_key(&name) {
+                    let counter = IntCounter::new(name.clone(), format!("custom metric {name}"))
+                        .map_err(|e| CustomMetricsError::ExportError {
+                            message: format!("cannot create counter {name}: {e}"),
+                        })?;
+                    counters.insert(name.clone(), counter);
+                }
+                if let Some(counter) = counters.get(&name) {
+                    counter.inc_by(value as u64);
+                }
+            },
+            // Latency-style samples belong in a histogram so percentiles are
+            // computed from the real distribution rather than the last value.
+            CustomMetric::Performance { .. } => {
+                let mut histograms = self.prometheus_metrics.custom_histograms.write().await;
+                if !histograms.contains_key(&name) {
+                    let opts = prometheus::HistogramOpts::new(
+                        name.clone(),
+                        format!("custom metric {name}"),
+                    );
+                    let histogram = Histogram::with_opts(opts).map_err(|e| {
+                        CustomMetricsError::ExportError {
+                            message: format!("cannot create histogram {name}: {e}"),
+                        }
+                    })?;
+                    histograms.insert(name.clone(), histogram);
+                }
+                if let Some(histogram) = histograms.get(&name) {
+                    histogram.observe(value);
+                }
+            },
+            // Everything else is a point-in-time reading: a gauge.
+            CustomMetric::System { .. }
+            | CustomMetric::Application { .. }
+            | CustomMetric::Custom { .. } => {
+                let mut gauges = self.prometheus_metrics.custom_gauges.write().await;
+                if !gauges.contains_key(&name) {
+                    let gauge =
+                        Gauge::new(name.clone(), format!("custom metric {name}")).map_err(|e| {
+                            CustomMetricsError::ExportError {
+                                message: format!("cannot create gauge {name}: {e}"),
+                            }
+                        })?;
+                    gauges.insert(name.clone(), gauge);
+                }
+                if let Some(gauge) = gauges.get(&name) {
+                    gauge.set(value);
+                }
+            },
+        }
         Ok(())
+    }
+
+    /// Current value of a recorded gauge metric, if one exists under `name`.
+    pub async fn prometheus_gauge_value(&self, name: &str) -> Option<f64> {
+        let gauges = self.prometheus_metrics.custom_gauges.read().await;
+        gauges.get(name).map(|gauge| gauge.get())
+    }
+
+    /// Number of observations recorded into a histogram metric, if any.
+    pub async fn prometheus_histogram_count(&self, name: &str) -> Option<u64> {
+        let histograms = self.prometheus_metrics.custom_histograms.read().await;
+        histograms.get(name).map(|histogram| histogram.get_sample_count())
+    }
+
+    /// Current value of a recorded counter metric, if one exists under `name`.
+    pub async fn prometheus_counter_value(&self, name: &str) -> Option<u64> {
+        let counters = self.prometheus_metrics.custom_counters.read().await;
+        counters.get(name).map(|counter| counter.get())
     }
 
     async fn calculate_averages(&self, analytics: &mut RealTimeAnalytics) -> Result<()> {
@@ -1312,5 +1402,76 @@ mod tests {
         let bt = BottleneckType::GpuBound;
         let debug_str = format!("{:?}", bt);
         assert_eq!(debug_str, "GpuBound");
+    }
+
+    #[tokio::test]
+    async fn test_prometheus_metrics_are_really_recorded() {
+        // 0.2.1 regression guard: update_prometheus_metrics used to be a
+        // no-op, so the three registries stayed empty no matter what was
+        // recorded.
+        let collector = CustomMetricsCollector::new(CustomMetricsConfig::default())
+            .unwrap_or_else(|e| panic!("collector construction failed: {e}"));
+
+        collector
+            .collect_metric(CustomMetric::System {
+                name: "cpu".to_string(),
+                value: 42.5,
+                metric_type: SystemMetricType::CpuUsage,
+                labels: HashMap::new(),
+                timestamp: SystemTime::now(),
+            })
+            .await
+            .unwrap_or_else(|e| panic!("collect_metric failed: {e}"));
+        assert_eq!(
+            collector.prometheus_gauge_value("system_cpu").await,
+            Some(42.5)
+        );
+
+        collector
+            .collect_metric(CustomMetric::Performance {
+                name: "latency".to_string(),
+                value: 12.0,
+                percentile: None,
+                labels: HashMap::new(),
+                timestamp: SystemTime::now(),
+            })
+            .await
+            .unwrap_or_else(|e| panic!("collect_metric failed: {e}"));
+        assert_eq!(
+            collector.prometheus_histogram_count("performance_latency").await,
+            Some(1)
+        );
+
+        collector
+            .collect_metric(CustomMetric::Business {
+                name: "orders".to_string(),
+                value: 3.0,
+                labels: HashMap::new(),
+                timestamp: SystemTime::now(),
+            })
+            .await
+            .unwrap_or_else(|e| panic!("collect_metric failed: {e}"));
+        assert_eq!(
+            collector.prometheus_counter_value("business_orders").await,
+            Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_negative_business_metric_is_rejected_not_silently_dropped() {
+        let collector = CustomMetricsCollector::new(CustomMetricsConfig::default())
+            .unwrap_or_else(|e| panic!("collector construction failed: {e}"));
+        let result = collector
+            .collect_metric(CustomMetric::Business {
+                name: "refunds".to_string(),
+                value: -1.0,
+                labels: HashMap::new(),
+                timestamp: SystemTime::now(),
+            })
+            .await;
+        assert!(
+            result.is_err(),
+            "a counter cannot decrease; this must be reported"
+        );
     }
 }

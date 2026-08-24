@@ -118,7 +118,22 @@ print(result[0]['generated_text'])   # prompt + real decoded continuation
 classifier = pipeline("text-classification", model=classifier_model, tokenizer=tokenizer)
 print(classifier("I love Rust!"))    # [{'label': ..., 'score': ...}, ...]
 
-# Question answering / NER raise NotImplementedError -- see Known Limitations.
+# NER and question-answering also run real inference (2026-08-24). NER's
+# tokenizer may be WordPiece or BPE; question-answering's must be WordPiece
+# specifically -- see the trustformers-py section below for why.
+from trustformers import WordPieceTokenizer, BertForTokenClassification, BertForQuestionAnswering
+
+wp_tokenizer = WordPieceTokenizer.from_pretrained("/path/to/local/bert-ner")
+tagger = BertForTokenClassification.from_pretrained("/path/to/local/bert-ner", num_labels=9)
+ner = pipeline("token-classification", model=tagger, tokenizer=wp_tokenizer)
+print(ner("My name is Sarah and I live in London"))
+# [{'entity_group': ..., 'score': ..., 'word': ..., 'start': ..., 'end': ...}, ...]
+# start/end are Unicode CHARACTER offsets: text[start:end] is correct in Python.
+
+answerer = BertForQuestionAnswering.from_pretrained("/path/to/local/bert-squad")
+qa = pipeline("question-answering", model=answerer, tokenizer=wp_tokenizer)
+print(qa(question="Where do I live?", context="My name is Sarah and I live in London"))
+# {'score': ..., 'start': ..., 'end': ..., 'answer': 'London'}
 ```
 
 ---
@@ -390,30 +405,44 @@ pytest tests/benchmarks/ --benchmark-only
   where the caller can still act on it. (They previously returned hardcoded
   output -- `"{text} [Generated continuation]"` with `score: 0.95`, and a fixed
   `POSITIVE 0.7 / NEGATIVE 0.3` pair -- without ever touching the model.)
-- **`TokenClassificationPipeline` and `QuestionAnsweringPipeline` still refuse
-  construction** with a structured `NotImplementedError`, but only one gap
-  remains open as of the 2026-08-24 py-followups pass (re-verified against
-  `trustformers-tokenizers` source directly, not trusted from any handoff
-  note):
+- **`TokenClassificationPipeline` and `QuestionAnsweringPipeline` now run real
+  inference end to end**, closing the second (and last) of the two gaps the
+  2026-08-24 py-followups pass tracked here:
   1. ~~`trustformers_models::bert::BertForTokenClassification` and
      `BertForQuestionAnswering`... this crate exposes no Python wrapper for
      either yet.~~ **Closed.** `BertForTokenClassification` and
-     `BertForQuestionAnswering` are now real, registered Python classes
-     (`src/models/mod.rs`) -- real forward pass, real logits, real loss when
+     `BertForQuestionAnswering` are real, registered Python classes
+     (`src/models/tasks.rs`) -- real forward pass, real logits, real loss when
      `labels`/`start_positions`+`end_positions` are given. Call them directly
-     for real per-token/per-position inference.
-  2. **Still open.** Both pipelines' HuggingFace output shape carries
-     *character* offsets (`start` / `end`), and `trustformers-tokenizers`
-     still sets `TokenizedInput::offset_mapping` to `None` unconditionally in
-     the `Tokenizer` trait `encode`/`encode_pair` methods this crate's
-     `WordPieceTokenizer`/`BPETokenizer` wrappers call, so those keys still
-     cannot be filled honestly. (`BPETokenizer` gained a real, tested
-     `tokenize_with_offsets` helper in `trustformers-tokenizers` this wave,
-     but it is not part of the `Tokenizer` trait and is BPE-only -- it would
-     not help `WordPieceTokenizer`, what BERT needs, in any case.) Reporting
-     token indices under `start`/`end` would be wrong in a way callers could
-     not detect, so the pipelines keep refusing rather than build an object
-     that can only fail or silently mis-report spans.
+     for raw per-token/per-position inference without a pipeline.
+  2. ~~`trustformers-tokenizers` sets `TokenizedInput::offset_mapping` to
+     `None` unconditionally.~~ **Closed**, verified 2026-08-24 by reading
+     `trustformers-tokenizers` source directly (not trusted from any handoff
+     note): `WordPieceTokenizer`/`BPETokenizer`'s `Tokenizer::encode`/
+     `encode_pair` all return `Some(offsets)` unconditionally today, as real
+     **byte** spans into the original text.
+  With both gaps closed, `pipelines/span.rs`'s extraction math
+  (`aggregate_entities_simple`/`extract_answer`, `#[allow(dead_code)]` since
+  the pass that wrote it) is wired up via new glue functions in the same file
+  (`classify_tokens_with_bert`/`answer_with_bert`: real forward pass -> real
+  extraction, the `#[allow(dead_code)]` removed) and called from
+  `pipelines/mod.rs`'s `PyTokenClassificationPipeline`/
+  `PyQuestionAnsweringPipeline`. HuggingFace's `start`/`end` output keys are
+  Unicode **character** offsets, not this crate's native byte offsets: the
+  conversion (`trustformers_tokenizers::byte_offsets_to_char_offsets`)
+  happens once, explicitly, at the Python dict-construction boundary in
+  `pipelines/mod.rs` (`HfEntity`/`HfAnswer`) -- `span::Entity`/`span::QaAnswer`
+  themselves stay byte-offset, matching this crate's in-tree convention, and
+  are never mutated to pretend otherwise. `QuestionAnsweringPipeline`
+  additionally requires a `WordPieceTokenizer`: `BPETokenizer::encode_pair`
+  joins question+context into one string with a single space and no
+  separator token, so there is no reliable per-sequence context boundary to
+  restrict the answer search to (see `pipelines::qa_requires_wordpiece`).
+  `NER` only needs `Tokenizer::encode`'s single-sequence offsets, which both
+  tokenizer families produce, so `TokenClassificationPipeline` accepts
+  either. `auto.rs`'s `pipeline()` factory was also fixed to build the real
+  task-head class (not a headless `AutoModel`) when `model=` is omitted for
+  either task, matching the `text-classification` branch's existing pattern.
   They previously invented a `B-PER` entity named `"John"` at characters 0..4
   for every input, and the literal answer string `"Example answer"` with
   `score: 0.85` for every question.

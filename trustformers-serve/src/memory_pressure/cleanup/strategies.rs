@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! # Cleanup Strategy Selection and Processing
 //!
 //! This module handles the selection and execution of cleanup strategies
@@ -153,7 +151,6 @@ impl CleanupStrategyEngine {
                         queued_at: chrono::Utc::now(),
                     },
                     calculated_priority: priority,
-                    urgency_score: context.get_urgency_score(),
                 };
 
                 queue.push(action);
@@ -512,7 +509,11 @@ impl Default for CleanupEngineConfig {
 struct PrioritizedCleanupAction {
     action: CleanupAction,
     calculated_priority: u32,
-    urgency_score: f32,
+    // 0.2.1: an `urgency_score: f32` field lived here, copied from
+    // `context.get_urgency_score()` and never read. The same urgency already
+    // feeds `calculated_priority` through `urgency_multiplier`, which is what
+    // the queue actually orders by, so the copy could only ever drift from the
+    // value in use.
 }
 
 impl PartialEq for PrioritizedCleanupAction {

@@ -39,3 +39,6 @@ pub use performance::PerformanceAnalyzer;
 pub use quality::QualityAnalyzer;
 pub use series::{MetricSeries, SERIES_NAMES};
 pub use trend::TrendAnalyzer;
+
+#[cfg(test)]
+mod tests;

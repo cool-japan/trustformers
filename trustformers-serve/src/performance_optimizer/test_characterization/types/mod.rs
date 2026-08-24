@@ -43,6 +43,8 @@ mod locking_tests;
 
 #[cfg(test)]
 mod optimization_tests;
+#[cfg(test)]
+mod optimization_unit_tests;
 
 #[cfg(test)]
 mod resources_tests;

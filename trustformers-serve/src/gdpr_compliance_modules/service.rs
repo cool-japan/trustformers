@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Main GDPR compliance service implementation
 //!
 //! This module contains the core GdprComplianceService that orchestrates

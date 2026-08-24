@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Graph Optimization Module
 //!
 //! Provides comprehensive computational graph optimization capabilities for improved
@@ -622,24 +620,28 @@ impl GraphOptimizationService {
         Ok(improvement)
     }
 
-    /// Memory layout optimization pass
-    async fn memory_layout_optimization_pass(&self, graph: &mut ComputationGraph) -> Result<f64> {
-        let mut improvement = 0.0;
-
-        // Optimize memory access patterns
-        let memory_optimizations = self.analyze_memory_patterns(graph);
-
-        for optimization in memory_optimizations {
-            if self.apply_memory_optimization(&optimization, graph).await? {
-                improvement += 0.08; // Estimate improvement
-            }
-        }
-
-        trace!(
-            "Memory layout optimization pass completed with {:.2}% improvement",
-            improvement * 100.0
-        );
-        Ok(improvement)
+    /// Memory layout optimization pass -- not implemented.
+    ///
+    /// 0.2.1: this pass never optimised anything. It called
+    /// `analyze_memory_patterns`, which returned an empty vector
+    /// unconditionally, then would have credited itself a flat `0.08`
+    /// "estimated" improvement per optimisation applied by
+    /// `apply_memory_optimization`, which returned `Ok(false)`
+    /// unconditionally. The net effect was always `Ok(0.0)` behind two layers
+    /// of machinery that suggested real analysis. Both helpers are deleted; the
+    /// pass reports the honest zero directly so the caller's pass accounting
+    /// still adds up, and the missing capability is stated rather than implied.
+    ///
+    /// Implementing it needs a memory-access model for `ComputationGraph`
+    /// (per-node live ranges and tensor layouts), which this crate does not
+    /// have.
+    ///
+    /// # Errors
+    ///
+    /// Infallible; the `Result` matches the other optimisation passes.
+    async fn memory_layout_optimization_pass(&self, _graph: &mut ComputationGraph) -> Result<f64> {
+        trace!("Memory layout optimization pass is not implemented; contributing 0.0 improvement");
+        Ok(0.0)
     }
 
     /// Validate graph structure
@@ -986,22 +988,6 @@ impl GraphOptimizationService {
         matches!(node.operation, Operation::Add | Operation::Mul)
     }
 
-    /// Analyze memory access patterns
-    fn analyze_memory_patterns(&self, _graph: &ComputationGraph) -> Vec<MemoryOptimization> {
-        // Simplified implementation - would analyze actual memory patterns
-        vec![]
-    }
-
-    /// Apply memory optimization
-    async fn apply_memory_optimization(
-        &self,
-        _optimization: &MemoryOptimization,
-        _graph: &mut ComputationGraph,
-    ) -> Result<bool> {
-        // Simplified implementation
-        Ok(false)
-    }
-
     /// Estimate performance improvement
     async fn estimate_performance_improvement(
         &self,
@@ -1097,13 +1083,13 @@ impl GraphOptimizationService {
     }
 }
 
-/// Memory optimization information
-#[derive(Debug, Clone)]
-struct MemoryOptimization {
-    optimization_type: String,
-    affected_nodes: Vec<String>,
-    estimated_benefit: f64,
-}
+// 0.2.1: a `MemoryOptimization { optimization_type, affected_nodes,
+// estimated_benefit }` struct lived here alongside `analyze_memory_patterns`
+// (which returned `vec![]` unconditionally) and `apply_memory_optimization`
+// (which returned `Ok(false)` unconditionally). Nothing in this crate analyses
+// a graph's memory access pattern, so the three fields could never be read and
+// the pair of methods could never do anything. All three are deleted rather
+// than left as a memory optimiser that silently finds and applies nothing.
 
 /// Summary statistics for the optimization service
 #[derive(Debug, Clone, Serialize, Deserialize)]

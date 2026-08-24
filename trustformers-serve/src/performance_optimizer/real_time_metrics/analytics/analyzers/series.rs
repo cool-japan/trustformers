@@ -228,10 +228,12 @@ pub fn linear_fit(y: &[f64]) -> Option<LinearFit> {
         ss_res += (value - predicted).powi(2);
         ss_tot += (value - mean_y).powi(2);
     }
-    let r_squared = if ss_tot > 0.0 {
+    let r_squared = if ss_tot > 0.0 && varies_materially(y) {
         (1.0 - ss_res / ss_tot).clamp(0.0, 1.0)
     } else {
-        // A constant series is perfectly described by a zero-slope line.
+        // A constant series is perfectly described by a zero-slope line. This
+        // also covers a series whose only variation is rounding noise, whose
+        // residual ratio would otherwise be a meaningless near-1.0.
         1.0
     };
     let residual_variance = ss_res / (nf - 2.0);
@@ -244,9 +246,62 @@ pub fn linear_fit(y: &[f64]) -> Option<LinearFit> {
     })
 }
 
+/// Two-sided p-value that a fitted slope differs from zero.
+///
+/// A zero residual standard error means the line passes through every point.
+/// That is the strongest possible evidence for a non-zero slope, not an absent
+/// one -- the naive `slope / slope_std_error` would divide by zero and the
+/// naive `slope_std_error <= 0.0 { skip }` guard would silently drop exactly
+/// the series a trend detector most wants to report.
+pub fn slope_p_value(fit: &LinearFit, n: usize) -> f64 {
+    if n < 3 {
+        return 1.0;
+    }
+    if fit.slope_std_error <= 0.0 {
+        return if fit.slope.abs() <= CONSTANT_SERIES_TOLERANCE * fit.intercept.abs().max(1.0) {
+            // A flat line -- or one whose slope is rounding noise. Either way
+            // there is no drift, and no uncertainty about that.
+            1.0
+        } else {
+            // A line through every point: the strongest possible evidence of a
+            // real slope, not an absent one.
+            0.0
+        };
+    }
+    student_t_two_sided(fit.slope / fit.slope_std_error, n as f64 - 2.0)
+}
+
+/// Relative spread below which a series is treated as constant.
+///
+/// A series held at a fixed value still shows a variance of order 1e-17 of its
+/// own magnitude, purely from the rounding in `sum / n`. Autocorrelating that
+/// noise yields coefficients near 1.0 and would report a strong cycle in a flat
+/// line, so any series whose standard deviation is this small a fraction of its
+/// mean magnitude is treated as having no structure at all.
+pub const CONSTANT_SERIES_TOLERANCE: f64 = 1e-12;
+
+/// True when a series varies by more than floating-point rounding.
+pub fn varies_materially(values: &[f64]) -> bool {
+    let (Some(m), Some(sd)) = (mean(values), sample_std_dev(values)) else {
+        return false;
+    };
+    if sd <= 0.0 {
+        return false;
+    }
+    // Compared against the series' own magnitude, with an absolute floor so a
+    // series centred on zero is still judged on its absolute spread.
+    sd > CONSTANT_SERIES_TOLERANCE * m.abs().max(1.0)
+}
+
 /// Lag-`k` autocorrelation of a series about its own mean.
+///
+/// Returns `None` for a series that does not vary beyond rounding noise: the
+/// coefficient is meaningless there and would otherwise read as a strong cycle.
 pub fn autocorrelation(values: &[f64], lag: usize) -> Option<f64> {
     if lag == 0 || values.len() <= lag + 2 {
+        return None;
+    }
+    if !varies_materially(values) {
         return None;
     }
     let m = mean(values)?;

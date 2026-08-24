@@ -212,9 +212,10 @@ fn robust_baseline(values: &[f64]) -> Option<RobustBaseline> {
     let deviations =
         sorted_finite(&sorted.iter().map(|v| (v - median).abs()).collect::<Vec<f64>>());
     let mad = percentile_sorted(&deviations, 0.5)?;
-    if mad <= 0.0 {
-        // A series whose MAD is zero cannot distinguish an outlier from its own
-        // constant level; excluding it is more honest than scoring against it.
+    if mad <= super::series::CONSTANT_SERIES_TOLERANCE * median.abs().max(1.0) {
+        // A series whose MAD is zero -- or is only rounding noise -- cannot
+        // distinguish an outlier from its own constant level; excluding it is
+        // more honest than scoring against it.
         return None;
     }
     Some(RobustBaseline { median, mad })

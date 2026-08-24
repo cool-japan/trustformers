@@ -893,13 +893,16 @@ pub struct PatternAnalysisResult {
 }
 
 #[derive(Debug, Clone)]
+/// Flags metrics whose readings scatter far from their own window mean.
+///
+/// The `anomalies_detected` counter was removed in 0.2.1: nothing ever
+/// incremented it, so it reported zero detections forever while
+/// `detect_anomalies` returned an empty vector regardless of its input.
 pub struct PatternAnomalyDetector {
-    /// Known patterns
+    /// Metric keys to inspect; all of them when empty.
     pub patterns: Vec<String>,
-    /// Pattern matching threshold
+    /// Coefficient of variation above which a metric is called erratic.
     pub match_threshold: f64,
-    /// Anomalies detected
-    pub anomalies_detected: u64,
 }
 
 #[derive(Debug, Clone)]

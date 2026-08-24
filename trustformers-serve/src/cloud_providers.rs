@@ -1,5 +1,3 @@
-// Allow dead code for cloud provider infrastructure under development
-
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -470,8 +468,8 @@ pub struct CloudProviderManager {
     config: CloudProviderConfig,
     stats: Arc<RwLock<CloudProviderStats>>,
     load_balancer: LoadBalancer,
-    cost_tracker: CostTracker,
-    health_monitor: HealthMonitor,
+    cost_tracker: Arc<RwLock<CostTracker>>,
+    health_monitor: Arc<RwLock<HealthMonitor>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -507,15 +505,35 @@ pub enum LoadBalancingStrategy {
     WeightedRoundRobin(HashMap<String, f32>),
 }
 
+/// Running spend against the operator's configured budget.
+///
+/// 0.2.1: all three fields were written once at construction and never read
+/// again, so `cost_optimization.budget_limit_usd` was configuration that did
+/// nothing -- a manager could spend without limit while appearing to enforce a
+/// budget. [`CloudProviderManager::inference`] now checks it before dispatching
+/// and [`CloudProviderManager::update_stats`] charges every response to it.
 struct CostTracker {
+    /// Ceiling from `cost_optimization.budget_limit_usd`.
     daily_budget: f64,
+    /// Total charged so far.
     current_spend: f64,
+    /// Per-provider breakdown of that total.
     cost_per_provider: HashMap<String, f64>,
 }
 
+/// Cache of the last health sweep, so callers do not re-probe every provider on
+/// every request.
+///
+/// 0.2.1: both fields were written once and never read --
+/// `monitoring.health_check_interval_seconds` governed nothing and no health
+/// result was ever retained.
 struct HealthMonitor {
+    /// Minimum gap between health sweeps, from configuration.
     check_interval: tokio::time::Duration,
+    /// Last observed status per provider.
     provider_health: HashMap<String, HealthStatus>,
+    /// When the last sweep completed, if one has.
+    last_check: Option<tokio::time::Instant>,
 }
 
 impl CloudProviderManager {
@@ -541,15 +559,16 @@ impl CloudProviderManager {
             load_balancer: LoadBalancer {
                 strategy: LoadBalancingStrategy::RoundRobin,
             },
-            cost_tracker: CostTracker {
+            cost_tracker: Arc::new(RwLock::new(CostTracker {
                 daily_budget,
                 current_spend: 0.0,
                 cost_per_provider: HashMap::new(),
-            },
-            health_monitor: HealthMonitor {
+            })),
+            health_monitor: Arc::new(RwLock::new(HealthMonitor {
                 check_interval: tokio::time::Duration::from_secs(check_interval_seconds),
                 provider_health: HashMap::new(),
-            },
+                last_check: None,
+            })),
         })
     }
 
@@ -569,10 +588,29 @@ impl CloudProviderManager {
         }
     }
 
+    /// Dispatch `request` to the selected provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no provider can be selected, when the configured
+    /// daily budget is already exhausted, or when the provider call itself
+    /// fails.
     pub async fn inference(
         &self,
         request: CloudInferenceRequest,
     ) -> Result<CloudInferenceResponse> {
+        // Refuse before spending rather than after: a configured budget that is
+        // only checked afterwards is not a budget.
+        {
+            let tracker = self.cost_tracker.read().await;
+            if tracker.current_spend >= tracker.daily_budget {
+                return Err(anyhow::anyhow!(
+                    "cloud provider budget exhausted: spent {:.4} USD of a {:.4} USD limit",
+                    tracker.current_spend,
+                    tracker.daily_budget
+                ));
+            }
+        }
         let provider_name = self.select_provider(&request).await?;
         let provider = self
             .providers
@@ -667,6 +705,12 @@ impl CloudProviderManager {
                 provider_stats.successes += 1;
                 provider_stats.total_cost_usd += response.cost.cost_usd;
 
+                // Charge the same real cost to the budget tracker.
+                let mut tracker = self.cost_tracker.write().await;
+                tracker.current_spend += response.cost.cost_usd;
+                *tracker.cost_per_provider.entry(provider_name.to_string()).or_insert(0.0) +=
+                    response.cost.cost_usd;
+
                 let latency_ms = duration.as_millis() as f64;
                 provider_stats.average_latency_ms = (provider_stats.average_latency_ms
                     * (provider_stats.requests - 1) as f64
@@ -699,6 +743,51 @@ impl CloudProviderManager {
         self.stats.read().await.clone()
     }
 
+    /// Total charged to the budget so far, and the configured ceiling.
+    pub async fn budget_status(&self) -> (f64, f64) {
+        let tracker = self.cost_tracker.read().await;
+        (tracker.current_spend, tracker.daily_budget)
+    }
+
+    /// Spend charged to each provider so far.
+    pub async fn cost_per_provider(&self) -> HashMap<String, f64> {
+        self.cost_tracker.read().await.cost_per_provider.clone()
+    }
+
+    /// The most recent health sweep, without probing again.
+    ///
+    /// Returns `None` when no sweep has run yet -- an empty map would read as
+    /// "no providers", which is a different claim.
+    pub async fn cached_health(&self) -> Option<HashMap<String, HealthStatus>> {
+        let monitor = self.health_monitor.read().await;
+        monitor.last_check.map(|_| monitor.provider_health.clone())
+    }
+
+    /// Health of every provider, re-probing only when the configured
+    /// `health_check_interval_seconds` has elapsed since the last sweep.
+    ///
+    /// # Errors
+    ///
+    /// Infallible today: an unreachable provider is reported as `unhealthy`
+    /// rather than aborting the sweep.
+    pub async fn health_check_cached(&self) -> Result<HashMap<String, HealthStatus>> {
+        {
+            let monitor = self.health_monitor.read().await;
+            if let Some(last_check) = monitor.last_check {
+                if last_check.elapsed() < monitor.check_interval {
+                    return Ok(monitor.provider_health.clone());
+                }
+            }
+        }
+        self.health_check().await
+    }
+
+    /// Probe every provider now, and cache the result.
+    ///
+    /// # Errors
+    ///
+    /// Infallible today: an unreachable provider is reported as `unhealthy`
+    /// rather than aborting the sweep.
     pub async fn health_check(&self) -> Result<HashMap<String, HealthStatus>> {
         let mut health_statuses = HashMap::new();
 
@@ -724,6 +813,12 @@ impl CloudProviderManager {
                     );
                 },
             }
+        }
+
+        {
+            let mut monitor = self.health_monitor.write().await;
+            monitor.provider_health = health_statuses.clone();
+            monitor.last_check = Some(tokio::time::Instant::now());
         }
 
         Ok(health_statuses)

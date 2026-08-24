@@ -431,6 +431,13 @@ impl ZeroCopyTokenizer {
 }
 
 impl Tokenizer for ZeroCopyTokenizer {
+    /// Whitespace-split lookup against the memory-mapped vocabulary.
+    ///
+    /// `offset_mapping` is `None`: this encoder computes no spans (and silently
+    /// skips words the vocabulary does not contain, so positions would not tile
+    /// the input anyway). `None` states that absence rather than inventing
+    /// spans — the `WordPieceTokenizer`/`BPETokenizer` encoders are the ones
+    /// that produce real offsets, see `crate::offsets`.
     fn encode(&self, text: &str) -> Result<TokenizedInput> {
         // Simple word-based tokenization for demonstration
         let tokens: Vec<&str> = text.split_whitespace().collect();

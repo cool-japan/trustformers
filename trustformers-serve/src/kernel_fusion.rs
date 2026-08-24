@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 //! Kernel Fusion Service for TrustformeRS Inference Server
 //!
 //! Implements kernel fusion optimization to combine multiple computational

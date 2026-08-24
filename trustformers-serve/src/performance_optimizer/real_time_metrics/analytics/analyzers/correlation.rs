@@ -122,10 +122,7 @@ impl CorrelationAnalyzer {
 }
 
 fn varies(values: &[f64]) -> bool {
-    let Some(first) = values.first() else {
-        return false;
-    };
-    values.len() >= MIN_SAMPLES && values.iter().any(|v| (v - first).abs() > f64::EPSILON)
+    values.len() >= MIN_SAMPLES && super::series::varies_materially(values)
 }
 
 fn classify_strength(r: f64) -> CorrelationStrength {

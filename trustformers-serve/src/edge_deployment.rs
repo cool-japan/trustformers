@@ -1,5 +1,3 @@
-// Allow dead code for infrastructure under development
-
 // Edge Deployment Infrastructure for TrustformeRS
 // Provides comprehensive edge deployment capabilities for distributed inference
 // at the edge, including offline mode, model synchronization, and bandwidth optimization

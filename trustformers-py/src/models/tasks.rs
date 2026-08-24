@@ -265,16 +265,12 @@ impl PyBertForSequenceClassification {
 /// *every* sequence position, unlike [`PyBertForSequenceClassification`]'s
 /// head, which runs once on the pooled `[CLS]` representation.
 ///
-/// This class did not exist before this pass. The `token-classification`
-/// pipeline (`crate::pipelines::PyTokenClassificationPipeline`) used to refuse
-/// construction citing two gaps: no Python wrapper for this model, and no
-/// character-offset support in this crate's tokenizers. This class closes the
-/// first gap -- real per-token logits are available today by calling it
-/// directly with `input_ids`/`attention_mask`. The pipeline itself still
-/// refuses: HuggingFace's `start`/`end` output keys need the character
-/// offsets `trustformers-tokenizers`'s `WordPieceTokenizer`/`BPETokenizer`
-/// still do not produce (verified 2026-08-24; see
-/// `pipelines::span_pipeline_unavailable`).
+/// The `token-classification`/`ner` pipeline
+/// (`crate::pipelines::PyTokenClassificationPipeline`) wraps this class
+/// directly: real per-token logits, aggregated with
+/// `aggregation_strategy='simple'` and reported at real (converted)
+/// character offsets. Call this class directly instead when per-token logits
+/// -- without aggregation or offset conversion -- are what's needed.
 #[pyclass(name = "BertForTokenClassification", module = "trustformers")]
 pub struct PyBertForTokenClassification {
     inner: BertForTokenClassification,
@@ -282,6 +278,18 @@ pub struct PyBertForTokenClassification {
     /// Label names by class index, from the checkpoint's `id2label` when it has
     /// one and `LABEL_0..LABEL_n` otherwise (HuggingFace's own fallback).
     labels: Vec<String>,
+}
+
+impl PyBertForTokenClassification {
+    /// The wrapped Rust model, for the `token-classification` pipeline.
+    pub(crate) fn model(&self) -> &BertForTokenClassification {
+        &self.inner
+    }
+
+    /// The class labels, indexed by class id.
+    pub(crate) fn labels(&self) -> &[String] {
+        &self.labels
+    }
 }
 
 #[pymethods]
@@ -465,13 +473,22 @@ impl PyBertForTokenClassification {
 /// `start_logits`/`end_logits` -- one score per sequence position for "does
 /// the answer start here" and "does the answer end here".
 ///
-/// This class did not exist before this pass; see
-/// [`PyBertForTokenClassification`]'s doc comment for why the
-/// `question-answering` pipeline itself still refuses to construct even
-/// though this wrapper is now real.
+/// The `question-answering` pipeline
+/// (`crate::pipelines::PyQuestionAnsweringPipeline`) wraps this class
+/// directly: real `start_logits`/`end_logits`, extracted via real
+/// joint-argmax search and reported at real (converted) character offsets.
+/// That pipeline requires a `WordPieceTokenizer` specifically -- see
+/// `pipelines::qa_requires_wordpiece` for why a `BPETokenizer` is rejected.
 #[pyclass(name = "BertForQuestionAnswering", module = "trustformers")]
 pub struct PyBertForQuestionAnswering {
     inner: BertForQuestionAnswering,
+}
+
+impl PyBertForQuestionAnswering {
+    /// The wrapped Rust model, for the `question-answering` pipeline.
+    pub(crate) fn model(&self) -> &BertForQuestionAnswering {
+        &self.inner
+    }
 }
 
 #[pymethods]
