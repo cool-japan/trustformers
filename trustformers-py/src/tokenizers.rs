@@ -223,8 +223,100 @@ struct SpecialTokens {
 
 use std::path::{Path, PathBuf};
 
-use trustformers_core::traits::Tokenizer;
+use trustformers_core::errors::TrustformersError;
+use trustformers_core::traits::{TokenizedInput, Tokenizer};
 use trustformers_tokenizers::{bpe::BPETokenizer, wordpiece::WordPieceTokenizer};
+
+/// Tokenize one `(text, optional text_pair)` batch item, matching
+/// `PyWordPieceTokenizer::encode`'s single-item behavior: `encode_pair` when a
+/// pair is given (real `[CLS] A [SEP] B [SEP]` with 0/1 `token_type_ids`),
+/// plain `encode` otherwise.
+///
+/// Extracted from `batch_encode_plus` so its per-item pair behavior is
+/// unit-testable without a Python interpreter -- see `resolve_single_text_pair`
+/// below for the same split.
+///
+/// This replaces `batch_encode_plus`'s previous per-item pair handling, which
+/// called `encode(text)` and `encode(pair)` independently and concatenated
+/// their `input_ids`/`attention_mask` -- carrying no `[SEP]` token between the
+/// two segments, and never touching `token_type_ids` for the pair at all, so
+/// the first call's `token_type_ids` (all zero, sized for `text` alone)
+/// survived unmodified and shorter than the now-concatenated `input_ids`.
+fn wordpiece_batch_item(
+    tokenizer: &WordPieceTokenizer,
+    text: &str,
+    text_pair: Option<&str>,
+) -> Result<TokenizedInput, TrustformersError> {
+    match text_pair {
+        Some(pair) => tokenizer.encode_pair(text, pair),
+        None => tokenizer.encode(text),
+    }
+}
+
+/// The `<bos> A <eos> <eos> B <eos>` pair-encoding convention this crate's
+/// RoBERTa/GPT-2-family `BPETokenizer` uses for sequence pairs, matching
+/// HuggingFace's `RobertaTokenizer.build_inputs_with_special_tokens`. BPE
+/// models built this way do not use segment ids for pairs (matching
+/// `RobertaTokenizer.create_token_type_ids_from_sequences`), so every
+/// position gets `token_type_ids = 0` rather than a 0/1 split.
+///
+/// `bos_token`/`eos_token` are read from the tokenizer itself, so this
+/// follows whichever preset is loaded: `<|endoftext|>` for the GPT-2 default
+/// `BPETokenizer::new`, `<s>`/`</s>` for `BPETokenizer::from_roberta_files`.
+///
+/// This bypasses `BPETokenizer::encode_pair` entirely rather than calling it:
+/// that method's own implementation is `format!("{} {}", text, text2)`,
+/// re-encoded as a single string -- no separator token at all, and
+/// `token_type_ids: None` -- which silently merges the two sequences'
+/// boundary instead of marking it.
+///
+/// # Errors
+///
+/// Fails when either sequence fails to tokenize, or when the tokenizer's
+/// configured `bos_token`/`eos_token` is not in its own vocabulary (there is
+/// then no id to place for it, and silently substituting `unk_token` would
+/// fabricate a boundary token that was never actually there).
+fn bpe_pair_encoding(
+    tokenizer: &BPETokenizer,
+    text: &str,
+    text2: &str,
+) -> Result<TokenizedInput, String> {
+    let bos_id = tokenizer.token_to_id(tokenizer.bos_token()).ok_or_else(|| {
+        format!(
+            "the beginning-of-sequence token {:?} is not in this tokenizer's vocabulary",
+            tokenizer.bos_token()
+        )
+    })?;
+    let eos_id = tokenizer.token_to_id(tokenizer.eos_token()).ok_or_else(|| {
+        format!(
+            "the end-of-sequence token {:?} is not in this tokenizer's vocabulary",
+            tokenizer.eos_token()
+        )
+    })?;
+
+    let first = tokenizer.encode(text).map_err(|e| format!("Encoding failed: {e}"))?;
+    let second = tokenizer.encode(text2).map_err(|e| format!("Encoding failed: {e}"))?;
+
+    let mut input_ids = Vec::with_capacity(first.input_ids.len() + second.input_ids.len() + 4);
+    input_ids.push(bos_id);
+    input_ids.extend(first.input_ids);
+    input_ids.push(eos_id);
+    input_ids.push(eos_id);
+    input_ids.extend(second.input_ids);
+    input_ids.push(eos_id);
+
+    let attention_mask = vec![1u8; input_ids.len()];
+    let token_type_ids = vec![0u32; input_ids.len()];
+
+    Ok(TokenizedInput {
+        input_ids,
+        attention_mask,
+        token_type_ids: Some(token_type_ids),
+        special_tokens_mask: None,
+        offset_mapping: None,
+        overflowing_tokens: None,
+    })
+}
 
 /// Base tokenizer class
 #[pyclass(name = "PreTrainedTokenizer", module = "trustformers", subclass)]
@@ -531,28 +623,15 @@ impl PyWordPieceTokenizer {
         // Encoding options are accepted for HF API parity; the underlying tokenizer
         // applies its configured defaults.
         let _ = (add_special_tokens, max_length, padding, truncation, return_tensors);
-        // Use single encode for each text since batch_encode doesn't exist
+        // One call per text (there is no dedicated batch-encode primitive on
+        // the wrapped tokenizer), routed per item through `wordpiece_batch_item`.
         let mut outputs = Vec::new();
         for (i, text) in texts.iter().enumerate() {
             let text_pair =
                 text_pairs.as_ref().and_then(|pairs| pairs.get(i)).and_then(|p| p.as_deref());
 
-            let mut tokenized = self
-                .inner
-                .encode(text)
+            let tokenized = wordpiece_batch_item(&self.inner, text, text_pair)
                 .map_err(|e| PyValueError::new_err(format!("Encoding failed: {}", e)))?;
-
-            // Handle text pairs by concatenating if provided
-            if let Some(pair) = text_pair {
-                let tokenized_pair = self
-                    .inner
-                    .encode(pair)
-                    .map_err(|e| PyValueError::new_err(format!("Encoding failed: {}", e)))?;
-
-                // Concatenate the inputs (simplified - real implementation would handle special tokens properly)
-                tokenized.input_ids.extend(tokenized_pair.input_ids);
-                tokenized.attention_mask.extend(tokenized_pair.attention_mask);
-            }
 
             outputs.push(tokenized);
         }
@@ -880,12 +959,15 @@ impl PyBPETokenizer {
         // Encoding options are accepted for HF API parity; the underlying tokenizer
         // applies its configured defaults.
         let _ = (add_special_tokens, max_length, padding, truncation);
-        let output = if let Some(text2) = text_pair {
-            self.inner.encode_pair(text, text2)
-        } else {
-            self.inner.encode(text)
-        }
-        .map_err(|e| PyValueError::new_err(format!("Encoding failed: {}", e)))?;
+        let output = match text_pair {
+            Some(text2) => {
+                bpe_pair_encoding(&self.inner, text, text2).map_err(PyValueError::new_err)?
+            },
+            None => self
+                .inner
+                .encode(text)
+                .map_err(|e| PyValueError::new_err(format!("Encoding failed: {}", e)))?,
+        };
 
         if let Some(format) = return_tensors {
             match format {
@@ -893,6 +975,9 @@ impl PyBPETokenizer {
                     let dict = pyo3::types::PyDict::new(py);
                     dict.set_item("input_ids", output.input_ids)?;
                     dict.set_item("attention_mask", output.attention_mask)?;
+                    if let Some(token_type_ids) = output.token_type_ids {
+                        dict.set_item("token_type_ids", token_type_ids)?;
+                    }
                     Ok(dict.into())
                 },
                 _ => output.input_ids.into_py_any(py),
@@ -1288,6 +1373,151 @@ mod local_asset_tests {
         assert_eq!(special.unk, "<unk>");
         // Unset entries keep the defaults.
         assert_eq!(special.cls, "[CLS]");
+    }
+}
+
+#[cfg(test)]
+mod pair_encoding_tests {
+    use super::*;
+
+    fn wordpiece_fixture() -> WordPieceTokenizer {
+        let vocab: HashMap<String, u32> = [
+            ("[PAD]", 0u32),
+            ("[UNK]", 1),
+            ("[CLS]", 2),
+            ("[SEP]", 3),
+            ("[MASK]", 4),
+            ("hello", 5),
+            ("world", 6),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        WordPieceTokenizer::new(vocab, true)
+    }
+
+    // ---- wordpiece_batch_item ----
+
+    #[test]
+    fn wordpiece_batch_item_pair_matches_encode_pair() {
+        let tokenizer = wordpiece_fixture();
+        let via_helper =
+            wordpiece_batch_item(&tokenizer, "hello", Some("world")).expect("pair encodes");
+        let direct = tokenizer.encode_pair("hello", "world").expect("pair encodes");
+        assert_eq!(via_helper.input_ids, direct.input_ids);
+        assert_eq!(via_helper.token_type_ids, direct.token_type_ids);
+    }
+
+    #[test]
+    fn wordpiece_batch_item_without_a_pair_matches_encode() {
+        let tokenizer = wordpiece_fixture();
+        let via_helper = wordpiece_batch_item(&tokenizer, "hello", None).expect("single encodes");
+        let direct = tokenizer.encode("hello").expect("single encodes");
+        assert_eq!(via_helper.input_ids, direct.input_ids);
+    }
+
+    /// The regression this helper exists for: the previous `batch_encode_plus`
+    /// pair handling concatenated two independent `encode()` calls, so there
+    /// was no `[SEP]` between segments, and `token_type_ids` stayed the
+    /// length of (and all zero for) the first segment alone -- shorter than
+    /// the now-concatenated `input_ids`.
+    #[test]
+    fn wordpiece_batch_item_pair_has_two_separators_and_full_length_token_type_ids() {
+        let tokenizer = wordpiece_fixture();
+        let output =
+            wordpiece_batch_item(&tokenizer, "hello", Some("world")).expect("pair encodes");
+        let token_type_ids = output.token_type_ids.expect("pair encoding carries token_type_ids");
+        assert_eq!(
+            token_type_ids.len(),
+            output.input_ids.len(),
+            "token_type_ids must cover every token, not just the first segment"
+        );
+        assert!(
+            token_type_ids.contains(&0) && token_type_ids.contains(&1),
+            "a real pair encoding must mark both segments, got {:?}",
+            token_type_ids
+        );
+        let sep_id = tokenizer.token_to_id("[SEP]").expect("[SEP] is in the fixture vocab");
+        let sep_count = output.input_ids.iter().filter(|&&id| id == sep_id).count();
+        assert_eq!(sep_count, 2, "[CLS] A [SEP] B [SEP] has exactly two [SEP] tokens");
+    }
+
+    // ---- bpe_pair_encoding ----
+
+    fn bpe_fixture_with_eot_in_vocab() -> BPETokenizer {
+        let vocab: HashMap<String, u32> = [("<|endoftext|>", 0u32), ("h", 1), ("i", 2)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        BPETokenizer::new(vocab, vec![])
+    }
+
+    fn bpe_fixture_missing_eot_from_vocab() -> BPETokenizer {
+        let vocab: HashMap<String, u32> =
+            [("h", 0u32), ("i", 1)].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        BPETokenizer::new(vocab, vec![])
+    }
+
+    #[test]
+    fn bpe_pair_encoding_wraps_with_bos_and_double_eos() {
+        let tokenizer = bpe_fixture_with_eot_in_vocab();
+        let eot_id = tokenizer.token_to_id("<|endoftext|>").expect("in fixture vocab");
+        let output = bpe_pair_encoding(&tokenizer, "hi", "hi").expect("pair encodes");
+
+        // <bos> h i <eos> <eos> h i <eos>: 8 ids, the boundary token at
+        // exactly 4 of them (positions 0, 3, 4, 7).
+        assert_eq!(output.input_ids.len(), 8, "{:?}", output.input_ids);
+        assert_eq!(output.input_ids.first(), Some(&eot_id), "must start with bos");
+        assert_eq!(output.input_ids.last(), Some(&eot_id), "must end with eos");
+        let boundary_count = output.input_ids.iter().filter(|&&id| id == eot_id).count();
+        assert_eq!(
+            boundary_count, 4,
+            "expected bos + two eos separators + trailing eos, got {:?}",
+            output.input_ids
+        );
+    }
+
+    #[test]
+    fn bpe_pair_encoding_uses_all_zero_token_type_ids() {
+        let tokenizer = bpe_fixture_with_eot_in_vocab();
+        let output = bpe_pair_encoding(&tokenizer, "h", "h").expect("pair encodes");
+        let token_type_ids = output.token_type_ids.expect("pair encoding carries token_type_ids");
+        assert_eq!(token_type_ids.len(), output.input_ids.len());
+        assert!(
+            token_type_ids.iter().all(|&t| t == 0),
+            "BPE-family pairs use no segment ids, got {:?}",
+            token_type_ids
+        );
+    }
+
+    #[test]
+    fn bpe_pair_encoding_attention_mask_covers_every_token() {
+        let tokenizer = bpe_fixture_with_eot_in_vocab();
+        let output = bpe_pair_encoding(&tokenizer, "hi", "hi").expect("pair encodes");
+        assert_eq!(output.attention_mask.len(), output.input_ids.len());
+        assert!(output.attention_mask.iter().all(|&m| m == 1));
+    }
+
+    /// A vocabulary missing only the boundary token (not the content tokens)
+    /// must be a clear error, not a silent fallback to `unk_token`'s id --
+    /// that would fabricate a boundary that was never actually placed there.
+    #[test]
+    fn bpe_pair_encoding_rejects_a_vocabulary_missing_the_boundary_token() {
+        let tokenizer = bpe_fixture_missing_eot_from_vocab();
+        let err = bpe_pair_encoding(&tokenizer, "h", "h")
+            .expect_err("a vocabulary with no bos/eos token must error, not fabricate an id");
+        assert!(err.contains("<|endoftext|>"), "error must name the missing token: {err}");
+    }
+
+    /// Different second sequences must produce different encodings -- proves
+    /// this composes real per-sequence tokenization rather than, say, always
+    /// wrapping the first sequence twice.
+    #[test]
+    fn bpe_pair_encoding_reflects_both_sequences() {
+        let tokenizer = bpe_fixture_with_eot_in_vocab();
+        let same = bpe_pair_encoding(&tokenizer, "h", "h").expect("pair encodes");
+        let different = bpe_pair_encoding(&tokenizer, "h", "hi").expect("pair encodes");
+        assert_ne!(same.input_ids, different.input_ids);
     }
 }
 

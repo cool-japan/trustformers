@@ -1,43 +1,22 @@
-//! Context summarization module for conversational AI pipeline.
+//! The `ContextSummarizer` engine: strategy dispatch, extractive/abstractive/hybrid summarization, quality assessment, and token/context management.
 //!
-//! This module provides comprehensive conversation context summarization capabilities,
-//! including multiple summarization strategies, quality assessment, token management,
-//! and optimization for different conversation types and requirements.
-//!
-//! # Features
-//!
-//! - **Multiple Strategies**: Extractive, abstractive, and hybrid summarization
-//! - **Context Compression**: Intelligent compression while preserving key information
-//! - **Quality Assessment**: Automatic summary quality scoring and validation
-//! - **Token Management**: Precise token counting and context window management
-//! - **Adaptive Algorithms**: Different algorithms for different conversation types
-//! - **Performance Optimization**: Efficient summarization with minimal latency
-//! - **Error Recovery**: Robust error handling and fallback mechanisms
+//! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use crate::error::{Result, TrustformersError};
+use crate::error::Result;
 use crate::pipeline::conversational::types::{
     ConversationRole, ConversationTurn, EngagementLevel, ReasoningType, SummarizationConfig,
     SummarizationStrategy,
 };
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-// ================================================================================================
-// CORE SUMMARIZATION TYPES
-// ================================================================================================
-
-// ================================================================================================
-// TYPE ALIASES
-// ================================================================================================
-
-/// Summarization engine alias
-pub type SummarizationEngine = ContextSummarizer;
-
-/// Summarization metadata alias
-pub type SummarizationMetadata = SummarizationResult;
+use super::types::{
+    ConstrainedSummary, ConversationSegment, HierarchicalSummary, ImportanceWeights,
+    QualityAssessment, QualityThresholds, SentenceScore, SentimentAnalysis, SummarizationResult,
+    TopicCluster,
+};
 
 /// Advanced context summarization component for conversation compression
 pub struct ContextSummarizer {
@@ -46,172 +25,11 @@ pub struct ContextSummarizer {
     /// Token counting function for accurate estimation
     pub token_counter: Option<Arc<dyn Fn(&str) -> usize + Send + Sync>>,
     /// Cache for frequently used regex patterns
-    regex_cache: HashMap<String, Regex>,
+    pub(super) regex_cache: HashMap<String, Regex>,
     /// Importance scoring weights
-    importance_weights: ImportanceWeights,
+    pub(super) importance_weights: ImportanceWeights,
     /// Quality assessment thresholds
-    quality_thresholds: QualityThresholds,
-}
-
-/// Result of summarization with metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SummarizationResult {
-    /// Generated summary text
-    pub summary: String,
-    /// Original token count before summarization
-    pub original_tokens: usize,
-    /// Summary token count after summarization
-    pub summary_tokens: usize,
-    /// Compression ratio achieved
-    pub compression_ratio: f32,
-    /// Quality score of the summary
-    pub quality_score: f32,
-    /// Strategy used for summarization
-    pub strategy_used: SummarizationStrategy,
-    /// Key topics preserved
-    pub preserved_topics: Vec<String>,
-    /// Important entities preserved
-    pub preserved_entities: Vec<String>,
-    /// Confidence in summary quality
-    pub confidence: f32,
-    /// Processing time in milliseconds
-    pub processing_time_ms: f64,
-}
-
-/// Weights for importance scoring, set via
-/// [`ContextSummarizer::with_importance_weights`].
-#[derive(Debug, Clone)]
-pub struct ImportanceWeights {
-    /// Weight for questions in importance calculation
-    pub question_weight: f32,
-    /// Weight for personal information
-    pub personal_info_weight: f32,
-    /// Weight for topical relevance
-    pub topic_relevance_weight: f32,
-    /// Weight for emotional content
-    pub emotional_weight: f32,
-    /// Weight for reasoning chains
-    pub reasoning_weight: f32,
-    /// Weight for engagement level
-    pub engagement_weight: f32,
-    /// Weight for recency (more recent = more important)
-    pub recency_weight: f32,
-}
-
-impl Default for ImportanceWeights {
-    fn default() -> Self {
-        Self {
-            question_weight: 0.3,
-            personal_info_weight: 0.4,
-            topic_relevance_weight: 0.25,
-            emotional_weight: 0.2,
-            reasoning_weight: 0.35,
-            engagement_weight: 0.15,
-            recency_weight: 0.1,
-        }
-    }
-}
-
-/// Thresholds for quality assessment, set via
-/// [`ContextSummarizer::with_quality_thresholds`]. A summary that falls
-/// outside these bounds is still returned (summarization never fails purely
-/// on quality), but is logged via `tracing::warn!`.
-#[derive(Debug, Clone)]
-pub struct QualityThresholds {
-    /// Minimum quality score for acceptable summaries
-    pub min_quality_score: f32,
-    /// Minimum compression ratio to be worthwhile
-    pub min_compression_ratio: f32,
-    /// Maximum allowable information loss
-    pub max_information_loss: f32,
-    /// Minimum coherence score
-    pub min_coherence_score: f32,
-}
-
-impl Default for QualityThresholds {
-    fn default() -> Self {
-        Self {
-            min_quality_score: 0.6,
-            min_compression_ratio: 0.3,
-            max_information_loss: 0.4,
-            min_coherence_score: 0.5,
-        }
-    }
-}
-
-/// Sentence importance score and metadata
-#[derive(Debug, Clone)]
-struct SentenceScore {
-    /// The sentence text
-    sentence: String,
-    /// Importance score (0.0 to 1.0)
-    score: f32,
-    /// Position in original text
-    position: usize,
-    /// Turn index this sentence belongs to
-    turn_index: usize,
-    /// Topics this sentence covers
-    topics: Vec<String>,
-    /// Named entities in this sentence
-    entities: Vec<String>,
-    /// Role of the speaker
-    speaker_role: ConversationRole,
-}
-
-/// Topic clustering result for extractive summarization
-#[derive(Debug, Clone)]
-struct TopicCluster {
-    /// Central topic/theme
-    topic: String,
-    /// Sentences belonging to this cluster
-    sentences: Vec<SentenceScore>,
-    /// Importance score of this cluster
-    cluster_score: f32,
-    /// Representative sentence for this cluster
-    representative_sentence: Option<String>,
-}
-
-// ================================================================================================
-// LEGACY COMPATIBILITY TYPES (From original file)
-// ================================================================================================
-
-/// Hierarchical summary with segments
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HierarchicalSummary {
-    pub overall_summary: String,
-    pub main_topics: Vec<String>,
-    pub segments: Vec<ConversationSegment>,
-    pub total_turns: usize,
-}
-
-/// A segment of conversation with its summary
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversationSegment {
-    pub start_turn: usize,
-    pub end_turn: usize,
-    pub summary: String,
-    pub topics: Vec<String>,
-    pub turn_count: usize,
-}
-
-/// Summary with specific constraints
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConstrainedSummary {
-    pub summary: String,
-    pub topics: Option<Vec<String>>,
-    pub sentiment_analysis: Option<SentimentAnalysis>,
-    pub original_turn_count: usize,
-    pub compression_ratio: f32,
-}
-
-/// Sentiment analysis results
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SentimentAnalysis {
-    pub dominant_sentiment: String,
-    pub positive_ratio: f32,
-    pub negative_ratio: f32,
-    pub neutral_ratio: f32,
-    pub confidence: f32,
+    pub(super) quality_thresholds: QualityThresholds,
 }
 
 // ================================================================================================
@@ -372,7 +190,7 @@ impl ContextSummarizer {
     }
 
     /// Perform extractive summarization using sentence scoring and clustering
-    fn extractive_summary(&mut self, turns: &[ConversationTurn]) -> Result<String> {
+    pub(super) fn extractive_summary(&mut self, turns: &[ConversationTurn]) -> Result<String> {
         // Score all sentences for importance
         let scored_sentences = self.score_sentences(turns)?;
 
@@ -432,7 +250,7 @@ impl ContextSummarizer {
     }
 
     /// Perform abstractive summarization using template-based generation
-    fn abstractive_summary(&self, turns: &[ConversationTurn]) -> Result<String> {
+    pub(super) fn abstractive_summary(&self, turns: &[ConversationTurn]) -> Result<String> {
         // Extract key information for abstraction
         let key_topics = self.extract_key_topics(turns, 5);
         let key_entities = self.extract_key_entities(turns, 10);
@@ -489,7 +307,7 @@ impl ContextSummarizer {
     }
 
     /// Perform hybrid summarization combining extractive and abstractive approaches
-    fn hybrid_summary(&mut self, turns: &[ConversationTurn]) -> Result<String> {
+    pub(super) fn hybrid_summary(&mut self, turns: &[ConversationTurn]) -> Result<String> {
         // Use 60% of target for extractive, 40% for abstractive
         let extractive_target = (self.config.target_length as f32 * 0.6) as usize;
         let abstractive_target = self.config.target_length - extractive_target;
@@ -526,7 +344,7 @@ impl ContextSummarizer {
     }
 
     /// Score individual sentences for importance
-    fn score_sentences(&self, turns: &[ConversationTurn]) -> Result<Vec<SentenceScore>> {
+    pub(super) fn score_sentences(&self, turns: &[ConversationTurn]) -> Result<Vec<SentenceScore>> {
         let mut scored_sentences = Vec::new();
 
         for (turn_index, turn) in turns.iter().enumerate() {
@@ -560,7 +378,7 @@ impl ContextSummarizer {
     }
 
     /// Calculate importance score for a sentence
-    fn calculate_sentence_importance(
+    pub(super) fn calculate_sentence_importance(
         &self,
         sentence: &str,
         turn: &ConversationTurn,
@@ -622,7 +440,7 @@ impl ContextSummarizer {
     }
 
     /// Check if sentence contains personal information
-    fn contains_personal_info(&self, sentence: &str) -> bool {
+    pub(super) fn contains_personal_info(&self, sentence: &str) -> bool {
         let personal_patterns = [
             "i am",
             "my name",
@@ -641,7 +459,7 @@ impl ContextSummarizer {
     }
 
     /// Check if sentence contains emotional content
-    fn contains_emotional_content(&self, sentence: &str) -> bool {
+    pub(super) fn contains_emotional_content(&self, sentence: &str) -> bool {
         let emotional_words = [
             "love",
             "hate",
@@ -666,7 +484,7 @@ impl ContextSummarizer {
     }
 
     /// Calculate length factor for sentence scoring
-    fn calculate_length_factor(&self, sentence: &str) -> f32 {
+    pub(super) fn calculate_length_factor(&self, sentence: &str) -> f32 {
         let word_count = sentence.split_whitespace().count();
 
         match word_count {
@@ -680,7 +498,7 @@ impl ContextSummarizer {
     }
 
     /// Cluster sentences by topics for better coverage
-    fn cluster_by_topics(&self, sentences: &[SentenceScore]) -> Vec<TopicCluster> {
+    pub(super) fn cluster_by_topics(&self, sentences: &[SentenceScore]) -> Vec<TopicCluster> {
         let mut topic_map: HashMap<String, Vec<SentenceScore>> = HashMap::new();
         let mut uncategorized = Vec::new();
 
@@ -740,7 +558,7 @@ impl ContextSummarizer {
     }
 
     /// Build coherent summary from selected sentences
-    fn build_coherent_summary(&self, sentences: Vec<SentenceScore>) -> Result<String> {
+    pub(super) fn build_coherent_summary(&self, sentences: Vec<SentenceScore>) -> Result<String> {
         if sentences.is_empty() {
             return Ok(String::new());
         }
@@ -772,7 +590,11 @@ impl ContextSummarizer {
     }
 
     /// Extract key topics from conversation
-    fn extract_key_topics(&self, turns: &[ConversationTurn], limit: usize) -> Vec<String> {
+    pub(super) fn extract_key_topics(
+        &self,
+        turns: &[ConversationTurn],
+        limit: usize,
+    ) -> Vec<String> {
         let mut topic_counts: HashMap<String, usize> = HashMap::new();
 
         for turn in turns {
@@ -790,7 +612,11 @@ impl ContextSummarizer {
     }
 
     /// Extract key entities from conversation
-    fn extract_key_entities(&self, turns: &[ConversationTurn], limit: usize) -> Vec<String> {
+    pub(super) fn extract_key_entities(
+        &self,
+        turns: &[ConversationTurn],
+        limit: usize,
+    ) -> Vec<String> {
         let mut entity_counts: HashMap<String, usize> = HashMap::new();
 
         for turn in turns {
@@ -808,7 +634,7 @@ impl ContextSummarizer {
     }
 
     /// Analyze conversation flow for abstractive summary
-    fn analyze_conversation_flow(&self, turns: &[ConversationTurn]) -> Option<String> {
+    pub(super) fn analyze_conversation_flow(&self, turns: &[ConversationTurn]) -> Option<String> {
         if turns.len() < 3 {
             return None;
         }
@@ -829,7 +655,7 @@ impl ContextSummarizer {
     }
 
     /// Analyze emotional arc for abstractive summary
-    fn analyze_emotional_arc(&self, turns: &[ConversationTurn]) -> Option<String> {
+    pub(super) fn analyze_emotional_arc(&self, turns: &[ConversationTurn]) -> Option<String> {
         let mut sentiment_progression = Vec::new();
 
         for turn in turns {
@@ -861,7 +687,11 @@ impl ContextSummarizer {
     }
 
     /// Extract important exchanges for abstractive summary
-    fn extract_important_exchanges(&self, turns: &[ConversationTurn], limit: usize) -> Vec<String> {
+    pub(super) fn extract_important_exchanges(
+        &self,
+        turns: &[ConversationTurn],
+        limit: usize,
+    ) -> Vec<String> {
         let mut exchanges = Vec::new();
 
         for i in 0..turns.len().saturating_sub(1) {
@@ -886,7 +716,7 @@ impl ContextSummarizer {
     }
 
     /// Extract topic from a question
-    fn extract_question_topic(&self, content: &str) -> String {
+    pub(super) fn extract_question_topic(&self, content: &str) -> String {
         // Simple keyword extraction for question topics
         let keywords = ["what", "how", "why", "when", "where", "who"];
         let content_lower = content.to_lowercase();
@@ -905,7 +735,7 @@ impl ContextSummarizer {
     }
 
     /// Extract summary from a response
-    fn extract_response_summary(&self, content: &str) -> String {
+    pub(super) fn extract_response_summary(&self, content: &str) -> String {
         let words: Vec<&str> = content.split_whitespace().take(10).collect();
         if words.len() < 10 {
             content.to_string()
@@ -915,7 +745,7 @@ impl ContextSummarizer {
     }
 
     /// Split text into sentences
-    fn split_into_sentences(&self, text: &str) -> Vec<String> {
+    pub(super) fn split_into_sentences(&self, text: &str) -> Vec<String> {
         // Simple sentence splitting on common punctuation
         let sentences: Vec<String> = text
             .split(&['.', '!', '?'])
@@ -931,7 +761,7 @@ impl ContextSummarizer {
     }
 
     /// Extract topics from a sentence
-    fn extract_sentence_topics(&self, sentence: &str) -> Vec<String> {
+    pub(super) fn extract_sentence_topics(&self, sentence: &str) -> Vec<String> {
         let mut topics = Vec::new();
         let sentence_lower = sentence.to_lowercase();
 
@@ -996,7 +826,7 @@ impl ContextSummarizer {
     }
 
     /// Extract entities from a sentence (simplified)
-    fn extract_sentence_entities(&self, sentence: &str) -> Vec<String> {
+    pub(super) fn extract_sentence_entities(&self, sentence: &str) -> Vec<String> {
         let mut entities = Vec::new();
 
         // Simple patterns for common entity types
@@ -1019,7 +849,7 @@ impl ContextSummarizer {
     }
 
     /// Build full context without summarization
-    fn build_full_context(&self, turns: &[ConversationTurn]) -> String {
+    pub(super) fn build_full_context(&self, turns: &[ConversationTurn]) -> String {
         turns
             .iter()
             .map(|turn| {
@@ -1035,12 +865,12 @@ impl ContextSummarizer {
     }
 
     /// Calculate total tokens across all turns
-    fn calculate_total_tokens(&self, turns: &[ConversationTurn]) -> usize {
+    pub(super) fn calculate_total_tokens(&self, turns: &[ConversationTurn]) -> usize {
         turns.iter().map(|turn| self.count_tokens(&turn.content)).sum()
     }
 
     /// Count tokens in text
-    fn count_tokens(&self, text: &str) -> usize {
+    pub(super) fn count_tokens(&self, text: &str) -> usize {
         if let Some(ref counter) = self.token_counter {
             counter(text)
         } else {
@@ -1050,7 +880,7 @@ impl ContextSummarizer {
     }
 
     /// Trim summary to target length
-    fn trim_to_target_length(&self, summary: String) -> Result<String> {
+    pub(super) fn trim_to_target_length(&self, summary: String) -> Result<String> {
         let current_tokens = self.count_tokens(&summary);
 
         if current_tokens <= self.config.target_length {
@@ -1070,7 +900,7 @@ impl ContextSummarizer {
     }
 
     /// Truncate text at word boundary
-    fn truncate_at_word_boundary(&self, text: &str, max_chars: usize) -> Option<String> {
+    pub(super) fn truncate_at_word_boundary(&self, text: &str, max_chars: usize) -> Option<String> {
         if text.len() <= max_chars {
             return Some(text.to_string());
         }
@@ -1082,7 +912,7 @@ impl ContextSummarizer {
     }
 
     /// Extract all topics from conversation
-    fn extract_all_topics(&self, turns: &[ConversationTurn]) -> Vec<String> {
+    pub(super) fn extract_all_topics(&self, turns: &[ConversationTurn]) -> Vec<String> {
         let mut topics = HashSet::new();
 
         for turn in turns {
@@ -1097,7 +927,7 @@ impl ContextSummarizer {
     }
 
     /// Extract all entities from conversation
-    fn extract_all_entities(&self, turns: &[ConversationTurn]) -> Vec<String> {
+    pub(super) fn extract_all_entities(&self, turns: &[ConversationTurn]) -> Vec<String> {
         let mut entities = HashSet::new();
 
         for turn in turns {
@@ -1112,7 +942,7 @@ impl ContextSummarizer {
     }
 
     /// Extract topics preserved in summary
-    fn extract_preserved_topics(
+    pub(super) fn extract_preserved_topics(
         &self,
         summary: &str,
         original_turns: &[ConversationTurn],
@@ -1127,7 +957,7 @@ impl ContextSummarizer {
     }
 
     /// Extract entities preserved in summary
-    fn extract_preserved_entities(
+    pub(super) fn extract_preserved_entities(
         &self,
         summary: &str,
         original_turns: &[ConversationTurn],
@@ -1142,7 +972,7 @@ impl ContextSummarizer {
     }
 
     /// Assess summary quality
-    fn assess_summary_quality(
+    pub(super) fn assess_summary_quality(
         &self,
         summary: &str,
         original_turns: &[ConversationTurn],
@@ -1212,7 +1042,7 @@ impl ContextSummarizer {
     /// honestly-labeled result, not an error), but it makes the configured
     /// thresholds — previously dead configuration nobody consulted —
     /// actually observable.
-    fn warn_if_below_quality_thresholds(
+    pub(super) fn warn_if_below_quality_thresholds(
         &self,
         assessment: &QualityAssessment,
         compression_ratio: f32,
@@ -1252,7 +1082,7 @@ impl ContextSummarizer {
     }
 
     /// Assess summary coherence
-    fn assess_coherence(&self, summary: &str) -> f32 {
+    pub(super) fn assess_coherence(&self, summary: &str) -> f32 {
         if summary.trim().is_empty() {
             return 0.0;
         }
@@ -1287,7 +1117,7 @@ impl ContextSummarizer {
     }
 
     /// Assess summary readability
-    fn assess_readability(&self, summary: &str) -> f32 {
+    pub(super) fn assess_readability(&self, summary: &str) -> f32 {
         if summary.trim().is_empty() {
             return 0.0;
         }
@@ -1401,7 +1231,7 @@ impl ContextSummarizer {
     }
 
     /// Extract main topics from conversation (legacy compatibility)
-    fn extract_main_topics(&self, turns: &[ConversationTurn]) -> Vec<String> {
+    pub(super) fn extract_main_topics(&self, turns: &[ConversationTurn]) -> Vec<String> {
         let mut topic_counts = HashMap::new();
 
         for turn in turns {
@@ -1422,7 +1252,7 @@ impl ContextSummarizer {
     }
 
     /// Extract topics from a conversation segment (legacy compatibility)
-    fn extract_segment_topics(&self, turns: &[ConversationTurn]) -> Vec<String> {
+    pub(super) fn extract_segment_topics(&self, turns: &[ConversationTurn]) -> Vec<String> {
         let mut topics = HashSet::new();
 
         for turn in turns {
@@ -1470,7 +1300,10 @@ impl ContextSummarizer {
     }
 
     /// Analyze overall sentiment of conversation (legacy compatibility)
-    fn analyze_overall_sentiment(&self, turns: &[ConversationTurn]) -> SentimentAnalysis {
+    pub(super) fn analyze_overall_sentiment(
+        &self,
+        turns: &[ConversationTurn],
+    ) -> SentimentAnalysis {
         let mut positive_count = 0;
         let mut negative_count = 0;
         let mut neutral_count = 0;
@@ -1510,492 +1343,5 @@ impl ContextSummarizer {
             neutral_ratio: neutral_count as f32 / total_turns as f32,
             confidence: avg_confidence,
         }
-    }
-}
-
-/// Quality assessment result
-#[derive(Debug, Clone)]
-struct QualityAssessment {
-    quality_score: f32,
-    confidence: f32,
-    coherence_score: f32,
-}
-
-// ================================================================================================
-// ADDITIONAL HELPER FUNCTIONS
-// ================================================================================================
-
-/// Validate summarization configuration
-pub fn validate_summarization_config(config: &SummarizationConfig) -> Result<()> {
-    if config.target_length == 0 {
-        return Err(TrustformersError::invalid_input_simple(
-            "Target length must be greater than 0".to_string(),
-        ));
-    }
-
-    if config.trigger_threshold <= config.target_length {
-        return Err(TrustformersError::invalid_input_simple(
-            "Trigger threshold must be greater than target length".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-/// Create a default context summarizer
-pub fn create_default_summarizer() -> ContextSummarizer {
-    ContextSummarizer::new(SummarizationConfig::default())
-}
-
-/// Create a high-compression summarizer for memory-constrained environments
-pub fn create_high_compression_summarizer() -> ContextSummarizer {
-    let mut config = SummarizationConfig::default();
-    config.target_length = 100;
-    config.trigger_threshold = 500;
-    config.strategy = SummarizationStrategy::Hybrid;
-
-    ContextSummarizer::new(config)
-}
-
-/// Create a topic-focused extractive summarizer
-pub fn create_extractive_summarizer() -> ContextSummarizer {
-    let mut config = SummarizationConfig::default();
-    config.strategy = SummarizationStrategy::Extractive;
-    config.target_length = 300;
-
-    ContextSummarizer::new(config)
-}
-
-/// Create an abstractive summarizer for detailed overviews
-pub fn create_abstractive_summarizer() -> ContextSummarizer {
-    let mut config = SummarizationConfig::default();
-    config.strategy = SummarizationStrategy::Abstractive;
-    config.target_length = 250;
-
-    ContextSummarizer::new(config)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::types::ConversationMetadata;
-    use super::*;
-    use chrono::Utc;
-
-    fn create_test_turn(role: ConversationRole, content: &str) -> ConversationTurn {
-        ConversationTurn {
-            role,
-            content: content.to_string(),
-            timestamp: Utc::now(),
-            metadata: None,
-            token_count: content.len() / 4, // Simple estimation
-        }
-    }
-
-    fn create_test_turn_with_metadata(
-        role: ConversationRole,
-        content: &str,
-        topics: Vec<String>,
-    ) -> ConversationTurn {
-        ConversationTurn {
-            role,
-            content: content.to_string(),
-            timestamp: Utc::now(),
-            metadata: Some(ConversationMetadata {
-                sentiment: Some("neutral".to_string()),
-                intent: Some("statement".to_string()),
-                confidence: 0.8,
-                topics,
-                safety_flags: Vec::new(),
-                entities: Vec::new(),
-                quality_score: 0.8,
-                engagement_level: EngagementLevel::Medium,
-                reasoning_type: None,
-            }),
-            token_count: content.len() / 4,
-        }
-    }
-
-    #[test]
-    fn test_context_summarizer_creation() {
-        let config = SummarizationConfig::default();
-        let summarizer = ContextSummarizer::new(config.clone());
-
-        assert_eq!(summarizer.config.strategy, config.strategy);
-        assert_eq!(summarizer.config.target_length, config.target_length);
-    }
-
-    #[test]
-    fn test_legacy_constructor() {
-        let summarizer = ContextSummarizer::with_strategy(SummarizationStrategy::Extractive, 200);
-        assert_eq!(
-            summarizer.config.strategy,
-            SummarizationStrategy::Extractive
-        );
-        assert_eq!(summarizer.config.target_length, 200);
-    }
-
-    #[test]
-    fn test_empty_conversation_summarization() {
-        let mut summarizer = create_default_summarizer();
-        let result = summarizer.summarize_context_enhanced(&[]).expect("operation failed in test");
-
-        assert!(result.summary.is_empty());
-        assert_eq!(result.original_tokens, 0);
-        assert_eq!(result.summary_tokens, 0);
-        assert_eq!(result.compression_ratio, 1.0);
-    }
-
-    #[test]
-    fn test_legacy_summarization() {
-        let mut summarizer = create_default_summarizer();
-        let turns = vec![
-            create_test_turn(ConversationRole::User, "Hello!"),
-            create_test_turn(ConversationRole::Assistant, "Hi there!"),
-        ];
-
-        let result = summarizer.summarize_context(&turns).expect("operation failed in test");
-        assert!(!result.is_empty());
-    }
-
-    #[test]
-    fn test_short_conversation_no_summarization() {
-        let mut summarizer = create_default_summarizer();
-        let turns = vec![
-            create_test_turn(ConversationRole::User, "Hello!"),
-            create_test_turn(ConversationRole::Assistant, "Hi there!"),
-        ];
-
-        let result =
-            summarizer.summarize_context_enhanced(&turns).expect("operation failed in test");
-
-        // Should not summarize if under target length
-        assert!(result.summary.contains("Hello"));
-        assert!(result.summary.contains("Hi there"));
-        assert_eq!(result.compression_ratio, 1.0);
-    }
-
-    #[test]
-    fn test_extractive_summarization() {
-        let mut config = SummarizationConfig::default();
-        config.strategy = SummarizationStrategy::Extractive;
-        config.target_length = 20; // Force summarization
-        config.trigger_threshold = 10;
-
-        let mut summarizer = ContextSummarizer::new(config);
-
-        let turns = vec![
-            create_test_turn_with_metadata(
-                ConversationRole::User,
-                "I really need help with my Python programming project. It's about machine learning algorithms.",
-                vec!["technology".to_string(), "programming".to_string()]
-            ),
-            create_test_turn(
-                ConversationRole::Assistant,
-                "I'd be happy to help you with your Python machine learning project. What specific aspect are you working on?"
-            ),
-            create_test_turn(
-                ConversationRole::User,
-                "I'm trying to implement a neural network from scratch but I'm getting confused about backpropagation."
-            ),
-        ];
-
-        let result =
-            summarizer.summarize_context_enhanced(&turns).expect("operation failed in test");
-
-        assert!(!result.summary.is_empty());
-        assert!(result.compression_ratio < 1.0);
-        assert!(result.quality_score > 0.0);
-        assert_eq!(result.strategy_used, SummarizationStrategy::Extractive);
-    }
-
-    #[test]
-    fn test_abstractive_summarization() {
-        let mut config = SummarizationConfig::default();
-        config.strategy = SummarizationStrategy::Abstractive;
-        config.target_length = 30;
-        config.trigger_threshold = 10;
-
-        let mut summarizer = ContextSummarizer::new(config);
-
-        let turns = vec![
-            create_test_turn_with_metadata(
-                ConversationRole::User,
-                "What's the weather like today?",
-                vec!["weather".to_string()]
-            ),
-            create_test_turn(
-                ConversationRole::Assistant,
-                "I don't have access to current weather data, but I can help you find weather information."
-            ),
-            create_test_turn_with_metadata(
-                ConversationRole::User,
-                "How can I check the weather?",
-                vec!["weather".to_string()]
-            ),
-        ];
-
-        let result =
-            summarizer.summarize_context_enhanced(&turns).expect("operation failed in test");
-
-        assert!(!result.summary.is_empty());
-        assert!(result.summary.contains("Conversation summary"));
-        assert_eq!(result.strategy_used, SummarizationStrategy::Abstractive);
-    }
-
-    #[test]
-    fn test_hybrid_summarization() {
-        let mut config = SummarizationConfig::default();
-        config.strategy = SummarizationStrategy::Hybrid;
-        config.target_length = 40;
-        config.trigger_threshold = 10;
-
-        let mut summarizer = ContextSummarizer::new(config);
-
-        let turns = vec![
-            create_test_turn(
-                ConversationRole::User,
-                "I'm interested in learning about artificial intelligence and machine learning.",
-            ),
-            create_test_turn(
-                ConversationRole::Assistant,
-                "AI and ML are fascinating fields! What specific area interests you most?",
-            ),
-            create_test_turn(
-                ConversationRole::User,
-                "I'd like to understand neural networks and deep learning applications.",
-            ),
-        ];
-
-        let result =
-            summarizer.summarize_context_enhanced(&turns).expect("operation failed in test");
-
-        assert!(!result.summary.is_empty());
-        assert!(result.compression_ratio < 1.0);
-        assert_eq!(result.strategy_used, SummarizationStrategy::Hybrid);
-    }
-
-    #[test]
-    fn test_sentence_importance_scoring() {
-        let summarizer = create_default_summarizer();
-        let turn = create_test_turn(
-            ConversationRole::User,
-            "I really need help with this important question.",
-        );
-
-        let score = summarizer.calculate_sentence_importance(
-            "I really need help with this important question.",
-            &turn,
-            0,
-        );
-
-        assert!(score > 0.0);
-        assert!(score <= 1.0);
-    }
-
-    #[test]
-    fn test_personal_info_detection() {
-        let summarizer = create_default_summarizer();
-
-        assert!(summarizer.contains_personal_info("i am john and i work as a developer"));
-        assert!(summarizer.contains_personal_info("my name is alice"));
-        assert!(!summarizer.contains_personal_info("the weather is nice today"));
-    }
-
-    #[test]
-    fn test_emotional_content_detection() {
-        let summarizer = create_default_summarizer();
-
-        assert!(summarizer.contains_emotional_content("i love this amazing product"));
-        assert!(summarizer.contains_emotional_content("i feel frustrated about this"));
-        assert!(!summarizer.contains_emotional_content("the technical specifications are correct"));
-    }
-
-    #[test]
-    fn test_token_counting() {
-        let summarizer = create_default_summarizer();
-
-        let short_text = "Hello world";
-        let long_text = "This is a much longer text with many more words and characters";
-
-        let short_tokens = summarizer.count_tokens(short_text);
-        let long_tokens = summarizer.count_tokens(long_text);
-
-        assert!(long_tokens > short_tokens);
-        assert!(short_tokens > 0);
-    }
-
-    #[test]
-    fn test_topic_extraction() {
-        let summarizer = create_default_summarizer();
-
-        let tech_sentence = "I need help with programming and software development";
-        let food_sentence = "Let's go to a restaurant for dinner";
-        let mixed_sentence = "I work in tech but love cooking food";
-
-        let tech_topics = summarizer.extract_sentence_topics(tech_sentence);
-        let food_topics = summarizer.extract_sentence_topics(food_sentence);
-        let mixed_topics = summarizer.extract_sentence_topics(mixed_sentence);
-
-        assert!(tech_topics.contains(&"technology".to_string()));
-        assert!(food_topics.contains(&"food".to_string()));
-        assert!(mixed_topics.len() >= 2);
-    }
-
-    #[test]
-    fn test_quality_assessment() {
-        let summarizer = create_default_summarizer();
-        let turns = vec![create_test_turn_with_metadata(
-            ConversationRole::User,
-            "What is machine learning?",
-            vec!["technology".to_string()],
-        )];
-
-        let good_summary = "User asked about machine learning technology";
-        let assessment = summarizer.assess_summary_quality(good_summary, &turns, 0.5);
-
-        assert!(assessment.quality_score > 0.0);
-        assert!(assessment.confidence > 0.0);
-    }
-
-    #[test]
-    fn test_configuration_validation() {
-        let mut config = SummarizationConfig::default();
-        assert!(validate_summarization_config(&config).is_ok());
-
-        config.target_length = 0;
-        assert!(validate_summarization_config(&config).is_err());
-
-        config.target_length = 100;
-        config.trigger_threshold = 50;
-        assert!(validate_summarization_config(&config).is_err());
-    }
-
-    #[test]
-    fn test_specialized_summarizers() {
-        let high_compression = create_high_compression_summarizer();
-        let extractive = create_extractive_summarizer();
-        let abstractive = create_abstractive_summarizer();
-
-        assert_eq!(high_compression.config.target_length, 100);
-        assert_eq!(
-            extractive.config.strategy,
-            SummarizationStrategy::Extractive
-        );
-        assert_eq!(
-            abstractive.config.strategy,
-            SummarizationStrategy::Abstractive
-        );
-    }
-
-    #[test]
-    fn test_topic_clustering() {
-        let summarizer = create_default_summarizer();
-
-        let sentences = vec![
-            SentenceScore {
-                sentence: "I love programming in Python".to_string(),
-                score: 0.8,
-                position: 0,
-                turn_index: 0,
-                topics: vec!["technology".to_string()],
-                entities: vec![],
-                speaker_role: ConversationRole::User,
-            },
-            SentenceScore {
-                sentence: "Let's discuss machine learning algorithms".to_string(),
-                score: 0.9,
-                position: 1,
-                turn_index: 0,
-                topics: vec!["technology".to_string()],
-                entities: vec![],
-                speaker_role: ConversationRole::User,
-            },
-            SentenceScore {
-                sentence: "I had pizza for dinner".to_string(),
-                score: 0.3,
-                position: 2,
-                turn_index: 1,
-                topics: vec!["food".to_string()],
-                entities: vec![],
-                speaker_role: ConversationRole::User,
-            },
-        ];
-
-        let clusters = summarizer.cluster_by_topics(&sentences);
-
-        assert!(clusters.len() >= 2); // Should have at least technology and food clusters
-
-        let tech_cluster = clusters.iter().find(|c| c.topic == "technology");
-        assert!(tech_cluster.is_some());
-        assert_eq!(
-            tech_cluster.expect("operation failed in test").sentences.len(),
-            2
-        );
-    }
-
-    #[test]
-    fn test_conversation_flow_analysis() {
-        let summarizer = create_default_summarizer();
-
-        let question_heavy_turns = vec![
-            create_test_turn(ConversationRole::User, "What is AI?"),
-            create_test_turn(
-                ConversationRole::Assistant,
-                "AI is artificial intelligence.",
-            ),
-            create_test_turn(ConversationRole::User, "How does it work?"),
-            create_test_turn(ConversationRole::Assistant, "It uses algorithms."),
-            create_test_turn(ConversationRole::User, "Can you give examples?"),
-        ];
-
-        let flow_analysis = summarizer.analyze_conversation_flow(&question_heavy_turns);
-        assert!(flow_analysis.is_some());
-        assert!(flow_analysis.expect("operation failed in test").contains("inquiry-heavy"));
-
-        let statement_heavy_turns = vec![
-            create_test_turn(ConversationRole::User, "I work in tech."),
-            create_test_turn(ConversationRole::Assistant, "That's interesting."),
-            create_test_turn(ConversationRole::User, "I develop software applications."),
-        ];
-
-        let flow_analysis2 = summarizer.analyze_conversation_flow(&statement_heavy_turns);
-        assert!(flow_analysis2.is_some());
-        assert!(flow_analysis2.expect("operation failed in test").contains("informational"));
-    }
-
-    #[test]
-    fn test_legacy_compatibility() {
-        let summarizer = create_default_summarizer();
-        let turns = vec![
-            create_test_turn_with_metadata(
-                ConversationRole::User,
-                "Let's talk about technology and programming",
-                vec!["technology".to_string()],
-            ),
-            create_test_turn(
-                ConversationRole::Assistant,
-                "Sure, what would you like to know?",
-            ),
-        ];
-
-        // Test topic-focused summary
-        let topic_summary = summarizer
-            .summarize_by_topic(&turns, "technology")
-            .expect("operation failed in test");
-        assert!(!topic_summary.is_empty());
-
-        // Test hierarchical summary
-        let hierarchical =
-            summarizer.hierarchical_summary(&turns).expect("operation failed in test");
-        assert!(!hierarchical.overall_summary.is_empty());
-        assert_eq!(hierarchical.total_turns, 2);
-
-        // Test constrained summary
-        let constrained = summarizer
-            .constrained_summary(&turns, 100, true, true)
-            .expect("operation failed in test");
-        assert!(!constrained.summary.is_empty());
-        assert!(constrained.topics.is_some());
-        assert!(constrained.sentiment_analysis.is_some());
     }
 }

@@ -5,11 +5,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::super::core::TestCharacterizationResult;
-use super::super::gpu::GpuMetrics;
-use super::super::network_io::{IoMetrics, NetworkMetrics};
+use super::super::core::{TestCharacterizationError, TestCharacterizationResult};
 
-use super::types::{MemoryUsageMetrics, ResourceAnalyzerConfig, ResourceMetrics};
+use super::types::{ResourceAnalyzerConfig, ResourceMetrics};
 use super::types_3::{ResourceUsageDataPoint, ResourceUsageSnapshot};
 
 pub(crate) fn duration_zero() -> Duration {
@@ -43,7 +41,13 @@ pub trait ResourceMonitor: std::fmt::Debug + Send + Sync {
 }
 pub trait ResourceMonitorTrait: std::fmt::Debug + Send + Sync {
     fn monitor(&self) -> String;
-    /// Collect current resource metrics
+    /// Collect current resource metrics.
+    ///
+    /// The default refuses. Before 0.2.1 it returned a fully-populated
+    /// `ResourceMetrics` in which every one of the ~40 fields was zero -- CPU,
+    /// memory, I/O, network and GPU alike -- which a caller could not tell apart
+    /// from a genuinely idle machine. Implementors that can measure a resource
+    /// override this; the rest say so.
     fn collect_metrics<'a>(
         &'a self,
     ) -> std::pin::Pin<
@@ -53,62 +57,11 @@ pub trait ResourceMonitorTrait: std::fmt::Debug + Send + Sync {
                 + 'a,
         >,
     > {
-        Box::pin(async {
-            Ok(ResourceMetrics {
-                cpu_utilization: 0.0,
-                memory_metrics: MemoryUsageMetrics {
-                    used_memory: 0,
-                    available_memory: 0,
-                    allocation_rate: 0.0,
-                    deallocation_rate: 0.0,
-                    gc_frequency: 0.0,
-                    pressure_level: 0.0,
-                    swap_usage: 0,
-                    fragmentation: 0.0,
-                    peak_usage: 0,
-                    efficiency: 0.0,
-                },
-                io_metrics: IoMetrics {
-                    read_ops_per_sec: 0.0,
-                    write_ops_per_sec: 0.0,
-                    read_throughput: 0.0,
-                    write_throughput: 0.0,
-                    avg_read_latency: Duration::from_secs(0),
-                    avg_write_latency: Duration::from_secs(0),
-                    queue_depth: 0.0,
-                    utilization: 0.0,
-                    wait_time: 0.0,
-                    error_rate: 0.0,
-                },
-                network_metrics: NetworkMetrics {
-                    bytes_received_per_sec: 0.0,
-                    bytes_sent_per_sec: 0.0,
-                    packets_received_per_sec: 0.0,
-                    packets_sent_per_sec: 0.0,
-                    latency: Duration::from_secs(0),
-                    connection_count: 0,
-                    bandwidth_utilization: 0.0,
-                    error_rate: 0.0,
-                    retransmission_rate: 0.0,
-                    connection_quality: 0.0,
-                },
-                gpu_metrics: GpuMetrics {
-                    utilization: 0.0,
-                    memory_usage: 0,
-                    memory_utilization: 0.0,
-                    temperature: 0.0,
-                    power_usage: 0.0,
-                    compute_utilization: 0.0,
-                    memory_bandwidth_utilization: 0.0,
-                    frequency: 0.0,
-                    throttling: false,
-                    efficiency: 0.0,
-                },
-                system_load: 0.0,
-                pressure_indicators: HashMap::new(),
-                availability: HashMap::new(),
-                efficiency_scores: HashMap::new(),
-                bottlenecks: Vec::new(),
+        Box::pin(async move {
+            Err(TestCharacterizationError::NotSupported {
+                message: "resource metric collection is not implemented by this monitor"
+                    .to_string(),
+                component: self.monitor(),
             })
         })
     }
@@ -236,9 +189,15 @@ mod tests {
         assert!(p.stages.is_empty());
     }
     #[test]
-    fn test_resource_insight_engine_new() {
-        let e = ResourceInsightEngine::new();
-        assert_eq!(e.patterns_detected, 0);
+    fn test_resource_insight_engine_reports_nothing_for_an_empty_window() {
+        use crate::performance_optimizer::test_characterization::types::analysis::{
+            InsightEngine, InsightObservations,
+        };
+        let engine = ResourceInsightEngine::new();
+        let insights = engine
+            .generate_insights(InsightObservations::new(&[]))
+            .expect("an empty window is a valid input");
+        assert!(insights.is_empty(), "an empty window supports no findings");
     }
     #[test]
     fn test_resource_optimized_strategy_new() {

@@ -1,5 +1,4 @@
 // Allow dead code for infrastructure under development
-#![allow(dead_code)]
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};

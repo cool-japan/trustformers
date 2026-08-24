@@ -45,6 +45,7 @@ pub mod mmap_vocab;
 pub mod multimodal;
 pub mod music;
 pub mod normalizer;
+pub mod offsets;
 #[cfg(feature = "onnx")]
 pub mod onnx;
 pub mod parallel;
@@ -169,6 +170,10 @@ pub use multimodal::{
 pub use music::{
     MusicAnalysis, MusicToken, MusicTokenMetadata, MusicTokenType, MusicTokenizer,
     MusicTokenizerConfig,
+};
+pub use offsets::{
+    byte_offsets_to_char_offsets, char_offsets_to_byte_offsets, AlignmentBuilder, ByteSpan,
+    OffsetAlignment,
 };
 #[cfg(feature = "onnx")]
 pub use onnx::{

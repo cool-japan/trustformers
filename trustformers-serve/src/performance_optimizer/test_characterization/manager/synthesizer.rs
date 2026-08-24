@@ -267,13 +267,12 @@ impl ResultsSynthesizer {
             self.integrate_profiling_results(&mut characteristics, profile, config).await?;
         }
 
-        // Merge real-time profiler results if available
-        if let Some(PhaseResult::RealTimeProfiler(rt_characteristics)) =
+        // Record real-time profiler measurements if available
+        if let Some(PhaseResult::RealTimeProfiler(rt_statistics)) =
             phase_results.get(&AnalysisPhase::RealTimeProfiler)
         {
-            characteristics = self
-                .merge_with_realtime_results(characteristics, rt_characteristics.as_ref(), config)
-                .await?;
+            characteristics =
+                self.record_realtime_statistics(characteristics, rt_statistics.as_ref());
         }
 
         // Apply quality checks
@@ -345,65 +344,41 @@ impl ResultsSynthesizer {
         Ok(())
     }
 
-    /// Merge with real-time results
-    async fn merge_with_realtime_results(
+    /// Record what the real-time profiler measured.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// This used to take a second `TestCharacteristics` produced by the
+    /// real-time-profiler phase and merge it into the synthesised result with
+    /// weighted averages and confidence comparisons. That second value was
+    /// always `TestCharacteristics::default()` — the phase invented it because
+    /// the profiler has no method that derives test characteristics — so every
+    /// "merge" mixed zeroed resource intensities and a zero confidence score
+    /// into a real analysis. The phase now reports the sampling counters it
+    /// genuinely measured, and this records them as notes without touching any
+    /// analysed field.
+    fn record_realtime_statistics(
         &self,
         mut base: TestCharacteristics,
-        realtime: &TestCharacteristics,
-        config: &SynthesisConfig,
-    ) -> Result<TestCharacteristics> {
-        match config.conflict_resolution {
-            ConflictResolutionStrategy::HighestConfidence => {
-                if realtime.analysis_metadata.confidence_score
-                    > base.analysis_metadata.confidence_score
-                {
-                    base = realtime.clone();
-                }
-            },
-            ConflictResolutionStrategy::WeightedAverage => {
-                // Merge resource intensity with weighted average
-                let weight_base = base.analysis_metadata.confidence_score;
-                let weight_rt = realtime.analysis_metadata.confidence_score;
-                let total_weight = weight_base + weight_rt;
-
-                if total_weight > 0.0 {
-                    base.resource_intensity.cpu_intensity = (base.resource_intensity.cpu_intensity
-                        * weight_base
-                        + realtime.resource_intensity.cpu_intensity * weight_rt)
-                        / total_weight;
-
-                    base.resource_intensity.memory_intensity =
-                        (base.resource_intensity.memory_intensity * weight_base
-                            + realtime.resource_intensity.memory_intensity * weight_rt)
-                            / total_weight;
-                }
-            },
-            ConflictResolutionStrategy::Conservative => {
-                // Take the more conservative (higher) resource requirements
-                base.resource_intensity.cpu_intensity = base
-                    .resource_intensity
-                    .cpu_intensity
-                    .max(realtime.resource_intensity.cpu_intensity);
-                base.resource_intensity.memory_intensity = base
-                    .resource_intensity
-                    .memory_intensity
-                    .max(realtime.resource_intensity.memory_intensity);
-                base.concurrency_requirements.max_threads = base
-                    .concurrency_requirements
-                    .max_threads
-                    .max(realtime.concurrency_requirements.max_threads);
-            },
-            _ => {
-                // Default to highest confidence
-                if realtime.analysis_metadata.confidence_score
-                    > base.analysis_metadata.confidence_score
-                {
-                    base = realtime.clone();
-                }
-            },
-        }
-
-        Ok(base)
+        statistics: &ProfilingStatistics,
+    ) -> TestCharacteristics {
+        base.analysis_metadata.notes.push(format!(
+            "real-time profiler: {} samples over {:?} (avg interval {:?}, {} active sessions)",
+            statistics.total_samples,
+            statistics.sampling_duration,
+            statistics.average_sample_interval,
+            statistics.active_sessions,
+        ));
+        base.analysis_metadata.notes.push(format!(
+            "real-time profiler counters: {} data points processed, {} anomalies, {} insights, \
+             buffer {:.1}% full, {:.2} points/s",
+            statistics.data_points_processed,
+            statistics.anomalies_detected,
+            statistics.insights_generated,
+            statistics.buffer_utilization * 100.0,
+            statistics.processing_rate,
+        ));
+        base
     }
 
     /// Validate synthesis quality

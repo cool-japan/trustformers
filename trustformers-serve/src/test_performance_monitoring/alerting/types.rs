@@ -607,18 +607,117 @@ struct EscalationMetrics {
 pub(crate) struct RealTimeProcessor {
     processing_queue: Arc<Mutex<VecDeque<String>>>,
 }
-/// System state at alert time
+/// System state at alert time.
+///
+/// 0.2.1: this used to be filled in at the single alert-construction site with
+/// the alerting metric plus hardcoded zeroes and a fixed
+/// `Medium`/`Degraded` verdict. It is now built by [`SystemState::sample`],
+/// which reads the host through `sysinfo`; anything the host cannot answer is
+/// `None` rather than zero.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemState {
-    pub cpu_utilization: f64,
+    /// CPU usage percentage, carried over from the sample that raised the
+    /// alert. `None` when that sample had no usable CPU delta.
+    pub cpu_utilization: Option<f64>,
+    /// Fraction of host memory in use, in `0.0..=1.0`.
     pub memory_utilization: f64,
-    pub disk_utilization: f64,
-    pub network_utilization: f64,
+    /// Fraction of host disk capacity in use across all mounted disks, in
+    /// `0.0..=1.0`. `None` when the host reports no disks.
+    pub disk_utilization: Option<f64>,
+    /// Network throughput in bytes/second carried over from the sample that
+    /// raised the alert. `None` when that sample could not measure a rate.
+    ///
+    /// Renamed from `network_utilization`: this is a throughput, never a
+    /// utilization fraction — there is no link-capacity figure to divide by.
+    pub network_bytes_per_second: Option<f64>,
+    /// Number of processes the host reports.
     pub active_processes: u32,
-    pub load_average: f64,
+    /// One-minute load average. `None` on platforms that do not report one.
+    pub load_average: Option<f64>,
+    /// Host uptime.
     pub system_uptime: Duration,
+    /// Pressure verdict derived from the measurements above — see
+    /// [`SystemState::sample`] for the exact rule.
     pub resource_pressure: PressureLevel,
+    /// Health verdict derived from `resource_pressure`.
     pub health_status: HealthStatus,
+}
+
+impl SystemState {
+    /// Sample the host, carrying the CPU and network readings over from the
+    /// streaming sample that raised the alert.
+    ///
+    /// Derivation rules, applied to measured values only:
+    /// * `resource_pressure` follows memory occupancy — `< 0.60` Low,
+    ///   `< 0.80` Medium, `< 0.95` High, otherwise Critical — escalated one
+    ///   step when the one-minute load average exceeds the host's CPU count.
+    /// * `health_status` maps Low/Medium to `Healthy`, High to `Degraded` and
+    ///   Critical to `Critical`.
+    pub fn sample(metrics: &StreamingMetrics) -> Self {
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
+
+        let total_memory = system.total_memory();
+        let memory_utilization = if total_memory == 0 {
+            0.0
+        } else {
+            system.used_memory() as f64 / total_memory as f64
+        };
+
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let (disk_total, disk_available) = disks.iter().fold((0u64, 0u64), |(t, a), disk| {
+            (
+                t.saturating_add(disk.total_space()),
+                a.saturating_add(disk.available_space()),
+            )
+        });
+        let disk_utilization = if disk_total == 0 {
+            None
+        } else {
+            Some((disk_total.saturating_sub(disk_available)) as f64 / disk_total as f64)
+        };
+
+        let load_one = sysinfo::System::load_average().one;
+        // `sysinfo` reports 0.0 for the load average on platforms that have no
+        // such concept; treat that as "not reported" rather than "idle".
+        let load_average = if load_one > 0.0 { Some(load_one) } else { None };
+
+        let cpu_count = sysinfo::System::new_all().cpus().len().max(1) as f64;
+        let mut resource_pressure = if memory_utilization < 0.60 {
+            PressureLevel::Low
+        } else if memory_utilization < 0.80 {
+            PressureLevel::Medium
+        } else if memory_utilization < 0.95 {
+            PressureLevel::High
+        } else {
+            PressureLevel::Critical
+        };
+        if load_average.is_some_and(|load| load > cpu_count) {
+            resource_pressure = match resource_pressure {
+                PressureLevel::Low => PressureLevel::Medium,
+                PressureLevel::Medium => PressureLevel::High,
+                PressureLevel::High | PressureLevel::Critical => PressureLevel::Critical,
+            };
+        }
+        let health_status = match resource_pressure {
+            PressureLevel::Low | PressureLevel::Medium => HealthStatus::Healthy,
+            PressureLevel::High => HealthStatus::Degraded,
+            PressureLevel::Critical => HealthStatus::Critical,
+        };
+
+        Self {
+            cpu_utilization: metrics.instantaneous_cpu,
+            memory_utilization,
+            disk_utilization,
+            network_bytes_per_second: metrics.instantaneous_network_rate,
+            active_processes: system.processes().len() as u32,
+            load_average,
+            system_uptime: Duration::from_secs(sysinfo::System::uptime()),
+            resource_pressure,
+            health_status,
+        }
+    }
 }
 /// Alert escalation information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -967,18 +1066,7 @@ impl AlertManager {
                     suppression_info: None,
                     context_data: AlertContext {
                         test_execution_context: None,
-                        system_state: SystemState {
-                            cpu_utilization: metrics.instantaneous_cpu,
-                            memory_utilization: metrics.instantaneous_memory as f64
-                                / (1024.0 * 1024.0 * 1024.0),
-                            disk_utilization: 0.0,
-                            network_utilization: metrics.instantaneous_network_rate,
-                            active_processes: 0,
-                            load_average: 0.0,
-                            system_uptime: Duration::from_secs(0),
-                            resource_pressure: PressureLevel::Medium,
-                            health_status: HealthStatus::Degraded,
-                        },
+                        system_state: SystemState::sample(metrics),
                         environmental_factors: HashMap::new(),
                         recent_changes: vec![],
                         related_metrics: HashMap::new(),

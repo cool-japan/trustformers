@@ -1,3 +1,13 @@
+# Only a ServiceAccount, no Role/RoleBinding: `trustformers-server` never
+# calls the Kubernetes API (its configuration comes entirely from environment
+# variables injected by kubelet — see kubernetes/configmap.yaml — not from the
+# binary reading ConfigMaps or Secrets through the API server itself). The
+# previous version of this file granted `get/list/watch` on configmaps and
+# `get/list` on secrets to a Role nothing in the application used; a
+# permission the workload cannot exercise is not a safety net, just extra
+# attack surface, so it is not reinstated here. `deployment.yaml` sets
+# `automountServiceAccountToken: false` for the same reason — there is no API
+# call this pod's own token would ever be used for.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -7,40 +17,3 @@ metadata:
     app: trustformers-server
     app.kubernetes.io/name: trustformers-server
     app.kubernetes.io/instance: trustformers
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: trustformers-server
-  namespace: trustformers
-  labels:
-    app: trustformers-server
-    app.kubernetes.io/name: trustformers-server
-    app.kubernetes.io/instance: trustformers
-rules:
-# Allow reading configmaps for dynamic configuration
-- apiGroups: [""]
-  resources: ["configmaps"]
-  verbs: ["get", "list", "watch"]
-# Allow reading secrets for model credentials
-- apiGroups: [""]
-  resources: ["secrets"]
-  verbs: ["get", "list"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: trustformers-server
-  namespace: trustformers
-  labels:
-    app: trustformers-server
-    app.kubernetes.io/name: trustformers-server
-    app.kubernetes.io/instance: trustformers
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: trustformers-server
-subjects:
-- kind: ServiceAccount
-  name: trustformers-server
-  namespace: trustformers

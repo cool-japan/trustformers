@@ -458,9 +458,9 @@ pub use request_profiling::{
 };
 pub use resource_management::{
     AlertSystem, AnalyticsEngine, CleanupEvent, CleanupManager, CleanupTask, CustomResourceManager,
-    DatabaseConnectionManager, GpuAllocation as RMGpuAllocation, GpuDeviceInfo,
-    GpuMonitoringSystem, GpuPerformanceTracker, GpuResourceManager, HealthChecker, LoadMetrics,
-    MetricsAggregator, NetworkPortManager as ModularNetworkPortManager, PerformanceAnomaly,
+    DatabaseSlotAllocator, GpuAllocation as RMGpuAllocation, GpuDeviceInfo, GpuMonitoringSystem,
+    GpuPerformanceTracker, GpuResourceManager, HealthChecker, LoadMetrics, MetricsAggregator,
+    NetworkPortManager as ModularNetworkPortManager, PerformanceAnomaly,
     PerformanceBottleneck as RMPerformanceBottleneck, PerformancePrediction,
     PortAllocation as ModularPortAllocation, ReportGenerator, ResourceAllocator,
     ResourceManagementSystem as ModularResourceManagementSystem, ResourceMonitor,

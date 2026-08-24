@@ -358,19 +358,23 @@ impl TestPerformanceMonitoringService {
 
         // Process alerts if any anomalies detected
         if !analytics_result.anomaly_analysis.detected_anomalies.is_empty() {
+            // Built from a *completed* test's measured metrics, so the
+            // elapsed time and 100% progress are facts, not placeholders. The
+            // I/O and network rates and the live error/warning counts are left
+            // absent: `ComprehensiveTestMetrics` records none of them.
             let streaming_metrics = StreamingMetrics {
                 stream_id: format!("stream_{}", metrics.test_id),
                 test_id: metrics.test_id.clone(),
                 timestamp: std::time::SystemTime::now(),
-                elapsed_time: metrics.execution_metrics.execution_time,
-                current_phase: TestPhase::Execution,
-                progress_percent: 100.0,
-                instantaneous_cpu: metrics.execution_metrics.cpu_usage_percent,
+                elapsed_time: Some(metrics.execution_metrics.execution_time),
+                current_phase: None,
+                progress_percent: Some(100.0),
+                instantaneous_cpu: Some(metrics.execution_metrics.cpu_usage_percent),
                 instantaneous_memory: metrics.execution_metrics.memory_peak,
-                instantaneous_io_rate: 0.0,
-                instantaneous_network_rate: 0.0,
-                live_error_count: 0,
-                live_warning_count: 0,
+                instantaneous_io_rate: None,
+                instantaneous_network_rate: None,
+                live_error_count: None,
+                live_warning_count: None,
                 performance_indicators: vec![],
                 anomaly_flags: vec![],
                 prediction_metrics: None,

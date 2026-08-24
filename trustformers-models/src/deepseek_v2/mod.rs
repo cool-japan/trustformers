@@ -47,7 +47,9 @@
 //! let model = DeepSeekV2ForCausalLM::new(config).expect("model creation");
 //! ```
 
+pub mod attention;
 pub mod config;
+pub mod loading;
 pub mod model;
 pub mod tasks;
 

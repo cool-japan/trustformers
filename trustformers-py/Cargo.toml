@@ -40,7 +40,21 @@ all = "warn"
 # See the "Dependency pins (PyO3 0.28 / SciRS2 0.5.1)" entry in TODO.md, which carries
 # the full rationale, the RUSTSEC-2026-0176 / RUSTSEC-2026-0177 context, and the
 # migration checklist.
-pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
+#
+# `extension-module` itself is NOT listed here -- it is gated behind this crate's own
+# `extension-module` feature (see [features] below) instead of being an unconditional
+# pyo3 feature. When it is active (the default, matching every real `pip install`/
+# `maturin build`), pyo3-ffi does not link this crate against libpython at all: the
+# symbols are resolved dynamically when the compiled `cdylib` is `dlopen`'d by a running
+# Python interpreter, which is correct for a real extension module but means a plain
+# `cargo test`/`cargo build --bin` (not loaded by Python) fails to link with dozens of
+# undefined Python C-API symbols (`_PyExc_BaseException`, `_Py_IncRef`, ...) -- the
+# lib-test harness binary is a normal executable, not a `cdylib` Python can inject
+# symbols into. Building with `--no-default-features --features python-gc` (or any
+# feature set that omits `extension-module`) restores pyo3's normal behavior of linking
+# directly against the discovered libpython, which is what `cargo test`/`cargo run`
+# need. See TODO.md's "Testing without a Python interpreter loading this module" entry.
+pyo3 = { version = "0.28", features = ["abi3-py39"] }
 # Pinned to 0.5.1 for the same pyo3-0.29-conflict reason as scirs2-core below.
 scirs2-numpy = { version = "0.5.1" }
 
@@ -71,12 +85,20 @@ safetensors = "0.8"
 # "Dependency pins (PyO3 0.28 / SciRS2 0.5.1)".
 scirs2-core = { version = "0.5.1", default-features = false, features = ["python", "random", "parallel", "array", "serialization"] }
 
-# TrustformeRS dependencies (path-based for standalone build)
-trustformers-core = { path = "../trustformers-core", default-features = false }
-trustformers-models = { path = "../trustformers-models", default-features = false, features = ["bert", "gpt2", "t5", "llama", "mamba", "rwkv"] }
-trustformers-tokenizers = { path = "../trustformers-tokenizers", default-features = false }
-trustformers-optim = { path = "../trustformers-optim", default-features = false }
-trustformers-training = { path = "../trustformers-training", default-features = false }
+# TrustformeRS dependencies (path-based for standalone build). Each also
+# carries a `version` alongside its `path`: without one, `cargo deny check
+# bans` fails with `error[wildcard]` ("crates.io disallows path dependencies"
+# for a wildcard/path-only dependency of a publishable crate) -- see TODO.md's
+# "Dependency pins" section. The version must track the workspace's own
+# `[workspace.package] version` (currently 0.2.1) since these are the same
+# repository's sibling crates, resolved locally via `path` in this standalone
+# build and would need to resolve from crates.io by `version` alone if this
+# crate were ever published without them being co-published first.
+trustformers-core = { path = "../trustformers-core", version = "0.2.1", default-features = false }
+trustformers-models = { path = "../trustformers-models", version = "0.2.1", default-features = false, features = ["bert", "gpt2", "t5", "llama", "mamba", "rwkv"] }
+trustformers-tokenizers = { path = "../trustformers-tokenizers", version = "0.2.1", default-features = false }
+trustformers-optim = { path = "../trustformers-optim", version = "0.2.1", default-features = false }
+trustformers-training = { path = "../trustformers-training", version = "0.2.1", default-features = false }
 # NOTE: the `trustformers` umbrella crate is deliberately NOT listed here. The
 # bindings never referenced it (the only mentions left in `src/` are three
 # commented-out `use` lines), and `cargo tree -e features -p trustformers-core`
@@ -98,10 +120,18 @@ half = "2.7.1"
 
 
 [features]
-default = ["python-gc"]
+default = ["python-gc", "extension-module"]
 python-gc = []  # Enable Python garbage collection integration
 cuda = []  # CUDA support
 metal = []  # Metal support
+# Build as a real Python extension module (no libpython link; symbols resolve
+# via dlopen when Python loads the compiled `cdylib`). On by default, matching
+# every real build (`pip install`, `maturin build`) -- disable it (e.g.
+# `cargo test --lib --no-default-features --features python-gc`) to link this
+# crate's own test/bin targets directly against libpython instead, which a
+# `cdylib`-only extension-module build cannot do. See the `pyo3` dependency's
+# comment above and TODO.md for the full rationale.
+extension-module = ["pyo3/extension-module"]
 
 # All features
-full = ["python-gc", "cuda", "metal"]
+full = ["python-gc", "extension-module", "cuda", "metal"]

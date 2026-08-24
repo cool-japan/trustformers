@@ -1,260 +1,117 @@
-# Kubernetes Deployment Guide for TrustformeRS Server
+# Kubernetes manifests for the TrustformeRS server example
 
-This guide covers deploying the TrustformeRS REST API server on Kubernetes.
+Plain manifests plus a `kustomization.yaml` for `trustformers-server` (see
+`../README.md` for what the server itself does and does not do — read that
+first, since several deployment choices below follow directly from it, e.g.
+there being no `/metrics` endpoint to scrape).
 
-## Prerequisites
+**Not verified against a real cluster**: no Kubernetes cluster was available
+in the environment these manifests were last checked in. What *was* verified
+there: `kubectl kustomize kubernetes/` builds successfully (`kubectl` alone,
+no `kustomize` binary, was available) and every resource it renders was
+inspected by hand against `../src/main.rs` and `../src/handlers.rs` — the
+"Recently corrected" section below has specifics. Before applying to a real
+cluster, at least run `kubectl apply --dry-run=server -k kubernetes/` (or
+`-f kubernetes/`) against it first.
 
-- Kubernetes cluster (1.24+)
-- kubectl configured
-- Docker registry access (or local registry)
-- Helm (optional, for advanced deployments)
+## Recently corrected
 
-## Quick Start
+A prior version of these manifests described capabilities this server does
+not have. Each item below was checked directly against the server's own
+source, not assumed:
 
-### 1. Build and Push Docker Image
+- **No `/metrics` endpoint.** `src/main.rs`'s route table has no such route.
+  `deployment.yaml`'s `prometheus.io/scrape` annotations, `hpa.yaml`'s
+  custom-metrics (`http_requests_per_second`) scaling rule, and
+  `networkpolicy.yaml`'s "allow traffic from the monitoring namespace" rule
+  all assumed one existed and have been removed — CPU/memory autoscaling
+  (which needs only the metrics-server most clusters already run) is
+  unaffected and still configured in `hpa.yaml`.
+- **`configmap.yaml` no longer describes a config file the server doesn't
+  read.** It held a `server.yaml` (workers, keep-alive, an auto-load model
+  list, batching/timeout settings) and a `log4rs.yaml` (a *different*
+  logging framework than the `tracing`/`tracing-subscriber` stack this
+  binary actually uses) — the binary has no config-file loader at all, only
+  `std::env::var` calls, and this ConfigMap was never even referenced by
+  `deployment.yaml`. It now holds the real environment variables (see
+  `../README.md`'s table) as plain `data:` entries, and `deployment.yaml`
+  consumes them via `envFrom.configMapRef` for real.
+- **`kustomization.yaml` could not actually be built.** It combined a plain
+  `configmap.yaml` resource with a `configMapGenerator` of the *same name*
+  generated from `server.yaml`/`log4rs.yaml` files that do not exist
+  anywhere in this directory — `kubectl kustomize kubernetes/` failed
+  outright on the missing files (reproduced directly against the pre-fix
+  files, not inferred), and would have collided with the plain resource even
+  if they had. The generator is gone; the plain `configmap.yaml` resource is
+  the only source of that ConfigMap now. Its deprecated `commonLabels:` was
+  also modernised to `labels:` with `includeSelectors: false` — the old form
+  injected `app.kubernetes.io/version` into every selector, including the
+  Deployment's `spec.selector`, which Kubernetes treats as **immutable**
+  after creation; bumping that label on a live cluster would have made the
+  next `kubectl apply` fail outright with an immutable-field error.
+- **`rbac.yaml`'s `Role`/`RoleBinding` are gone.** They granted
+  `get/list/watch` on ConfigMaps and `get/list` on Secrets through the
+  Kubernetes API — permission the application never exercises, since its
+  configuration comes entirely from environment variables kubelet injects,
+  not from the binary calling the API server. `deployment.yaml` now also sets
+  `automountServiceAccountToken: false` for the same reason. The
+  `ServiceAccount` itself is kept (still referenced by `deployment.yaml`, and
+  a stable pod identity is good practice regardless).
+- **`deployment.yaml`'s `image:` field, and `kustomization.yaml`'s matching
+  `images:` entry, are placeholders.** `trustformers/server:latest` is not
+  published anywhere. Build `../Dockerfile` yourself, push it to a registry
+  you control, and update both before applying.
 
-```bash
-# Build the image
-docker build -t your-registry/trustformers-server:latest -f examples/server/Dockerfile .
-
-# Push to registry
-docker push your-registry/trustformers-server:latest
-```
-
-### 2. Apply Kubernetes Manifests
-
-```bash
-# Create namespace
-kubectl create namespace trustformers
-
-# Apply all manifests
-kubectl apply -f examples/server/kubernetes/ -n trustformers
-
-# Check deployment status
-kubectl get pods -n trustformers
-kubectl get svc -n trustformers
-```
-
-### 3. Access the Service
-
-```bash
-# Port forward for testing
-kubectl port-forward -n trustformers svc/trustformers-server 8080:8080
-
-# Or get the LoadBalancer IP (if using cloud provider)
-kubectl get svc -n trustformers trustformers-server
-```
-
-## Configuration
-
-### Environment Variables
-
-Configure the deployment through environment variables in `deployment.yaml`:
-
-```yaml
-env:
-  - name: RUST_LOG
-    value: "info"
-  - name: MODEL_CACHE_DIR
-    value: "/var/cache/trustformers"
-  - name: MAX_MODELS
-    value: "10"
-```
-
-### Resource Limits
-
-Adjust resources based on your model requirements:
-
-```yaml
-resources:
-  requests:
-    memory: "4Gi"
-    cpu: "2"
-  limits:
-    memory: "8Gi"
-    cpu: "4"
-```
-
-### Persistent Storage
-
-For model caching, use a PersistentVolumeClaim:
-
-```yaml
-volumeMounts:
-  - name: model-cache
-    mountPath: /var/cache/trustformers
-volumes:
-  - name: model-cache
-    persistentVolumeClaim:
-      claimName: trustformers-cache
-```
-
-## Scaling
-
-### Horizontal Pod Autoscaling
+## Applying
 
 ```bash
-# Enable HPA
-kubectl autoscale deployment trustformers-server \
-  --cpu-percent=70 \
-  --min=2 \
-  --max=10 \
-  -n trustformers
+# Either plain manifests...
+kubectl apply -f kubernetes/ -n trustformers
+
+# ...or via Kustomize (adds the commonLabels-successor labels and the
+# `trustformers/server` image-tag substitution from kustomization.yaml):
+kubectl apply -k kubernetes/
 ```
 
-### Manual Scaling
+Both target the `trustformers` namespace `namespace.yaml` creates; apply that
+file (or let either command above create it — it's in `kustomization.yaml`'s
+`resources:` and namespaced manifests will fail if it doesn't exist yet)
+first if applying individual files out of order.
 
-```bash
-# Scale to 5 replicas
-kubectl scale deployment trustformers-server --replicas=5 -n trustformers
-```
+## What each manifest is for
 
-## Monitoring
-
-### Prometheus Metrics
-
-The server exposes metrics at `/metrics`. Configure Prometheus ServiceMonitor:
-
-```yaml
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: trustformers-server
-spec:
-  selector:
-    matchLabels:
-      app: trustformers-server
-  endpoints:
-  - port: http
-    path: /metrics
-```
-
-### Health Checks
-
-The deployment includes liveness and readiness probes:
-
-```yaml
-livenessProbe:
-  httpGet:
-    path: /health
-    port: 8080
-  initialDelaySeconds: 30
-  periodSeconds: 30
-
-readinessProbe:
-  httpGet:
-    path: /health
-    port: 8080
-  initialDelaySeconds: 10
-  periodSeconds: 10
-```
-
-## Production Considerations
-
-### 1. Security
-
-- Use NetworkPolicies to restrict traffic
-- Enable RBAC for service accounts
-- Use secrets for sensitive configuration
-- Enable TLS with cert-manager
-
-### 2. High Availability
-
-- Deploy across multiple availability zones
-- Use pod anti-affinity rules
-- Configure pod disruption budgets
-- Enable session affinity for stateful operations
-
-### 3. Performance
-
-- Use node selectors for GPU nodes (when available)
-- Configure resource requests/limits appropriately
-- Enable response compression
-- Use CDN for static assets
-
-### 4. Observability
-
-- Centralized logging with Fluentd/Elasticsearch
-- Distributed tracing with Jaeger
-- Custom dashboards in Grafana
-- Alert rules for SLOs
+| File | Kind | Real behaviour it configures |
+|---|---|---|
+| `namespace.yaml` | `Namespace` | The `trustformers` namespace everything else lives in. |
+| `rbac.yaml` | `ServiceAccount` | Pod identity. No `Role`/`RoleBinding` — see above. |
+| `configmap.yaml` | `ConfigMap` | The real env vars from `../README.md`'s table. |
+| `pvc.yaml` | `PersistentVolumeClaim` ×2 | Storage for `MODEL_CACHE_DIR` — the RWX one (`trustformers-cache`) is what `deployment.yaml` actually mounts; the RWO one (`trustformers-cache-rwo`) is an alternative for single-node/ReadWriteOnce clusters, referenced by neither `deployment.yaml` nor `kustomization.yaml`. |
+| `deployment.yaml` | `Deployment` | 2 replicas, real `/health` liveness/readiness probes, the ConfigMap wired in via `envFrom`, the PVC mounted at `MODEL_CACHE_DIR`'s value. |
+| `service.yaml` | `Service` | Routes port 80 → the container's `http` (8080) port. |
+| `ingress.yaml` | `Ingress` | `api.trustformers.example.com` is a placeholder host; needs an nginx ingress controller and cert-manager (for the TLS annotation) actually installed in the cluster to do anything. |
+| `hpa.yaml` | `HorizontalPodAutoscaler` | CPU (70%) / memory (80%) target utilization, 2-10 replicas. |
+| `pdb.yaml` | `PodDisruptionBudget` | `minAvailable: 1`. |
+| `networkpolicy.yaml` | `NetworkPolicy` | Ingress from the nginx-ingress namespace and same-namespace pods on 8080; egress for DNS and for the real outbound HTTPS/HTTP calls `AutoConfig::from_pretrained`'s hub-config fallback can make (see `../README.md`). |
+| `kustomization.yaml` | — | Bundles all of the above; see "Recently corrected" for what changed. |
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **OOMKilled Pods**
-   - Increase memory limits
-   - Reduce MAX_MODELS
-   - Enable model unloading
-
-2. **Slow Startup**
-   - Increase initialDelaySeconds
-   - Pre-load models in init containers
-   - Use readiness gates
-
-3. **High Latency**
-   - Check node placement
-   - Review resource allocation
-   - Enable request batching
-
-### Debugging Commands
-
 ```bash
-# Check pod logs
 kubectl logs -n trustformers deployment/trustformers-server
-
-# Describe pod for events
 kubectl describe pod -n trustformers <pod-name>
-
-# Execute into pod
-kubectl exec -it -n trustformers <pod-name> -- /bin/bash
-
-# Check resource usage
 kubectl top pods -n trustformers
 ```
 
-## Advanced Deployments
-
-### Using Helm
-
-```bash
-# Install with Helm
-helm install trustformers ./helm/trustformers-server \
-  --namespace trustformers \
-  --create-namespace \
-  --values values.yaml
-
-# Upgrade deployment
-helm upgrade trustformers ./helm/trustformers-server \
-  --namespace trustformers \
-  --values values.yaml
-```
-
-### GitOps with ArgoCD
-
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: trustformers-server
-spec:
-  source:
-    repoURL: https://github.com/cool-japan/trustformers
-    path: examples/server/kubernetes
-    targetRevision: main
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: trustformers
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-```
-
-## Cost Optimization
-
-1. **Spot Instances**: Use spot/preemptible nodes for non-critical workloads
-2. **Cluster Autoscaling**: Enable cluster autoscaler for dynamic scaling
-3. **Resource Optimization**: Right-size pods based on actual usage
-4. **Model Caching**: Share model cache across pods with ReadWriteMany PVC
+- **`CrashLoopBackOff` / readiness never turns green**: `/health` returns 200
+  as soon as the router is serving, regardless of whether any model is
+  loaded — so a failing probe almost always means the process itself didn't
+  start (check `PRELOAD_MODEL_NAME`/`PRELOAD_MODEL_TASK`: if one is set
+  without the other, or the checkpoint directory it names has no
+  `model.safetensors`, `main()` returns an error and the process exits
+  before it ever binds a port — see `../README.md`).
+- **`POST /models` returns 503**: `MAX_MODELS` checkpoints are already
+  loaded; `DELETE /models/{id}` one first or raise the ConfigMap's
+  `MAX_MODELS` value.
+- **`OOMKilled`**: lower `MAX_MODELS`, or raise `deployment.yaml`'s memory
+  `limits` — this server keeps every loaded checkpoint's weights in process
+  memory for as long as it stays loaded.

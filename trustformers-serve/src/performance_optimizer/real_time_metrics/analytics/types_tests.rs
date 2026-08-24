@@ -168,7 +168,7 @@ fn test_goodness_of_fit_statistics_construction() {
         ks_statistic: 0.05,
         ks_p_value: 0.2,
         ad_statistic: 0.3,
-        ad_p_value: 0.15,
+        ad_p_value: Some(0.15),
         chi_square_statistic: 10.5,
         chi_square_p_value: 0.1,
         log_likelihood: -120.5,
@@ -186,7 +186,7 @@ fn test_goodness_of_fit_clone() {
         ks_statistic: 0.1,
         ks_p_value: 0.05,
         ad_statistic: 0.5,
-        ad_p_value: 0.08,
+        ad_p_value: Some(0.08),
         chi_square_statistic: 15.0,
         chi_square_p_value: 0.04,
         log_likelihood: -200.0,
@@ -666,7 +666,7 @@ fn test_distribution_fit_construction() {
             ks_statistic: 0.05,
             ks_p_value: 0.2,
             ad_statistic: 0.3,
-            ad_p_value: 0.15,
+            ad_p_value: Some(0.15),
             chi_square_statistic: 8.0,
             chi_square_p_value: 0.1,
             log_likelihood: -100.0,
@@ -689,11 +689,11 @@ fn test_quality_recommendation_construction() {
         description: "Ensure all fields are populated".to_string(),
         expected_improvement: 0.15,
         implementation_effort: "low".to_string(),
-        cost_benefit_ratio: 5.0,
+        cost_benefit_ratio: Some(5.0),
     };
     assert_eq!(rec.priority, 1);
     assert!((rec.expected_improvement - 0.15).abs() < f64::EPSILON);
-    assert!((rec.cost_benefit_ratio - 5.0).abs() < f64::EPSILON);
+    assert!(rec.cost_benefit_ratio.is_some_and(|ratio| (ratio - 5.0).abs() < f64::EPSILON));
 }
 
 #[test]

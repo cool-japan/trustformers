@@ -49,6 +49,44 @@ yanked = "deny"
 ignore = [
     # Add RUSTSEC ids here ONLY with a comment stating why the exposure does not
     # apply and who owns the removal. Never add one to silence a real finding.
+    #
+    # ---------------------------------------------------------------------
+    # RUSTSEC-2023-0071 — "Marvin Attack" timing side-channel in `rsa 0.9.10`.
+    # Accepted 2026-08-24. This is a REAL, UNPATCHED vulnerability in a crate
+    # that is genuinely in the tree; it is ignored because there is no pure-Rust
+    # way to remove it, NOT because the exposure has been ruled out.
+    #
+    # Chain:  rsa 0.9.10  <-  jsonwebtoken 11.0.0  <-  trustformers-serve
+    #
+    # Why it cannot be fixed:
+    #  * Upstream RustSec says "No safe upgrade is available!"; the RustCrypto
+    #    RSA constant-time rewrite (RustCrypto/RSA#626) has not shipped.
+    #  * `jsonwebtoken` requires exactly one crypto backend. Checked against the
+    #    latest release (11.0.0, published 2026-07-24) rather than assumed: its
+    #    feature table is
+    #      rust_crypto = ["ed25519-dalek", "hmac", "p256", "p384", "rand", "rsa", "sha2"]
+    #      aws_lc_rs   = ["aws-lc-rs"]
+    #    `rsa` is not separable from `rust_crypto` — there is no HMAC-only or
+    #    HMAC+EdDSA-only feature — and the alternative backend, `aws_lc_rs`,
+    #    links AWS-LC (C/C++, BoringSSL-derived) and is banned by the COOLJAPAN
+    #    Pure-Rust policy. So the choice is "keep `rsa`" or "keep a C library".
+    #
+    # Honest scope of the exposure (do NOT read this as "unreachable"):
+    # `trustformers-serve` configures HS256 by default
+    # (`src/auth/authconfig_traits.rs:22`) and every JWT it issues and verifies
+    # today is HMAC-SHA256, which never enters `rsa`. But `AuthConfig.algorithm`
+    # (`src/auth/types.rs:365`) is a `pub` field of type `jsonwebtoken::Algorithm`,
+    # so an embedder can set RS256/RS384/RS512/PS* and reach the vulnerable code
+    # path. Exploiting it additionally requires a network-observable signing or
+    # decryption oracle under attacker-chosen input.
+    #
+    # Owned removal path (the real fix, not a mitigation): drop `jsonwebtoken`
+    # and implement HS256/HS384/HS512 directly on the RustCrypto crates
+    # `trustformers-serve` already depends on — `hmac`, `sha2`, `base64`,
+    # `subtle` (constant-time tag compare) and `serde_json`. That deletes `rsa`
+    # from the tree outright and narrows the public API to the algorithms the
+    # server actually implements. It is a source change in `src/auth/`.
+    { id = "RUSTSEC-2023-0071", reason = "rsa 0.9.10 <- jsonwebtoken 11 <- trustformers-serve; `rust_crypto` does not separate `rsa`, and the only other backend (`aws_lc_rs`) is banned C/C++ FFI. Accepted 2026-08-24; removal = replace jsonwebtoken with a native HMAC-only JWT implementation in src/auth/." },
 ]
 
 # ---------------------------------------------------------------------------
@@ -174,13 +212,16 @@ deny = [
     { crate = "lz4_flex", use-instead = "oxiarc-lz4", reason = "ecosystem-duplicating LZ4; COOLJAPAN uses oxiarc-lz4" },
     { crate = "tar", use-instead = "oxiarc-archive", reason = "COOLJAPAN uses oxiarc-archive for TAR containers" },
     { crate = "snap", use-instead = "oxiarc-archive", reason = "ecosystem-duplicating Snappy; COOLJAPAN uses the oxiarc-* family" },
-    { crate = "brotli", use-instead = "oxiarc-archive", wrappers = [
-        "lambda-web", # AWS Lambda adapter, opt-in `lambda` feature of
-                      # trustformers-serve (excluded from the default tree).
-    ], reason = "ecosystem-duplicating Brotli; COOLJAPAN uses the oxiarc-* family" },
-    { crate = "brotli-decompressor", use-instead = "oxiarc-archive", wrappers = [
-        "brotli", # brotli's own decompressor half; same opt-in `lambda` path.
-    ], reason = "ecosystem-duplicating Brotli; COOLJAPAN uses the oxiarc-* family" },
+    # No `wrappers` any more: as of 2026-08-24 neither `brotli` nor
+    # `brotli-decompressor` is in the graph at all. Their only parent was
+    # `lambda-web`, an optional dependency behind `trustformers-serve`'s `lambda`
+    # feature; both the feature and the dependency were deleted because nothing in
+    # that crate ever referenced `lambda_web` or `#[cfg(feature = "lambda")]`.
+    # These entries are kept unwrapped so the gate reports the next parent that
+    # appears, instead of silently permitting one. The workspace's own Brotli is
+    # `oxiarc-brotli`, which is not this crate and is not banned.
+    { crate = "brotli", use-instead = "oxiarc-archive", reason = "ecosystem-duplicating Brotli; COOLJAPAN uses the oxiarc-* family" },
+    { crate = "brotli-decompressor", use-instead = "oxiarc-archive", reason = "ecosystem-duplicating Brotli; COOLJAPAN uses the oxiarc-* family" },
 ]
 
 # STATUS OF THE `flate2` GATE (verified with `cargo deny check bans` -> `bans ok`)
@@ -203,6 +244,39 @@ deny = [
 # If a NEW unwrapped parent ever appears, do not add a wrapper reflexively: a
 # wrapper entry is a statement that the edge is unavoidable, so it needs the
 # same kind of evidence as the paragraph above.
+
+# KNOWN OPEN PURE-RUST GAP: `aws-lc-sys` (2026-08-24)
+#
+# `aws-lc-rs 1.18.0` -> `aws-lc-sys 0.44.0` is in the default dependency tree.
+# `aws-lc-sys` builds AWS-LC, a BoringSSL-derived C/C++ library — a genuine
+# COOLJAPAN Pure-Rust policy violation. It is NOT in the `deny` list above,
+# deliberately: adding it would turn `cargo deny check bans` red with no
+# in-tree remedy, and this file's rule is that a `deny` entry states a policy
+# that can actually be enforced today.
+#
+# It arrives through `trustformers-serve`'s AWS SDK clients:
+#   aws-sdk-*/default-https-client -> aws-smithy-runtime/default-https-client
+#                                  -> aws-smithy-http-client/rustls-aws-lc
+#                                  -> rustls 0.23 (aws_lc_rs provider)
+#
+# There is no manifest-only escape, and that was measured, not assumed:
+# `aws-smithy-http-client` does expose a pure-Rust `rustls-ring` feature, but
+# `aws-smithy-runtime` has no feature that forwards to it, and
+# `aws_smithy_runtime::client::http::default_https_client` hardcodes
+# `tls::rustls_provider::CryptoMode::AwsLc`. Do not re-attempt a feature-flag
+# fix. Closing it requires a source change in `trustformers-serve`: drop
+# `default-https-client`, add a direct
+# `aws-smithy-http-client = { default-features = false, features = ["rustls-ring"] }`
+# dependency, and build the connector explicitly at the three
+# `aws_config::load_defaults` sites (`src/message_queue/sqs.rs`,
+# `src/cloud_providers/sagemaker.rs`, `src/serverless/types.rs`), passing it via
+# `aws_config::defaults(..).http_client(..)`. Removing `default-https-client`
+# without that code change makes every AWS request fail at runtime with
+# "a http_client is required".
+#
+# Note `ring 0.17.14` is already in the tree (via rustls 0.23's other consumers:
+# async-nats, rustls-webpki, tokio-websockets), so the ring provider costs no new
+# dependency — only the wiring above.
 
 # Crates allowed to appear at multiple versions (the `multiple-versions` lint is
 # only a warning today; add entries here with a justification when a duplicate

@@ -143,7 +143,13 @@ safetensors = "0.8"
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
+# `rust_crypto` is the pure-Rust backend. It is an all-or-nothing bundle —
+# 11.0.0's table reads
+# `rust_crypto = ["ed25519-dalek", "hmac", "p256", "p384", "rand", "rsa", "sha2"]`
+# — so `rsa` (RUSTSEC-2023-0071, Marvin timing side-channel, no safe upgrade)
+# cannot be dropped from it. The only other backend, `aws_lc_rs`, is C/C++ FFI and
+# banned by the COOLJAPAN Pure-Rust policy. See deny.toml's `[advisories] ignore`.
+jsonwebtoken = { version = "11.0", features = ["rust_crypto"] }
 num_cpus = "1.17"
 once_cell = "1.21"
 prometheus = "0.14"
@@ -321,7 +327,14 @@ pretty_assertions = "1.4"
 axum-test = "21.0"
 tokio-test = "0.4"
 tempfile = "3.27"
-paste = "1.0"
+# NOTE (2026-08-24): `paste = "1.0"` was here. `trustformers-serve` was its only
+# declarer (a dev-dependency), and that direct declaration is what made
+# RUSTSEC-2024-0436 (unmaintained, no safe upgrade) fire under `deny.toml`'s
+# `[advisories] unmaintained = "workspace"`. Its one use site — the never-invoked
+# `optimized_test_with_progress!` macro in `trustformers-serve/src/test_utilities.rs`
+# — expands nowhere, so nothing needed rewriting. `paste` remains in the graph
+# transitively (metal, pulp, rav1e, simba, tokenizers); that is not actionable
+# here. Use the maintained fork `pastey` if token pasting is ever needed again.
 
 # Debug-specific dependencies
 indexmap = { version = "2.14", features = ["serde"] }
@@ -415,12 +428,16 @@ utoipa = "5.5.0"
 utoipa-swagger-ui = "9.0.2"
 rustls = "0.23.43"
 glob = "0.3.4"
-opentelemetry = "0.32.0"
-opentelemetry-otlp = "0.32.0"
-opentelemetry-jaeger = "0.22.0"
-opentelemetry-zipkin = "0.32.0"
-opentelemetry-semantic-conventions = "0.32.1"
-tracing-opentelemetry = "0.33.0"
+# NOTE (2026-08-24): the six OpenTelemetry entries that used to live here
+# (`opentelemetry`, `opentelemetry-otlp`, `opentelemetry-jaeger`,
+# `opentelemetry-zipkin`, `opentelemetry-semantic-conventions`,
+# `tracing-opentelemetry`) are gone. `trustformers-serve` was their only
+# declarer and it never referenced a single one of them in code — its
+# `src/tracing/` module hand-rolls its own span model and serialises it with
+# `serde_json`. `opentelemetry-jaeger` was the root of RUSTSEC-2025-0123
+# (deprecated upstream, no safe upgrade). Deleting them closed that advisory for
+# real; do not re-add one without the code that uses it, or
+# `workspace_dependency_table_has_no_unused_entries` will fail.
 
 # Serving layer: message queues
 # `rdkafka` builds librdkafka (C/C++ via cmake); optional, `kafka` feature only.
@@ -430,14 +447,37 @@ redis = "1.5.0"
 async-nats = "0.49.1"
 
 # Serving layer: cloud provider SDKs
+#
+# Every `aws-sdk-*` crate below opts out of its own `default` feature set and
+# asks back for exactly `["default-https-client", "rt-tokio"]`. The feature that
+# is deliberately NOT re-enabled is `rustls`, which forwards to
+# `aws-smithy-runtime/tls-rustls` -> `aws-smithy-http-client/legacy-rustls-ring`
+# and drags in a second, obsolete TLS stack (rustls 0.21 + rustls-webpki 0.101.7
+# + hyper 0.14 + h2 0.3) alongside the modern one that `default-https-client`
+# already provides. That obsolete stack was the root of four advisories —
+# RUSTSEC-2026-0098 / -0099 / -0104 (rustls-webpki 0.101.7) and RUSTSEC-2026-0258
+# (h2 0.3.27) — none of which `cargo update` can reach, because rustls 0.21 pins
+# `rustls-webpki ^0.101.7` and `aws-smithy-http-client`'s `hyper-014` pins
+# `h2 ^0.3.24`. It was compiled but never used at runtime; see the long comment
+# in `trustformers-serve/Cargo.toml` for the measurement that establishes that,
+# and for the one remaining gap (`aws-lc-sys`) this does not close.
+#
+# `default-features = false` must live HERE rather than in the member manifest:
+# a member's `default-features = false` is silently ignored when the
+# `[workspace.dependencies]` entry does not set it too.
 aws-config = "1.10.1"
-aws-sdk-sqs = "1.105.0"
-aws-sdk-sagemaker = "1.221.0"
-aws-sdk-sagemakerruntime = "1.109.0"
-aws-sdk-lambda = "1.138.0"
-aws-sdk-cloudwatch = "1.123.0"
-# `lambda-web` depends on the banned `brotli` crates; optional, `lambda` feature only.
-lambda-web = "0.2.1"
+aws-sdk-sqs = { version = "1.105.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sagemaker = { version = "1.221.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sagemakerruntime = { version = "1.109.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-lambda = { version = "1.138.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-cloudwatch = { version = "1.123.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+# NOTE (2026-08-24): `lambda-web = "0.2.1"` was here, declared only by
+# `trustformers-serve`'s (now deleted) optional `lambda` feature. Nothing in that
+# crate ever referenced `lambda_web` or `#[cfg(feature = "lambda")]`, and its
+# sibling `lambda_runtime` had already been removed from this table. It pulled
+# `hyper 0.14` -> `h2 0.3.27` (RUSTSEC-2026-0258) and the banned
+# `brotli`/`brotli-decompressor` crates into the all-features audit graph for no
+# working functionality.
 
 [profile.release]
 lto = true

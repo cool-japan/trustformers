@@ -1,5 +1,4 @@
 // Allow dead code for chaos testing infrastructure under development
-#![allow(dead_code)]
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};

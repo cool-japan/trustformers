@@ -223,16 +223,16 @@ model = AutoModel.from_pretrained("gpt2", device="mps")
 
 **PyTorch-compatible training loop**
 
-> **Accuracy note (2026-08-24, added by the documentation pass, not independently re-verified beyond this one method)**: `PyTrainer`/`PyTrainingArguments` are real, registered Python classes (constructible today), but `src/training.rs`'s `PyTrainer::train()` is still fabricated — its own source comment reads "In a real implementation, we'd run the training loop here / For now, return a mock training result", and it unconditionally returns `train_loss: 0.5`, `total_steps: 1000` regardless of the model, data, or configuration passed in. The ✅ "Trainer API" checkmark and the example below reflect the class/API surface existing, not `.train()` actually training anything or returning real metrics. See root `TODO.md`'s trustformers-py section.
+> **Accuracy note (updated 2026-08-24, py-followups pass)**: `PyTrainer`/`PyTrainingArguments` are real, registered Python classes (constructible today). `src/training.rs`'s `PyTrainer::train()` used to be fabricated -- its own source comment read "In a real implementation, we'd run the training loop here / For now, return a mock training result", and it unconditionally returned `train_loss: 0.5`, `total_steps: 1000` regardless of the model, data, or configuration passed in. **That fabrication is gone**: `train()` now raises `NotImplementedError`, naming exactly what is missing -- this crate has real forward passes and real loss functions, but no backpropagation/optimizer-step path from a loss back to a model's own parameters exists anywhere in this workspace (checked directly: zero `impl ParameterAccess` sites across `trustformers-core`/`trustformers-models`/`trustformers-training`; `trustformers-training::trainer::Trainer::apply_gradients_to_model` -- the training crate's *own*, more complete trainer -- is itself a no-op today for exactly this reason; `trustformers-core`'s separate autodiff `Variable`/`ComputationGraph` system is never constructed by any model's `forward()`). The same investigation found three more live fabrications in the same file, now also honest refusals: `evaluate()` (used to return a fixed `eval_loss`/`eval_accuracy`/`eval_samples` triple, ignoring `eval_dataset`), `predict()` (used to return fixed `predictions`/`label_ids` arrays, ignoring `test_dataset`), and `push_to_hub()` (used to return a `https://huggingface.co/{repo_name}` URL without ever calling the network or uploading anything). `save_model()` is the one real method: it now delegates to the wrapped model's own real `save_pretrained()` (it previously computed an unused save-directory string and returned `Ok(())` without writing anything).
 
-- ✅ **Features** (class/API surface only — see the accuracy note above for `.train()` specifically)
+- ✅ **Features** (class/API surface only; see the accuracy note above -- `train`/`evaluate`/`predict`/`push_to_hub` all honestly refuse rather than fabricate; only `save_model` runs real logic)
   - Trainer API
   - Distributed Data Parallel (DDP)
   - Mixed precision training (AMP)
   - Gradient accumulation
   - Learning rate scheduling
 
-**Example** (constructs and calls without erroring; the returned metrics are fabricated, see above):
+**Example** (construction succeeds; `.train()` now raises `NotImplementedError` instead of returning fabricated metrics):
 ```python
 from trustformers import Trainer, TrainingArguments
 
@@ -252,7 +252,11 @@ trainer = Trainer(
     eval_dataset=eval_dataset,
 )
 
-trainer.train()
+trainer.train()  # raises NotImplementedError -- see the accuracy note above
+# Real forward pass + real loss (no training loop) is available directly on
+# the task-head models instead, e.g.:
+#   outputs = model(input_ids, attention_mask, labels=labels)
+#   outputs["loss"]  # a real cross-entropy value
 ```
 
 ---
@@ -386,21 +390,60 @@ pytest tests/benchmarks/ --benchmark-only
   where the caller can still act on it. (They previously returned hardcoded
   output -- `"{text} [Generated continuation]"` with `score: 0.95`, and a fixed
   `POSITIVE 0.7 / NEGATIVE 0.3` pair -- without ever touching the model.)
-- **`TokenClassificationPipeline` and `QuestionAnsweringPipeline` refuse
-  construction** with a structured `NotImplementedError`. Two things are
-  missing, and neither is papered over:
-  1. `trustformers_models::bert::BertForTokenClassification` and
-     `BertForQuestionAnswering` are real models with real heads, but this crate
-     exposes no Python wrapper for either yet.
-  2. Both pipelines' HuggingFace output shape carries *character* offsets
-     (`start` / `end`), and `trustformers-tokenizers` sets
-     `TokenizedInput::offset_mapping` to `None` unconditionally in both its
-     WordPiece and BPE encoders, so those keys cannot be filled honestly.
-     Reporting token indices under them would be wrong in a way callers could
-     not detect.
+- **`TokenClassificationPipeline` and `QuestionAnsweringPipeline` still refuse
+  construction** with a structured `NotImplementedError`, but only one gap
+  remains open as of the 2026-08-24 py-followups pass (re-verified against
+  `trustformers-tokenizers` source directly, not trusted from any handoff
+  note):
+  1. ~~`trustformers_models::bert::BertForTokenClassification` and
+     `BertForQuestionAnswering`... this crate exposes no Python wrapper for
+     either yet.~~ **Closed.** `BertForTokenClassification` and
+     `BertForQuestionAnswering` are now real, registered Python classes
+     (`src/models/mod.rs`) -- real forward pass, real logits, real loss when
+     `labels`/`start_positions`+`end_positions` are given. Call them directly
+     for real per-token/per-position inference.
+  2. **Still open.** Both pipelines' HuggingFace output shape carries
+     *character* offsets (`start` / `end`), and `trustformers-tokenizers`
+     still sets `TokenizedInput::offset_mapping` to `None` unconditionally in
+     the `Tokenizer` trait `encode`/`encode_pair` methods this crate's
+     `WordPieceTokenizer`/`BPETokenizer` wrappers call, so those keys still
+     cannot be filled honestly. (`BPETokenizer` gained a real, tested
+     `tokenize_with_offsets` helper in `trustformers-tokenizers` this wave,
+     but it is not part of the `Tokenizer` trait and is BPE-only -- it would
+     not help `WordPieceTokenizer`, what BERT needs, in any case.) Reporting
+     token indices under `start`/`end` would be wrong in a way callers could
+     not detect, so the pipelines keep refusing rather than build an object
+     that can only fail or silently mis-report spans.
   They previously invented a `B-PER` entity named `"John"` at characters 0..4
   for every input, and the literal answer string `"Example answer"` with
   `score: 0.85` for every question.
+- **`AutoModelForSequenceClassification`/`ForTokenClassification`/
+  `ForQuestionAnswering` now construct the matching real task-head class**
+  (`BertForSequenceClassification`/`BertForTokenClassification`/
+  `BertForQuestionAnswering`) for BERT-family checkpoints (bert/roberta/
+  distilbert/deberta), and raise `NotImplementedError` naming the inferred
+  architecture for anything else. They previously all delegated straight to
+  `AutoModel.from_pretrained`, which returns a *bare* encoder with no task
+  head at all -- so, for example, `AutoModelForTokenClassification.from_pretrained("dslim/bert-base-NER")`
+  handed back an object that looked like a token-classification model (same
+  `PreTrainedModel`-shaped surface, loaded from the same checkpoint) but
+  carried no classifier weights and silently dropped the checkpoint's
+  `classifier.{weight,bias}` tensors, however its `forward()` was called.
+- **`batch_encode_plus`'s (`WordPieceTokenizer`) and `encode(text,
+  text_pair=...)`'s (`BPETokenizer`) sequence-pair handling now produce a
+  real pair encoding.** Previously both concatenated two independent
+  single-sequence `encode()` calls -- no `[SEP]`/boundary token between the
+  segments, and (for `WordPieceTokenizer`'s `batch_encode_plus`)
+  `token_type_ids` that stayed the length of, and all zero for, the first
+  segment alone, shorter than the concatenated `input_ids` (a comment in the
+  code called this "simplified"). Now: WordPiece routes through the
+  already-correct `WordPieceTokenizer::encode_pair` (BERT's
+  `[CLS] A [SEP] B [SEP]`, 0/1 `token_type_ids`); BPE composes its own real
+  `<bos> A <eos> <eos> B <eos>` encoding at the `trustformers-py` layer
+  (matching HuggingFace's `RobertaTokenizer.build_inputs_with_special_tokens`
+  convention for BPE-family pairs, all-zero `token_type_ids`) rather than
+  calling `BPETokenizer::encode_pair`, whose own implementation is still just
+  `format!("{} {}", text, text2)` re-encoded as one string.
 - **Tokenizer `from_pretrained` reads real local files.** `WordPieceTokenizer`
   loads `vocab.txt` (ids are line numbers) or `vocab.json`, plus an optional
   `tokenizer_config.json` for the special-token names and `do_lower_case`;
@@ -480,6 +523,21 @@ version" policy.
   `Cargo.toml`). Every `cargo` command for it must be run from inside
   `trustformers-py/`; a green `cargo check --workspace` at the repo root says
   nothing about this crate.
+- **`extension-module` is its own crate feature, on by default** (`default = ["python-gc", "extension-module"]`,
+  gating `pyo3/extension-module` -- see the `pyo3` dependency's own comment in
+  `Cargo.toml`). With it on (the default, matching every real `pip install`/
+  `maturin build`), pyo3 does not link this crate against libpython -- the
+  Python C-API symbols resolve dynamically when the compiled `cdylib` is
+  `dlopen`'d by a running Python interpreter -- so a plain `cargo test --lib`
+  (a normal executable, not a `cdylib` Python injects symbols into) fails to
+  link with dozens of undefined symbols (`_PyExc_BaseException`, `_Py_IncRef`,
+  ...), EXIT 101. This is expected, not a regression: run
+  `cargo test --lib --no-default-features --features python-gc` instead (see
+  "Build & Test Commands" below), which omits `extension-module` and links
+  directly against the discovered libpython like any other Rust binary. Fixed
+  2026-08-24 (`py-followups`) -- before this, the only way to run this crate's
+  Rust tests at all was a machine-specific `RUSTFLAGS` linking against
+  libpython by hand.
 - **The `trustformers` umbrella crate is deliberately not a dependency.** It was
   removed after verifying, with `cargo tree -e features -p trustformers-core`
   and `-p trustformers-models` snapshots taken before and after, that the
@@ -553,6 +611,27 @@ ruff check trustformers/ tests/
 # Build documentation
 cd docs && make html
 ```
+
+### Running the Rust test suite (`cargo test`)
+
+The commands above are the Python-facing workflow (`maturin`/`pytest`). To run
+this crate's own `cargo test` suite (the one this repository's gates check),
+run it from inside `trustformers-py/` with `extension-module` disabled --
+`pyo3/extension-module` is on by default (see "Build notes" above), and a
+`cdylib`-only extension-module build cannot link a plain test binary:
+
+```bash
+cd trustformers-py
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo test --lib --no-default-features --features python-gc
+```
+
+The plain `cargo test` (default features) is expected to fail to link with
+undefined Python C-API symbols (`_PyExc_BaseException`, ...) -- that failure
+is `extension-module` doing exactly what it should for a real Python build,
+not a bug in the crate. `cargo check`/`cargo clippy` are unaffected either way
+(no test binary is linked for those), so they can run with default features.
 
 ### PyPI Publishing
 

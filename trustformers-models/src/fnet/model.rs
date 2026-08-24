@@ -2,7 +2,7 @@ use crate::common::ActivationType;
 use crate::fnet::config::FNetConfig;
 use crate::weight_loading::binding::{
     bind_embedding, bind_head_layer_norm, bind_head_linear, bind_linear, take_norm_bias,
-    take_norm_weight,
+    take_norm_weight, BoundNamespaces,
 };
 use crate::weight_loading::checkpoint::{Checkpoint, LoadReport, UnusedTensors};
 use std::io::Read;
@@ -722,6 +722,13 @@ impl Model for FNetForSequenceClassification {
 }
 
 impl FNetForSequenceClassification {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["classifier."]);
+
     /// Load the encoder and the classification head, reporting what was bound.
     ///
     /// A previous revision delegated straight to `FNetModel::load_pretrained`,
@@ -750,6 +757,7 @@ impl FNetForSequenceClassification {
             [self.num_labels, hidden],
             &mut self.classifier,
         )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }
@@ -815,6 +823,13 @@ pub struct FNetForMaskedLM {
 }
 
 impl FNetForMaskedLM {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["cls.predictions."]);
+
     pub fn new(config: FNetConfig) -> Result<Self> {
         Self::new_with_device(config, Device::CPU)
     }
@@ -899,6 +914,7 @@ impl FNetForMaskedLM {
             None => report.note_absent(canonical_bias),
         }
 
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }

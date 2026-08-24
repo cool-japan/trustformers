@@ -2,7 +2,7 @@
 
 use crate::bert::config::BertConfig;
 use crate::bert::model::BertModel;
-use crate::weight_loading::binding::{bind_head_layer_norm, bind_head_linear};
+use crate::weight_loading::binding::{bind_head_layer_norm, bind_head_linear, BoundNamespaces};
 use crate::weight_loading::checkpoint::{Checkpoint, LoadReport};
 use std::io::Read;
 use trustformers_core::device::Device;
@@ -122,6 +122,13 @@ impl Model for BertForSequenceClassification {
 }
 
 impl BertForSequenceClassification {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["classifier."]);
+
     /// Load the encoder and, when the checkpoint carries one, the classifier head.
     ///
     /// A previous revision delegated straight to `BertModel::load_pretrained`,
@@ -144,6 +151,7 @@ impl BertForSequenceClassification {
             [self.num_labels, hidden],
             &mut self.classifier,
         )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }
@@ -307,14 +315,29 @@ impl BertLMHead {
             },
         }
 
-        for bias_name in ["cls.predictions.decoder.bias", "cls.predictions.bias"] {
-            if let Some(bias) = checkpoint.take_shaped(bias_name, &[config.vocab_size])? {
-                self.decoder.set_bias(bias)?;
-                report.mark_loaded(bias_name);
-                return Ok(());
+        // HuggingFace ties `BertLMPredictionHead.bias` onto `decoder.bias`, and
+        // `state_dict()` walks both owning modules — so a real export commonly
+        // carries *both* `cls.predictions.bias` and `cls.predictions.decoder.bias`
+        // for the same parameter. Bind the first spelling present and mark every
+        // alias as loaded: leaving the second one unconsumed would make the
+        // strict head-namespace check below reject a genuine checkpoint.
+        let aliases = ["cls.predictions.decoder.bias", "cls.predictions.bias"];
+        let mut bound = false;
+        for bias_name in aliases {
+            if !checkpoint.contains(bias_name) {
+                continue;
             }
+            if !bound {
+                if let Some(bias) = checkpoint.take_shaped(bias_name, &[config.vocab_size])? {
+                    self.decoder.set_bias(bias)?;
+                    bound = true;
+                }
+            }
+            report.mark_loaded(bias_name);
         }
-        report.note_absent("cls.predictions.bias");
+        if !bound {
+            report.note_absent("cls.predictions.bias");
+        }
         Ok(())
     }
 }
@@ -372,6 +395,16 @@ impl Model for BertForMaskedLM {
 }
 
 impl BertForMaskedLM {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    /// `cls.seq_relationship.*` is deliberately *not* claimed: a pretraining
+    /// checkpoint's next-sentence head is a different head this model does not
+    /// bind, so it stays tolerated by the encoder policy.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["cls.predictions."]);
+
     /// Load the encoder and, when the checkpoint carries one, the MLM head.
     ///
     /// HuggingFace stores the head as `cls.predictions.transform.dense.*`,
@@ -388,6 +421,7 @@ impl BertForMaskedLM {
         let mut report = self.bert.load_from_checkpoint(&checkpoint)?;
         let config = self.bert.get_config().clone();
         self.cls.load_weights(&checkpoint, &mut report, &config)?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }
@@ -476,6 +510,13 @@ impl Model for BertForTokenClassification {
 }
 
 impl BertForTokenClassification {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["classifier."]);
+
     /// Load the encoder and, when present, the token-classification head.
     ///
     /// # Errors
@@ -493,6 +534,7 @@ impl BertForTokenClassification {
             [self.num_labels, hidden],
             &mut self.classifier,
         )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }
@@ -592,6 +634,13 @@ impl Model for BertForQuestionAnswering {
 }
 
 impl BertForQuestionAnswering {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["qa_outputs."]);
+
     /// Load the encoder and, when present, the span-prediction head.
     ///
     /// # Errors
@@ -609,6 +658,7 @@ impl BertForQuestionAnswering {
             [2, hidden],
             &mut self.qa_outputs,
         )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }
@@ -1098,6 +1148,215 @@ mod tests {
             .load_pretrained(&mut std::io::Cursor::new(mlm_bytes))
             .expect("the masked-LM head's published names must load");
         assert_eq!(snapshot(&mlm_loaded), mlm_expected);
+    }
+
+    /// A model's published parameters plus one extra tensor, as safetensors.
+    fn checkpoint_with_extra<M: Model>(model: &M, extra: F32Tensor) -> Vec<u8> {
+        let mut tensors: Vec<F32Tensor> = model
+            .named_tensors()
+            .into_iter()
+            .map(|(name, tensor)| {
+                F32Tensor::new(
+                    &name,
+                    &tensor.shape(),
+                    tensor.to_vec_f32().expect("test fixtures are all F32"),
+                )
+            })
+            .collect();
+        tensors.push(extra);
+        build_safetensors(&tensors)
+    }
+
+    /// A task wrapper must refuse a checkpoint entry it does not recognise inside
+    /// a namespace it binds itself.
+    ///
+    /// Regression test for contextual strictness. `BertModel`'s
+    /// `ALLOWED_UNUSED_PREFIXES` tolerates `cls.`, `classifier.` and
+    /// `qa_outputs.` so that loading a *bare encoder* out of a fine-tuned
+    /// checkpoint does not fail. The task wrappers inherited that tolerance even
+    /// though they bind those namespaces, so a misspelling like
+    /// `cls.predictions.transform.dens.weight` was reported as merely `ignored`:
+    /// the load returned `Ok`, and the layer the typo was meant to fill kept its
+    /// random initialisation.
+    #[test]
+    fn a_wrapper_rejects_an_unknown_tensor_inside_a_namespace_it_binds() {
+        let config = round_trip_config();
+        let hidden = config.hidden_size;
+
+        // Masked LM: a typo one level below the namespace it binds.
+        let mlm = BertForMaskedLM::new(config.clone()).expect("model must build");
+        let bytes = checkpoint_with_extra(
+            &mlm,
+            F32Tensor::ramp(
+                "cls.predictions.transform.dens.weight",
+                &[hidden, hidden],
+                1.0,
+            ),
+        );
+        let mut target = BertForMaskedLM::new(config.clone()).expect("model must build");
+        let err = target
+            .load_pretrained(&mut std::io::Cursor::new(bytes))
+            .expect_err("a misspelt head tensor must not be tolerated by the head's own binder");
+        let message = err.to_string();
+        assert!(
+            message.contains("cls.predictions.transform.dens.weight"),
+            "the offending name must be reported: {message}"
+        );
+
+        // Sequence classification: a typo under `classifier.`.
+        let sequence =
+            BertForSequenceClassification::new(config.clone(), 3).expect("model must build");
+        let bytes = checkpoint_with_extra(
+            &sequence,
+            F32Tensor::ramp("classifier.weigth", &[3, hidden], 2.0),
+        );
+        let mut target =
+            BertForSequenceClassification::new(config.clone(), 3).expect("model must build");
+        let err = target
+            .load_pretrained(&mut std::io::Cursor::new(bytes))
+            .expect_err("a misspelt classifier tensor must be refused");
+        assert!(
+            err.to_string().contains("classifier.weigth"),
+            "unexpected: {err}"
+        );
+
+        // Question answering: a typo under `qa_outputs.`.
+        let qa = BertForQuestionAnswering::new(config.clone()).expect("model must build");
+        let bytes = checkpoint_with_extra(&qa, F32Tensor::ramp("qa_outputs.baias", &[2], 3.0));
+        let mut target = BertForQuestionAnswering::new(config.clone()).expect("model must build");
+        let err = target
+            .load_pretrained(&mut std::io::Cursor::new(bytes))
+            .expect_err("a misspelt span-head tensor must be refused");
+        assert!(
+            err.to_string().contains("qa_outputs.baias"),
+            "unexpected: {err}"
+        );
+
+        // Token classification: a typo under `classifier.`.
+        let token = BertForTokenClassification::new(config.clone(), 4).expect("model must build");
+        let bytes = checkpoint_with_extra(
+            &token,
+            F32Tensor::ramp("classifier.extra_head.weight", &[4, hidden], 4.0),
+        );
+        let mut target = BertForTokenClassification::new(config, 4).expect("model must build");
+        let err = target
+            .load_pretrained(&mut std::io::Cursor::new(bytes))
+            .expect_err("an unknown tensor under the bound classifier namespace must be refused");
+        assert!(
+            err.to_string().contains("classifier.extra_head.weight"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// The bare-encoder path keeps tolerating whole head namespaces, and a
+    /// wrapper keeps tolerating the namespaces it does *not* bind.
+    ///
+    /// The strictness above must not turn into "every checkpoint entry must be
+    /// consumed": a pretraining checkpoint legitimately carries heads no
+    /// particular model binds.
+    #[test]
+    fn namespaces_a_model_does_not_bind_stay_tolerated() {
+        let config = round_trip_config();
+        let hidden = config.hidden_size;
+
+        // A pretraining checkpoint: encoder + MLM head + NSP head, loaded into a
+        // model that binds only the MLM head. `cls.seq_relationship.*` is a
+        // different head and must not be refused.
+        let mlm = BertForMaskedLM::new(config.clone()).expect("model must build");
+        let mut tensors: Vec<F32Tensor> = mlm
+            .named_tensors()
+            .into_iter()
+            .map(|(name, tensor)| {
+                F32Tensor::new(
+                    &name,
+                    &tensor.shape(),
+                    tensor.to_vec_f32().expect("test fixtures are all F32"),
+                )
+            })
+            .collect();
+        tensors.push(F32Tensor::ramp(
+            "cls.seq_relationship.weight",
+            &[2, hidden],
+            7.0,
+        ));
+        tensors.push(F32Tensor::ramp("cls.seq_relationship.bias", &[2], 8.0));
+        let bytes = build_safetensors(&tensors);
+
+        let mut target = BertForMaskedLM::new(config.clone()).expect("model must build");
+        let report = target
+            .load_pretrained_report(&mut std::io::Cursor::new(bytes.clone()))
+            .expect("a next-sentence head this model does not bind must stay tolerated");
+        assert!(
+            report.ignored.iter().any(|name| name == "cls.seq_relationship.weight"),
+            "the unbound head must be reported as ignored: {:?}",
+            report.ignored
+        );
+
+        // The same checkpoint through the bare encoder: `cls.` as a whole is not
+        // bound there, so the entire namespace stays tolerated.
+        let mut encoder = BertModel::new(config).expect("model must build");
+        let encoder_report = encoder
+            .load_pretrained_report(&mut std::io::Cursor::new(bytes))
+            .expect("the bare encoder must keep tolerating a head namespace it never binds");
+        assert!(
+            encoder_report
+                .ignored
+                .iter()
+                .any(|name| name == "cls.predictions.transform.dense.weight"),
+            "the whole MLM head must be ignored by the bare encoder: {:?}",
+            encoder_report.ignored
+        );
+    }
+
+    /// A checkpoint that carries both spellings of the tied MLM decoder bias
+    /// still loads under the strict head-namespace rule.
+    ///
+    /// HuggingFace's `BertLMPredictionHead` ties `bias` onto `decoder.bias`, and
+    /// `state_dict()` walks both owning modules, so a real export commonly holds
+    /// `cls.predictions.bias` *and* `cls.predictions.decoder.bias` for the same
+    /// parameter. The binder used to stop at the first spelling it found, which
+    /// would leave the second unconsumed — and the new strictness would then
+    /// reject a genuine checkpoint.
+    #[test]
+    fn both_spellings_of_the_tied_decoder_bias_are_accounted_for() {
+        let config = round_trip_config();
+        let vocab = config.vocab_size;
+
+        let source = BertForMaskedLM::new(config.clone()).expect("model must build");
+        let mut tensors: Vec<F32Tensor> = source
+            .named_tensors()
+            .into_iter()
+            .map(|(name, tensor)| {
+                F32Tensor::new(
+                    &name,
+                    &tensor.shape(),
+                    tensor.to_vec_f32().expect("test fixtures are all F32"),
+                )
+            })
+            .collect();
+        assert!(
+            tensors.iter().any(|t| t.name == "cls.predictions.bias"),
+            "the fixture must publish the canonical bias name"
+        );
+        tensors.push(F32Tensor::ramp(
+            "cls.predictions.decoder.bias",
+            &[vocab],
+            11.0,
+        ));
+        let bytes = build_safetensors(&tensors);
+
+        let mut target = BertForMaskedLM::new(config).expect("model must build");
+        let report = target
+            .load_pretrained_report(&mut std::io::Cursor::new(bytes))
+            .expect("a checkpoint carrying both aliases of the tied bias must load");
+        for alias in ["cls.predictions.bias", "cls.predictions.decoder.bias"] {
+            assert!(
+                report.loaded.iter().any(|name| name == alias),
+                "{alias} must be accounted for: loaded={:?} ignored={:?}",
+                report.loaded,
+                report.ignored
+            );
+        }
     }
 
     /// End-to-end proof that a fine-tuned task model is now exportable: push a

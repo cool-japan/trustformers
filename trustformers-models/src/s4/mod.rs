@@ -11,10 +11,15 @@
 //! - Any task requiring efficient handling of very long sequences
 
 pub mod config;
+pub mod discretization;
+pub mod layer;
+pub mod loading;
 pub mod model;
 
 pub use config::S4Config;
-pub use model::{S4Block, S4ForLanguageModeling, S4Layer, S4Model};
+pub use discretization::{Discretization, HiPPOMatrix};
+pub use layer::S4Layer;
+pub use model::{S4Block, S4ForLanguageModeling, S4Model};
 
 #[cfg(test)]
 mod tests;

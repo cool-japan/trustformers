@@ -1,5 +1,4 @@
 // Allow dead code for infrastructure under development
-#![allow(dead_code)]
 
 //! Core Encryption Service Implementation
 

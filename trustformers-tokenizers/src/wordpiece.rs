@@ -8,13 +8,24 @@
 //! There is deliberately **no** built-in vocabulary: a WordPiece tokenizer is
 //! meaningless without the checkpoint's `vocab.txt`, so loading fails loudly
 //! rather than substituting an invented word list.
+//!
+//! # Offsets
+//!
+//! Every stage carries a byte-span alignment back into the caller's original
+//! string, so [`WordPieceTokenizer::tokenize_with_offsets`] and the
+//! `offset_mapping` of [`Tokenizer::encode`]/[`Tokenizer::encode_pair`] report
+//! where each piece — continuation (`##`) pieces included — came from *before*
+//! accent stripping and lowercasing. See [`crate::offsets`] for the byte- (not
+//! character-) offset convention and the alignment machinery.
 
+use crate::offsets::{
+    aligned_lowercase, aligned_strip_accents, AlignmentBuilder, ByteSpan, OffsetAlignment,
+};
 use crate::vocab::Vocab;
 use std::collections::HashMap;
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::traits::{TokenizedInput, Tokenizer};
 use unicode_categories::UnicodeCategories;
-use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug, Clone)]
 pub struct WordPieceTokenizer {
@@ -26,6 +37,57 @@ pub struct WordPieceTokenizer {
     mask_token: String,
     do_lower_case: bool,
     max_input_chars_per_word: usize,
+}
+
+/// The offset every special token (and every padding token) reports.
+///
+/// HuggingFace's convention: a special token covers no source text, and an
+/// empty span at position 0 is unambiguous because a real token starting at
+/// byte 0 always has a non-empty span.
+const SPECIAL_TOKEN_SPAN: ByteSpan = (0, 0);
+
+/// One basic-tokenization word together with the byte span, in the caller's
+/// original string, that every one of its characters came from.
+///
+/// The characters are the *normalized* ones (accent-stripped and lowercased
+/// when `do_lower_case` is set) — the ones the sub-word search runs over —
+/// while the spans always point back into the pre-normalization input, which
+/// is what makes a `##` continuation piece able to report its own sub-span of
+/// the original text.
+#[derive(Debug, Clone)]
+struct AlignedWord {
+    /// The word as the sub-word search sees it.
+    text: String,
+    /// `text`'s characters, so the sub-word search does not re-collect them.
+    chars: Vec<char>,
+    /// One byte span in the original input per entry of `chars`.
+    char_spans: Vec<ByteSpan>,
+}
+
+impl AlignedWord {
+    fn new(chars: &[char], char_spans: &[ByteSpan]) -> Self {
+        Self {
+            text: chars.iter().collect(),
+            chars: chars.to_vec(),
+            char_spans: char_spans.to_vec(),
+        }
+    }
+
+    /// The smallest byte span containing every one of `spans`.
+    ///
+    /// A union rather than `(first.0, last.1)`: normalization can map several
+    /// output characters onto one source character, so neighbouring spans may
+    /// repeat, and an insertion contributes an empty span.
+    fn enclosing_span(spans: &[ByteSpan]) -> ByteSpan {
+        let start = spans.iter().map(|&(start, _)| start).min().unwrap_or(0);
+        let end = spans.iter().map(|&(_, end)| end).max().unwrap_or(start);
+        (start, end.max(start))
+    }
+
+    /// The byte span of the whole word in the original input.
+    fn span(&self) -> ByteSpan {
+        Self::enclosing_span(&self.char_spans)
+    }
 }
 
 impl WordPieceTokenizer {
@@ -127,39 +189,76 @@ impl WordPieceTokenizer {
 
     /// BERT `_clean_text`: drop NUL/replacement/control characters and turn every
     /// whitespace character into a plain space.
-    fn clean_text(text: &str) -> String {
+    ///
+    /// Public for inspection and testing, like
+    /// [`crate::bpe::BPETokenizer::pre_tokenize`]: this and the other
+    /// individually named BERT stages below are projections of the aligned
+    /// pipeline the encoder actually runs, so inspecting one can never show a
+    /// stage the encoder does not perform.
+    pub fn clean_text(text: &str) -> String {
+        Self::aligned_clean_text(text).0
+    }
+
+    /// [`Self::clean_text`] plus a byte alignment back into `text`.
+    ///
+    /// Dropped characters contribute no alignment unit at all, which is why a
+    /// word straddling a dropped control character reports a span that still
+    /// contains that character: the span is the union of its pieces' sources,
+    /// and there is no way to express a hole in a single `(start, end)` pair.
+    /// The span therefore always *contains* the token's source text, which is
+    /// the property `&text[start..end]` consumers rely on.
+    fn aligned_clean_text(text: &str) -> (String, OffsetAlignment) {
         let mut cleaned = String::with_capacity(text.len());
-        for ch in text.chars() {
+        let mut alignment = AlignmentBuilder::new();
+        for (index, ch) in text.char_indices() {
             let cp = ch as u32;
+            let len = ch.len_utf8();
             if cp == 0 || cp == 0xfffd {
                 continue;
             }
             if ch.is_whitespace() {
                 cleaned.push(' ');
+                alignment.push(1, index, index + len);
                 continue;
             }
             if ch.is_control() {
                 continue;
             }
             cleaned.push(ch);
+            alignment.push(len, index, index + len);
         }
-        cleaned
+        (cleaned, alignment.finish(text.len()))
     }
 
     /// BERT `_tokenize_chinese_chars`: pad every CJK codepoint with spaces so it
     /// becomes its own token.
-    fn tokenize_chinese_chars(text: &str) -> String {
+    pub fn tokenize_chinese_chars(text: &str) -> String {
+        Self::aligned_tokenize_chinese_chars(text).0
+    }
+
+    /// [`Self::tokenize_chinese_chars`] plus a byte alignment back into `text`.
+    ///
+    /// The padding spaces are insertions with no source of their own; they are
+    /// consumed by the whitespace split that follows and never end up inside a
+    /// word.
+    fn aligned_tokenize_chinese_chars(text: &str) -> (String, OffsetAlignment) {
         let mut spaced = String::with_capacity(text.len());
-        for ch in text.chars() {
+        let mut alignment = AlignmentBuilder::new();
+        for (index, ch) in text.char_indices() {
+            let len = ch.len_utf8();
             if Self::is_chinese_char(ch) {
                 spaced.push(' ');
+                alignment.skip_output(1);
                 spaced.push(ch);
+                alignment.push(len, index, index + len);
                 spaced.push(' ');
+                alignment.skip_output(1);
             } else {
                 spaced.push(ch);
+                alignment.push(len, index, index + len);
             }
         }
-        spaced
+        (spaced, alignment.finish(text.len()))
     }
 
     /// The CJK ranges used by BERT's `_is_chinese_char`.
@@ -176,8 +275,12 @@ impl WordPieceTokenizer {
     }
 
     /// BERT `_run_strip_accents`: NFD, then drop non-spacing marks.
-    fn strip_accents(text: &str) -> String {
-        text.nfd().filter(|ch| !ch.is_mark_nonspacing()).collect()
+    ///
+    /// Shared with [`crate::offsets::aligned_strip_accents`], which produces
+    /// the same string plus the alignment back into its input, so the offset
+    /// path and the token path can never drift apart.
+    pub fn strip_accents(text: &str) -> String {
+        crate::offsets::strip_accents(text)
     }
 
     /// BERT `_is_punctuation`: the ASCII punctuation blocks plus any codepoint
@@ -192,26 +295,47 @@ impl WordPieceTokenizer {
     }
 
     /// BERT `_run_split_on_punc`: each punctuation character becomes its own token.
-    fn split_on_punctuation(token: &str) -> Vec<String> {
-        let mut pieces: Vec<String> = Vec::new();
-        let mut current = String::new();
+    pub fn split_on_punctuation(token: &str) -> Vec<String> {
+        let chars: Vec<char> = token.chars().collect();
+        let spans: Vec<ByteSpan> = vec![(0, 0); chars.len()];
+        let mut pieces = Vec::new();
+        Self::split_aligned_on_punctuation(&chars, &spans, &mut pieces);
+        pieces.into_iter().map(|word| word.text).collect()
+    }
 
-        for ch in token.chars() {
-            if Self::is_punctuation(ch) {
-                if !current.is_empty() {
-                    pieces.push(std::mem::take(&mut current));
-                }
-                pieces.push(ch.to_string());
-            } else {
-                current.push(ch);
+    /// [`Self::split_on_punctuation`] over a span-carrying word: the character
+    /// spans are partitioned alongside the characters, so each piece keeps the
+    /// exact source range of the characters it covers.
+    fn split_aligned_on_punctuation(
+        chars: &[char],
+        spans: &[ByteSpan],
+        output: &mut Vec<AlignedWord>,
+    ) {
+        let mut piece_start = 0usize;
+
+        for (index, &ch) in chars.iter().enumerate() {
+            if !Self::is_punctuation(ch) {
+                continue;
             }
+            if index > piece_start {
+                output.push(AlignedWord::new(
+                    &chars[piece_start..index],
+                    &spans[piece_start..index],
+                ));
+            }
+            output.push(AlignedWord::new(
+                &chars[index..index + 1],
+                &spans[index..index + 1],
+            ));
+            piece_start = index + 1;
         }
 
-        if !current.is_empty() {
-            pieces.push(current);
+        if piece_start < chars.len() {
+            output.push(AlignedWord::new(
+                &chars[piece_start..],
+                &spans[piece_start..],
+            ));
         }
-
-        pieces
     }
 
     /// BERT `BasicTokenizer`: clean -> CJK padding -> whitespace split ->
@@ -221,21 +345,75 @@ impl WordPieceTokenizer {
     /// *before* lowercasing. No Unicode normalization is applied in the cased
     /// path, because BERT's own tokenizer performs none — adding one here would
     /// produce ids no cased checkpoint agrees with.
-    fn basic_tokenize(&self, text: &str) -> Vec<String> {
-        let cleaned = Self::clean_text(text);
-        let spaced = Self::tokenize_chinese_chars(&cleaned);
+    pub fn basic_tokenize(&self, text: &str) -> Vec<String> {
+        self.aligned_basic_tokenize(text).into_iter().map(|word| word.text).collect()
+    }
 
-        let mut output = Vec::new();
-        for raw_token in spaced.split_whitespace() {
-            let token = if self.do_lower_case {
-                Self::strip_accents(raw_token).to_lowercase()
+    /// [`Self::basic_tokenize`], with each word carrying the byte span in
+    /// `text` of every one of its characters.
+    ///
+    /// This is the only implementation of the basic-tokenization pipeline;
+    /// [`Self::basic_tokenize`] is a projection of it, so the tokens the offset
+    /// path describes are by construction the tokens the encoder emits.
+    ///
+    /// Every stage contributes an alignment — control-character stripping, CJK
+    /// space padding, accent stripping, lowercasing — and they are composed
+    /// into a single map back to the caller's original string, so a `##`
+    /// continuation piece of a lowercased, accent-stripped word still reports
+    /// its own sub-span of the *pre-normalization* text.
+    fn aligned_basic_tokenize(&self, text: &str) -> Vec<AlignedWord> {
+        let (cleaned, clean_alignment) = Self::aligned_clean_text(text);
+        let (spaced, cjk_alignment) = Self::aligned_tokenize_chinese_chars(&cleaned);
+        // `spaced` -> original.
+        let alignment = cjk_alignment.rebase(&clean_alignment);
+
+        let mut words = Vec::new();
+        for (word_start, word_end) in Self::whitespace_delimited_spans(&spaced) {
+            let raw_word = &spaced[word_start..word_end];
+
+            let (word_text, word_alignment) = if self.do_lower_case {
+                let (stripped, strip_alignment) = aligned_strip_accents(raw_word);
+                let (lowered, lower_alignment) = aligned_lowercase(&stripped);
+                (lowered, lower_alignment.rebase(&strip_alignment))
             } else {
-                raw_token.to_string()
+                (raw_word.to_string(), OffsetAlignment::identity(raw_word))
             };
-            output.extend(Self::split_on_punctuation(&token));
+
+            let mut chars = Vec::new();
+            let mut char_spans = Vec::new();
+            for (index, ch) in word_text.char_indices() {
+                let (raw_start, raw_end) = word_alignment.map_span(index, index + ch.len_utf8());
+                char_spans.push(alignment.map_span(word_start + raw_start, word_start + raw_end));
+                chars.push(ch);
+            }
+
+            Self::split_aligned_on_punctuation(&chars, &char_spans, &mut words);
         }
 
-        output
+        words
+    }
+
+    /// Byte ranges of the whitespace-delimited runs of `text`, which is exactly
+    /// what `str::split_whitespace` yields, but with their positions.
+    fn whitespace_delimited_spans(text: &str) -> Vec<ByteSpan> {
+        let mut spans = Vec::new();
+        let mut start: Option<usize> = None;
+
+        for (index, ch) in text.char_indices() {
+            if ch.is_whitespace() {
+                if let Some(run_start) = start.take() {
+                    spans.push((run_start, index));
+                }
+            } else if start.is_none() {
+                start = Some(index);
+            }
+        }
+
+        if let Some(run_start) = start {
+            spans.push((run_start, text.len()));
+        }
+
+        spans
     }
 
     /// Greedy longest-match-first WordPiece segmentation.
@@ -243,13 +421,27 @@ impl WordPieceTokenizer {
     /// Matches HuggingFace semantics: if any position of the word fails to match
     /// a vocabulary piece, the *whole* word becomes a single unknown token — the
     /// sub-tokens collected so far are discarded.
-    fn wordpiece_tokenize(&self, word: &str) -> Vec<String> {
-        if word.chars().count() > self.max_input_chars_per_word {
-            return vec![self.unk_token.clone()];
+    pub fn wordpiece_tokenize(&self, word: &str) -> Vec<String> {
+        let chars: Vec<char> = word.chars().collect();
+        self.wordpiece_piece_ranges(&chars)
+            .into_iter()
+            .map(|(piece, _, _)| piece)
+            .collect()
+    }
+
+    /// [`Self::wordpiece_tokenize`] over a character slice, reporting for each
+    /// piece the half-open character range `[start, end)` of `chars` it covers.
+    ///
+    /// The two fall-back paths (a word longer than
+    /// `max_input_chars_per_word`, and a word no vocabulary segmentation
+    /// covers) both emit one unknown token spanning the whole word, so the
+    /// reported range is the whole word in those cases too.
+    fn wordpiece_piece_ranges(&self, chars: &[char]) -> Vec<(String, usize, usize)> {
+        if chars.len() > self.max_input_chars_per_word {
+            return vec![(self.unk_token.clone(), 0, chars.len())];
         }
 
-        let chars: Vec<char> = word.chars().collect();
-        let mut sub_tokens: Vec<String> = Vec::new();
+        let mut sub_tokens: Vec<(String, usize, usize)> = Vec::new();
         let mut candidate = String::new();
         let mut start = 0;
 
@@ -274,10 +466,10 @@ impl WordPieceTokenizer {
 
             match matched {
                 Some((piece, next_start)) => {
-                    sub_tokens.push(piece);
+                    sub_tokens.push((piece, start, next_start));
                     start = next_start;
                 },
-                None => return vec![self.unk_token.clone()],
+                None => return vec![(self.unk_token.clone(), 0, chars.len())],
             }
         }
 
@@ -286,11 +478,45 @@ impl WordPieceTokenizer {
 
     /// Tokenize `text` into WordPiece string tokens (no special tokens added).
     pub fn tokenize(&self, text: &str) -> Vec<String> {
+        self.tokenize_with_offsets(text).0
+    }
+
+    /// Tokenize `text`, reporting for each token the byte range of the
+    /// **original** `text` it covers.
+    ///
+    /// The two returned vectors always have the same length: they are produced
+    /// by one pass, not by two independent ones.
+    ///
+    /// Offsets are byte indices into `text` itself, before any normalization
+    /// (see [`crate::offsets`] for the convention and for
+    /// [`crate::offsets::byte_offsets_to_char_offsets`], which converts them to
+    /// the character offsets a Python caller needs). `&text[start..end]` is
+    /// always a valid slice and always *contains* the source of the token:
+    ///
+    /// * for a cased tokenizer it is exactly the token's surface text (`##`
+    ///   stripped),
+    /// * for `do_lower_case` it is the pre-normalization text, so
+    ///   `strip_accents` + lowercase applied to it yields the token,
+    /// * a character that `clean_text` deletes (NUL, `U+FFFD`, other control
+    ///   characters) leaves no unit of its own, so a token spanning a deleted
+    ///   character reports a range that still contains it.
+    pub fn tokenize_with_offsets(&self, text: &str) -> (Vec<String>, Vec<ByteSpan>) {
         let mut tokens = Vec::new();
-        for word in self.basic_tokenize(text) {
-            tokens.extend(self.wordpiece_tokenize(&word));
+        let mut offsets = Vec::new();
+
+        for word in self.aligned_basic_tokenize(text) {
+            let word_span = word.span();
+            for (piece, start, end) in self.wordpiece_piece_ranges(&word.chars) {
+                let span = match word.char_spans.get(start..end) {
+                    Some(spans) if !spans.is_empty() => AlignedWord::enclosing_span(spans),
+                    _ => word_span,
+                };
+                tokens.push(piece);
+                offsets.push(span);
+            }
         }
-        tokens
+
+        (tokens, offsets)
     }
 
     fn is_special_token(&self, token: &str) -> bool {
@@ -336,10 +562,23 @@ impl WordPieceTokenizer {
 }
 
 impl Tokenizer for WordPieceTokenizer {
+    /// Encode `text` as `[CLS] ... [SEP]`.
+    ///
+    /// `offset_mapping` is always populated: byte spans into `text` for the
+    /// content tokens (see [`Self::tokenize_with_offsets`]) and `(0, 0)` for
+    /// `[CLS]`/`[SEP]`, matching HuggingFace's convention for special tokens.
     fn encode(&self, text: &str) -> Result<TokenizedInput> {
-        let mut tokens = vec![self.cls_token.clone()];
-        tokens.extend(self.tokenize(text));
+        let (content_tokens, content_offsets) = self.tokenize_with_offsets(text);
+
+        let mut tokens = Vec::with_capacity(content_tokens.len() + 2);
+        let mut offsets = Vec::with_capacity(content_offsets.len() + 2);
+
+        tokens.push(self.cls_token.clone());
+        offsets.push(SPECIAL_TOKEN_SPAN);
+        tokens.extend(content_tokens);
+        offsets.extend(content_offsets);
         tokens.push(self.sep_token.clone());
+        offsets.push(SPECIAL_TOKEN_SPAN);
 
         let mut input_ids = Vec::with_capacity(tokens.len());
         for token in &tokens {
@@ -356,19 +595,36 @@ impl Tokenizer for WordPieceTokenizer {
             attention_mask,
             token_type_ids: Some(vec![0u32; input_ids_len]),
             special_tokens_mask: Some(special_tokens_mask),
-            offset_mapping: None,
+            offset_mapping: Some(offsets),
             overflowing_tokens: None,
         })
     }
 
+    /// Encode a sequence pair as `[CLS] A [SEP] B [SEP]`.
+    ///
+    /// `offset_mapping` is **per sequence**, exactly as HuggingFace reports it:
+    /// a token's span indexes `text` when its `token_type_ids` entry is `0` and
+    /// `text2` when it is `1`. There is no combined coordinate space, because
+    /// the two sequences are never concatenated. `[CLS]`/`[SEP]` are `(0, 0)`.
     fn encode_pair(&self, text: &str, text2: &str) -> Result<TokenizedInput> {
-        let mut tokens = vec![self.cls_token.clone()];
-        tokens.extend(self.tokenize(text));
+        let (first_tokens, first_offsets) = self.tokenize_with_offsets(text);
+        let (second_tokens, second_offsets) = self.tokenize_with_offsets(text2);
+
+        let mut tokens = Vec::with_capacity(first_tokens.len() + second_tokens.len() + 3);
+        let mut offsets = Vec::with_capacity(first_offsets.len() + second_offsets.len() + 3);
+
+        tokens.push(self.cls_token.clone());
+        offsets.push(SPECIAL_TOKEN_SPAN);
+        tokens.extend(first_tokens);
+        offsets.extend(first_offsets);
         tokens.push(self.sep_token.clone());
+        offsets.push(SPECIAL_TOKEN_SPAN);
         let first_seg_len = tokens.len();
 
-        tokens.extend(self.tokenize(text2));
+        tokens.extend(second_tokens);
+        offsets.extend(second_offsets);
         tokens.push(self.sep_token.clone());
+        offsets.push(SPECIAL_TOKEN_SPAN);
 
         let mut input_ids = Vec::with_capacity(tokens.len());
         for token in &tokens {
@@ -387,7 +643,7 @@ impl Tokenizer for WordPieceTokenizer {
             attention_mask,
             token_type_ids: Some(token_type_ids),
             special_tokens_mask: Some(special_tokens_mask),
-            offset_mapping: None,
+            offset_mapping: Some(offsets),
             overflowing_tokens: None,
         })
     }

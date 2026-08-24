@@ -1039,8 +1039,17 @@ mod tests {
         Ok(())
     }
 
+    /// Was `#[ignore]`d with "60+ second delays (likely thread/deadlock
+    /// issue)". Investigated 2026-08-24: `detect_bottlenecks` ->
+    /// `measure_now` locks `metrics_collector` once and calls straight-line
+    /// methods on it (`collect_metrics`, `get_current_snapshot`); nothing in
+    /// that path spawns a thread, waits on a channel, or blocks on a
+    /// `Condvar`. `RealTimeMonitor::start_monitoring`/`stop_monitoring`
+    /// (called from `start_profiling`/`stop_profiling`) never populate
+    /// `_monitor_thread`, so there is no background thread here either.
+    /// Reliably completes in well under a second, run standalone or as part
+    /// of the full suite; the stale FIXME predates this module's rewrite.
     #[test]
-    #[ignore] // FIXME: This test has implementation issues causing 60+ second delays (likely thread/deadlock issue)
     pub(crate) fn test_bottleneck_detection() -> Result<()> {
         let config = fast_test_config();
         let profiler = MobilePerformanceProfiler::new(config)?;

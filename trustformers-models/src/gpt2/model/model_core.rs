@@ -328,19 +328,7 @@ impl Gpt2Model {
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             if matches!(self.device, Device::Metal(_)) {
-                // Debug: Check values before GPU upload
-                if let Tensor::F32(ref arr) = hidden_states {
-                    let data: Vec<f32> = arr.iter().cloned().collect();
-                }
-
                 hidden_states = hidden_states.to_device_enum(&self.device)?;
-
-                // Debug: Check values after GPU upload
-                if let Tensor::Metal(ref metal_data) = hidden_states {
-                    use trustformers_core::gpu_ops::metal::get_metal_backend;
-                    let backend = get_metal_backend()?;
-                    let gpu_data = backend.download_buffer_to_vec(&metal_data.buffer_id)?;
-                }
             }
         }
 
@@ -821,7 +809,7 @@ impl Gpt2LMHeadModel {
 
                     // Download logits from GPU to CPU
                     let backend = get_metal_backend()?;
-                    let data = backend.download_buffer_to_vec(&metal_data.buffer_id)?;
+                    let data = backend.download_buffer_to_vec(&metal_data.buffer_id())?;
 
                     // Shape should be [batch, seq_len, vocab_size]
                     if metal_data.shape.len() != 3 {
@@ -837,23 +825,6 @@ impl Gpt2LMHeadModel {
                     // Get logits for last token: offset = (batch=0, seq_len-1, vocab=0)
                     let offset = (seq_len - 1) * vocab_size;
                     let last_logits = &data[offset..offset + vocab_size];
-
-                    // Debug: Show logits statistics for first few iterations
-                    if generated.len() <= 8 {
-                        // Find top 5 predictions
-                        let mut top_indices: Vec<usize> = (0..vocab_size).collect();
-                        top_indices.sort_by(|&a, &b| {
-                            last_logits[b]
-                                .partial_cmp(&last_logits[a])
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        for &idx in &top_indices[..5.min(vocab_size)] {}
-
-                        // Statistics
-                        let min = last_logits.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-                        let max = last_logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-                        let mean = last_logits.iter().sum::<f32>() / vocab_size as f32;
-                    }
 
                     // Find argmax
                     let mut max_idx = 0;
@@ -913,15 +884,6 @@ impl Gpt2LMHeadModel {
                 self.transformer.forward_internal(&input_batch, None, Some(&mut cache))?;
 
             // Apply LM head
-
-            // Debug: Download and check hidden state values
-            #[cfg(all(target_os = "macos", feature = "metal"))]
-            if let Tensor::Metal(ref metal_data) = hidden_states {
-                use trustformers_core::gpu_ops::metal::get_metal_backend;
-                let backend = get_metal_backend()?;
-                let hidden_data = backend.download_buffer_to_vec(&metal_data.buffer_id)?;
-            }
-
             let logits = self.lm_head.forward(hidden_states)?;
 
             // Debug: Check which match arm will be taken
@@ -964,7 +926,7 @@ impl Gpt2LMHeadModel {
 
                     // Download logits from GPU to CPU
                     let backend = get_metal_backend()?;
-                    let data = backend.download_buffer_to_vec(&metal_data.buffer_id)?;
+                    let data = backend.download_buffer_to_vec(&metal_data.buffer_id())?;
 
                     // Shape should be [batch, seq_len, vocab_size]
                     if metal_data.shape.len() != 3 {
@@ -981,8 +943,6 @@ impl Gpt2LMHeadModel {
                     // Get logits for last token: offset = (batch=0, seq_len-1, vocab=0)
                     let offset = (seq_len - 1) * vocab_size;
                     let last_logits = &data[offset..offset + vocab_size];
-
-                    // Debug: Print first 10 logits values
 
                     // Find argmax
                     let mut max_idx = 0;

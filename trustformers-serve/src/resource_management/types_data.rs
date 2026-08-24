@@ -791,38 +791,37 @@ pub struct GpuUsageStatistics {
     pub performance_index: f32,
 }
 
-/// Statistics for database usage
+/// Statistics for database slot usage.
+///
+/// 0.2.1: this struct used to carry two parallel sets of the same five
+/// counters (`total_allocated`/`total_connections`,
+/// `currently_active`/`active_connections`, `peak_usage`/`peak_connections`,
+/// `average_lifetime`/`average_duration`) of which only the second set was ever
+/// written, plus `pool_efficiency` and `query_throughput` that nothing anywhere
+/// computed -- so a report reading them printed `0.00 queries/sec` as though it
+/// had been measured. The duplicates and the two unmeasurable fields are gone;
+/// every field below is written by
+/// [`DatabaseSlotAllocator`](crate::resource_management::DatabaseSlotAllocator)
+/// from real allocations and real hold times.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct DatabaseUsageStatistics {
-    /// Total number of connections allocated
+    /// Total number of slots handed out over this allocator's lifetime
     pub total_allocated: u64,
 
-    /// Number of currently active connections
+    /// Number of slots currently held
     pub currently_active: usize,
 
-    /// Peak number of connections used simultaneously
+    /// Highest number of slots held simultaneously
     pub peak_usage: usize,
 
-    /// Average lifetime of connections
+    /// Number of slots released so far, the denominator of the mean below
+    pub released_count: u64,
+
+    /// Summed hold time of every released slot
+    pub total_held_time: Duration,
+
+    /// Mean hold time across released slots
     pub average_lifetime: Duration,
-
-    /// Connection pool efficiency percentage
-    pub pool_efficiency: f32,
-
-    /// Total connections established
-    pub total_connections: u64,
-
-    /// Number of active connections
-    pub active_connections: usize,
-
-    /// Peak connections reached
-    pub peak_connections: usize,
-
-    /// Average connection duration
-    pub average_duration: Duration,
-
-    /// Query throughput (queries per second)
-    pub query_throughput: f64,
 }
 
 /// Overall system resource statistics

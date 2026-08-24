@@ -15,6 +15,13 @@ spec:
     name: trustformers-server
   minReplicas: 2
   maxReplicas: 10
+  # CPU and memory only. A previous version of this file also scaled on a
+  # `http_requests_per_second` Pods metric, which requires both a Prometheus
+  # Adapter (or another custom-metrics API server) wired into this cluster
+  # and a workload that publishes that metric — trustformers-server exposes
+  # no /metrics endpoint at all (verified against src/main.rs's route table),
+  # so nothing was ever producing that metric and the rule could never fire.
+  # CPU/memory come from metrics-server, which most clusters already run.
   metrics:
   - type: Resource
     resource:
@@ -28,14 +35,6 @@ spec:
       target:
         type: Utilization
         averageUtilization: 80
-  # Optional: Custom metrics from Prometheus
-  - type: Pods
-    pods:
-      metric:
-        name: http_requests_per_second
-      target:
-        type: AverageValue
-        averageValue: "100"
   behavior:
     scaleDown:
       stabilizationWindowSeconds: 300

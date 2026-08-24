@@ -415,14 +415,30 @@ impl SystemMetricsCollector {
         }))
     }
 
-    /// Battery telemetry is not readable from this crate's dependency set.
+    /// Battery telemetry from the kernel `power_supply` sysfs class on
+    /// Android/Linux.
     ///
-    /// `crate::battery` reads the Linux/Android `power_supply` sysfs class
-    /// directly; wiring that in here would make the profiler's battery figures
-    /// depend on a target-specific path, so this collector reports absence and
-    /// leaves battery reporting to that module.
+    /// Reuses `crate::battery::read_live_battery_reading`, the same reader
+    /// `crate::battery`'s own manager calls, rather than re-implementing a
+    /// second `#[cfg(target_os = ...)]`-gated sysfs walk here -- one parser
+    /// for the whole crate. `None` everywhere else, and on any host where the
+    /// reading carries nothing at all (no `Battery`-type supply found, e.g. a
+    /// desktop Linux box with no battery).
     fn collect_battery_metrics(&self) -> Result<Option<BatteryMetrics>> {
-        Ok(None)
+        let reading = crate::battery::read_live_battery_reading();
+        if !battery_reading_has_data(&reading) {
+            return Ok(None);
+        }
+
+        let is_charging = charging_status_to_bool(reading.charging_status);
+
+        Ok(Some(BatteryMetrics {
+            level_percent: reading.level_percent,
+            is_charging,
+            power_consumption_mw: reading.power_consumption_mw,
+            voltage_v: reading.voltage,
+            estimated_life_minutes: reading.estimated_time_remaining_minutes,
+        }))
     }
 
     /// Platform-specific metrics.
@@ -453,9 +469,39 @@ impl SystemMetricsCollector {
         match metric_type {
             "memory" | "cpu" => true,
             "thermal" => hottest_component_celsius().is_some(),
-            "gpu" | "battery" | "network" => false,
+            "battery" => battery_reading_has_data(&crate::battery::read_live_battery_reading()),
+            "gpu" | "network" => false,
             _ => false,
         }
+    }
+}
+
+/// Whether a battery reading actually measured anything, or is
+/// [`crate::battery::BatteryReading::unavailable`] in disguise -- no
+/// `Battery`-type `power_supply` node found. True on every non-Android/Linux
+/// target, and on any Linux/Android host with no battery at all (a desktop, a
+/// server, most CI runners).
+fn battery_reading_has_data(reading: &crate::battery::BatteryReading) -> bool {
+    reading.level_percent.is_some()
+        || reading.voltage.is_some()
+        || reading.power_consumption_mw.is_some()
+        || reading.estimated_time_remaining_minutes.is_some()
+        || charging_status_to_bool(reading.charging_status).is_some()
+}
+
+/// Collapse the platform's charging status to the tri-state
+/// [`BatteryMetrics::is_charging`] carries: `Some(true)`/`Some(false)` when
+/// the platform actually reported a status, `None` when it is
+/// [`crate::device_info::ChargingStatus::Unknown`] (every target this
+/// collector cannot read, plus a handful of real gauges that publish no
+/// `status` node).
+fn charging_status_to_bool(status: crate::device_info::ChargingStatus) -> Option<bool> {
+    match status {
+        crate::device_info::ChargingStatus::Charging => Some(true),
+        crate::device_info::ChargingStatus::Discharging
+        | crate::device_info::ChargingStatus::NotCharging
+        | crate::device_info::ChargingStatus::Full => Some(false),
+        crate::device_info::ChargingStatus::Unknown => None,
     }
 }
 
@@ -1513,8 +1559,14 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Was `#[ignore]`d with "60+ second delays (likely thread/deadlock
+    /// issue)". Investigated 2026-08-24: this collector spawns no background
+    /// thread at all (`grep -n 'thread::spawn' collector.rs` -- zero hits),
+    /// so there is no thread to deadlock and no channel/`Condvar` anyone
+    /// forgot to signal. Reliably completes in well under a second, run
+    /// standalone or as part of the full suite; the stale FIXME predates this
+    /// module's rewrite and the hang it described no longer exists.
     #[test]
-    #[ignore] // FIXME: This test has implementation issues causing 60+ second delays (likely thread/deadlock issue)
     fn test_collection_lifecycle() {
         let config = fast_test_config();
         let collector = MobileMetricsCollector::new(config).expect("Operation failed");
@@ -1706,19 +1758,34 @@ mod tests {
         assert_eq!(cpu.user_percent, None);
         assert_eq!(cpu.throttling_level, None);
 
-        // Metric families with no source report absence.
+        // GPU and network telemetry have no source at all in this crate.
+        // Battery does, on Android/Linux with a `power_supply` node -- absent
+        // here only because this host (like most CI runners) has none; see
+        // `test_battery_is_measured_or_absent` for the conditional check.
         assert!(
             snapshot.gpu.is_none(),
             "GPU telemetry has no source in this build"
         );
         assert!(
-            snapshot.battery.is_none(),
-            "battery telemetry has no source in this build"
-        );
-        assert!(
             snapshot.network.is_none(),
             "network telemetry has no source in this build"
         );
+        match snapshot.battery.as_ref() {
+            Some(battery) => assert!(
+                battery.level_percent.is_some()
+                    || battery.voltage_v.is_some()
+                    || battery.power_consumption_mw.is_some()
+                    || battery.estimated_life_minutes.is_some()
+                    || battery.is_charging.is_some(),
+                "a reported BatteryMetrics must carry at least one real reading"
+            ),
+            None => {
+                // Absent on this host: every non-Android/Linux target, and
+                // any Linux/Android host with no `power_supply` battery node
+                // -- true of most CI runners and this crate's own test
+                // machine.
+            },
+        }
     }
 
     /// A family switched off by configuration must be absent, not zeroed:
@@ -1737,16 +1804,49 @@ mod tests {
 
     /// `supports_metric` used to answer `true` for every family because every
     /// family returned a constant. It must now answer for what is measured.
+    ///
+    /// `thermal` and `battery` are genuinely host-dependent (a real sensor or
+    /// `power_supply` node may or may not exist on the machine running this
+    /// test), so each gets its own conditional test below instead of a fixed
+    /// answer here.
     #[test]
     fn test_supports_metric_reports_the_truth() {
         let collector = SystemMetricsCollector;
         assert!(collector.supports_metric("memory"));
         assert!(collector.supports_metric("cpu"));
         assert!(!collector.supports_metric("gpu"));
-        assert!(!collector.supports_metric("battery"));
         assert!(!collector.supports_metric("network"));
         assert!(!collector.supports_metric("nonsense"));
         assert_eq!(collector.platform_name(), std::env::consts::OS);
+    }
+
+    /// Battery reporting must be all-or-nothing, like thermal: either the
+    /// host has a real `power_supply` battery node and a genuine reading
+    /// comes back, or the family is absent. Never a fabricated level/voltage.
+    #[test]
+    fn test_battery_is_measured_or_absent() {
+        let collector = SystemMetricsCollector;
+        let live = crate::battery::read_live_battery_reading();
+        let expected_has_data = battery_reading_has_data(&live);
+        assert_eq!(
+            collector.supports_metric("battery"),
+            expected_has_data,
+            "supports_metric must agree with a fresh reading of the same host"
+        );
+
+        match collector.collect_battery_metrics().expect("battery collection never errors") {
+            Some(battery) => {
+                assert!(expected_has_data);
+                assert!(
+                    battery.level_percent.is_some()
+                        || battery.voltage_v.is_some()
+                        || battery.power_consumption_mw.is_some()
+                        || battery.estimated_life_minutes.is_some()
+                        || battery.is_charging.is_some()
+                );
+            },
+            None => assert!(!expected_has_data),
+        }
     }
 
     /// Thermal reporting must be all-or-nothing: either the host exposes

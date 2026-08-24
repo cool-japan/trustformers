@@ -1,5 +1,4 @@
 // Allow dead code for infrastructure under development
-#![allow(dead_code)]
 
 //! Health Check and High Availability Module
 //!

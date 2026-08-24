@@ -76,16 +76,6 @@ fn test_test_characteristics_default() {
 }
 
 // =============================================================================
-// TEST PATTERN RECOGNITION ENGINE TESTS
-// =============================================================================
-
-#[test]
-fn test_test_pattern_recognition_engine_default() {
-    let engine = TestPatternRecognitionEngine::default();
-    let _dbg = format!("{:?}", engine);
-}
-
-// =============================================================================
 // ESTIMATION ALGORITHM TESTS
 // =============================================================================
 

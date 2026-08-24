@@ -8,6 +8,10 @@
 //!    `bytes_to_unicode` alphabet,
 //! 3. merges are applied in rank order until no ranked pair remains.
 
+use crate::offsets::{
+    aligned_lowercase, aligned_nfc, ceil_char_boundary, floor_char_boundary, AlignmentBuilder,
+    OffsetAlignment,
+};
 use crate::vocab::Vocab;
 use fancy_regex::Regex as FancyRegex;
 use once_cell::sync::Lazy;
@@ -15,7 +19,6 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::traits::{TokenizedInput, Tokenizer};
-use unicode_normalization::UnicodeNormalization;
 
 /// Separator used to key merge ranks by a single joined string.
 ///
@@ -359,46 +362,76 @@ impl BPETokenizer {
         Ok(tokenizer)
     }
 
-    /// Normalize text for improved Unicode handling
-    fn normalize_text(&self, text: &str) -> String {
+    /// Normalize text for improved Unicode handling.
+    ///
+    /// Public for inspection and testing, like [`Self::pre_tokenize`]. It is a
+    /// projection of [`Self::aligned_normalize_text`], the single
+    /// implementation the encoder runs, so it can never describe a
+    /// normalization the encoder does not perform.
+    pub fn normalize_text(&self, text: &str) -> String {
+        self.aligned_normalize_text(text).0
+    }
+
+    /// [`Self::normalize_text`] plus a byte alignment from the normalized
+    /// string back into `text`.
+    ///
+    /// Each configured stage — NFC, case folding, CJK space padding — is
+    /// aligned individually and the alignments are composed, so a token found
+    /// in the normalized string can always be reported against the caller's
+    /// original bytes. When a stage changes nothing (the common case: ASCII, or
+    /// text that is already NFC with `preserve_case`) its alignment is the
+    /// zero-cost identity.
+    fn aligned_normalize_text(&self, text: &str) -> (String, OffsetAlignment) {
         if !self.normalize_unicode {
-            return text.to_string();
+            return (text.to_string(), OffsetAlignment::identity(text));
         }
 
         // Apply Unicode normalization (NFC form)
-        let normalized: String = text.nfc().collect();
+        let (normalized, normalized_alignment) = aligned_nfc(text);
 
         // Handle case normalization if needed
-        let case_normalized =
-            if self.preserve_case { normalized } else { normalized.to_lowercase() };
+        let (case_normalized, case_alignment) = if self.preserve_case {
+            (normalized, normalized_alignment)
+        } else {
+            let (lowered, lower_alignment) = aligned_lowercase(&normalized);
+            (lowered, lower_alignment.rebase(&normalized_alignment))
+        };
 
         // Handle Chinese characters specially if enabled
         if self.handle_chinese_chars {
-            self.handle_chinese_text(&case_normalized)
+            let (padded, pad_alignment) = self.aligned_handle_chinese_text(&case_normalized);
+            (padded, pad_alignment.rebase(&case_alignment))
         } else {
-            case_normalized
+            (case_normalized, case_alignment)
         }
     }
 
-    /// Special handling for Chinese characters
-    fn handle_chinese_text(&self, text: &str) -> String {
+    /// Special handling for Chinese characters, with a byte alignment back into
+    /// `text`.
+    ///
+    /// The separator spaces are insertions with no source of their own; the
+    /// pre-tokenizer consumes them and they never end up inside a token.
+    fn aligned_handle_chinese_text(&self, text: &str) -> (String, OffsetAlignment) {
         // Add spaces around Chinese characters for better tokenization
         let mut result = String::new();
+        let mut alignment = AlignmentBuilder::new();
         let mut prev_was_chinese = false;
 
-        for ch in text.chars() {
+        for (index, ch) in text.char_indices() {
             let is_chinese = self.is_chinese_char(ch);
 
             // Add space when transitioning between Chinese and non-Chinese text
             if (is_chinese != prev_was_chinese) && !result.is_empty() && !result.ends_with(' ') {
                 result.push(' ');
+                alignment.skip_output(1);
             }
 
             result.push(ch);
+            alignment.push(ch.len_utf8(), index, index + ch.len_utf8());
             prev_was_chinese = is_chinese;
         }
 
-        result
+        (result, alignment.finish(text.len()))
     }
 
     /// Check if a character is a Chinese character
@@ -570,60 +603,60 @@ impl BPETokenizer {
         }
     }
 
-    fn tokenize(&self, text: &str) -> Vec<String> {
-        let normalized_text = self.normalize_text(text);
-
-        let mut tokens = vec![];
-        for (start, end) in Self::pre_token_spans(&normalized_text) {
-            tokens.extend(self.bpe(&normalized_text[start..end]));
-        }
-
-        tokens
+    /// Tokenize `text` into byte-level BPE string tokens.
+    ///
+    /// A projection of [`Self::tokenize_with_offsets`], so the token sequence
+    /// the encoder emits and the token sequence the offsets describe are the
+    /// same sequence by construction, not by coincidence.
+    ///
+    /// Public for parity with [`crate::wordpiece::WordPieceTokenizer::tokenize`].
+    pub fn tokenize(&self, text: &str) -> Vec<String> {
+        self.tokenize_with_offsets(text).0
     }
 
     /// Tokenization with byte offsets into the **original** text.
     ///
-    /// Pre-tokenization runs on the caller's string (never on a normalized
-    /// copy), so the returned spans index the input directly. Within a
-    /// pre-token, each BPE piece covers exactly as many bytes as it has symbol
-    /// characters (one symbol == one source byte), and those exact byte
-    /// positions are what the cursor advances by — the reported span is only
-    /// widened outward to the enclosing character boundaries so that
-    /// `&text[start..end]` never panics. A piece that splits a multi-byte
-    /// character therefore reports the whole character (as HuggingFace does)
-    /// without shifting the pieces that follow it.
+    /// Normalization runs once over the whole string (exactly as
+    /// [`Self::normalize_text`] describes it) and the pre-tokenizer runs on the
+    /// normalized result, which is what fixes the token sequence; every span is
+    /// then mapped back through the normalization alignment, so the returned
+    /// offsets index the caller's original bytes even when normalization
+    /// changed lengths. See [`crate::offsets`] for the byte-offset convention
+    /// and for [`crate::offsets::byte_offsets_to_char_offsets`], which converts
+    /// these to the character offsets a Python caller needs.
     ///
-    /// If normalization changed a pre-token, byte lengths no longer line up and
-    /// every piece of that pre-token conservatively reports the whole pre-token
-    /// span.
+    /// Within a pre-token, each BPE piece covers exactly as many bytes as it
+    /// has symbol characters (one byte-level symbol == one source byte), and
+    /// those exact byte positions are what the cursor advances by — the
+    /// reported span is only widened outward to the enclosing character
+    /// boundaries so that `&text[start..end]` never panics. A piece that splits
+    /// a multi-byte character therefore reports the whole character (as
+    /// HuggingFace does) without shifting the pieces that follow it.
+    ///
+    /// The two returned vectors always have the same length.
     pub fn tokenize_with_offsets(&self, text: &str) -> (Vec<String>, Vec<(usize, usize)>) {
+        let (normalized, alignment) = self.aligned_normalize_text(text);
+
         let mut tokens = vec![];
         let mut offsets = vec![];
 
-        for (start, end) in Self::pre_token_spans(text) {
-            let word = &text[start..end];
-            let normalized_word = self.normalize_text(word);
-            let pieces = self.bpe(&normalized_word);
-            let byte_exact = normalized_word == word;
+        for (start, end) in Self::pre_token_spans(&normalized) {
+            let pieces = self.bpe(&normalized[start..end]);
 
-            // Exact byte cursor: never adjusted for character boundaries, so the
-            // spans of successive pieces stay perfectly tiled.
+            // Exact byte cursor into `normalized`: never adjusted for character
+            // boundaries, so the spans of successive pieces stay perfectly
+            // tiled before they are widened and mapped back.
             let mut cursor = start;
 
-            for piece in &pieces {
-                let span = if !byte_exact {
-                    (start, end)
-                } else {
-                    let piece_end = (cursor + piece.chars().count()).min(end);
-                    let span = (
-                        Self::floor_char_boundary(text, cursor),
-                        Self::ceil_char_boundary(text, piece_end),
-                    );
-                    cursor = piece_end;
-                    span
-                };
+            for piece in pieces {
+                let piece_end = (cursor + piece.chars().count()).min(end);
+                let span = alignment.map_span(
+                    floor_char_boundary(&normalized, cursor),
+                    ceil_char_boundary(&normalized, piece_end),
+                );
+                cursor = piece_end;
 
-                tokens.push(piece.clone());
+                tokens.push(piece);
                 offsets.push(span);
             }
         }
@@ -631,28 +664,27 @@ impl BPETokenizer {
         (tokens, offsets)
     }
 
-    /// Largest character boundary of `text` that is `<= index`.
-    fn floor_char_boundary(text: &str, index: usize) -> usize {
-        let mut index = index.min(text.len());
-        while index > 0 && !text.is_char_boundary(index) {
-            index -= 1;
-        }
-        index
-    }
-
-    /// Smallest character boundary of `text` that is `>= index`.
-    fn ceil_char_boundary(text: &str, index: usize) -> usize {
-        let mut index = index.min(text.len());
-        while index < text.len() && !text.is_char_boundary(index) {
-            index += 1;
-        }
-        index
+    /// The single string [`Tokenizer::encode_pair`] actually encodes.
+    ///
+    /// Byte-level BPE has no separator token of its own, so this tokenizer's
+    /// pair encoding is the two sequences joined by one space and encoded as
+    /// one sequence. Exposed because `encode_pair`'s `offset_mapping` indexes
+    /// *this* string — the only coordinate space in which those offsets mean
+    /// anything — so a caller that wants to slice by them can reconstruct it.
+    pub fn pair_input_text(text: &str, text2: &str) -> String {
+        format!("{} {}", text, text2)
     }
 }
 
 impl Tokenizer for BPETokenizer {
+    /// Encode `text`. Byte-level BPE adds no special tokens, so every position
+    /// is a content token.
+    ///
+    /// `offset_mapping` is always populated with byte spans into `text` — see
+    /// [`BPETokenizer::tokenize_with_offsets`], which produces the ids and the
+    /// spans in one pass.
     fn encode(&self, text: &str) -> Result<TokenizedInput> {
-        let tokens = self.tokenize(text);
+        let (tokens, offsets) = self.tokenize_with_offsets(text);
 
         let input_ids: Vec<u32> = tokens
             .iter()
@@ -670,13 +702,22 @@ impl Tokenizer for BPETokenizer {
             attention_mask,
             token_type_ids: None,
             special_tokens_mask: None,
-            offset_mapping: None,
+            offset_mapping: Some(offsets),
             overflowing_tokens: None,
         })
     }
 
+    /// Encode a sequence pair by joining the two sequences with a single space
+    /// and encoding the result as one sequence — byte-level BPE has no
+    /// separator token to place between them.
+    ///
+    /// Consequently `offset_mapping` indexes that joined string, **not** `text`
+    /// or `text2`: build it with [`BPETokenizer::pair_input_text`] to slice by
+    /// these offsets. Callers that need per-sequence offsets should encode the
+    /// two sequences separately, or use a tokenizer whose pair encoding has a
+    /// real sequence boundary (`WordPieceTokenizer::encode_pair`).
     fn encode_pair(&self, text: &str, text2: &str) -> Result<TokenizedInput> {
-        let combined = format!("{} {}", text, text2);
+        let combined = Self::pair_input_text(text, text2);
         self.encode(&combined)
     }
 

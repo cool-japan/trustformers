@@ -1,5 +1,4 @@
 // Allow dead code for infrastructure under development
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

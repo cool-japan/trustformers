@@ -17,13 +17,13 @@ The `trustformers-mobile` crate provides mobile deployment infrastructure for iO
 
 ## Current Status
 
-**Version:** 0.2.1 | **Date:** 2026-07-09 | **Status:** Alpha
+**Version:** 0.2.1 | **Date:** 2026-08-24 | **Status:** Alpha
 
 ### Implementation Status
 🔵 **ALPHA** - Core infrastructure implemented; API may change
-✅ **~742 CRATE TESTS PASSING** - 0 failed (workspace-wide: 18,102 passed / 0 failed / 119 skipped)
-✅ **ZERO CLIPPY WARNINGS** - Clean lint run across the workspace
-✅ **26 DOCTESTS PASSING** - 0 failed, 2 ignored (22 doctest failures fixed 2026-07-01 in `expo_plugin.rs`, `react_native_fabric.rs`, and the `mobile_performance_profiler` subsystem: `collector.rs`, `profiler/profiler_impl.rs`, `profiler/profiler_types.rs`, `types.rs`)
+✅ **1,355 CRATE TESTS PASSING** - `cargo nextest run -p trustformers-mobile --all-features --no-fail-fast`, 2026-08-24: 1,355 passed / 0 failed / 2 skipped in 26.5s (the 2 skips are the unrelated long-running `benchmarks/mod.rs` `#[ignore]`s, not the two FIXME hangs below, which are now un-ignored and passing). Superseded the earlier `~742` figure, which predates this pass; the workspace-wide total is tracked in the root `TODO.md`, not re-measured here.
+✅ **ZERO CLIPPY WARNINGS** - `cargo clippy -p trustformers-mobile --all-targets --all-features -- -D warnings`, 2026-08-24: exit 0, 0 warnings
+✅ **27 DOCTESTS PASSING** - `cargo test --doc -p trustformers-mobile --all-features`, 2026-08-24: 27 passed / 0 failed / 2 ignored (22 doctest failures fixed 2026-07-01 in `expo_plugin.rs`, `react_native_fabric.rs`, and the `mobile_performance_profiler` subsystem: `collector.rs`, `profiler/profiler_impl.rs`, `profiler/profiler_types.rs`, `types.rs`; count rose from 26 to 27 with the battery-integral work below)
 ✅ **~3,860 PUBLIC API ITEMS** - functions/structs/enums/traits across 187 files in `src/`; 0 `todo!()`/`unimplemented!()` macros remain
 ✅ **IOS IMPLEMENTED** - Swift package (`TrustformersKit`), Core ML, Metal
 ✅ **ANDROID IMPLEMENTED** - Java/Kotlin AAR, NNAPI, Vulkan
@@ -158,7 +158,7 @@ val output = engine.inference(model, inputTensor)
 - ✅ **Hardware Acceleration** (`nnapi.rs`, feature `nnapi`)
   - Backend detection (NPU, GPU, DSP)
   - Fallback strategies
-- ⚠️ **TensorFlow Lite delegate** (`tflite_nnapi_delegate.rs`, feature `tflite-nnapi`): source-complete with real `#[cfg(feature = "tflite-nnapi")]` gates throughout, but the file has no `pub mod` declaration anywhere in `lib.rs` — orphaned, unreachable from the crate today; the `tflite-nnapi` feature currently gates nothing. Found during the 2026-07-09 documentation pass (see [Known Limitations](#known-limitations)).
+- ✅ **TensorFlow Lite delegate** (`tflite_nnapi_delegate.rs`, feature `tflite-nnapi`): **resolved**, verified 2026-08-24 — `lib.rs:147` now declares `#[cfg(feature = "tflite-nnapi")] pub mod tflite_nnapi_delegate;` (mounted the same way as `nnapi`/`nnapi_converter` above), matching the `tflite-nnapi = ["nnapi"]` feature already declared in `Cargo.toml`; every item inside was already correctly `#[cfg(all(target_os = "android", feature = "tflite-nnapi"))]`-gated. Confirmed compiling as part of this crate's `--all-features` build (`cargo clippy -p trustformers-mobile --all-targets --all-features -- -D warnings` is clean). The module's Android-specific behavior itself was not exercised on a physical Android target or the `aarch64-linux-android` toolchain (not installed in this environment, consistent with other entries in this file). When this fix landed was not determined — the module was already mounted when this pass started, with no matching diff in this crate's uncommitted changes, so it predates this session; see [Known Limitations](#known-limitations) and [Future Enhancements](#future-enhancements) for the now-corrected history.
 
 - ✅ **Optimization**
   - Model compilation for NNAPI
@@ -472,10 +472,19 @@ let recommendations = battery_mgr.get_optimization_recommendations();
 - `simd_analytics.rs`: three functions claimed algorithms they did not implement and were renamed to what they compute — `compute_mutual_information` → `gaussian_mutual_information` (exact only under a bivariate-Gaussian assumption), `compute_simd_isolation_scores` → `compute_simd_standardized_deviation_scores` (no isolation forest is built), `compute_simd_lof_scores` → `compute_simd_inverse_local_density` (not the LOF density *ratio*). `AnomalyScore`'s `isolation_scores`/`lof_scores` and `CrossMetricRelationship`'s `mutual_information` fields were renamed to match — **breaking field renames**.
 - `inference_visualizer.rs`: `RealTimeVisualizationMonitor::get_current_state` measures frame rate and mean render time from the buffered frames instead of reporting a fixed 30 fps / 16 ms / 0 dropped / 0.9 quality; `RenderPerformance`'s fields are now `Option` so "not observable" is distinguishable from a measured zero.
 
+### Resolved 2026-08-24 (mobile-followups: ignore-test investigation + battery mAh integral)
+
+- The two `#[ignore]`d `mobile_performance_profiler` tests (`collector.rs::test_collection_lifecycle`, `profiler/profiler_components.rs::test_bottleneck_detection`) marked `FIXME: 60+ second delays (likely thread/deadlock issue)` were investigated for real, not just re-labelled. Neither file spawns a background thread anywhere (`grep -n 'thread::spawn' collector.rs` and the `RealTimeMonitor` in `profiler_components.rs` both come back empty of any live spawn — `_monitor_thread` is set at construction and never becomes `Some`), so there is no thread to deadlock and no channel/`Condvar` anyone forgot to signal; the FIXME predates the `mobile_performance_profiler / battery honesty audit` rewrite above, which structurally removed whatever used to hang. Both tests now run un-ignored: verified passing individually (repeated runs, direct binary invocation with `--test-threads=1`) and as part of the full `cargo nextest run -p trustformers-mobile --all-features` suite (completes in ~25s, no hang). Skipped count: 4 → 2 (the two remaining skips are unrelated `#[ignore]`s, not touched by this pass).
+- `ProfilingSummary::battery_consumed_mah` was `sum(mW) / 1000` — summed instantaneous power readings with no time axis and no voltage, which is not a charge (mAh) in any unit system. Rather than just rename the field, real battery telemetry now reaches the profiler and the formula is a genuine time integral:
+  - `mobile_performance_profiler::types::BatteryMetrics` gained a `voltage_v: Option<f32>` field, and its other four fields (`level_percent`, `is_charging`, `power_consumption_mw`, `estimated_life_minutes`) changed from bare `u8`/`bool`/`f32`/`u32` to `Option<..>` — **breaking field-type change**, matching the `Option`-per-family pattern the rest of this snapshot already uses. `is_charging` is `None` when the platform's charging status is `Unknown` (every non-Android/Linux target, plus real gauges that publish no `status` node) rather than silently collapsing `Unknown` into `false`.
+  - `mobile_performance_profiler::collector::SystemMetricsCollector::collect_battery_metrics` no longer unconditionally returns `Ok(None)`. It now calls `battery::read_live_battery_reading` (new `pub(crate)` function) — the exact same `#[cfg(any(target_os = "android", target_os = "linux"))]`-gated `power_supply` sysfs reader `battery.rs`'s own `MobileBatteryManager` uses, reused rather than re-implemented a second time. `supports_metric("battery")` is now a live host check, the same pattern already used for `"thermal"`, instead of a hardcoded `false`.
+  - `calculate_profiling_summary` (`profiler/profiler_impl.rs`) now builds a chronological `(timestamp, power_mw, voltage_v)` series from every snapshot that carries both a power *and* a voltage reading, and integrates it with a new pure, independently unit-tested free function `integrate_battery_consumed_mah`: each reading's own current (`power_mw / voltage_v` at that instant) is computed *first*, then consecutive readings' currents are trapezoidally averaged and multiplied by the interval's elapsed hours, summed across all intervals. Fewer than two qualifying snapshots (the case on every host without a `power_supply` battery node — every non-Android/Linux target, and most CI runners) yields `None`, not a fabricated figure derived from a single instant.
+  - Net effect: `battery_consumed_mah` is a real mAh figure on Android/Linux hosts with a battery once a profiling session spans at least two samples, and stays honestly `None` everywhere else, including this crate's own dev/test machine (macOS has no `power_supply` sysfs, and the sysfs-reading code isn't even compiled in on that target).
+  - **Corrected 2026-08-24 (mobile-followups, second pass)**: the first-pass implementation above computed each interval's average current as `avg(power_mw) / avg(voltage_v)` (trapezoidal power over trapezoidal voltage), which is *not* the same quantity as the trapezoidal average of the per-instant current `power_mw / voltage_v` whenever voltage moves within an interval — division is nonlinear, so averaging the ratio and taking the ratio of the averages disagree in general (e.g. 1000 mW at 5 V then 1000 mW at 10 V over 1 h: correct answer is (200 mA + 100 mA) / 2 = 150 mAh; the old formula gave 1000 mW / 7.5 V = 133.3 mAh). All five original unit tests held voltage constant across every interval, so they could not distinguish the two formulas — every existing assertion still passes unchanged after the fix. `integrate_battery_consumed_mah` now divides power by voltage at each reading before averaging; a new test, `varying_voltage_averages_current_not_power_over_voltage`, pins the correct 150.0 mAh result against the varying-voltage case above and would fail under the old formula.
+  - Updated consumers: the three `mobile_performance_profiler` tests that previously hard-asserted "battery telemetry has no source in this build" (`collector.rs::test_snapshot_carries_real_measurements_not_constants`, `collector.rs::test_supports_metric_reports_the_truth`) now check the host-conditional invariant instead (mirroring the pre-existing `thermal` test pattern), plus a new dedicated `collector.rs::test_battery_is_measured_or_absent`; `types_tests.rs::test_battery_metrics_default` now expects every field `None`. `profiler_components.rs::test_unmeasured_families_never_trip_a_rule` needed no change (it exercises `MobileMetricsSnapshot::default()`, which is unaffected).
+
 ### Still open in this area
 
-- `mobile_performance_profiler` has two `#[ignore]`d tests (`collector.rs`, `profiler/profiler_components.rs`) marked `FIXME: 60+ second delays (likely thread/deadlock issue)`. Both files were substantially rewritten in this pass and the suspected deadlock was not investigated; the skipped count is unchanged at 4.
-- `ProfilingSummary::battery_consumed_mah` is `sum(mW) / 1000`, which is not milliamp-hours. It is always `None` today (no battery source reaches the profiler), so nothing consumes the wrong unit, but the field name and the formula still disagree.
 - `mobile_testing/framework.rs` still constructs `MemoryUsageStats`-free results; `BenchmarkResult::accuracy_metrics`/`power_stats` and `MemoryTestResult::memory_stats`/`allocation_success_rate` are now `Option` and always `None`, because this framework evaluates no labelled data, reads no per-component power rail and has no allocator introspection. Making any of them real needs an evaluation harness and platform allocator hooks that do not exist yet.
 - `DeviceFarmManager` cannot execute anything: `run_test_on_device` reports the missing device channel. Real farm support needs an AWS Device Farm / Firebase Test Lab client (neither is a dependency) or a local ADB/`xcrun` driver.
 
@@ -489,7 +498,7 @@ let recommendations = battery_mgr.get_optimization_recommendations();
 - ⚠️ **Updated 2026-08-18**: `advanced_security.rs` implements real post-quantum KEM/signatures (ML-KEM-768/ML-DSA-65/SLH-DSA-SHAKE-128f, FIPS 203/204/205, via `ml-kem`/`ml-dsa`/`slh-dsa`), real Paillier homomorphic encryption, and real Shamir secret sharing — not mock reference code. The remaining caveat is narrower than before: the underlying RustCrypto PQC crates state they haven't been independently audited, and the Paillier/Schnorr code's `num-bigint`-based `modpow` isn't constant-time (a local-timing-attacker concern, not a correctness one).
 - ⚠️ `react-native-example/` ships an example only — no installable npm package source is present in this repository
 - ⚠️ Flutter/Unity/iOS/Android sub-packages version independently at `1.0.0` and do not track the workspace `0.2.1` release
-- ⚠️ **Newly found 2026-07-09**: `tflite_nnapi_delegate.rs` is fully written (real `#[cfg(feature = "tflite-nnapi")]` gates internally) but has no `pub mod` declaration in `lib.rs` — the `tflite-nnapi` Cargo feature currently gates nothing. Not yet triaged; see [Future Enhancements](#future-enhancements).
+- ✅ **Resolved, verified 2026-08-24**: the 2026-07-09 finding below is stale. `tflite_nnapi_delegate.rs` now has a `#[cfg(feature = "tflite-nnapi")] pub mod tflite_nnapi_delegate;` declaration at `lib.rs:147` — the `tflite-nnapi` Cargo feature gates the module for real. See the NNAPI Integration entry above and [Future Enhancements](#future-enhancements) for what's still unverified (behavior on an actual Android target).
 
 ---
 
@@ -520,12 +529,11 @@ Two workspace-wide tracks land in 0.2.0: **OxiCUDA GPU migration** (scirs2-core 
 - ✅ **INT4/GGUF quantization** — nibble-packed INT4 per-group quantization + pure-Rust GGUF reader (`quantization/int4.rs`, `quantization/gguf_mobile.rs`)
 - ✅ **Predictive thermal management** — linear regression thermal predictor with proactive throttle prevention (`thermal/predictive.rs`)
 - ✅ **WebNN integration (IR + export)** — W3C WebNN IR, graph builder, JSON/compact-JSON export, structural validation (`webnn/mod.rs`)
-- [ ] Triage orphaned `tflite_nnapi_delegate.rs` (found 2026-07-09)
+- [x] Triage orphaned `tflite_nnapi_delegate.rs` (found 2026-07-09; option (a) landed, verified 2026-08-24)
   - Goal: the `tflite-nnapi` Cargo feature should either gate something real or be removed — right now it does neither.
-  - Design: the file itself is source-complete (real `#[cfg(feature = "tflite-nnapi")]` guards throughout, mirroring `nnapi.rs`'s structure), it's simply missing a `pub mod tflite_nnapi_delegate;` (+ matching feature-gated `pub use`) in `lib.rs`. Two options: (a) wire it up the same way `swin`/`deit` were wired into `trustformers-models` in 0.2.0 (add the `pub mod`/`pub use`, verify `cargo build --features tflite-nnapi` on an Android target), or (b) delete it as dead code the same way `android_renderscript.rs` was deleted, if on closer inspection it's superseded/unwanted.
-  - Files: trustformers-mobile/src/lib.rs (+ delete trustformers-mobile/src/tflite_nnapi_delegate.rs if option (b)); README.md, TODO.md.
-  - Tests: cargo check -p trustformers-mobile --features tflite-nnapi (Android target) before/after; cargo build --all-features must be unaffected by whichever path is chosen.
-  - Risk: low either way — confirmed zero references to this module anywhere else in the crate today, so neither path has blast radius beyond this one file.
+  - Resolution: option (a) — `lib.rs:147` now declares `#[cfg(feature = "tflite-nnapi")] pub mod tflite_nnapi_delegate;`, mirroring `nnapi`/`nnapi_converter`'s mounting immediately above it. Exactly when this landed was not determined (it predates this pass, with no matching diff in this session's changes — see the NNAPI Integration entry above).
+  - Verified 2026-08-24: `cargo clippy -p trustformers-mobile --all-targets --all-features -- -D warnings` compiles the module clean (exit 0, 0 warnings) as part of this crate's normal gate run. **Not verified**: the module's actual behavior on `aarch64-linux-android` or a physical device — the Android target isn't installed in this environment (same limitation recorded elsewhere in this file, e.g. the OxiCUDA migration section above), so `cargo build --features tflite-nnapi` on a real Android target is still open if anyone wants that specific proof.
+  - Files: trustformers-mobile/src/lib.rs, TODO.md (this entry).
 - [ ] Improved model compression techniques
   - **Refinement needed:** target compression ratio? Which techniques: GPTQ, AWQ, SqueezeLLM?
 - [ ] Replace the `advanced_security.rs` placeholder cryptography (post-quantum KEM, homomorphic encryption, MPC) with audited implementations before advertising real confidentiality guarantees
@@ -591,10 +599,10 @@ cargo build --target aarch64-apple-ios --release
 # Build for Android
 cargo build --target aarch64-linux-android --release
 
-# Run tests (~742 passing, all features, verified 2026-07-01)
+# Run tests (1,355 passing / 2 skipped, all features, verified 2026-08-24)
 cargo nextest run --all-features -p trustformers-mobile
 
-# Run doctests (26 passing, 0 failed, 2 ignored)
+# Run doctests (27 passing, 0 failed, 2 ignored, verified 2026-08-24)
 cargo test --doc -p trustformers-mobile --all-features
 
 # CLI tools shipped with the crate
@@ -700,9 +708,9 @@ fun TrustformersDemo() {
 
 ---
 
-**Last Updated:** 2026-07-09
+**Last Updated:** 2026-08-24
 **Version:** 0.2.1
 **Status:** Alpha
-**Test Suite:** ~742 crate tests passing · 26 doctests passing (0 failed, 2 ignored)
-**SLoC:** ~103,900 (Rust, `src/`) · ~124,000 (full repo incl. Swift/Kotlin/C#/Dart/TS bindings, via tokei)
+**Test Suite:** 1,355 crate tests passing / 2 skipped · 27 doctests passing (0 failed, 2 ignored) — `cargo nextest run`/`cargo test --doc`, both `--all-features`, verified 2026-08-24
+**SLoC:** ~104,000 (Rust code in `src/`, `tokei` 12.1.2, 2026-08-24: 186 files / 103,992 lines of code) · ~124,000 (full repo incl. Swift/Kotlin/C#/Dart/TS bindings, not re-measured this pass)
 **Platforms:** iOS 11+ (Neural Engine/Core ML require iOS 14+/16+), Android 5.0+ / API 21+ (NNAPI requires API 27+)

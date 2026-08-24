@@ -79,8 +79,9 @@ use crate::auto::{
     PyAutoModelForTokenClassification, PyAutoTokenizer,
 };
 use crate::models::{
-    PyBertForSequenceClassification, PyBertModel, PyGPT2LMHeadModel, PyGPT2Model, PyLlamaModel,
-    PyMambaModel, PyPreTrainedModel, PyRwkvModel, PyT5Model,
+    PyBertForQuestionAnswering, PyBertForSequenceClassification, PyBertForTokenClassification,
+    PyBertModel, PyGPT2LMHeadModel, PyGPT2Model, PyLlamaModel, PyMambaModel, PyPreTrainedModel,
+    PyRwkvModel, PyT5Model,
 };
 use crate::pipelines::{
     PyPipeline, PyQuestionAnsweringPipeline, PyTextClassificationPipeline, PyTextGenerationPipeline,
@@ -124,6 +125,8 @@ fn _trustformers(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Task-specific models
     m.add_class::<PyBertForSequenceClassification>()?;
+    m.add_class::<PyBertForTokenClassification>()?;
+    m.add_class::<PyBertForQuestionAnswering>()?;
     m.add_class::<PyGPT2LMHeadModel>()?;
 
     // Tokenizers

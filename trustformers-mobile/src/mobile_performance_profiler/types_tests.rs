@@ -169,12 +169,14 @@ mod tests {
     #[test]
     fn test_battery_metrics_default() {
         let metrics = BatteryMetrics::default();
-        // Regression: this default used to be 100, so a battery nothing had
-        // read reported as fully charged.
-        assert_eq!(metrics.level_percent, 0);
-        assert!(!metrics.is_charging);
-        assert!((metrics.power_consumption_mw - 0.0).abs() < f32::EPSILON);
-        assert_eq!(metrics.estimated_life_minutes, 0);
+        // Regression: this default used to be 100 (or 0/false), so a battery
+        // nothing had read reported as fully charged, empty, or idle. Every
+        // field is `None`: nothing was measured.
+        assert_eq!(metrics.level_percent, None);
+        assert_eq!(metrics.is_charging, None);
+        assert_eq!(metrics.power_consumption_mw, None);
+        assert_eq!(metrics.voltage_v, None);
+        assert_eq!(metrics.estimated_life_minutes, None);
     }
 
     // Test 14: ThermalMetrics default values

@@ -434,13 +434,13 @@ pub struct PerformanceImpactAnalysis {
     pub impact_areas: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct PerformanceInsightEngine {
-    /// Insights generated
-    pub insights_generated: u64,
-    /// Insight quality score
-    pub quality_score: f64,
-}
+/// Reports on the CPU and latency metrics present in an observation window.
+///
+/// Before 0.2.1 this carried `insights_generated` and `quality_score` fields
+/// that nothing ever wrote to, and reported "few" or "several optimization
+/// opportunities" by comparing the permanently-zero `quality_score` to 0.7.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PerformanceInsightEngine;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
@@ -807,50 +807,54 @@ impl super::core::StreamingPipeline for PerformanceAnalysisPipeline {
 }
 
 impl PerformanceInsightEngine {
-    /// Create a new PerformanceInsightEngine with default settings
+    /// Create a new PerformanceInsightEngine.
     pub fn new() -> Self {
-        Self {
-            insights_generated: 0,
-            quality_score: 0.0,
-        }
+        Self
     }
-}
 
-impl Default for PerformanceInsightEngine {
-    fn default() -> Self {
-        Self::new()
+    /// Summaries of the CPU, latency and throughput metrics in the window.
+    fn findings(&self, observations: super::analysis::InsightObservations<'_>) -> Vec<String> {
+        observations
+            .summaries_matching(&["cpu", "latency", "throughput"])
+            .into_iter()
+            .map(|summary| {
+                format!(
+                    "`{}` over {} samples: mean {:.4}, min {:.4}, max {:.4}, latest {:.4}",
+                    summary.key,
+                    summary.count,
+                    summary.mean,
+                    summary.min,
+                    summary.max,
+                    summary.last
+                )
+            })
+            .collect()
     }
 }
 
 impl InsightEngine for PerformanceInsightEngine {
-    fn generate(&self) -> String {
-        format!(
-            "Performance Insight Engine (insights_generated={}, quality_score={:.2})",
-            self.insights_generated, self.quality_score
-        )
+    fn describe(&self) -> String {
+        "Performance insight engine: summarises CPU, latency and throughput metrics over the          supplied window; holds no accumulated state"
+            .to_string()
     }
 
-    fn generate_test_insights(&self, test_id: &str) -> TestCharacterizationResult<Vec<String>> {
-        // Placeholder implementation - in production, this would analyze test-specific performance data
-        Ok(vec![
-            format!(
-                "Test '{}' performance analysis: {} insights generated with quality score {:.2}",
-                test_id, self.insights_generated, self.quality_score
-            ),
-            format!(
-                "Performance metrics suggest {} optimization opportunities",
-                if self.quality_score > 0.7 { "few" } else { "several" }
-            ),
-        ])
+    fn generate_test_insights(
+        &self,
+        test_id: &str,
+        observations: super::analysis::InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>> {
+        Ok(self
+            .findings(observations)
+            .into_iter()
+            .map(|insight| format!("test `{}`: {}", test_id, insight))
+            .collect())
     }
 
-    fn generate_insights(&self) -> TestCharacterizationResult<Vec<String>> {
-        // Placeholder implementation - in production, this would generate comprehensive insights
-        Ok(vec![
-            format!("Total insights generated: {}", self.insights_generated),
-            format!("Overall insight quality: {:.2}", self.quality_score),
-            "Performance analysis engine active".to_string(),
-        ])
+    fn generate_insights(
+        &self,
+        observations: super::analysis::InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>> {
+        Ok(self.findings(observations))
     }
 }
 

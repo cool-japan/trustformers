@@ -221,7 +221,7 @@ pub(crate) fn stack_tensors(tensors: &[Tensor]) -> Result<Tensor> {
                     let buffer_ids: Vec<_> = tensors
                         .iter()
                         .map(|t| match t {
-                            Tensor::Metal(data) => Ok(data.buffer_id),
+                            Tensor::Metal(data) => Ok(data.buffer_id()),
                             _ => Err(TrustformersError::tensor_op_error(
                                 "All tensors must be Metal for GPU stacking",
                                 "stack_tensors",
@@ -236,11 +236,15 @@ pub(crate) fn stack_tensors(tensors: &[Tensor]) -> Result<Tensor> {
                     // Create output shape: [batch_size, seq_len, hidden_size]
                     let output_shape = vec![tensors.len(), seq_len, hidden_size];
 
-                    return Ok(Tensor::Metal(MetalTensorData {
-                        buffer_id: stacked_buffer_id,
-                        shape: output_shape,
-                        dtype: first_data.dtype,
-                    }));
+                    // `stacked_buffer_id` is a freshly allocated buffer (a copy of
+                    // every input into one new contiguous allocation), never wrapped
+                    // before now, so this is the required first (and only) wrap.
+                    return Ok(Tensor::Metal(MetalTensorData::new(
+                        &backend,
+                        stacked_buffer_id,
+                        output_shape,
+                        first_data.dtype,
+                    )?));
                 }
             }
 

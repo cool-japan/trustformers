@@ -1,11 +1,10 @@
 //! Python bindings for training functionality
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use trustformers_core::errors::TrustformersError;
 use trustformers_training::{EvaluationStrategy, SaveStrategy, TrainingArguments};
 
 /// Owned Python reference alias (pyo3 0.28 removed the `PyObject` type alias from
@@ -204,10 +203,61 @@ impl PyTrainingArguments {
     }
 }
 
+/// Why `PyTrainer::train()` cannot run a real training loop.
+///
+/// A real loop needs, at minimum: a forward pass (real, exists), a loss
+/// function (real, exists -- `models::losses`), and a way to turn that loss
+/// into a parameter update (backpropagation through the model, then an
+/// optimizer step). The third piece does not exist for any model this crate
+/// wraps:
+///
+/// * `trustformers_core`'s automatic-differentiation system
+///   (`autodiff::variable::Variable` / `ComputationGraph`) is real, but it is
+///   never constructed by `BertModel::forward`, `Gpt2LMHeadModel::forward`, or
+///   any other model's `forward()` in `trustformers-models` -- those methods
+///   operate on plain `Tensor`s and never build a graph node, so there is
+///   nothing for `Variable::backward()` to walk back through even if a
+///   caller wrapped the *input* in one.
+/// * `trustformers_training::trainer::Trainer` (the training crate's own,
+///   more complete trainer, which this binding does not currently drive) has
+///   an explicit `ParameterAccess` trait for models that expose gradient-
+///   writable parameters, but grep across the whole workspace
+///   (`trustformers-core`, `trustformers-models`, `trustformers-training`)
+///   finds zero `impl ParameterAccess for ...` -- no model implements it. Its
+///   own `Trainer::apply_gradients_to_model` already documents this
+///   limitation and is itself a no-op today, logging "Gradients computed but
+///   not applied - model needs ParameterAccess trait" and returning `Ok(())`
+///   without touching any weight.
+///
+/// So: forward and loss are real; backpropagation and the optimizer step are
+/// not. Rather than run the first two and silently skip the third (which
+/// would report a train_loss that never changes and imply progress that
+/// never happened), `train()` refuses outright. This replaces a fabrication
+/// that returned `train_loss: 0.5`, `total_steps: 1000` unconditionally, for
+/// every model, dataset, and configuration.
+fn no_training_path_available() -> PyErr {
+    PyNotImplementedError::new_err(
+        "Trainer.train() cannot run: this crate has a real forward pass and real loss functions \
+         (see BertForSequenceClassification.forward(..., labels=...) etc.), but no backward/\
+         gradient path from a loss to a model's own parameters exists anywhere in \
+         trustformers-core, trustformers-models, or trustformers-training. Verified: \
+         trustformers_core::autodiff::variable::Variable's ComputationGraph is never constructed \
+         by any model's forward() (they operate on plain Tensors only), and \
+         trustformers_training::trainer::ParameterAccess -- the trait a model would need to \
+         implement for trustformers-training's own Trainer to apply computed gradients -- has \
+         zero implementors in the workspace. There is no autograd path to run real gradient \
+         descent through, so this refuses instead of returning a fabricated loss/step count.",
+    )
+}
+
 /// Python wrapper for Trainer
 #[pyclass(name = "Trainer")]
 pub struct PyTrainer {
-    // We'll store a placeholder since the actual Trainer requires complex types
+    /// The wrapped model object, kept so `save_model` can delegate to its real
+    /// `save_pretrained` -- every concrete model class this crate registers
+    /// (`BertModel`, `GPT2LMHeadModel`, `BertForSequenceClassification`, ...)
+    /// has one.
+    model: PyObject,
     model_name: String,
     args: PyTrainingArguments,
 }
@@ -237,8 +287,11 @@ impl PyTrainer {
         callbacks: Option<&Bound<'_, PyAny>>,
         optimizers: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        // These configuration objects are accepted for HF Trainer API parity; the
-        // current simplified trainer does not yet consume them.
+        // Accepted for HF Trainer API parity. `train_dataset`/`eval_dataset`
+        // are not stored: there is no real training loop to run them through
+        // (see `no_training_path_available`), and this binding defines no
+        // dataset-to-model-input protocol for `evaluate`/`predict` to consume
+        // one by either. `tokenizer` is likewise unused by any real path here.
         let _ = (
             train_dataset,
             eval_dataset,
@@ -248,69 +301,92 @@ impl PyTrainer {
             callbacks,
             optimizers,
         );
-        // For now, we'll create a simplified trainer
-        // In a real implementation, we'd convert the Python objects to Rust types
 
         let model_name = model.getattr("__class__")?.getattr("__name__")?.extract::<String>()?;
 
-        Ok(PyTrainer { model_name, args })
-    }
-
-    /// Train the model
-    fn train(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        // Release the GIL for training
-        py.detach(|| -> Result<(), TrustformersError> {
-            // In a real implementation, we'd run the training loop here
-            // For now, return a mock training result
-            Ok(())
+        Ok(PyTrainer {
+            model: model.clone().unbind(),
+            model_name,
+            args,
         })
-        .map_err(|e| PyValueError::new_err(format!("Training failed: {}", e)))?;
-
-        // Return training metrics
-        let metrics = PyDict::new(py);
-        metrics.set_item("train_loss", 0.5)?;
-        metrics.set_item("epoch", self.args.inner.num_train_epochs)?;
-        metrics.set_item("total_steps", 1000)?;
-
-        Ok(metrics.into())
     }
 
-    /// Evaluate the model
+    /// Train the model.
+    ///
+    /// Always refuses; see [`no_training_path_available`]. Replaces a
+    /// fabrication that unconditionally returned `train_loss: 0.5`,
+    /// `total_steps: 1000`.
+    fn train(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let _ = py;
+        Err(no_training_path_available())
+    }
+
+    /// Evaluate the model.
+    ///
+    /// Always refuses, for the same reason `predict` does: this binding
+    /// stores no dataset-to-model-input protocol, so `eval_dataset` cannot be
+    /// turned into real forward passes here (constructing `TokenizedInput`s
+    /// and calling the model directly, as `pipelines::scoring::classify_with_bert`
+    /// does, works today outside `Trainer`). Replaces a fabrication that
+    /// unconditionally returned `eval_loss: 0.45`, `eval_accuracy: 0.92`,
+    /// `eval_samples: 100`, discarding `eval_dataset` entirely.
     fn evaluate(
         &self,
         py: Python<'_>,
         eval_dataset: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
-        let _ = eval_dataset;
-        // Return evaluation metrics
-        let metrics = PyDict::new(py);
-        metrics.set_item("eval_loss", 0.45)?;
-        metrics.set_item("eval_accuracy", 0.92)?;
-        metrics.set_item("eval_samples", 100)?;
-
-        Ok(metrics.into())
+        let _ = (py, eval_dataset);
+        Err(PyNotImplementedError::new_err(
+            "Trainer.evaluate() is not implemented: this binding defines no dataset-to-model-input \
+             protocol (HuggingFace's Trainer expects a datasets.Dataset yielding per-example \
+             tensors matching the model's forward signature; this crate integrates none), so \
+             eval_dataset cannot be turned into real forward passes here. Build TokenizedInputs \
+             from your data and call the model directly instead -- e.g. \
+             BertForSequenceClassification.forward(input_ids, attention_mask, labels=...) returns a \
+             real loss.",
+        ))
     }
 
-    /// Make predictions
+    /// Make predictions.
+    ///
+    /// Always refuses; see [`PyTrainer::evaluate`]. Replaces a fabrication
+    /// that unconditionally returned the fixed vectors
+    /// `predictions=[0.1, 0.9, 0.3, 0.7]`, `label_ids=[0, 1, 0, 1]`,
+    /// discarding `test_dataset` entirely.
     fn predict(&self, py: Python<'_>, test_dataset: &Bound<'_, PyAny>) -> PyResult<PyObject> {
-        let _ = test_dataset;
-        // Return predictions
-        let result = PyDict::new(py);
-        result.set_item("predictions", vec![0.1, 0.9, 0.3, 0.7])?;
-        result.set_item("label_ids", vec![0, 1, 0, 1])?;
-
-        Ok(result.into())
+        let _ = (py, test_dataset);
+        Err(PyNotImplementedError::new_err(
+            "Trainer.predict() is not implemented: this binding defines no dataset-to-model-input \
+             protocol (see Trainer.evaluate()'s error for the same gap), so test_dataset cannot be \
+             turned into real forward passes here. Call the wrapped model's forward()/__call__() \
+             directly on your own TokenizedInputs instead.",
+        ))
     }
 
-    /// Save the model
-    fn save_model(&self, output_dir: Option<String>) -> PyResult<()> {
-        let _save_dir =
+    /// Save the model: delegates to the wrapped model object's own real
+    /// `save_pretrained(save_directory)`, which every concrete model class
+    /// this crate registers implements for real (exports `config.json` and
+    /// `model.safetensors` from the model's actual tensors).
+    ///
+    /// Replaces an implementation whose body was `Ok(())` after computing (and
+    /// discarding) an unused save-directory string -- it reported success
+    /// while writing nothing.
+    fn save_model(&self, py: Python<'_>, output_dir: Option<String>) -> PyResult<()> {
+        let save_dir =
             output_dir.unwrap_or_else(|| self.args.inner.output_dir.to_string_lossy().to_string());
-        // In a real implementation, we'd save the model here
+        self.model.bind(py).call_method1("save_pretrained", (save_dir,))?;
         Ok(())
     }
 
-    /// Push model to hub
+    /// Push model to hub.
+    ///
+    /// Always refuses: this crate has no Hugging Face Hub client anywhere
+    /// (`trustformers-py/src/tokenizers.rs` and `models/weights.rs` both
+    /// document the same absence for `from_pretrained`). Replaces a
+    /// fabrication that returned a `https://huggingface.co/{repo_name}` URL
+    /// unconditionally, for any `repo_name`, without ever making a network
+    /// call or uploading anything -- callers had no way to tell a successful
+    /// push from this placeholder.
     fn push_to_hub(
         &self,
         repo_name: String,
@@ -318,8 +394,12 @@ impl PyTrainer {
         private: Option<bool>,
     ) -> PyResult<String> {
         let _ = (commit_message, private);
-        // In a real implementation, we'd push to HuggingFace Hub
-        Ok(format!("https://huggingface.co/{}", repo_name))
+        Err(PyNotImplementedError::new_err(format!(
+            "Trainer.push_to_hub('{repo_name}') is not implemented: this crate has no Hugging Face \
+             Hub client (no network call was made, nothing was uploaded). The previous \
+             implementation returned 'https://huggingface.co/{repo_name}' unconditionally, which \
+             looked like a successful push but was not one."
+        )))
     }
 
     fn __repr__(&self) -> String {

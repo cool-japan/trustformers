@@ -1,5 +1,4 @@
 // Allow dead code for cloud provider infrastructure under development
-#![allow(dead_code)]
 
 use anyhow::Result;
 use async_trait::async_trait;

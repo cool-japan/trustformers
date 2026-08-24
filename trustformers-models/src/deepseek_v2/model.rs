@@ -12,7 +12,7 @@
 use std::io::Read;
 use trustformers_core::{
     device::Device,
-    errors::{tensor_op_error, Result, TrustformersError},
+    errors::{tensor_op_error, Result},
     layers::{Embedding, Linear},
     tensor::Tensor,
     traits::{Config, Layer, Model},
@@ -45,315 +45,10 @@ pub fn apply_activation(data: &[f32], act: ActivationType) -> Vec<f32> {
 }
 
 // ---------------------------------------------------------------------------
-// RMSNorm
+// Attention building blocks
 // ---------------------------------------------------------------------------
 
-/// DeepSeek-V2 RMSNorm layer.
-///
-/// `output = weight * (input / sqrt(mean(input²) + eps))`
-pub struct DeepSeekV2RmsNorm {
-    weight: Tensor,
-    eps: f32,
-    device: Device,
-}
-
-impl DeepSeekV2RmsNorm {
-    pub fn new(size: usize, eps: f64, device: Device) -> Result<Self> {
-        let weight = Tensor::ones(&[size])?;
-        Ok(Self {
-            weight,
-            eps: eps as f32,
-            device,
-        })
-    }
-
-    pub fn device(&self) -> Device {
-        self.device
-    }
-}
-
-impl Layer for DeepSeekV2RmsNorm {
-    type Input = Tensor;
-    type Output = Tensor;
-
-    fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        match &input {
-            Tensor::F32(arr) => {
-                let n = arr.len() as f32;
-                let mean_sq = arr.iter().map(|x| x * x).sum::<f32>() / n;
-                let rms = (mean_sq + self.eps).sqrt();
-                let normed = arr.mapv(|x| x / rms);
-                match &self.weight {
-                    Tensor::F32(w) => Ok(Tensor::F32(&normed * w)),
-                    _ => Err(tensor_op_error(
-                        "deepseek_v2_rmsnorm",
-                        "weight tensor must be F32",
-                    )),
-                }
-            },
-            _ => Err(tensor_op_error(
-                "deepseek_v2_rmsnorm",
-                "input tensor must be F32",
-            )),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Rotary Position Embedding (applied to rope portion only)
-// ---------------------------------------------------------------------------
-
-/// RoPE applied to the `qk_rope_head_dim`-dimensional slice of Q and K.
-pub struct DeepSeekV2RotaryEmbedding {
-    /// Dimension of the RoPE slice (= `qk_rope_head_dim`).
-    rope_head_dim: usize,
-    rope_theta: f64,
-    #[allow(dead_code)]
-    device: Device,
-}
-
-impl DeepSeekV2RotaryEmbedding {
-    pub fn new(config: &DeepSeekV2Config, device: Device) -> Self {
-        Self {
-            rope_head_dim: config.qk_rope_head_dim,
-            rope_theta: config.rope_theta,
-            device,
-        }
-    }
-
-    /// Apply RoPE in-place to a flat slice of length `seq_len * rope_head_dim`.
-    pub fn apply(&self, data: &mut [f32], seq_len: usize) {
-        let half = self.rope_head_dim / 2;
-        if half == 0 {
-            return;
-        }
-        for pos in 0..seq_len {
-            for i in 0..half {
-                let freq = 1.0 / self.rope_theta.powf(2.0 * i as f64 / self.rope_head_dim as f64);
-                let angle = (pos as f64 * freq) as f32;
-                let cos_v = angle.cos();
-                let sin_v = angle.sin();
-                let base = pos * self.rope_head_dim;
-                let x0 = data[base + i];
-                let x1 = data[base + i + half];
-                data[base + i] = x0 * cos_v - x1 * sin_v;
-                data[base + i + half] = x0 * sin_v + x1 * cos_v;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Multi-head Latent Attention (MLA)
-// ---------------------------------------------------------------------------
-
-/// Multi-head Latent Attention as introduced in DeepSeek-V2.
-///
-/// ## Key idea
-///
-/// Instead of projecting hidden states separately into full K and V tensors
-/// (which become large for many heads), MLA first compresses them jointly into
-/// a low-rank *latent* vector `c_kv` of dimension `kv_lora_rank`.  K and V are
-/// then expanded from this latent on the fly.  At inference only `c_kv` (plus a
-/// small RoPE key slice) needs to be cached, saving significant memory bandwidth.
-///
-/// ### Projection dimensions
-///
-/// | Weight | Shape |
-/// |--------|-------|
-/// | `c_kv` | `hidden_size → kv_lora_rank` |
-/// | `k_pe` | `kv_lora_rank → qk_rope_head_dim` |
-/// | `k_nope` | `kv_lora_rank → num_heads * qk_nope_head_dim` |
-/// | `v_proj` | `kv_lora_rank → num_heads * v_head_dim` |
-/// | `q_a_proj` | `hidden_size → q_lora_rank` |
-/// | `q_b_proj` | `q_lora_rank → num_heads * (qk_rope_head_dim + qk_nope_head_dim)` |
-/// | `o_proj` | `num_heads * v_head_dim → hidden_size` |
-pub struct MlaAttention {
-    /// Joint KV compression: hidden → latent `c_kv`.
-    c_kv: Linear,
-    /// RoPE key expansion: latent → `qk_rope_head_dim` (shared across heads).
-    k_pe: Linear,
-    /// Non-RoPE key expansion: latent → `num_heads * qk_nope_head_dim`.
-    k_nope: Linear,
-    /// Value expansion: latent → `num_heads * v_head_dim`.
-    v_proj: Linear,
-    /// Query down-projection: hidden → `q_lora_rank`.
-    q_a_proj: Linear,
-    /// Query up-projection: `q_lora_rank → num_heads * (qk_rope_head_dim + qk_nope_head_dim)`.
-    q_b_proj: Linear,
-    /// Output projection: `num_heads * v_head_dim → hidden_size`.
-    o_proj: Linear,
-    rotary_emb: DeepSeekV2RotaryEmbedding,
-    num_heads: usize,
-    qk_rope_head_dim: usize,
-    #[allow(dead_code)]
-    qk_nope_head_dim: usize,
-    v_head_dim: usize,
-    device: Device,
-}
-
-impl MlaAttention {
-    pub fn new(config: &DeepSeekV2Config, device: Device) -> Result<Self> {
-        let hs = config.hidden_size;
-        let nh = config.num_attention_heads;
-        let kv_r = config.kv_lora_rank;
-        let q_r = config.q_lora_rank;
-        let rope_d = config.qk_rope_head_dim;
-        let nope_d = config.qk_nope_head_dim;
-        let v_d = config.v_head_dim;
-
-        let c_kv = Linear::new_with_device(hs, kv_r, false, device);
-        let k_pe = Linear::new_with_device(kv_r, rope_d, false, device);
-        let k_nope = Linear::new_with_device(kv_r, nh * nope_d, false, device);
-        let v_proj = Linear::new_with_device(kv_r, nh * v_d, false, device);
-        // Query path: if q_lora_rank > 0 use two-step projection; otherwise single step
-        let q_a_proj = Linear::new_with_device(hs, q_r.max(1), false, device);
-        let q_b_proj = Linear::new_with_device(q_r.max(1), nh * (rope_d + nope_d), false, device);
-        let o_proj = Linear::new_with_device(nh * v_d, hs, false, device);
-        let rotary_emb = DeepSeekV2RotaryEmbedding::new(config, device);
-
-        Ok(Self {
-            c_kv,
-            k_pe,
-            k_nope,
-            v_proj,
-            q_a_proj,
-            q_b_proj,
-            o_proj,
-            rotary_emb,
-            num_heads: nh,
-            qk_rope_head_dim: rope_d,
-            qk_nope_head_dim: nope_d,
-            v_head_dim: v_d,
-            device,
-        })
-    }
-
-    pub fn device(&self) -> Device {
-        self.device
-    }
-
-    /// Number of attention heads.
-    pub fn num_heads(&self) -> usize {
-        self.num_heads
-    }
-
-    /// KV lora rank — dimension of the compressed latent KV vector.
-    ///
-    /// Derived from the weight shape of `c_kv`: `weight` is `[out, in]`, so `shape[0]` is the
-    /// output dimension (= kv_lora_rank).
-    pub fn kv_lora_rank(&self) -> usize {
-        let w = self.c_kv.weight();
-        let shape = w.shape();
-        if shape.is_empty() {
-            0
-        } else {
-            shape[0]
-        }
-    }
-}
-
-impl Layer for MlaAttention {
-    type Input = Tensor;
-    type Output = Tensor;
-
-    fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        // --- Compress K,V jointly ---
-        let c_kv_out = self.c_kv.forward(input.clone())?;
-
-        // Expand RoPE key slice (shared across heads)
-        let k_pe_out = self.k_pe.forward(c_kv_out.clone())?;
-
-        // Expand non-RoPE keys
-        let k_nope_out = self.k_nope.forward(c_kv_out.clone())?;
-
-        // Expand values
-        let v_out = self.v_proj.forward(c_kv_out)?;
-
-        // Apply RoPE to k_pe_out
-        let k_pe_roped = match k_pe_out {
-            Tensor::F32(arr) => {
-                let contig = arr.as_standard_layout().to_owned();
-                let mut data = contig.as_slice().unwrap_or(&[]).to_vec();
-                let seq_len = data.len() / self.qk_rope_head_dim.max(1);
-                if seq_len > 0 {
-                    self.rotary_emb.apply(&mut data, seq_len);
-                }
-                let shape = contig.shape().to_vec();
-                Tensor::from_vec(data, &shape)?
-            },
-            _ => return Err(tensor_op_error("deepseek_v2_mla", "k_pe must be F32")),
-        };
-
-        // --- Query path (two-stage compression) ---
-        let q_a_out = self.q_a_proj.forward(input)?;
-        let q_out = self.q_b_proj.forward(q_a_out)?;
-
-        // Apply RoPE to the rope slice of q_out
-        let q_roped = match q_out {
-            Tensor::F32(arr) => {
-                let contig = arr.as_standard_layout().to_owned();
-                let mut data = contig.as_slice().unwrap_or(&[]).to_vec();
-                let full_head_dim = self.qk_rope_head_dim + self.qk_nope_head_dim;
-                let seq_len = data.len() / (self.num_heads * full_head_dim).max(1);
-                // Only apply RoPE to the first qk_rope_head_dim elements of each head
-                for h in 0..self.num_heads {
-                    for pos in 0..seq_len {
-                        let base = (pos * self.num_heads + h) * full_head_dim;
-                        let rope_slice = &mut data[base..base + self.qk_rope_head_dim];
-                        let half = self.qk_rope_head_dim / 2;
-                        if half > 0 {
-                            for i in 0..half {
-                                let freq = 1.0
-                                    / self
-                                        .rotary_emb
-                                        .rope_theta
-                                        .powf(2.0 * i as f64 / self.qk_rope_head_dim as f64);
-                                let angle = (pos as f64 * freq) as f32;
-                                let cos_v = angle.cos();
-                                let sin_v = angle.sin();
-                                let x0 = rope_slice[i];
-                                let x1 = rope_slice[i + half];
-                                rope_slice[i] = x0 * cos_v - x1 * sin_v;
-                                rope_slice[i + half] = x0 * sin_v + x1 * cos_v;
-                            }
-                        }
-                    }
-                }
-                let shape = contig.shape().to_vec();
-                Tensor::from_vec(data, &shape)?
-            },
-            _ => return Err(tensor_op_error("deepseek_v2_mla", "q must be F32")),
-        };
-
-        // --- Simplified attention computation ---
-        // Full scaled dot-product attention with KV absorption is complex and
-        // weight-dependent; here we represent the attended output dimensionally
-        // correctly via the q projection shape, then project through o_proj.
-        let _ = (k_pe_roped, k_nope_out, v_out); // consumed by full impl
-
-        // Build attended output: shape matches input (seq_len, num_heads * v_head_dim)
-        // We derive seq_len from the q shape, then build a 2D tensor for o_proj.
-        let (q_data, input_shape) = match q_roped {
-            Tensor::F32(arr) => {
-                let contig = arr.as_standard_layout().to_owned();
-                let data = contig.as_slice().unwrap_or(&[]).to_vec();
-                let shape = contig.shape().to_vec();
-                (data, shape)
-            },
-            _ => return Err(tensor_op_error("deepseek_v2_mla", "q must be F32")),
-        };
-
-        let attended_head_size = (self.num_heads * self.v_head_dim).max(1);
-        // Determine seq_len from input shape (2D: [seq_len, heads*qk_dim])
-        let seq_len = if input_shape.len() >= 2 { input_shape[0] } else { 1 };
-        let total_attended = seq_len * attended_head_size;
-        let mut attended_data = q_data;
-        attended_data.resize(total_attended, 0.0_f32);
-        let attended = Tensor::from_vec(attended_data, &[seq_len, attended_head_size])?;
-        self.o_proj.forward(attended)
-    }
-}
+pub use super::attention::{DeepSeekV2RmsNorm, DeepSeekV2RotaryEmbedding, MlaAttention};
 
 // ---------------------------------------------------------------------------
 // Dense MLP (used in early layers and as shared experts)
@@ -391,6 +86,18 @@ impl DeepSeekV2MLP {
 
     pub fn device(&self) -> Device {
         self.device
+    }
+
+    /// Total learnable parameters in this MLP.
+    pub fn parameter_count(&self) -> usize {
+        self.gate_proj.parameter_count()
+            + self.up_proj.parameter_count()
+            + self.down_proj.parameter_count()
+    }
+
+    /// The three projections, for the checkpoint binder.
+    pub(super) fn projections_mut(&mut self) -> (&mut Linear, &mut Linear, &mut Linear) {
+        (&mut self.gate_proj, &mut self.up_proj, &mut self.down_proj)
     }
 }
 
@@ -461,6 +168,16 @@ impl ExpertRouter {
             routed_scaling_factor: config.routed_scaling_factor,
             device,
         }
+    }
+
+    /// The routing projection, for the checkpoint binder.
+    pub(super) fn gate_mut(&mut self) -> &mut Linear {
+        &mut self.gate
+    }
+
+    /// Total learnable parameters in the router.
+    pub fn parameter_count(&self) -> usize {
+        self.gate.parameter_count()
     }
 
     /// Compute logits and select top-k experts.
@@ -556,6 +273,28 @@ impl DeepSeekV2MoELayer {
 
     pub fn num_shared_experts(&self) -> usize {
         self.shared_experts.len()
+    }
+
+    /// The shared experts, for the checkpoint binder.
+    pub(super) fn shared_experts_mut(&mut self) -> &mut [DeepSeekV2MLP] {
+        &mut self.shared_experts
+    }
+
+    /// The routed experts, for the checkpoint binder.
+    pub(super) fn routed_experts_mut(&mut self) -> &mut [DeepSeekV2MLP] {
+        &mut self.routed_experts
+    }
+
+    /// The router, for the checkpoint binder.
+    pub(super) fn router_mut(&mut self) -> &mut ExpertRouter {
+        &mut self.router
+    }
+
+    /// Total learnable parameters across every expert and the router.
+    pub fn parameter_count(&self) -> usize {
+        self.shared_experts.iter().map(DeepSeekV2MLP::parameter_count).sum::<usize>()
+            + self.routed_experts.iter().map(DeepSeekV2MLP::parameter_count).sum::<usize>()
+            + self.router.parameter_count()
     }
 
     pub fn device(&self) -> Device {
@@ -696,6 +435,42 @@ impl DeepSeekV2DecoderLayer {
         self.dense_mlp.is_some()
     }
 
+    /// Total learnable parameters in this layer.
+    pub fn parameter_count(&self) -> usize {
+        let ffn = match (&self.dense_mlp, &self.moe_layer) {
+            (Some(mlp), _) => mlp.parameter_count(),
+            (None, Some(moe)) => moe.parameter_count(),
+            (None, None) => 0,
+        };
+        self.self_attn.parameter_count()
+            + ffn
+            + self.input_layernorm.parameter_count()
+            + self.post_attention_layernorm.parameter_count()
+    }
+
+    /// The attention block, for the checkpoint binder.
+    pub(super) fn self_attn_mut(&mut self) -> &mut MlaAttention {
+        &mut self.self_attn
+    }
+
+    /// The dense FFN, for the checkpoint binder.
+    pub(super) fn dense_mlp_mut(&mut self) -> Option<&mut DeepSeekV2MLP> {
+        self.dense_mlp.as_mut()
+    }
+
+    /// The MoE FFN, for the checkpoint binder.
+    pub(super) fn moe_layer_mut(&mut self) -> Option<&mut DeepSeekV2MoELayer> {
+        self.moe_layer.as_mut()
+    }
+
+    /// The two per-layer norms, for the checkpoint binder.
+    pub(super) fn norms_mut(&mut self) -> (&mut DeepSeekV2RmsNorm, &mut DeepSeekV2RmsNorm) {
+        (
+            &mut self.input_layernorm,
+            &mut self.post_attention_layernorm,
+        )
+    }
+
     pub fn device(&self) -> Device {
         self.device
     }
@@ -706,11 +481,17 @@ impl Layer for DeepSeekV2DecoderLayer {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        // Pre-norm → attention → residual
+        // Pre-norm → attention → residual.
+        //
+        // `MlaAttention` projects back to `hidden_size`, so both residual adds
+        // are real shape-checked additions. A previous revision wrote
+        // `input.add(&attn_out).unwrap_or(attn_out)` / `.or(Ok(ff_out))`, which
+        // silently *dropped the residual branch* whenever the shapes disagreed —
+        // and they always disagreed, because that attention block returned a
+        // resized copy of its own query buffer.
         let normed = self.input_layernorm.forward(input.clone())?;
         let attn_out = self.self_attn.forward(normed)?;
-        // Residual add (size may differ from input due to simplified mock impl; use attn output)
-        let hidden = input.add(&attn_out).unwrap_or(attn_out);
+        let hidden = input.add(&attn_out)?;
 
         // Pre-norm → FFN → residual
         let normed_ff = self.post_attention_layernorm.forward(hidden.clone())?;
@@ -724,7 +505,7 @@ impl Layer for DeepSeekV2DecoderLayer {
                 "layer has neither dense_mlp nor moe_layer",
             ));
         };
-        hidden.add(&ff_out).or(Ok(ff_out))
+        hidden.add(&ff_out)
     }
 }
 
@@ -774,6 +555,26 @@ impl DeepSeekV2Model {
     pub fn device(&self) -> Device {
         self.device
     }
+
+    /// The token embedding table, for the checkpoint binder.
+    pub(super) fn embed_tokens_mut(&mut self) -> &mut Embedding {
+        &mut self.embed_tokens
+    }
+
+    /// The decoder stack, for the checkpoint binder.
+    pub(super) fn layers_mut(&mut self) -> &mut [DeepSeekV2DecoderLayer] {
+        &mut self.layers
+    }
+
+    /// The final norm, for the checkpoint binder.
+    pub(super) fn final_norm_mut(&mut self) -> &mut DeepSeekV2RmsNorm {
+        &mut self.norm
+    }
+
+    /// The token embedding table.
+    pub fn embed_tokens(&self) -> &Embedding {
+        &self.embed_tokens
+    }
 }
 
 impl Model for DeepSeekV2Model {
@@ -802,79 +603,45 @@ impl Model for DeepSeekV2Model {
         self.norm.forward(hidden_states)
     }
 
-    /// Loading a pretrained DeepSeek-V2 checkpoint is not implemented.
+    /// Load a HuggingFace DeepSeek-V2 checkpoint.
     ///
-    /// A previous revision read the stream into a buffer, checked only that the
-    /// buffer was non-empty and returned `Ok(())` — binding nothing. Any
-    /// non-empty byte sequence "loaded successfully" while the model kept its
-    /// constructor initialisation.
+    /// Every tensor is bound by name; the complete map lives in
+    /// [`crate::deepseek_v2::loading`]. Nothing is skipped: a parameter the
+    /// checkpoint does not carry, and a checkpoint tensor this architecture does
+    /// not recognise, both fail the load with the offending names listed.
     ///
-    /// The reason it is an error rather than a binder is concrete: this
-    /// implementation's [`MlaAttention`] decomposes multi-head latent attention
-    /// into `c_kv` / `k_pe` / `k_nope` / `v_proj`, whereas a HuggingFace
-    /// DeepSeek-V2 export stores the fused `kv_a_proj_with_mqa` and `kv_b_proj`
-    /// *plus* two RMS norms on the compressed latents, `q_a_layernorm` and
-    /// `kv_a_layernorm`, that this attention block does not model at all. The
-    /// fused projections could be split, but the two norms have nowhere to go,
-    /// and binding everything except them is precisely the silent-drop failure
-    /// this crate is being cleaned of. Modelling the latent norms is the
-    /// prerequisite for a real loader here.
-    ///
-    /// The stream is drained first so the caller's reader is left in a defined
-    /// state.
+    /// Two earlier revisions of this method were both dishonest in their own
+    /// way. The first read the stream into a buffer, checked only that the
+    /// buffer was non-empty and returned `Ok(())` — binding nothing. The second
+    /// replaced that with a `not_implemented` error, correct at the time,
+    /// because this file's attention block stored `c_kv`/`k_pe`/`k_nope`/
+    /// `v_proj` and modelled neither latent norm, so a real export's tensors had
+    /// nowhere to land. The attention block now matches the reference
+    /// implementation, so the binder is real.
     ///
     /// # Errors
     ///
-    /// Always fails: with an I/O error when the stream cannot be read, otherwise
-    /// with `not_implemented`.
+    /// Fails when the container cannot be parsed, when the stream does not look
+    /// like a DeepSeek-V2 checkpoint, when a tensor has the wrong shape, when a
+    /// parameter is missing, or when an unrecognised tensor is present.
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
-        let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer).map_err(|e| {
-            TrustformersError::io_error(format!("DeepSeekV2: failed to read weights: {e}"))
-        })?;
-        Err(TrustformersError::not_implemented(
-            "DeepSeekV2Model::load_pretrained: this implementation's MLA attention has no home \
-             for a checkpoint's `q_a_layernorm` / `kv_a_layernorm` latent norms and stores the \
-             key/value projection split rather than fused, so no HuggingFace DeepSeek-V2 \
-             checkpoint can be bound without silently dropping weights. Install weights \
-             explicitly through the layer setters instead."
-                .to_string(),
-        ))
+        self.load_pretrained_report(reader).map(|_| ())
     }
 
     fn get_config(&self) -> &Self::Config {
         &self.config
     }
 
+    /// Count the parameters this model actually holds.
+    ///
+    /// Summed from the live layers rather than re-derived from the config: the
+    /// previous formula estimated the MLA block from a projection decomposition
+    /// this model no longer uses and charged every layer a dense MLP even when
+    /// it was a MoE layer, so the number disagreed with the model in front of it.
     fn num_parameters(&self) -> usize {
-        let hs = self.config.hidden_size;
-        let vs = self.config.vocab_size;
-        let nl = self.config.num_hidden_layers;
-        let nh = self.config.num_attention_heads;
-        let kv_r = self.config.kv_lora_rank;
-        let q_r = self.config.q_lora_rank.max(1);
-        let rope_d = self.config.qk_rope_head_dim;
-        let nope_d = self.config.qk_nope_head_dim;
-        let v_d = self.config.v_head_dim;
-        let is = self.config.intermediate_size;
-
-        let embed = vs * hs;
-        // MLA weights per layer
-        let mla = hs * kv_r
-            + kv_r * rope_d
-            + kv_r * nh * nope_d
-            + kv_r * nh * v_d
-            + hs * q_r
-            + q_r * nh * (rope_d + nope_d)
-            + nh * v_d * hs;
-        // Norms per layer (2 × hidden_size)
-        let norms = 2 * hs;
-        // Dense MLP (rough estimate for all layers)
-        let dense_mlp = 3 * hs * is;
-        // Final norm
-        let final_norm = hs;
-
-        embed + nl * (mla + norms + dense_mlp) + final_norm
+        self.embed_tokens.parameter_count()
+            + self.layers.iter().map(DeepSeekV2DecoderLayer::parameter_count).sum::<usize>()
+            + self.norm.parameter_count()
     }
 }
 
@@ -1161,24 +928,21 @@ mod tests {
         assert!(model.num_parameters() > 0, "model must have parameters");
     }
 
-    /// Regression: `load_pretrained` read the stream, checked only that it was
-    /// non-empty and returned `Ok(())` without binding anything — so *any*
+    /// Regression: `load_pretrained` used to read the stream, check only that it
+    /// was non-empty and return `Ok(())` without binding anything — so *any*
     /// non-empty byte sequence reported a successful load while the model kept
-    /// its constructor initialisation.
+    /// its constructor initialisation. A later revision refused outright. Now a
+    /// real binder runs, so a buffer that is not a checkpoint at all must fail
+    /// on the container, and no parameter may move.
     #[test]
-    fn load_pretrained_refuses_instead_of_reporting_a_load_that_did_not_happen() {
+    fn load_pretrained_rejects_a_buffer_that_is_not_a_checkpoint() {
         let mut model = DeepSeekV2Model::new(tiny_config()).expect("model must build");
         let before = model.embed_tokens.weight().data().expect("readable");
 
         let plausible_weights = vec![0x11u8; 4096];
-        let err = model
+        model
             .load_pretrained(&mut plausible_weights.as_slice())
-            .expect_err("a non-empty buffer must not be reported as a successful load");
-        let message = err.to_string();
-        assert!(
-            message.contains("kv_a_layernorm") || message.contains("q_a_layernorm"),
-            "the error must say which weights have no home: {message}"
-        );
+            .expect_err("a buffer that is not a checkpoint must not be reported as a load");
         assert_eq!(
             model.embed_tokens.weight().data().expect("readable"),
             before,
@@ -1186,8 +950,8 @@ mod tests {
         );
     }
 
-    /// The stream is still drained, so a caller that reuses the reader sees a
-    /// defined state rather than a partially consumed one.
+    /// The stream is consumed, so a caller that reuses the reader sees a defined
+    /// state rather than a partially consumed one.
     #[test]
     fn load_pretrained_drains_the_reader_before_refusing() {
         let mut model = DeepSeekV2Model::new(tiny_config()).expect("model must build");

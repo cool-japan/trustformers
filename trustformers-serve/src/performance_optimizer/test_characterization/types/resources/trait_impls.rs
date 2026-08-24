@@ -297,41 +297,42 @@ impl Default for ResourceDependencyGraph {
     }
 }
 
-impl Default for ResourceInsightEngine {
-    fn default() -> Self {
-        Self::new()
+impl InsightEngine for ResourceInsightEngine {
+    fn describe(&self) -> String {
+        "Resource insight engine: summarises memory and I/O metrics over the supplied window; \
+         holds no accumulated state"
+            .to_string()
+    }
+    fn generate_test_insights(
+        &self,
+        test_id: &str,
+        observations: super::super::analysis::InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>> {
+        Ok(resource_findings(observations)
+            .into_iter()
+            .map(|insight| format!("test `{}`: {}", test_id, insight))
+            .collect())
+    }
+    fn generate_insights(
+        &self,
+        observations: super::super::analysis::InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>> {
+        Ok(resource_findings(observations))
     }
 }
 
-impl InsightEngine for ResourceInsightEngine {
-    fn generate(&self) -> String {
-        format!(
-            "Resource Insight Engine (patterns_detected={}, confidence={:.2})",
-            self.patterns_detected, self.confidence
-        )
-    }
-    fn generate_test_insights(&self, test_id: &str) -> TestCharacterizationResult<Vec<String>> {
-        Ok(vec![
+/// Summaries of the memory and I/O metrics in the window.
+fn resource_findings(observations: super::super::analysis::InsightObservations<'_>) -> Vec<String> {
+    observations
+        .summaries_matching(&["memory", "disk", "io_", "_io", "network"])
+        .into_iter()
+        .map(|summary| {
             format!(
-                "Test '{}' resource analysis: {} patterns detected with confidence {:.2}",
-                test_id, self.patterns_detected, self.confidence
-            ),
-            format!(
-                "Resource usage patterns suggest {} optimization potential",
-                if self.confidence > 0.7 { "high" } else { "moderate" }
-            ),
-        ])
-    }
-    fn generate_insights(&self) -> TestCharacterizationResult<Vec<String>> {
-        Ok(vec![
-            format!(
-                "Total resource patterns detected: {}",
-                self.patterns_detected
-            ),
-            format!("Pattern detection confidence: {:.2}", self.confidence),
-            "Resource analysis engine active".to_string(),
-        ])
-    }
+                "`{}` over {} samples: mean {:.4}, min {:.4}, max {:.4}, latest {:.4}",
+                summary.key, summary.count, summary.mean, summary.min, summary.max, summary.last
+            )
+        })
+        .collect()
 }
 
 impl Default for ResourceIntensity {

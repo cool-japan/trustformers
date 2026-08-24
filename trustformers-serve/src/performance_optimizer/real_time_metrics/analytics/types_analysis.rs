@@ -4,7 +4,10 @@
 //! seasonal patterns, capacity planning, and metric correlations.
 
 use super::super::types::*;
-use super::functions::*;
+use super::analyzers::{
+    AnomalyDetector, CorrelationAnalyzer, DistributionAnalyzer, ForecastingEngine, PatternAnalyzer,
+    PerformanceAnalyzer, QualityAnalyzer, TrendAnalyzer,
+};
 use super::types::*;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -24,8 +27,11 @@ pub struct AnomalyAnalysisResult {
     pub score_distribution: DistributionAnalysisResult,
     /// Anomaly patterns
     pub patterns: Vec<AnomalyPattern>,
-    /// Baseline model performance
-    pub baseline_performance: BaselineModelPerformance,
+    /// Baseline model quality, when labelled anomalies exist to score against.
+    ///
+    /// Always `None` on this build: detection is unsupervised, so there is no
+    /// ground truth from which precision, recall or AUC could be computed.
+    pub baseline_performance: Option<BaselineModelPerformance>,
     /// Overall anomaly rate
     pub anomaly_rate: f64,
     /// Detection confidence
@@ -266,12 +272,16 @@ pub struct ForecastPoint {
 /// Normality assessment
 #[derive(Debug, Clone)]
 pub struct NormalityAssessment {
-    /// Shapiro-Wilk test
-    pub shapiro_wilk: NormalityTestResult,
-    /// Jarque-Bera test
-    pub jarque_bera: NormalityTestResult,
-    /// D'Agostino test
-    pub dagostino: NormalityTestResult,
+    /// Shapiro-Wilk test, when its coefficient table is available.
+    ///
+    /// Always `None`: the Royston coefficients this test needs are not carried
+    /// by this crate, and a substitute statistic would not be Shapiro-Wilk.
+    pub shapiro_wilk: Option<NormalityTestResult>,
+    /// Jarque-Bera test; `None` when the sample is smaller than eight.
+    pub jarque_bera: Option<NormalityTestResult>,
+    /// D'Agostino-Pearson omnibus test; `None` below twenty samples, where the
+    /// skewness and kurtosis transformations are not usable.
+    pub dagostino: Option<NormalityTestResult>,
     /// Overall normality conclusion
     pub is_normal: bool,
     /// Confidence in normality assessment
@@ -417,9 +427,13 @@ impl AnalyticsEngine {
             distribution_analyzer: Arc::new(DistributionAnalyzer::new().await?),
             correlation_analyzer: Arc::new(CorrelationAnalyzer::new().await?),
             forecasting_engine: Arc::new(ForecastingEngine::new().await?),
-            quality_analyzer: Arc::new(QualityAnalyzer::new().await?),
+            quality_analyzer: Arc::new(
+                QualityAnalyzer::new(config.quality_thresholds.clone()).await?,
+            ),
             pattern_analyzer: Arc::new(PatternAnalyzer::new().await?),
-            performance_analyzer: Arc::new(PerformanceAnalyzer::new().await?),
+            performance_analyzer: Arc::new(
+                PerformanceAnalyzer::new(config.performance_thresholds.clone()).await?,
+            ),
             stats: Arc::new(AnalyticsStats::default()),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
@@ -461,19 +475,23 @@ impl AnalyticsEngine {
             self.pattern_analyzer.analyze(data),
             self.performance_analyzer.analyze(data),
         )?;
-        let confidence = self
-            .calculate_overall_confidence(&[
-                statistical_result.basic_stats.count as f64 / 1000.0,
-                trend_result.trend_significance,
-                anomaly_result.detection_confidence,
-                distribution_result.best_fit.as_ref().map_or(0.5, |f| f.fit_score),
-                correlation_result.correlation_matrix.determinant.abs(),
-                forecasting_result.confidence,
-                quality_result.confidence,
-                pattern_result.confidence,
-                performance_result.metrics_analysis.throughput.capacity_utilization,
-            ])
-            .min(1.0);
+        // Only components that actually produced a confidence figure enter the
+        // geometric mean; a fit that could not be made contributes nothing
+        // rather than a substituted 0.5.
+        let mut component_confidences = vec![
+            trend_result.trend_significance,
+            anomaly_result.detection_confidence,
+            forecasting_result.confidence,
+            quality_result.confidence,
+            pattern_result.confidence,
+        ];
+        if let Some(fit) = distribution_result.best_fit.as_ref() {
+            component_confidences.push(fit.fit_score);
+        }
+        component_confidences.push(correlation_result.correlation_matrix.determinant.abs());
+        component_confidences
+            .push(performance_result.metrics_analysis.throughput.capacity_utilization);
+        let confidence = self.calculate_overall_confidence(&component_confidences).min(1.0);
         let result = AnalyticsResult {
             timestamp: Utc::now(),
             statistical_analysis: statistical_result,
@@ -707,34 +725,6 @@ pub struct TrendComponent {
     /// Trend confidence
     pub confidence: f64,
 }
-/// Trend analyzer placeholder
-#[derive(Clone)]
-pub struct TrendAnalyzer {
-    shutdown: Arc<AtomicBool>,
-}
-impl TrendAnalyzer {
-    pub async fn new() -> Result<Self> {
-        Ok(Self {
-            shutdown: Arc::new(AtomicBool::new(false)),
-        })
-    }
-    pub async fn analyze(&self, _data: &[TimestampedMetrics]) -> Result<TrendAnalysisResult> {
-        Ok(TrendAnalysisResult {
-            trends: Vec::new(),
-            overall_trend: TrendDirection::Stable,
-            trend_strength: 0.5,
-            trend_significance: 0.8,
-            seasonal_components: Vec::new(),
-            cyclical_patterns: Vec::new(),
-            change_points: Vec::new(),
-            forecasts: Vec::new(),
-        })
-    }
-    pub async fn shutdown(&self) -> Result<()> {
-        self.shutdown.store(true, Ordering::Relaxed);
-        Ok(())
-    }
-}
 /// Outlier detection methods
 #[derive(Debug, Clone)]
 pub enum OutlierDetectionMethod {
@@ -838,8 +828,11 @@ pub struct AnalyticsStats {
 pub struct QualityDimensions {
     /// Completeness score
     pub completeness: f64,
-    /// Accuracy score
-    pub accuracy: f64,
+    /// Accuracy score, when a reference measurement exists to compare against.
+    ///
+    /// Always `None` on this build: nothing independent measures the same
+    /// quantities, so accuracy is not observable from the window.
+    pub accuracy: Option<f64>,
     /// Consistency score
     pub consistency: f64,
     /// Timeliness score
@@ -848,8 +841,11 @@ pub struct QualityDimensions {
     pub validity: f64,
     /// Uniqueness score
     pub uniqueness: f64,
-    /// Integrity score
-    pub integrity: f64,
+    /// Integrity score, when referential constraints are declared.
+    ///
+    /// Always `None` on this build: a metrics window declares no cross-record
+    /// constraints to check.
+    pub integrity: Option<f64>,
 }
 /// Quality analysis result
 #[derive(Debug, Clone)]

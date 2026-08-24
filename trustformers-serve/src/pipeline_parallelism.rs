@@ -1,5 +1,4 @@
 // Allow dead code for infrastructure under development
-#![allow(dead_code)]
 
 //! Pipeline Parallelism for TrustformeRS Inference Server
 //!

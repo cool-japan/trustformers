@@ -695,18 +695,20 @@ impl Gpt2Attention {
 
             // Split QKV on GPU: [batch, seq, 3*hidden] → 3x [batch, seq, hidden]
             let (q_id, k_new_id, v_new_id) =
-                backend.split_qkv_gpu(&qkv_data.buffer_id, batch_size, seq_len, hidden_size)?;
+                backend.split_qkv_gpu(&qkv_data.buffer_id(), batch_size, seq_len, hidden_size)?;
 
-            // Get cached K/V buffer IDs and sequence length (if cache exists)
+            // Get cached K/V buffer IDs and sequence length (if cache exists).
+            // Owned `BufferId`s (not references): they must outlive this
+            // statement to reach `concat_kv_cache` below, and `BufferId` is
+            // `Copy`, so there is no reason to borrow from the cache tensors.
             let (cached_k_id, cached_v_id, cached_seq_len) = if let Some(cache) = &layer_cache {
                 match (&cache.key, &cache.value) {
                     (Some(Tensor::Metal(k_metal)), Some(Tensor::Metal(v_metal))) => {
                         let cached_shape = &k_metal.shape; // [batch, num_heads, cached_seq, head_dim]
                         let cached_seq = cached_shape[2];
-                        #[cfg(debug_assertions)]
                         (
-                            Some(&k_metal.buffer_id),
-                            Some(&v_metal.buffer_id),
+                            Some(k_metal.buffer_id()),
+                            Some(v_metal.buffer_id()),
                             cached_seq,
                         )
                     },
@@ -729,7 +731,7 @@ impl Gpt2Attention {
 
             // Concatenate with cached K/V on GPU (stays on GPU!)
             let k_heads_id = backend.concat_kv_cache(
-                cached_k_id,
+                cached_k_id.as_ref(),
                 &k_new_heads_id,
                 batch_size,
                 self.n_head,
@@ -739,7 +741,7 @@ impl Gpt2Attention {
             )?;
 
             let v_heads_id = backend.concat_kv_cache(
-                cached_v_id,
+                cached_v_id.as_ref(),
                 &v_new_heads_id,
                 batch_size,
                 self.n_head,
@@ -773,26 +775,32 @@ impl Gpt2Attention {
                 self.d_head,
             )?;
 
-            // Update cache with full K/V (keep on GPU!)
+            // Update cache with full K/V (keep on GPU!). Each id is fresh out of
+            // `concat_kv_cache` above and has never been wrapped in a handle yet,
+            // so `::new` here is the required first (and only) wrap.
             if let Some(cache) = layer_cache {
-                cache.key = Some(Tensor::Metal(MetalTensorData {
-                    buffer_id: k_heads_id,
-                    shape: vec![batch_size, self.n_head, total_seq_len, self.d_head],
-                    dtype: qkv_data.dtype,
-                }));
-                cache.value = Some(Tensor::Metal(MetalTensorData {
-                    buffer_id: v_heads_id,
-                    shape: vec![batch_size, self.n_head, total_seq_len, self.d_head],
-                    dtype: qkv_data.dtype,
-                }));
+                cache.key = Some(Tensor::Metal(MetalTensorData::new(
+                    &backend,
+                    k_heads_id,
+                    vec![batch_size, self.n_head, total_seq_len, self.d_head],
+                    qkv_data.dtype,
+                )?));
+                cache.value = Some(Tensor::Metal(MetalTensorData::new(
+                    &backend,
+                    v_heads_id,
+                    vec![batch_size, self.n_head, total_seq_len, self.d_head],
+                    qkv_data.dtype,
+                )?));
             }
 
-            // Wrap in Metal tensor and apply output projection
-            let attn_output = Tensor::Metal(MetalTensorData {
-                buffer_id: attn_output_id,
-                shape: vec![batch_size, seq_len, hidden_size],
-                dtype: qkv_data.dtype,
-            });
+            // Wrap in Metal tensor and apply output projection. `attn_output_id` is
+            // likewise fresh out of `reshape_from_heads_gpu` above.
+            let attn_output = Tensor::Metal(MetalTensorData::new(
+                &backend,
+                attn_output_id,
+                vec![batch_size, seq_len, hidden_size],
+                qkv_data.dtype,
+            )?);
 
             // Apply output projection (stays on GPU)
             let output = self.c_proj.forward(attn_output)?;
@@ -800,14 +808,15 @@ impl Gpt2Attention {
             // Remove batch dimension if it was added
             return if was_2d {
                 match output {
-                    Tensor::Metal(metal_data) if metal_data.shape[0] == 1 => {
-                        // Reshape [1, seq, hidden] → [seq, hidden]
-                        let new_shape = vec![metal_data.shape[1], metal_data.shape[2]];
-                        Ok(Tensor::Metal(MetalTensorData {
-                            buffer_id: metal_data.buffer_id,
-                            shape: new_shape,
-                            dtype: metal_data.dtype,
-                        }))
+                    Tensor::Metal(mut metal_data) if metal_data.shape[0] == 1 => {
+                        // Reshape [1, seq, hidden] → [seq, hidden]: same buffer, new
+                        // shape. Move the handle `output` already owns instead of
+                        // minting a second one for an id it already wraps —
+                        // `MetalTensorData::new`'s contract is that each raw id is
+                        // wrapped at most once and all further sharing goes through
+                        // `clone()`, which this is not (it's a single-owner reshape).
+                        metal_data.shape = vec![metal_data.shape[1], metal_data.shape[2]];
+                        Ok(Tensor::Metal(metal_data))
                     },
                     _ => Ok(output),
                 }
@@ -858,8 +867,12 @@ impl Gpt2Attention {
                 let backend = get_metal_backend()?;
 
                 // Split QKV on GPU then download
-                let (q_id, k_id, v_id) =
-                    backend.split_qkv_gpu(&qkv_data.buffer_id, batch_size, seq_len, hidden_size)?;
+                let (q_id, k_id, v_id) = backend.split_qkv_gpu(
+                    &qkv_data.buffer_id(),
+                    batch_size,
+                    seq_len,
+                    hidden_size,
+                )?;
 
                 let q_data = backend.download_buffer_to_vec(&q_id)?;
                 let k_data = backend.download_buffer_to_vec(&k_id)?;

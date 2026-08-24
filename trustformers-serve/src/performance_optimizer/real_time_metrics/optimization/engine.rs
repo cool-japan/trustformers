@@ -167,15 +167,20 @@ impl LiveOptimizationEngine {
 
         let algorithms = self.algorithms.lock();
         let mut all_recommendations = Vec::new();
+        // Outcomes are recorded after the lock is dropped so the selector's own
+        // lock is never taken while this one is held.
+        let mut runs: Vec<(String, bool)> = Vec::new();
 
         // Generate recommendations using selected algorithms
         for algorithm in algorithms.iter() {
             if selected_algorithms.contains(&algorithm.name().to_string()) {
                 match algorithm.optimize(metrics, history, context) {
                     Ok(mut recommendations) => {
+                        runs.push((algorithm.name().to_string(), !recommendations.is_empty()));
                         all_recommendations.append(&mut recommendations);
                     },
                     Err(e) => {
+                        runs.push((algorithm.name().to_string(), false));
                         error!("Optimization algorithm '{}' error: {}", algorithm.name(), e);
                     },
                 }
@@ -183,6 +188,11 @@ impl LiveOptimizationEngine {
         }
 
         drop(algorithms);
+
+        // Feed the selector the observations its ranking depends on.
+        for (name, produced) in runs {
+            self.strategy_selector.record_algorithm_run(&name, produced);
+        }
 
         // Score recommendations for confidence
         let scored_recommendations = self.score_recommendations(&all_recommendations).await?;

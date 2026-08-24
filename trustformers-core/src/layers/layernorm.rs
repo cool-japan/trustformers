@@ -482,20 +482,33 @@ impl Layer for LayerNorm {
                                     (Tensor::Metal(w_data), Tensor::Metal(b_data)) => {
                                         use crate::tensor::MetalTensorData;
 
-                                        // Upload input to GPU
+                                        // Upload input to GPU. This buffer is
+                                        // upload-only scratch: nothing else ever
+                                        // references it, so it must be released once
+                                        // `layernorm_gpu_to_gpu` has consumed it below
+                                        // or it leaks as an unreleased `Pinned` cache
+                                        // entry for the rest of the process.
                                         let input_vec: Vec<f32> = arr.iter().copied().collect();
                                         let input_buffer_id =
                                             backend.create_persistent_buffer(&input_vec)?;
 
-                                        // Execute GPU-to-GPU
-                                        let output_buffer_id = backend.layernorm_gpu_to_gpu(
+                                        // Execute GPU-to-GPU. Capture the result rather
+                                        // than propagating with `?` immediately: the
+                                        // upload above must be released regardless of
+                                        // whether this call succeeds or fails, mirroring
+                                        // how `attention_gpu_to_gpu` /
+                                        // `attention_with_cache_gpu_to_gpu` release their
+                                        // own scratch "regardless of where it failed".
+                                        let layernorm_result = backend.layernorm_gpu_to_gpu(
                                             &input_buffer_id,
                                             &w_data.buffer_id(),
                                             &b_data.buffer_id(),
                                             seq_len,
                                             hidden_size,
                                             self.eps,
-                                        )?;
+                                        );
+                                        backend.release_buffers(&[input_buffer_id])?;
+                                        let output_buffer_id = layernorm_result?;
 
                                         // Return Metal tensor
                                         return Ok(Tensor::Metal(MetalTensorData::new(
@@ -1188,6 +1201,56 @@ mod tests {
         for val in &data {
             assert!((val - 1.0).abs() < 0.1);
         }
+        Ok(())
+    }
+
+    /// Regression: the CPU-input / GPU-weight `LayerNorm::forward` fallback used to
+    /// upload the input as a `Pinned` buffer via `create_persistent_buffer` and never
+    /// release it, leaking one Metal cache entry per call.
+    ///
+    /// `layernorm_gpu_to_gpu` allocates exactly one new (`Live`-tier) output buffer,
+    /// and that output's own `MetalBufferHandle` releases its cache entry the moment
+    /// the returned tensor drops. So once the upload is *also* released, a single
+    /// `forward()` call must leave the cache exactly where it started: any residual
+    /// growth means something leaked.
+    ///
+    /// Relies on nextest's process-per-test isolation for the global Metal buffer
+    /// cache singleton (`get_metal_backend()` clones handles to one process-wide
+    /// `Arc<Mutex<BufferCache>>`); under a threaded single-process runner other
+    /// concurrent Metal tests could shift the count for unrelated reasons.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn test_layernorm_forward_cpu_input_gpu_weight_releases_upload() -> Result<()> {
+        use crate::gpu_ops::metal::get_metal_backend;
+
+        let backend = match get_metal_backend() {
+            Ok(backend) => backend,
+            Err(_) => {
+                eprintln!("no Metal device; skipping");
+                return Ok(());
+            },
+        };
+
+        let mut ln = LayerNorm::new(vec![4], 1e-5)?;
+        ln.weights_to_gpu(&Device::Metal(0))?;
+
+        let entries_before = backend.buffer_cache_stats()?.entries;
+
+        {
+            let input = Tensor::from_data(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4])?;
+            let output = ln.forward(input)?;
+            assert!(matches!(output, Tensor::Metal(_)));
+            // `output`'s `MetalBufferHandle` drops here, releasing the output
+            // buffer's own cache entry before the assertion below runs.
+        }
+
+        let entries_after = backend.buffer_cache_stats()?.entries;
+        assert_eq!(
+            entries_after, entries_before,
+            "LayerNorm::forward leaked its uploaded input buffer (pre-fix this was \
+             entries_before + 1: the input upload was never released)"
+        );
+
         Ok(())
     }
 }

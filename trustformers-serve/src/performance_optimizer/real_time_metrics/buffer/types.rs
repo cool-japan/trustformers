@@ -72,7 +72,11 @@ pub struct BufferStatistics {
     pub reallocations: AtomicU64,
     /// Number of failed operations
     pub failed_operations: AtomicU64,
-    /// Number of compression operations
+    /// Number of compression operations performed.
+    ///
+    /// Always zero: `CircularBuffer` has no compression backend, and
+    /// `OverflowStrategy::Compress` refuses rather than counting a compression
+    /// it did not perform.
     pub compression_ops: AtomicU64,
     /// Total compressed size in bytes
     pub compressed_size: AtomicU64,
@@ -717,22 +721,48 @@ impl<T> CircularBuffer<T> {
         self.overflow_strategy = strategy;
     }
     /// Grow buffer capacity dynamically
+    /// Double the capacity, carrying the existing items over in logical order.
+    ///
+    /// Before 0.2.1 this allocated the larger buffer, ran `for _item in
+    /// self.iter() {}` -- iterating the old contents and discarding every one of
+    /// them -- and then installed the empty buffer, silently losing the whole
+    /// window while reporting success.
     fn grow_capacity(&mut self) -> Result<()>
     where
         T: Clone,
     {
         let new_capacity = self.capacity * 2;
-        let new_buffer = vec![None; new_capacity];
-        for _item in self.iter() {}
+        let size = self.size.load(Ordering::Relaxed);
+        let mut new_buffer: Vec<Option<T>> = vec![None; new_capacity];
+        // `get(i)` addresses items oldest-first, so the copy re-bases the ring
+        // at index zero and the write position becomes the item count.
+        for index in 0..size {
+            let Some(item) = self.get(index).cloned() else {
+                continue;
+            };
+            if let Some(slot) = new_buffer.get_mut(index) {
+                *slot = Some(item);
+            }
+        }
         self.buffer = new_buffer;
         self.capacity = new_capacity;
+        self.write_pos.store(size % new_capacity, Ordering::Relaxed);
         self.stats.reallocations.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
-    /// Compress old data to make space (placeholder for compression logic)
+    /// Make space by compressing the oldest entries.
+    ///
+    /// Not available: `CircularBuffer` has no compression backend wired in and
+    /// the items it holds are opaque `T`. Before 0.2.1 this returned `Ok(())`
+    /// after bumping `stats.compression_ops`, so `OverflowStrategy::Compress`
+    /// reported a compression that never happened and then overwrote the oldest
+    /// entry anyway. It refuses instead, and `compression_ops` stays at the zero
+    /// that has always been the truth.
     fn compress_old_data(&mut self) -> Result<()> {
-        self.stats.compression_ops.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        Err(anyhow::anyhow!(
+            "OverflowStrategy::Compress is unsupported by CircularBuffer '{}': no compression backend is wired in; use Grow, Overwrite, DropNew or Error",
+            self.id
+        ))
     }
     /// Update insertion time statistics
     fn update_insertion_time(&self, duration: Duration) {

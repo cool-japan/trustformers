@@ -648,14 +648,11 @@ impl Default for PredictiveAnalysisAlgorithm {
 
 impl PredictiveAnalysisAlgorithm {
     pub fn new() -> Self {
-        let mut coefficients = HashMap::new();
-
-        // Simple linear model coefficients (would be trained in a real implementation)
-        coefficients.insert("cpu_trend".to_string(), 0.7);
-        coefficients.insert("memory_trend".to_string(), 0.8);
-        coefficients.insert("throughput_trend".to_string(), 0.6);
-        coefficients.insert("latency_trend".to_string(), 0.9);
-
+        // Removed in 0.2.1: this constructor used to build a `coefficients` map
+        // of four invented "trained" weights (0.7/0.8/0.6/0.9) and then drop it
+        // on the floor -- `PredictiveAnalysisAlgorithm` has no fields, so the
+        // map could never reach the prediction path. Prediction is done by
+        // `calculate_trend` over the observed history instead.
         Self {}
     }
 

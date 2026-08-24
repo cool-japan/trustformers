@@ -73,9 +73,13 @@ pub struct GoodnessOfFitStatistics {
     /// Kolmogorov-Smirnov test
     pub ks_statistic: f64,
     pub ks_p_value: f64,
-    /// Anderson-Darling test
+    /// Anderson-Darling test statistic.
     pub ad_statistic: f64,
-    pub ad_p_value: f64,
+    /// Anderson-Darling p-value, when a critical-value table is available.
+    ///
+    /// Always `None`: the null distribution depends on the fitted family and
+    /// on the sample size, and no table is linked in this crate.
+    pub ad_p_value: Option<f64>,
     /// Chi-square test
     pub chi_square_statistic: f64,
     pub chi_square_p_value: f64,
@@ -89,6 +93,8 @@ pub struct GoodnessOfFitStatistics {
 /// Distribution analysis result
 #[derive(Debug, Clone)]
 pub struct DistributionAnalysisResult {
+    /// Name of the metric series this result characterises.
+    pub series: String,
     /// Distribution fit results
     pub distribution_fits: Vec<DistributionFit>,
     /// Best fitting distribution
@@ -180,98 +186,6 @@ pub struct StatisticalAnalyzerStats {
     /// Processing errors
     pub processing_errors: AtomicU64,
 }
-/// Anomaly detector placeholder
-#[derive(Clone)]
-pub struct AnomalyDetector {
-    shutdown: Arc<AtomicBool>,
-}
-impl AnomalyDetector {
-    pub async fn new() -> Result<Self> {
-        Ok(Self {
-            shutdown: Arc::new(AtomicBool::new(false)),
-        })
-    }
-    pub async fn analyze(&self, _data: &[TimestampedMetrics]) -> Result<AnomalyAnalysisResult> {
-        Ok(AnomalyAnalysisResult {
-            anomalies: Vec::new(),
-            score_distribution: DistributionAnalysisResult {
-                distribution_fits: Vec::new(),
-                best_fit: None,
-                normality_assessment: NormalityAssessment {
-                    shapiro_wilk: NormalityTestResult {
-                        statistic: 0.95,
-                        p_value: 0.1,
-                        is_normal: true,
-                        significance_level: 0.05,
-                    },
-                    jarque_bera: NormalityTestResult {
-                        statistic: 2.0,
-                        p_value: 0.2,
-                        is_normal: true,
-                        significance_level: 0.05,
-                    },
-                    dagostino: NormalityTestResult {
-                        statistic: 1.5,
-                        p_value: 0.15,
-                        is_normal: true,
-                        significance_level: 0.05,
-                    },
-                    is_normal: true,
-                    confidence: 0.9,
-                },
-                characteristics: DistributionCharacteristics {
-                    distribution_type: "normal".to_string(),
-                    parameters: HashMap::new(),
-                    goodness_of_fit: 0.9,
-                    normality_tests: HashMap::new(),
-                    histogram: HistogramData {
-                        bin_edges: Vec::new(),
-                        bin_counts: Vec::new(),
-                        bin_centers: Vec::new(),
-                        frequencies: Vec::new(),
-                        cumulative_frequencies: Vec::new(),
-                    },
-                    symmetry: 0.9,
-                    peakedness: 0.5,
-                },
-                histogram_analysis: HistogramAnalysis {
-                    optimal_bins: 10,
-                    histogram: HistogramData {
-                        bin_edges: Vec::new(),
-                        bin_counts: Vec::new(),
-                        bin_centers: Vec::new(),
-                        frequencies: Vec::new(),
-                        cumulative_frequencies: Vec::new(),
-                    },
-                    peaks: Vec::new(),
-                    shape_assessment: ShapeAssessment {
-                        is_unimodal: true,
-                        is_symmetric: true,
-                        has_heavy_tails: false,
-                        shape_description: "Normal-like".to_string(),
-                    },
-                },
-                comparison_results: Vec::new(),
-            },
-            patterns: Vec::new(),
-            baseline_performance: BaselineModelPerformance {
-                accuracy: 0.95,
-                precision: 0.9,
-                recall: 0.85,
-                f1_score: 0.87,
-                false_positive_rate: 0.05,
-                false_negative_rate: 0.15,
-                auc_roc: 0.92,
-            },
-            anomaly_rate: 0.02,
-            detection_confidence: 0.9,
-        })
-    }
-    pub async fn shutdown(&self) -> Result<()> {
-        self.shutdown.store(true, Ordering::Relaxed);
-        Ok(())
-    }
-}
 /// Comprehensive statistical analysis result
 #[derive(Debug, Clone)]
 pub struct StatisticalAnalysisResult {
@@ -345,8 +259,12 @@ pub struct PerformanceMetricsAnalysis {
     pub resource_utilization: ResourceUtilizationAnalysis,
     /// Error rate analysis
     pub error_rate: ErrorRateAnalysis,
-    /// Availability analysis
-    pub availability: AvailabilityAnalysis,
+    /// Availability analysis, when uptime and incident records are available.
+    ///
+    /// Always `None` on this build: a metrics window carries neither downtime
+    /// incidents nor an availability target, so MTTR/MTBF and an availability
+    /// percentage cannot be derived from it.
+    pub availability: Option<AvailabilityAnalysis>,
 }
 /// Descriptive statistics with percentiles
 #[derive(Debug, Clone)]
@@ -510,10 +428,15 @@ pub struct EfficiencyComponents {
     pub resource_efficiency: f64,
     /// Computational efficiency
     pub computational_efficiency: f64,
-    /// Energy efficiency
-    pub energy_efficiency: f64,
-    /// Cost efficiency
-    pub cost_efficiency: f64,
+    /// Energy efficiency, when power telemetry is available.
+    ///
+    /// Always `None` on this build: no metric series carries power draw, and a
+    /// substituted score would be indistinguishable from a measured one.
+    pub energy_efficiency: Option<f64>,
+    /// Cost efficiency, when cost telemetry is available.
+    ///
+    /// Always `None` on this build: no metric series carries cost.
+    pub cost_efficiency: Option<f64>,
     /// Time efficiency
     pub time_efficiency: f64,
 }
@@ -666,8 +589,11 @@ pub struct QualityRecommendation {
     pub expected_improvement: f64,
     /// Implementation effort
     pub implementation_effort: String,
-    /// Cost-benefit ratio
-    pub cost_benefit_ratio: f64,
+    /// Cost-benefit ratio, when the cost side can be priced.
+    ///
+    /// Always `None` on this build: the analyzer measures data quality and has
+    /// no view of what a remediation would cost.
+    pub cost_benefit_ratio: Option<f64>,
 }
 /// Distribution fit result
 #[derive(Debug, Clone)]
@@ -736,8 +662,11 @@ pub struct LatencyAnalysis {
     pub distribution: LatencyDistribution,
     /// Latency trends
     pub trends: Vec<LatencyTrend>,
-    /// SLA compliance
-    pub sla_compliance: SlaCompliance,
+    /// SLA compliance, when a latency target is configured.
+    ///
+    /// Always `None` on this build: `PerformanceThresholds` carries no latency
+    /// SLA, so there is no target to measure compliance against.
+    pub sla_compliance: Option<SlaCompliance>,
 }
 /// Correlation strength
 #[derive(Debug, Clone)]

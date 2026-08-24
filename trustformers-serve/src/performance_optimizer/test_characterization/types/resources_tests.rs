@@ -347,13 +347,42 @@ fn test_memory_latency_tester() {
 }
 
 #[test]
-fn test_resource_insight_engine() {
-    let engine = ResourceInsightEngine {
-        patterns_detected: 42,
-        confidence: 0.95,
+fn test_resource_insight_engine_reports_only_observed_memory_and_io_metrics() {
+    use crate::performance_optimizer::test_characterization::types::analysis::{
+        InsightEngine, InsightObservations,
     };
-    assert_eq!(engine.patterns_detected, 42);
-    assert!(engine.confidence > 0.9);
+    use crate::performance_optimizer::test_characterization::types::core::RealTimeMetrics;
+
+    let engine = ResourceInsightEngine::new();
+
+    // An empty window supports no finding at all.
+    assert!(engine
+        .generate_insights(InsightObservations::new(&[]))
+        .expect("an empty window is a valid input")
+        .is_empty());
+
+    // A window carrying a memory series yields exactly one summary for it, and
+    // says nothing about the CPU series it also carries (that is the
+    // performance engine's remit).
+    let mut first = RealTimeMetrics::new();
+    first.metrics.insert("memory_utilization".to_string(), 0.25);
+    first.metrics.insert("cpu_utilization_percent".to_string(), 10.0);
+    let mut second = RealTimeMetrics::new();
+    second.metrics.insert("memory_utilization".to_string(), 0.75);
+    second.metrics.insert("cpu_utilization_percent".to_string(), 90.0);
+    let samples = vec![first, second];
+
+    let insights = engine
+        .generate_insights(InsightObservations::new(&samples))
+        .expect("a populated window is a valid input");
+    assert_eq!(insights.len(), 1, "one memory series, one finding");
+    let finding = insights.first().expect("just asserted one finding");
+    assert!(finding.contains("memory_utilization"), "{finding}");
+    assert!(
+        finding.contains("mean 0.5000"),
+        "mean of 0.25 and 0.75: {finding}"
+    );
+    assert!(!finding.contains("cpu_utilization_percent"), "{finding}");
 }
 
 #[test]

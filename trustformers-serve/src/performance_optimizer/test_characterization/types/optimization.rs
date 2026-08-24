@@ -461,11 +461,13 @@ pub struct OptimizationEvent {
     pub performance_improvement: f64,
 }
 
-#[derive(Debug, Clone)]
-pub struct OptimizationInsightEngine {
-    pub insights_generated: u64,
-    pub recommendations: Vec<String>,
-}
+/// Reports the headroom between each metric's mean and its observed peak.
+///
+/// Before 0.2.1 this carried `insights_generated` and `recommendations` fields
+/// that nothing ever wrote to, and reported an "Optimization potential" of
+/// high/moderate/low derived from the length of that permanently empty vector.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OptimizationInsightEngine;
 
 #[derive(Debug, Clone)]
 pub struct OptimizationObjective {
@@ -1431,69 +1433,56 @@ impl Default for AdaptiveThresholdManager {
 }
 
 impl OptimizationInsightEngine {
-    /// Create a new OptimizationInsightEngine with default settings
+    /// Create a new OptimizationInsightEngine.
     pub fn new() -> Self {
-        Self {
-            insights_generated: 0,
-            recommendations: Vec::new(),
-        }
+        Self
     }
-}
 
-impl Default for OptimizationInsightEngine {
-    fn default() -> Self {
-        Self::new()
+    /// Headroom findings: how far each metric's mean sits below its own peak.
+    fn headroom(&self, observations: super::analysis::InsightObservations<'_>) -> Vec<String> {
+        observations
+            .keys()
+            .into_iter()
+            .filter_map(|key| observations.summary(&key))
+            .filter(|summary| summary.max > 0.0 && summary.max > summary.min)
+            .map(|summary| {
+                let headroom = 1.0 - summary.mean / summary.max;
+                format!(
+                    "`{}` averaged {:.4} against an observed peak of {:.4} over {} samples                      ({:.1}% headroom to its own peak)",
+                    summary.key,
+                    summary.mean,
+                    summary.max,
+                    summary.count,
+                    headroom * 100.0
+                )
+            })
+            .collect()
     }
 }
 
 impl InsightEngine for OptimizationInsightEngine {
-    fn generate(&self) -> String {
-        format!(
-            "Optimization Insight Engine (insights_generated={}, recommendations={})",
-            self.insights_generated,
-            self.recommendations.len()
-        )
+    fn describe(&self) -> String {
+        "Optimization insight engine: reports mean-to-peak headroom per metric over the supplied          window; holds no accumulated state"
+            .to_string()
     }
 
-    fn generate_test_insights(&self, test_id: &str) -> TestCharacterizationResult<Vec<String>> {
-        // Placeholder implementation - in production, this would analyze test-specific optimization opportunities
-        Ok(vec![
-            format!(
-                "Test '{}' optimization analysis: {} insights generated with {} recommendations",
-                test_id,
-                self.insights_generated,
-                self.recommendations.len()
-            ),
-            format!(
-                "Optimization potential: {}",
-                if self.recommendations.len() > 5 {
-                    "high"
-                } else if self.recommendations.len() > 2 {
-                    "moderate"
-                } else {
-                    "low"
-                }
-            ),
-        ])
-    }
-
-    fn generate_insights(&self) -> TestCharacterizationResult<Vec<String>> {
-        // Placeholder implementation - in production, this would generate comprehensive optimization insights
-        let mut insights = vec![
-            format!(
-                "Total optimization insights generated: {}",
-                self.insights_generated
-            ),
-            format!("Active recommendations: {}", self.recommendations.len()),
-            "Optimization analysis engine active".to_string(),
-        ];
-
-        // Add top recommendations if available
-        if !self.recommendations.is_empty() {
-            insights.push(format!("Top recommendation: {}", self.recommendations[0]));
+    fn generate_test_insights(
+        &self,
+        test_id: &str,
+        observations: super::analysis::InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>> {
+        let mut insights = self.headroom(observations);
+        for insight in insights.iter_mut() {
+            *insight = format!("test `{}`: {}", test_id, insight);
         }
-
         Ok(insights)
+    }
+
+    fn generate_insights(
+        &self,
+        observations: super::analysis::InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>> {
+        Ok(self.headroom(observations))
     }
 }
 

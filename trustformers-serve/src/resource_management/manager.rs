@@ -14,7 +14,7 @@ use crate::parallel_execution_engine::ResourceRequirement;
 use crate::test_parallelization::ResourceAllocation;
 
 use super::custom_resources::CustomResourceManager;
-use super::database_management::DatabaseConnectionManager;
+use super::database_management::DatabaseSlotAllocator;
 use super::directory_management::TempDirectoryManager;
 use super::gpu_manager::types::GpuPoolConfig as GpuManagerPoolConfig;
 use super::gpu_manager::GpuResourceManager;
@@ -48,7 +48,7 @@ pub struct ResourceManagementSystem {
     gpu_manager: Arc<GpuResourceManager>,
 
     /// Database connection manager
-    database_manager: Arc<DatabaseConnectionManager>,
+    database_manager: Arc<DatabaseSlotAllocator>,
 
     /// Custom resource manager
     custom_resource_manager: Arc<CustomResourceManager>,
@@ -283,7 +283,7 @@ impl ResourceManagementSystem {
         );
 
         let database_manager = Arc::new(
-            DatabaseConnectionManager::new(config.resource_pools.database_pool.clone())
+            DatabaseSlotAllocator::new(config.resource_pools.database_pool.clone())
                 .await
                 .context("Failed to create database manager")?,
         );
@@ -359,9 +359,9 @@ impl ResourceManagementSystem {
 
         if requirements.database_connections > 0 {
             self.database_manager
-                .allocate_connections(requirements.database_connections, test_id)
+                .allocate_slots(requirements.database_connections, test_id)
                 .await
-                .context("Failed to allocate database connections")?;
+                .context("Failed to allocate database slots")?;
         }
 
         // Determine resource_type label from whichever sub-resource is primary.
@@ -378,8 +378,11 @@ impl ResourceManagementSystem {
             allocated_at: chrono::Utc::now(),
             deallocated_at: None,
             duration: std::time::Duration::from_secs(0),
-            utilization: 0.0,
-            efficiency: 0.0,
+            // Not observed: nothing here samples how much of the reserved
+            // capacity the test actually used. `0.0` would have claimed a
+            // measured zero.
+            utilization: None,
+            efficiency: None,
         };
 
         // Track allocation
@@ -521,7 +524,7 @@ impl ResourceManagementSystem {
 
     /// Deallocate database connections for test
     async fn deallocate_database_connections_for_test(&self, test_id: &str) -> Result<()> {
-        self.database_manager.deallocate_connections_for_test(test_id).await
+        self.database_manager.release_slots_for_test(test_id).await
     }
 
     /// Deallocate custom resources for test
@@ -662,8 +665,8 @@ impl ResourceManagementSystem {
         report.push_str("\n\n");
 
         // Database management report
-        report.push_str("Database Connection Management:\n");
-        report.push_str(&self.database_manager.generate_connection_report().await);
+        report.push_str("Database Slot Management:\n");
+        report.push_str(&self.database_manager.generate_slot_report().await);
         report.push_str("\n\n");
 
         // Custom resource management report

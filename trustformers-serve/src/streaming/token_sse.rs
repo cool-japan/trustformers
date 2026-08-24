@@ -1,5 +1,4 @@
 // Allow dead code for infrastructure under development
-#![allow(dead_code)]
 
 //! SSE (Server-Sent Events) streaming for real-time token generation
 //!

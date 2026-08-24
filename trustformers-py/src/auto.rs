@@ -1,6 +1,6 @@
 use crate::models::{
-    PyBertForSequenceClassification, PyBertModel, PyGPT2LMHeadModel, PyLlamaModel, PyMambaModel,
-    PyRwkvModel, PyT5Model,
+    PyBertForQuestionAnswering, PyBertForSequenceClassification, PyBertForTokenClassification,
+    PyBertModel, PyGPT2LMHeadModel, PyLlamaModel, PyMambaModel, PyRwkvModel, PyT5Model,
 };
 use crate::tokenizers::{PyBPETokenizer, PyWordPieceTokenizer};
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
@@ -173,6 +173,106 @@ fn infer_model_type(model_name: &str) -> String {
     }
 }
 
+/// Whether `model_type` (an [`infer_model_type`] result) is one of the
+/// architectures this crate's `Bert*` task wrappers cover.
+///
+/// `roberta`/`distilbert`/`deberta` are included because [`infer_model_type`]
+/// already collapses them to those names for `AutoModel`'s own routing, on
+/// the basis that this crate loads all four through `BertModel`/`BertConfig`
+/// -- there is no separate `RobertaModel`/`DistilBertModel` implementation to
+/// disagree with.
+fn is_bert_family(model_type: &str) -> bool {
+    matches!(model_type, "bert" | "roberta" | "distilbert" | "deberta")
+}
+
+#[cfg(test)]
+mod auto_model_for_task_tests {
+    use super::*;
+
+    #[test]
+    fn bert_family_checkpoints_are_accepted() {
+        for name in ["bert-base-uncased", "roberta-large", "distilbert-base", "deberta-v3-base"] {
+            assert!(
+                bert_family_gap_message(
+                    name,
+                    "AutoModelForTokenClassification",
+                    "BertForTokenClassification"
+                )
+                .is_none(),
+                "'{name}' should resolve to a BERT-family checkpoint"
+            );
+        }
+    }
+
+    /// The regression this whole helper exists for: before this fix,
+    /// `AutoModelForTokenClassification.from_pretrained("gpt2")` (or any
+    /// non-BERT checkpoint) silently returned a bare model with no
+    /// token-classification head at all, via `AutoModel::from_pretrained`.
+    /// It must now be a structured refusal instead.
+    #[test]
+    fn non_bert_checkpoints_are_refused_not_silently_mislabeled() {
+        for name in ["gpt2-medium", "t5-base", "meta-llama/Llama-2-7b", "mamba-130m", "RWKV-4-169m"] {
+            let message = bert_family_gap_message(
+                name,
+                "AutoModelForQuestionAnswering",
+                "BertForQuestionAnswering",
+            );
+            assert!(message.is_some(), "'{name}' must be refused, not silently mislabeled");
+        }
+    }
+
+    /// The refusal message must name both the checkpoint's inferred type and
+    /// the wrapper that cannot serve it, so a caller can see immediately why.
+    #[test]
+    fn the_refusal_names_the_inferred_type_and_the_missing_wrapper() {
+        let message = bert_family_gap_message(
+            "gpt2",
+            "AutoModelForTokenClassification",
+            "BertForTokenClassification",
+        )
+        .expect("gpt2 is not BERT-family");
+        assert!(message.contains("gpt2"), "message must name the inferred type: {message}");
+        assert!(
+            message.contains("BertForTokenClassification"),
+            "message must name the missing wrapper: {message}"
+        );
+    }
+
+    /// The `PyResult`-returning wrapper's control flow must match the pure
+    /// function's, at least structurally (`Ok`/`Err`, not the message text --
+    /// see `bert_family_gap_message`'s doc comment for why the text itself is
+    /// tested there instead).
+    #[test]
+    fn require_bert_family_checkpoint_ok_err_matches_the_pure_function() {
+        assert!(
+            require_bert_family_checkpoint(
+                "bert-base-uncased",
+                "AutoModelForSequenceClassification",
+                "BertForSequenceClassification"
+            )
+            .is_ok()
+        );
+        assert!(
+            require_bert_family_checkpoint(
+                "gpt2",
+                "AutoModelForSequenceClassification",
+                "BertForSequenceClassification"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn is_bert_family_covers_exactly_the_four_shared_architectures() {
+        for name in ["bert", "roberta", "distilbert", "deberta"] {
+            assert!(is_bert_family(name), "'{name}' must be BERT-family");
+        }
+        for name in ["gpt2", "t5", "llama", "rwkv", "mamba", "gpt-j", "mistral", ""] {
+            assert!(!is_bert_family(name), "'{name}' must not be BERT-family");
+        }
+    }
+}
+
 /// AutoTokenizer for automatic tokenizer selection
 #[pyclass(name = "AutoTokenizer", module = "trustformers")]
 pub struct PyAutoTokenizer;
@@ -246,6 +346,69 @@ fn infer_tokenizer_type(model_name: &str) -> String {
     }
 }
 
+/// Refuse `pretrained_model_name_or_path` unless [`infer_model_type`] resolves
+/// it to one of the BERT-family architectures the task-specific wrapper this
+/// factory constructs actually wraps.
+///
+/// `AutoModelForSequenceClassification`/`ForTokenClassification`/
+/// `ForQuestionAnswering` used to all delegate straight to
+/// `AutoModel::from_pretrained`, which returns a *bare* `BertModel` (or
+/// `GPT2Model`, `T5Model`, ...) with no task head at all. That meant
+/// `AutoModelForTokenClassification.from_pretrained("dslim/bert-base-NER")`
+/// handed back an object that looked like a token-classification model --
+/// same `PreTrainedModel`-shaped Python surface, loaded from the very same
+/// checkpoint -- but carried no classifier weights and could never produce
+/// per-token logits, however its `forward()` was called: the checkpoint's
+/// `classifier.{weight,bias}` tensors were silently dropped on the floor by
+/// the loader `AutoModel` actually uses (`BertModel`, encoder-only).
+///
+/// # Errors
+///
+/// Returns a structured `NotImplementedError` naming the inferred
+/// (unsupported) architecture, instead of silently handing back a checkpoint
+/// bound onto the wrong model.
+/// The pure message-construction half of [`require_bert_family_checkpoint`],
+/// returning `None` when `pretrained_model_name_or_path` is BERT-family (no
+/// gap to report) and `Some(message)` otherwise.
+///
+/// Split out from the `PyResult`-returning wrapper so it is unit-testable
+/// with a plain `cargo test`: constructing a `PyErr`'s `Display` output
+/// requires an initialized Python interpreter (this crate's `cargo test`
+/// binary does not embed one -- see `pipelines::scoring`'s module doc for the
+/// same reason its logic is kept free of the Python C API), but building the
+/// `String` this function returns does not.
+fn bert_family_gap_message(
+    pretrained_model_name_or_path: &str,
+    factory_name: &str,
+    wrapper_name: &str,
+) -> Option<String> {
+    let model_type = infer_model_type(pretrained_model_name_or_path);
+    if is_bert_family(&model_type) {
+        return None;
+    }
+    Some(format!(
+        "{factory_name}.from_pretrained('{pretrained_model_name_or_path}') resolves to model \
+         type '{model_type}', but this crate's only {factory_name} wrapper is {wrapper_name} \
+         (BERT-family: bert/roberta/distilbert/deberta share BertModel's architecture here). \
+         There is no {wrapper_name}-equivalent head implemented for '{model_type}' in this \
+         crate; returning a bare encoder for it, relabelled as a task model, would silently \
+         drop the checkpoint's task head."
+    ))
+}
+
+/// Refuse `pretrained_model_name_or_path` unless it is BERT-family; see
+/// [`bert_family_gap_message`] for the logic and why it is split out this way.
+fn require_bert_family_checkpoint(
+    pretrained_model_name_or_path: &str,
+    factory_name: &str,
+    wrapper_name: &str,
+) -> PyResult<()> {
+    match bert_family_gap_message(pretrained_model_name_or_path, factory_name, wrapper_name) {
+        None => Ok(()),
+        Some(message) => Err(PyNotImplementedError::new_err(message)),
+    }
+}
+
 /// AutoModelForSequenceClassification
 #[pyclass(name = "AutoModelForSequenceClassification", module = "trustformers")]
 pub struct PyAutoModelForSequenceClassification;
@@ -259,8 +422,17 @@ impl PyAutoModelForSequenceClassification {
         pretrained_model_name_or_path: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyObject> {
-        // Similar implementation to AutoModel but returns classification variants
-        PyAutoModel::from_pretrained(py, pretrained_model_name_or_path, kwargs)
+        require_bert_family_checkpoint(
+            pretrained_model_name_or_path,
+            "AutoModelForSequenceClassification",
+            "BertForSequenceClassification",
+        )?;
+        PyBertForSequenceClassification::from_pretrained(
+            py,
+            pretrained_model_name_or_path,
+            kwargs.map(|k| k.as_any()),
+        )?
+        .into_py_any(py)
     }
 }
 
@@ -277,7 +449,17 @@ impl PyAutoModelForTokenClassification {
         pretrained_model_name_or_path: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyObject> {
-        PyAutoModel::from_pretrained(py, pretrained_model_name_or_path, kwargs)
+        require_bert_family_checkpoint(
+            pretrained_model_name_or_path,
+            "AutoModelForTokenClassification",
+            "BertForTokenClassification",
+        )?;
+        PyBertForTokenClassification::from_pretrained(
+            py,
+            pretrained_model_name_or_path,
+            kwargs.map(|k| k.as_any()),
+        )?
+        .into_py_any(py)
     }
 }
 
@@ -294,7 +476,17 @@ impl PyAutoModelForQuestionAnswering {
         pretrained_model_name_or_path: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyObject> {
-        PyAutoModel::from_pretrained(py, pretrained_model_name_or_path, kwargs)
+        require_bert_family_checkpoint(
+            pretrained_model_name_or_path,
+            "AutoModelForQuestionAnswering",
+            "BertForQuestionAnswering",
+        )?;
+        PyBertForQuestionAnswering::from_pretrained(
+            py,
+            pretrained_model_name_or_path,
+            kwargs.map(|k| k.as_any()),
+        )?
+        .into_py_any(py)
     }
 }
 

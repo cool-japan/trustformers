@@ -599,17 +599,34 @@ pub struct ThermalMetrics {
 
 /// Battery performance metrics
 ///
-/// Tracks battery level, charging status, power consumption, and estimated battery life.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Tracks battery level, charging status, power consumption, voltage and
+/// estimated battery life. Real telemetry on Android/Linux (kernel
+/// `power_supply` sysfs); `None` fields elsewhere, or on any node the running
+/// gauge does not publish -- **breaking change**: every field became
+/// `Option` here so an unread node reports absence instead of a fabricated
+/// `0`/`false`, matching `MemoryMetrics`/`CpuMetrics` elsewhere in this
+/// snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BatteryMetrics {
-    /// Battery level percentage (0-100)
-    pub level_percent: u8,
-    /// Whether the device is currently charging
-    pub is_charging: bool,
-    /// Current power consumption in milliwatts
-    pub power_consumption_mw: f32,
-    /// Estimated battery life in minutes
-    pub estimated_life_minutes: u32,
+    /// Battery level percentage (0-100). `None` when the gauge publishes no
+    /// `capacity` node.
+    pub level_percent: Option<u8>,
+    /// Whether the device is currently charging. `None` when the platform's
+    /// charging status is unknown (includes every non-Android/Linux target).
+    pub is_charging: Option<bool>,
+    /// Current power consumption in milliwatts: the gauge's own `power_now`
+    /// node when published, else `voltage_now * current_now`. `None` when
+    /// neither is available.
+    pub power_consumption_mw: Option<f32>,
+    /// Battery voltage in volts, from the gauge's `voltage_now` node. This is
+    /// what turns a power reading into a charge (mAh) figure elsewhere in the
+    /// profiler: `power_consumption_mw / voltage_v` is a current in mA that
+    /// a time integral over consecutive snapshots turns into mAh.
+    pub voltage_v: Option<f32>,
+    /// Estimated battery life in minutes, from remaining charge divided by
+    /// present draw. `None` while charging, at zero draw, or when the gauge
+    /// publishes no `charge_now` node.
+    pub estimated_life_minutes: Option<u32>,
 }
 
 /// Platform-specific metrics container
@@ -975,8 +992,13 @@ pub struct ProfilingSummary {
     /// Average GPU usage percentage, or `None` when no snapshot in the
     /// session carried GPU telemetry.
     pub avg_gpu_usage_percent: Option<f32>,
-    /// Total battery consumed in mAh, or `None` when no snapshot carried
-    /// battery telemetry.
+    /// Total battery charge throughput in mAh, from a trapezoidal time
+    /// integral of current (`power_consumption_mw / voltage_v`) over
+    /// consecutive snapshots that both carried a power *and* a voltage
+    /// reading. `None` when the session has fewer than two such snapshots --
+    /// in particular, always `None` on a host with no `power_supply` battery
+    /// node (every non-Android/Linux target, and any Linux/Android host with
+    /// no battery).
     pub battery_consumed_mah: Option<f32>,
     /// Number of thermal throttling events detected, or `None` when no
     /// snapshot carried a throttling level to count them from.
@@ -1292,19 +1314,6 @@ impl Default for ThermalMetrics {
             thermal_state: ThermalState::Nominal,
             throttling_level: None,
             temperature_trend: TemperatureTrend::Stable,
-        }
-    }
-}
-
-impl Default for BatteryMetrics {
-    fn default() -> Self {
-        Self {
-            // Zero, not 100: a default-constructed value has measured nothing,
-            // and claiming a full battery is worse than claiming an empty one.
-            level_percent: 0,
-            is_charging: false,
-            power_consumption_mw: 0.0,
-            estimated_life_minutes: 0,
         }
     }
 }

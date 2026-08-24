@@ -472,13 +472,13 @@ pub struct ConcurrencyEstimationResult {
     pub estimation_duration: Duration,
 }
 
-#[derive(Debug, Clone)]
-pub struct ConcurrencyInsightEngine {
-    /// Concurrency issues found
-    pub issues_found: u64,
-    /// Analysis depth
-    pub analysis_depth: usize,
-}
+/// Reports on host-load and parallelism metrics in an observation window.
+///
+/// Before 0.2.1 this carried an `issues_found` counter that nothing ever wrote
+/// to, and announced "high"/"medium"/"low priority attention" by comparing that
+/// permanently-zero counter to 10 and 5.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConcurrencyInsightEngine;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConcurrencyPattern {

@@ -190,7 +190,11 @@ pub struct MixtureOfDepthsPipeline {
     token_classifier: Option<Arc<dyn TokenClassifier>>,
     confidence_estimator: Arc<dyn ConfidenceEstimator>,
     depth_router: Arc<dyn DepthRouter>,
-    layer_cache: Arc<RwLock<HashMap<String, LayerExecutionResult>>>,
+    layer_cache: Arc<RwLock<LayerCache>>,
+    /// Maximum number of entries `layer_cache` may hold; see
+    /// [`DEFAULT_LAYER_CACHE_CAPACITY`] and
+    /// [`Self::with_layer_cache_capacity`].
+    layer_cache_capacity: usize,
     /// Produces the real token embeddings the router reasons about.
     embedder: Option<Arc<dyn TokenEmbedder>>,
     /// Executes a real transformer layer.
@@ -234,6 +238,112 @@ pub trait TransformerLayerExecutor: Send + Sync {
     ) -> TrustformersResult<Vec<Vec<f32>>>;
 }
 
+/// Default maximum number of entries [`MixtureOfDepthsPipeline`]'s
+/// layer-execution cache may hold before the least-recently-used entry is
+/// evicted. `MixtureOfDepthsConfig` carries no cache-size field of its own
+/// (it describes routing depth, not caching), so this is a separate,
+/// implementation-level default, overridable via
+/// [`MixtureOfDepthsPipeline::with_layer_cache_capacity`].
+const DEFAULT_LAYER_CACHE_CAPACITY: usize = 128;
+
+/// A capacity-bounded, least-recently-used cache of per-layer execution
+/// results, keyed on `(layer_index, content_hash_of_inputs_and_mask)`.
+///
+/// Bounded so a long-running pipeline processing many distinct inputs cannot
+/// grow this cache without limit: once `capacity` entries are held, the
+/// least-recently-used entry is evicted before a new one is inserted.
+#[derive(Debug, Default)]
+struct LayerCache {
+    entries: HashMap<(usize, u64), LayerExecutionResult>,
+    /// Recency order, oldest (least-recently-used) first. Each key appears
+    /// at most once; `touch` moves a key to the back (most-recently-used).
+    order: std::collections::VecDeque<(usize, u64)>,
+}
+
+impl LayerCache {
+    /// Number of entries currently held.
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Look up `key`, marking it most-recently-used on a hit.
+    fn get(&mut self, key: (usize, u64)) -> Option<LayerExecutionResult> {
+        let hit = self.entries.get(&key).cloned();
+        if hit.is_some() {
+            self.touch(key);
+        }
+        hit
+    }
+
+    /// Move `key` to the most-recently-used end of the recency order.
+    fn touch(&mut self, key: (usize, u64)) {
+        if let Some(pos) = self.order.iter().position(|k| *k == key) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(key);
+    }
+
+    /// Insert (or update) `value` under `key`, evicting the
+    /// least-recently-used entry if `capacity` would otherwise be exceeded.
+    ///
+    /// A `capacity` of `0` disables caching: nothing is stored, so every
+    /// lookup misses and every call recomputes.
+    fn insert(&mut self, key: (usize, u64), value: LayerExecutionResult, capacity: usize) {
+        if capacity == 0 {
+            return;
+        }
+        // A plain upsert handles both the new-key and existing-key cases
+        // uniformly (`HashMap::insert` replaces in place for an existing
+        // key without changing its length); `touch` likewise both
+        // repositions an existing `order` entry and appends a brand new
+        // one, so no separate existing/new branch is needed here.
+        self.entries.insert(key, value);
+        self.touch(key);
+        while self.entries.len() > capacity {
+            // `touch` above just moved `key` to the most-recently-used
+            // (back) end, so the front of `order` is never the entry we
+            // just inserted or updated.
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+}
+
+/// Content hash of a layer's inputs and routing mask, combined with the
+/// layer index, for [`LayerCache`]'s key.
+///
+/// The mask is part of the key, not just the input tensor: it changes what
+/// the executor actually does to those inputs (a masked-out token passes
+/// through unchanged; a selected one does not), so a mask-blind key would
+/// silently serve a stale result computed under a different mask. Assuming a
+/// deterministic [`TransformerLayerExecutor`], two calls that hash equal are
+/// guaranteed to produce the same output.
+fn layer_cache_key(
+    layer_index: usize,
+    inputs: &[Vec<f32>],
+    token_mask: Option<&[bool]>,
+) -> (usize, u64) {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    inputs.len().hash(&mut hasher);
+    for row in inputs {
+        row.len().hash(&mut hasher);
+        for value in row {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    match token_mask {
+        Some(mask) => {
+            1u8.hash(&mut hasher);
+            mask.hash(&mut hasher);
+        },
+        None => 0u8.hash(&mut hasher),
+    }
+    (layer_index, hasher.finish())
+}
+
 /// Mean absolute activation of `outputs`, squashed into 0..=1.
 ///
 /// A measured summary of how strongly the layer responded — used as the
@@ -272,13 +382,24 @@ impl MixtureOfDepthsPipeline {
             depth_router,
             embedder: None,
             layer_executor: None,
-            layer_cache: Arc::new(RwLock::new(HashMap::new())),
+            layer_cache: Arc::new(RwLock::new(LayerCache::default())),
+            layer_cache_capacity: DEFAULT_LAYER_CACHE_CAPACITY,
         }
     }
 
     /// Set token classifier for hierarchical routing
     pub fn with_token_classifier(mut self, classifier: Arc<dyn TokenClassifier>) -> Self {
         self.token_classifier = Some(classifier);
+        self
+    }
+
+    /// Override the layer-execution cache's maximum entry count (default
+    /// [`DEFAULT_LAYER_CACHE_CAPACITY`]).
+    ///
+    /// A capacity of `0` disables caching entirely: every call to
+    /// `execute_layer` recomputes.
+    pub fn with_layer_cache_capacity(mut self, capacity: usize) -> Self {
+        self.layer_cache_capacity = capacity;
         self
     }
 
@@ -414,10 +535,13 @@ impl MixtureOfDepthsPipeline {
 
     /// Number of entries currently stored in the layer-execution cache.
     ///
-    /// Nothing populates this cache yet — `execute_layer` does not consult or
-    /// write to it — so this is always `0` today. It is exposed now so a
-    /// future memoisation pass has a real, testable read path to build on
-    /// rather than a field nothing ever touches.
+    /// `execute_layer` checks this cache before running the attached
+    /// [`TransformerLayerExecutor`] and inserts into it after a real
+    /// execution, keyed on `(layer_index, content_hash(inputs,
+    /// routing_mask))` (see [`layer_cache_key`]). Entries beyond
+    /// [`Self::with_layer_cache_capacity`]'s bound (default
+    /// [`DEFAULT_LAYER_CACHE_CAPACITY`]) are evicted least-recently-used
+    /// first.
     pub async fn cached_layer_count(&self) -> usize {
         self.layer_cache.read().await.len()
     }
@@ -444,9 +568,23 @@ impl MixtureOfDepthsPipeline {
     /// Execute a single layer with optional token-level routing.
     ///
     /// The transformation is performed by the attached
-    /// [`TransformerLayerExecutor`]; the reported computation cost is the real
-    /// wall-clock time the layer took, and the token routing mask is passed
-    /// through so unselected tokens are genuinely skipped.
+    /// [`TransformerLayerExecutor`]; on a cache miss, the reported computation
+    /// cost is the real wall-clock time the layer took (see below for the
+    /// cache-hit case), and the token routing mask is passed through so
+    /// unselected tokens are genuinely skipped.
+    ///
+    /// Memoised on `(layer_idx, content_hash(inputs, token_mask))` via
+    /// [`layer_cache_key`]: a cache hit returns the earlier, real
+    /// `token_outputs`/`output_confidence` without calling the executor
+    /// again, but with `computation_cost` reset to `0.0` -- the wall-clock
+    /// cost recorded on the original (miss) call was paid then, not on this
+    /// replay, and reporting it again would double-count it into
+    /// `execute_with_mod`'s `total_computation_cost` (its compute-budget
+    /// cutoff and efficiency score) every time the same layer is replayed. A
+    /// miss computes the result for real and stores it, subject to
+    /// [`Self::with_layer_cache_capacity`]'s bound. A skipped layer
+    /// (`!routing_decision.should_execute`) is a pure, zero-cost
+    /// pass-through and is not cached.
     ///
     /// # Errors
     ///
@@ -486,6 +624,20 @@ impl MixtureOfDepthsPipeline {
                 None
             };
 
+        let cache_key = layer_cache_key(layer_idx, inputs, token_mask.as_deref());
+        if let Some(cached) = self.layer_cache.write().await.get(cache_key) {
+            // No computation happened on this call -- the executor was not
+            // invoked -- so the honest cost of *this* call is zero, not the
+            // wall-clock time measured back when the result was first
+            // computed. Returning the stale cost here would let a replayed
+            // layer that cost ~0 this time still be charged its original
+            // cost in `execute_with_mod`'s running `total_computation_cost`.
+            return Ok(LayerExecutionResult {
+                computation_cost: 0.0,
+                ..cached
+            });
+        }
+
         let started = std::time::Instant::now();
         let token_outputs = executor.execute(layer_idx, inputs, token_mask.as_deref())?;
         // Measured, not synthesised from the routing flags.
@@ -495,7 +647,7 @@ impl MixtureOfDepthsPipeline {
         // than scaled up by a fixed factor.
         let output_confidence = mean_activation_confidence(&token_outputs);
 
-        Ok(LayerExecutionResult {
+        let result = LayerExecutionResult {
             layer_index: layer_idx,
             was_executed: true,
             output_confidence,
@@ -504,7 +656,14 @@ impl MixtureOfDepthsPipeline {
             // The executor interface does not surface attention matrices, and a
             // uniform stand-in would be indistinguishable from a real one.
             attention_weights: None,
-        })
+        };
+
+        self.layer_cache
+            .write()
+            .await
+            .insert(cache_key, result.clone(), self.layer_cache_capacity);
+
+        Ok(result)
     }
 
     /// Check if early exit should be triggered
@@ -847,765 +1006,5 @@ pub fn create_quality_focused_mod_pipeline(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // -----------------------------------------------------------------------
-    // Regression: the pipeline used to embed every token as a constant 0.1
-    // vector and to "execute" layers by adding 0.01 * layer_index. Routing over
-    // identical vectors carries no information, yet efficiency scores were
-    // still reported. Both tests below fail against that implementation.
-    // -----------------------------------------------------------------------
-
-    /// A real embedder over a tiny hashing feature space.
-    struct HashingEmbedder {
-        dim: usize,
-    }
-
-    impl TokenEmbedder for HashingEmbedder {
-        fn embed(&self, inputs: &[String]) -> TrustformersResult<Vec<Vec<f32>>> {
-            Ok(inputs
-                .iter()
-                .map(|text| {
-                    let mut features = vec![0.0f32; self.dim];
-                    for (position, byte) in text.bytes().enumerate() {
-                        let slot = (byte as usize + position) % self.dim;
-                        features[slot] += 1.0;
-                    }
-                    let norm = features.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-6);
-                    features.iter().map(|v| v / norm).collect()
-                })
-                .collect())
-        }
-
-        fn embedding_dim(&self) -> usize {
-            self.dim
-        }
-    }
-
-    /// A real (if simple) layer: a per-layer scaled non-linearity that honours
-    /// the routing mask.
-    struct ScalingLayerExecutor {
-        layers: usize,
-    }
-
-    impl TransformerLayerExecutor for ScalingLayerExecutor {
-        fn num_layers(&self) -> usize {
-            self.layers
-        }
-
-        fn execute(
-            &self,
-            layer_index: usize,
-            inputs: &[Vec<f32>],
-            token_mask: Option<&[bool]>,
-        ) -> TrustformersResult<Vec<Vec<f32>>> {
-            if layer_index >= self.layers {
-                return Err(TrustformersError::invalid_input_simple(format!(
-                    "layer {layer_index} is out of range for a {}-layer model",
-                    self.layers
-                )));
-            }
-            Ok(inputs
-                .iter()
-                .enumerate()
-                .map(|(token_index, row)| {
-                    let selected = token_mask.map(|m| *m.get(token_index).unwrap_or(&true));
-                    if selected == Some(false) {
-                        return row.clone();
-                    }
-                    row.iter().map(|v| (v * (1.0 + layer_index as f32 * 0.1)).tanh()).collect()
-                })
-                .collect())
-        }
-    }
-
-    /// Attach the real test embedder and layer executor to `pipeline`.
-    fn wire_real_components(pipeline: MixtureOfDepthsPipeline) -> MixtureOfDepthsPipeline {
-        let layers = pipeline.config.total_layers.max(1);
-        pipeline
-            .with_embedder(Arc::new(HashingEmbedder { dim: 16 }))
-            .with_layer_executor(Arc::new(ScalingLayerExecutor { layers }))
-    }
-
-    #[tokio::test]
-    async fn embeddings_without_an_embedder_are_refused() {
-        let pipeline = MixtureOfDepthsPipeline::new(
-            MixtureOfDepthsConfig::default(),
-            Arc::new(MockBaseModel),
-            Arc::new(MockComplexityAnalyzer),
-            Arc::new(MockConfidenceEstimator),
-            Arc::new(MockDepthRouter),
-        );
-        let result = pipeline.initialize_embeddings(&["hello".to_string()]).await;
-        assert!(
-            result.is_err(),
-            "routing needs real embeddings; a constant vector must not be substituted"
-        );
-    }
-
-    #[tokio::test]
-    async fn real_embeddings_differ_between_inputs() {
-        let embedder = HashingEmbedder { dim: 16 };
-        let pipeline = MixtureOfDepthsPipeline::new(
-            MixtureOfDepthsConfig::default(),
-            Arc::new(MockBaseModel),
-            Arc::new(MockComplexityAnalyzer),
-            Arc::new(MockConfidenceEstimator),
-            Arc::new(MockDepthRouter),
-        )
-        .with_embedder(Arc::new(embedder));
-
-        let embeddings = pipeline
-            .initialize_embeddings(&["alpha".to_string(), "omega".to_string()])
-            .await
-            .expect("a real embedder should answer");
-        assert_eq!(embeddings.len(), 2);
-        assert!(
-            embeddings[0]
-                .iter()
-                .zip(embeddings[1].iter())
-                .any(|(a, b)| (a - b).abs() > 1e-6),
-            "distinct inputs must produce distinct embeddings"
-        );
-        assert!(
-            embeddings[0].iter().any(|v| (v - 0.1).abs() > 1e-6),
-            "the constant-0.1 embedding is gone"
-        );
-    }
-
-    #[tokio::test]
-    async fn layer_execution_requires_an_executor() {
-        let pipeline = MixtureOfDepthsPipeline::new(
-            MixtureOfDepthsConfig::default(),
-            Arc::new(MockBaseModel),
-            Arc::new(MockComplexityAnalyzer),
-            Arc::new(MockConfidenceEstimator),
-            Arc::new(MockDepthRouter),
-        );
-        let decision = RoutingDecision {
-            layer_index: 0,
-            should_execute: true,
-            confidence_score: 0.5,
-            complexity_score: 0.5,
-            routing_reason: RoutingReason::ConfidenceThreshold,
-            token_routing: Vec::new(),
-        };
-        let inputs = vec![vec![0.5f32; 4]];
-        assert!(
-            pipeline.execute_layer(0, &inputs, &decision, None).await.is_err(),
-            "without an executor there is no layer to run"
-        );
-    }
-
-    #[tokio::test]
-    async fn executed_layer_transforms_its_input() {
-        let pipeline = MixtureOfDepthsPipeline::new(
-            MixtureOfDepthsConfig::default(),
-            Arc::new(MockBaseModel),
-            Arc::new(MockComplexityAnalyzer),
-            Arc::new(MockConfidenceEstimator),
-            Arc::new(MockDepthRouter),
-        )
-        .with_layer_executor(Arc::new(ScalingLayerExecutor { layers: 4 }));
-
-        let decision = RoutingDecision {
-            layer_index: 1,
-            should_execute: true,
-            confidence_score: 0.5,
-            complexity_score: 0.5,
-            routing_reason: RoutingReason::ConfidenceThreshold,
-            token_routing: Vec::new(),
-        };
-        let inputs = vec![vec![0.5f32, -0.25, 0.75, 0.0]];
-        let result = pipeline
-            .execute_layer(1, &inputs, &decision, None)
-            .await
-            .expect("a real executor should answer");
-
-        assert!(result.was_executed);
-        assert!(
-            result
-                .token_outputs
-                .iter()
-                .zip(inputs.iter())
-                .any(|(o, i)| o.iter().zip(i.iter()).any(|(a, b)| (a - b).abs() > 1e-6)),
-            "the layer must actually transform its input"
-        );
-        assert!(
-            result.attention_weights.is_none(),
-            "uniform stand-in attention is gone"
-        );
-        assert!(result.computation_cost >= 0.0);
-    }
-
-    // Mock base model for testing
-    struct MockBaseModel;
-
-    impl Pipeline for MockBaseModel {
-        type Input = String;
-        type Output = PipelineOutput;
-
-        fn __call__(&self, _input: Self::Input) -> TrustformersResult<Self::Output> {
-            Ok(PipelineOutput::Text("Mock output".to_string()))
-        }
-    }
-
-    #[test]
-    fn test_base_model_accessor_returns_the_constructed_pipeline() {
-        let pipeline = create_mixture_of_depths_pipeline(
-            MixtureOfDepthsConfig::default(),
-            Arc::new(MockBaseModel),
-        );
-        let output = pipeline
-            .base_model()
-            .__call__("hello".to_string())
-            .expect("the base model must be callable through the accessor");
-        assert!(
-            matches!(output, PipelineOutput::Text(t) if t == "Mock output"),
-            "base_model() must return the same pipeline the constructor was given"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_cached_layer_count_starts_empty() {
-        let pipeline = create_mixture_of_depths_pipeline(
-            MixtureOfDepthsConfig::default(),
-            Arc::new(MockBaseModel),
-        );
-        assert_eq!(
-            pipeline.cached_layer_count().await,
-            0,
-            "a freshly constructed pipeline has an empty layer cache"
-        );
-    }
-
-    // ── Config defaults ───────────────────────────────────────────────────────
-
-    #[test]
-    fn test_config_default_min_layers_less_than_total() {
-        let config = MixtureOfDepthsConfig::default();
-        assert!(
-            config.min_layers < config.total_layers,
-            "min_layers must be less than total_layers"
-        );
-    }
-
-    #[test]
-    fn test_config_default_confidence_threshold_in_range() {
-        let config = MixtureOfDepthsConfig::default();
-        assert!(config.confidence_threshold > 0.0 && config.confidence_threshold <= 1.0);
-    }
-
-    #[test]
-    fn test_config_default_compute_budget_positive() {
-        let config = MixtureOfDepthsConfig::default();
-        assert!(config.compute_budget > 0.0);
-    }
-
-    // ── Expert capacity formula ───────────────────────────────────────────────
-    // expert_capacity = ceil(capacity_factor * seq_len / num_experts)
-
-    #[test]
-    fn test_expert_capacity_formula() {
-        let capacity_factor = 1.25_f32;
-        let seq_len = 128_usize;
-        let num_experts = 4_usize;
-        let capacity = ((capacity_factor * seq_len as f32 / num_experts as f32).ceil()) as usize;
-        assert_eq!(capacity, 40, "capacity = ceil(1.25*128/4) = ceil(40) = 40");
-    }
-
-    #[test]
-    fn test_expert_capacity_rounds_up() {
-        let capacity_factor = 1.0_f32;
-        let seq_len = 7_usize;
-        let num_experts = 2_usize;
-        let capacity = ((capacity_factor * seq_len as f32 / num_experts as f32).ceil()) as usize;
-        assert_eq!(capacity, 4, "capacity = ceil(7/2) = 4");
-    }
-
-    // ── Complexity analyser ───────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_complexity_analysis() {
-        let analyzer = MockComplexityAnalyzer;
-        let simple_input = vec!["hello".to_string(), "world".to_string()];
-        let complex_input = vec![
-            "sophisticated".to_string(),
-            "terminology".to_string(),
-            "requires".to_string(),
-            "extensive".to_string(),
-            "computational".to_string(),
-            "resources".to_string(),
-        ];
-        let simple_analysis = analyzer
-            .analyze_complexity(&simple_input)
-            .await
-            .expect("async operation failed");
-        let complex_analysis = analyzer
-            .analyze_complexity(&complex_input)
-            .await
-            .expect("async operation failed");
-        assert!(simple_analysis.overall_complexity < complex_analysis.overall_complexity);
-        assert!(simple_analysis.predicted_optimal_depth < complex_analysis.predicted_optimal_depth);
-    }
-
-    #[tokio::test]
-    async fn test_complexity_analysis_confidence_in_range() {
-        let analyzer = MockComplexityAnalyzer;
-        let input = vec!["test".to_string()];
-        let analysis = analyzer
-            .analyze_complexity(&input)
-            .await
-            .expect("analyze_complexity should succeed");
-        assert!(analysis.confidence_estimate >= 0.0 && analysis.confidence_estimate <= 1.0);
-    }
-
-    #[tokio::test]
-    async fn test_complexity_per_token_count() {
-        let analyzer = MockComplexityAnalyzer;
-        let tokens = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let analysis = analyzer
-            .analyze_complexity(&tokens)
-            .await
-            .expect("analyze_complexity should succeed");
-        assert_eq!(
-            analysis.token_complexities.len(),
-            tokens.len(),
-            "token_complexities must have one entry per token"
-        );
-    }
-
-    // ── Token classification ─────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_token_classification() {
-        let classifier = MockTokenClassifier;
-        let tokens = vec![
-            "The".to_string(),
-            "quick".to_string(),
-            "brown".to_string(),
-            "fox".to_string(),
-            "123".to_string(),
-            "!".to_string(),
-        ];
-        let classifications =
-            classifier.classify_tokens(&tokens).await.expect("async operation failed");
-        assert_eq!(classifications[0], TokenType::Function); // "The"
-        assert_eq!(classifications[4], TokenType::Numeric); // "123"
-        assert_eq!(classifications[5], TokenType::Special); // "!"
-    }
-
-    #[tokio::test]
-    async fn test_token_classification_length_matches() {
-        let classifier = MockTokenClassifier;
-        let tokens: Vec<String> = (0..7).map(|i| format!("token{}", i)).collect();
-        let classes = classifier
-            .classify_tokens(&tokens)
-            .await
-            .expect("classify_tokens should succeed");
-        assert_eq!(classes.len(), tokens.len());
-    }
-
-    // ── Confidence estimator ─────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_confidence_increases_with_layer_depth() {
-        let estimator = MockConfidenceEstimator;
-        let outputs = vec![vec![0.1_f32; 4]];
-        let conf_early = estimator
-            .estimate_confidence(&outputs, 0)
-            .await
-            .expect("estimate_confidence should succeed");
-        let conf_late = estimator
-            .estimate_confidence(&outputs, 20)
-            .await
-            .expect("estimate_confidence should succeed");
-        assert!(
-            conf_late > conf_early,
-            "confidence should increase with layer depth"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_confidence_capped_at_one() {
-        let estimator = MockConfidenceEstimator;
-        let outputs = vec![vec![100.0_f32; 4]]; // very high variance
-        let conf = estimator
-            .estimate_confidence(&outputs, 23)
-            .await
-            .expect("estimate_confidence should succeed");
-        assert!(conf <= 1.0, "confidence must be ≤ 1.0");
-    }
-
-    // ── Routing decision ─────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_router_fixed_depth_strategy() {
-        let router = MockDepthRouter;
-        let analysis = ComplexityAnalysis {
-            overall_complexity: 0.5,
-            token_complexities: vec![0.5],
-            predicted_optimal_depth: 12,
-            confidence_estimate: 0.7,
-            semantic_density: 0.5,
-            syntactic_complexity: 0.3,
-        };
-        let config = MixtureOfDepthsConfig {
-            depth_strategy: DepthStrategy::Fixed(5),
-            ..Default::default()
-        };
-        // Layer 3 < 5 → should execute
-        let decision = router
-            .route_depth(&analysis, 3, 0.6, &config)
-            .await
-            .expect("route_depth should succeed");
-        assert!(decision.should_execute);
-        // Layer 6 >= 5 → should not execute
-        let decision2 = router
-            .route_depth(&analysis, 6, 0.6, &config)
-            .await
-            .expect("route_depth should succeed");
-        assert!(!decision2.should_execute);
-    }
-
-    #[tokio::test]
-    async fn test_router_min_layers_always_execute() {
-        let router = MockDepthRouter;
-        let analysis = ComplexityAnalysis {
-            overall_complexity: 0.5,
-            token_complexities: vec![0.5],
-            predicted_optimal_depth: 10,
-            confidence_estimate: 0.7,
-            semantic_density: 0.5,
-            syntactic_complexity: 0.3,
-        };
-        let config = MixtureOfDepthsConfig {
-            depth_strategy: DepthStrategy::EarlyExit,
-            min_layers: 6,
-            confidence_threshold: 0.9,
-            ..Default::default()
-        };
-        // Below min_layers, confidence is irrelevant - should execute
-        let decision = router
-            .route_depth(&analysis, 2, 0.99, &config)
-            .await
-            .expect("route_depth should succeed");
-        // EarlyExit: execute while layer < min_layers OR confidence < threshold
-        // layer 2 < 6 → should execute
-        assert!(decision.should_execute);
-    }
-
-    // ── Skipped token handling (residual pass-through) ───────────────────────
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_skipped_layer_preserves_outputs() {
-        let config = MixtureOfDepthsConfig {
-            depth_strategy: DepthStrategy::Fixed(0), // skip all layers
-            min_layers: 0,
-            ..Default::default()
-        };
-        let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline =
-            wire_real_components(create_mixture_of_depths_pipeline(config, mock_base_model));
-        let input = PipelineInput::Text("skip all layers".to_string());
-        let result = pipeline.__call__(input);
-        assert!(result.is_ok(), "skipping all layers should not crash");
-    }
-
-    // ── Depth reduction vs accuracy trade-off ─────────────────────────────────
-
-    #[test]
-    fn test_efficiency_score_with_fewer_executed_layers() {
-        let config = MixtureOfDepthsConfig::default();
-        let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline = wire_real_components(create_mixture_of_depths_pipeline(
-            config.clone(),
-            mock_base_model,
-        ));
-        // Fewer executed layers → higher depth_efficiency
-        let score_few = pipeline.calculate_efficiency_score(&[0, 1], 2.0, 0.9);
-        let score_many =
-            pipeline.calculate_efficiency_score(&(0..20).collect::<Vec<_>>(), 20.0, 0.9);
-        assert!(
-            score_few > score_many,
-            "fewer executed layers should yield a higher efficiency score"
-        );
-    }
-
-    // ── Auxiliary load-balancing auxiliary loss ───────────────────────────────
-
-    #[test]
-    fn test_routing_reason_min_layers() {
-        // When layer < min_layers, reason should be FixedDepth
-        let reason = RoutingReason::FixedDepth;
-        assert!(matches!(reason, RoutingReason::FixedDepth));
-    }
-
-    // ── End-to-end pipeline tests ─────────────────────────────────────────────
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_mixture_of_depths_pipeline() {
-        let config = MixtureOfDepthsConfig::default();
-        let mock_base_model = Arc::new(MockBaseModel);
-        let mod_pipeline =
-            wire_real_components(create_mixture_of_depths_pipeline(config, mock_base_model));
-        let input =
-            PipelineInput::Text("This is a test sentence for mixture of depths".to_string());
-        let result = mod_pipeline.__call__(input);
-        assert!(result.is_ok());
-        if let Ok(PipelineOutput::MixtureOfDepths(mod_result)) = result {
-            assert!(!mod_result.executed_layers.is_empty());
-            assert!(mod_result.efficiency_score > 0.0);
-            assert!(!mod_result.confidence_progression.is_empty());
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_early_exit_strategy() {
-        let config = MixtureOfDepthsConfig {
-            depth_strategy: DepthStrategy::EarlyExit,
-            confidence_threshold: 0.8,
-            min_layers: 6,
-            ..Default::default()
-        };
-        let mock_base_model = Arc::new(MockBaseModel);
-        let mod_pipeline =
-            wire_real_components(create_mixture_of_depths_pipeline(config, mock_base_model));
-        let input = PipelineInput::Text("Simple text".to_string());
-        let result = mod_pipeline.__call__(input);
-        assert!(result.is_ok());
-        if let Ok(PipelineOutput::MixtureOfDepths(mod_result)) = result {
-            assert!(mod_result.executed_layers.len() < 24);
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_budget_optimal_strategy() {
-        let config = MixtureOfDepthsConfig {
-            depth_strategy: DepthStrategy::BudgetOptimal,
-            compute_budget: 5.0,
-            ..Default::default()
-        };
-        let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline =
-            wire_real_components(create_mixture_of_depths_pipeline(config, mock_base_model));
-        let input = PipelineInput::Text("budget test".to_string());
-        let result = pipeline.__call__(input);
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_efficiency_optimized_factory() {
-        let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline =
-            wire_real_components(create_efficiency_optimized_mod_pipeline(mock_base_model));
-        let input = PipelineInput::Text("efficiency test".to_string());
-        let result = pipeline.__call__(input);
-        assert!(
-            result.is_ok(),
-            "efficiency-optimized pipeline should succeed"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_quality_focused_factory() {
-        let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline = wire_real_components(create_quality_focused_mod_pipeline(mock_base_model));
-        let input = PipelineInput::Text("quality test".to_string());
-        let result = pipeline.__call__(input);
-        assert!(result.is_ok(), "quality-focused pipeline should succeed");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_non_text_input_rejected() {
-        let config = MixtureOfDepthsConfig::default();
-        let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline =
-            wire_real_components(create_mixture_of_depths_pipeline(config, mock_base_model));
-        // BatchText is not supported by MoD pipeline
-        let input = PipelineInput::BatchText(vec!["a".to_string()]);
-        let result = pipeline.__call__(input);
-        assert!(
-            result.is_err(),
-            "MoD pipeline should reject BatchText input"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_confidence_progression_non_decreasing_tendency() {
-        let config = MixtureOfDepthsConfig::default();
-        let mock_base_model = Arc::new(MockBaseModel);
-        let pipeline =
-            wire_real_components(create_mixture_of_depths_pipeline(config, mock_base_model));
-        let input = PipelineInput::Text("confidence progression test".to_string());
-        let result = pipeline.__call__(input).expect("pipeline should succeed");
-        if let PipelineOutput::MixtureOfDepths(mod_result) = result {
-            // At least the last confidence value should be accessible
-            assert!(!mod_result.confidence_progression.is_empty());
-            let first = mod_result.confidence_progression[0];
-            let last = *mod_result.confidence_progression.last().expect("last confidence exists");
-            assert!(
-                last >= first - 0.01,
-                "confidence generally should not decrease significantly overall"
-            );
-        }
-    }
-
-    // ── Additional unit tests ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_depth_strategy_variants_constructable() {
-        let _fixed = DepthStrategy::Fixed(12);
-        let _early = DepthStrategy::EarlyExit;
-        let _complexity = DepthStrategy::AdaptiveComplexity;
-        let _confidence = DepthStrategy::AdaptiveConfidence;
-        let _budget = DepthStrategy::BudgetOptimal;
-        let _token = DepthStrategy::TokenTypeAware;
-    }
-
-    #[test]
-    fn test_token_type_variants_constructable() {
-        let types = [
-            TokenType::Function,
-            TokenType::Content,
-            TokenType::Entity,
-            TokenType::Numeric,
-            TokenType::Special,
-            TokenType::Unknown,
-        ];
-        assert_eq!(types.len(), 6);
-    }
-
-    #[test]
-    fn test_token_type_equality() {
-        assert_eq!(TokenType::Function, TokenType::Function);
-        assert_ne!(TokenType::Content, TokenType::Entity);
-        assert_ne!(TokenType::Numeric, TokenType::Special);
-    }
-
-    #[test]
-    fn test_routing_reason_variants() {
-        let reasons = [
-            RoutingReason::ConfidenceThreshold,
-            RoutingReason::ComplexityBased,
-            RoutingReason::BudgetConstraint,
-            RoutingReason::TokenSpecific,
-            RoutingReason::FixedDepth,
-        ];
-        assert_eq!(reasons.len(), 5);
-    }
-
-    #[test]
-    fn test_routing_decision_struct() {
-        let decision = RoutingDecision {
-            layer_index: 5,
-            should_execute: true,
-            confidence_score: 0.85,
-            complexity_score: 0.6,
-            token_routing: vec![true, false, true],
-            routing_reason: RoutingReason::ConfidenceThreshold,
-        };
-        assert_eq!(decision.layer_index, 5);
-        assert!(decision.should_execute);
-        assert!(decision.confidence_score > 0.0 && decision.confidence_score <= 1.0);
-        assert_eq!(decision.token_routing.len(), 3);
-    }
-
-    #[test]
-    fn test_mod_execution_result_struct() {
-        let result = MoDExecutionResult {
-            final_outputs: vec![vec![0.1, 0.2, 0.3]],
-            executed_layers: vec![0, 1, 2, 3, 4, 5],
-            routing_decisions: Vec::new(),
-            layer_results: Vec::new(),
-            total_computation_cost: 6.0,
-            efficiency_score: 0.75,
-            confidence_progression: vec![0.5, 0.6, 0.7, 0.8, 0.85, 0.9],
-        };
-        assert_eq!(result.executed_layers.len(), 6);
-        assert!(result.efficiency_score > 0.0 && result.efficiency_score <= 1.0);
-        assert_eq!(result.confidence_progression.len(), 6);
-    }
-
-    #[test]
-    fn test_complexity_analysis_struct_fields() {
-        let analysis = ComplexityAnalysis {
-            overall_complexity: 0.65,
-            token_complexities: vec![0.4, 0.7, 0.8],
-            predicted_optimal_depth: 18,
-            confidence_estimate: 0.82,
-            semantic_density: 0.55,
-            syntactic_complexity: 0.4,
-        };
-        assert!(analysis.overall_complexity >= 0.0 && analysis.overall_complexity <= 1.0);
-        assert!(analysis.predicted_optimal_depth > 0);
-        assert_eq!(analysis.token_complexities.len(), 3);
-    }
-
-    #[test]
-    fn test_layer_execution_result_struct() {
-        let layer_res = LayerExecutionResult {
-            layer_index: 7,
-            was_executed: true,
-            output_confidence: 0.78,
-            computation_cost: 1.2,
-            token_outputs: vec![vec![0.1, 0.2]],
-            attention_weights: None,
-        };
-        assert_eq!(layer_res.layer_index, 7);
-        assert!(layer_res.was_executed);
-        assert!(layer_res.computation_cost > 0.0);
-    }
-
-    #[test]
-    fn test_config_token_level_routing_default() {
-        let cfg = MixtureOfDepthsConfig::default();
-        assert!(
-            cfg.token_level_routing,
-            "token_level_routing should be enabled by default"
-        );
-    }
-
-    #[test]
-    fn test_config_adaptive_depth_default() {
-        let cfg = MixtureOfDepthsConfig::default();
-        assert!(
-            cfg.adaptive_depth,
-            "adaptive_depth should be enabled by default"
-        );
-    }
-
-    #[test]
-    fn test_config_max_layers_gte_min_layers() {
-        let cfg = MixtureOfDepthsConfig::default();
-        assert!(
-            cfg.max_layers >= cfg.min_layers,
-            "max_layers must be >= min_layers"
-        );
-    }
-
-    #[test]
-    fn test_efficiency_score_formula() {
-        // efficiency = (1 - executed/total) * quality / cost
-        let total = 24_usize;
-        let executed = 12_usize;
-        let depth_efficiency = 1.0 - (executed as f32 / total as f32);
-        assert!(
-            (depth_efficiency - 0.5).abs() < 1e-5,
-            "executing half the layers → depth_efficiency = 0.5"
-        );
-    }
-
-    #[test]
-    fn test_compute_budget_positive() {
-        let cfg = MixtureOfDepthsConfig::default();
-        assert!(cfg.compute_budget > 0.0);
-    }
-
-    #[test]
-    fn test_hierarchical_routing_disabled_default() {
-        let cfg = MixtureOfDepthsConfig::default();
-        assert!(!cfg.hierarchical_routing);
-    }
-}
+#[path = "mixture_of_depths_tests.rs"]
+mod tests;

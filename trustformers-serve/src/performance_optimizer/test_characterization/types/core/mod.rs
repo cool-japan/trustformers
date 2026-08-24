@@ -26,17 +26,15 @@ pub use strategies::*;
 
 // Additional types that don't fit cleanly into other modules
 use chrono::{DateTime, Utc};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{atomic::AtomicBool, Arc},
+    sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::task::JoinHandle;
 
 // Import cross-module types
-use super::super::synchronization_analyzer::SynchronizationAnalyzer;
 use super::alerts::AlertSystem;
 use super::analysis::{AnalysisResultData, AnalyzerMetrics, AnomalyInfo};
 use super::data_management::{
@@ -47,14 +45,11 @@ use super::locking::{
     DeadlockPreventionStrategy, DeadlockRisk, DependencyType, LockDependency, LockUsageInfo,
     OrderedLockingStrategy, PredictiveDeadlockAlgorithm,
 };
-use super::optimization::{
-    AdaptiveOptimizer, OptimizationObjective, OptimizationRecommendation, StrategySelector,
-};
+use super::optimization::{OptimizationObjective, OptimizationRecommendation};
 use super::patterns::{
     ConcurrencyAnalysisResult, ConcurrencyEstimationAlgorithm, ConcurrencyRequirements,
-    ConcurrencyRequirementsDetector, PatternCharacteristics, PatternDetectionAlgorithm,
-    PatternEffectiveness, PatternType, PatternUpdate, SynchronizationRequirements,
-    ThreadInteraction,
+    PatternCharacteristics, PatternDetectionAlgorithm, PatternEffectiveness, PatternType,
+    PatternUpdate, SynchronizationRequirements, ThreadInteraction,
 };
 use super::performance::{EffectivenessMetrics, PerformanceMetrics, PerformanceProfile};
 use super::quality::{
@@ -62,8 +57,8 @@ use super::quality::{
     RiskAssessmentAlgorithm, RiskFactor, RiskFactorType, RiskLevel, ValidationResults,
 };
 use super::resources::{
-    ResourceAccessPattern, ResourceConflict, ResourceIntensity, ResourceIntensityAnalyzer,
-    ResourceMetrics, ResourceUsageDataPoint, SystemResourceSnapshot,
+    ResourceAccessPattern, ResourceConflict, ResourceIntensity, ResourceMetrics,
+    ResourceUsageDataPoint, SystemResourceSnapshot,
 };
 
 // ============================================================================
@@ -417,74 +412,6 @@ pub struct RealTimeDashboard {
     pub metrics: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RealTimeTestProfiler {
-    /// Profiler configuration
-    pub config: Arc<RwLock<RealTimeProfilerConfig>>,
-    /// Streaming analyzer
-    pub streaming_analyzer: Arc<StreamingAnalyzer>,
-    /// Adaptive optimizer
-    pub adaptive_optimizer: Arc<AdaptiveOptimizer>,
-    /// Strategy selector
-    pub strategy_selector: Arc<StrategySelector>,
-    /// Dashboard integration
-    pub dashboard: Arc<RealTimeDashboard>,
-    /// Profile streams
-    pub profile_streams: Arc<RwLock<HashMap<String, ProfileStream>>>,
-    /// Background tasks
-    pub background_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    /// Shutdown signal
-    pub shutdown: Arc<AtomicBool>,
-}
-
-impl RealTimeTestProfiler {
-    pub fn new(config: Arc<RwLock<RealTimeProfilerConfig>>) -> Self {
-        Self {
-            config,
-            streaming_analyzer: Arc::new(StreamingAnalyzer {
-                algorithms: HashMap::new(),
-                stream_config: StreamConfiguration {
-                    buffer_size: 1000,
-                    sampling_interval: Duration::from_secs(1),
-                    compression_enabled: false,
-                    retention_policy: "default".to_string(),
-                },
-                results: Arc::new(RwLock::new(HashMap::new())),
-                quality_settings: StreamQualitySettings {
-                    min_quality_score: 0.8,
-                    max_error_rate: 0.1,
-                    quality_check_interval: Duration::from_secs(60),
-                    auto_quality_adjust: true,
-                },
-                buffer: VecDeque::new(),
-                performance_tracker: AnalyzerMetrics::default(),
-                anomaly_threshold: 0.95,
-                stream_stats: StreamStatistics::default(),
-                alert_system: AlertSystem::default(),
-            }),
-            adaptive_optimizer: Arc::new(AdaptiveOptimizer::new(LearningConfiguration::default())),
-            strategy_selector: Arc::new(StrategySelector::new(SelectionContext::default())),
-            dashboard: Arc::new(RealTimeDashboard {
-                refresh_interval: Duration::from_secs(5),
-                metrics: Vec::new(),
-            }),
-            profile_streams: Arc::new(RwLock::new(HashMap::new())),
-            background_tasks: Arc::new(Mutex::new(Vec::new())),
-            shutdown: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    pub fn start_profiling(&self, _test_id: &str) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        Ok(())
-    }
-
-    pub fn stop_profiling(&self, _test_id: &str) -> TestCharacterizationResult<()> {
-        // Placeholder implementation
-        Ok(())
-    }
-}
-
 // ============================================================================
 // TEST CHARACTERIZATION TYPES
 // ============================================================================
@@ -639,25 +566,6 @@ pub struct TestPattern {
     pub predictive_accuracy: f64,
 }
 
-pub struct TestCharacterizationEngine {
-    /// Engine configuration
-    pub config: Arc<RwLock<TestCharacterizationConfig>>,
-    /// Resource intensity analyzer
-    pub resource_analyzer: Arc<ResourceIntensityAnalyzer>,
-    /// Concurrency requirements detector
-    pub concurrency_detector: Arc<ConcurrencyRequirementsDetector>,
-    /// Synchronization analyzer
-    pub synchronization_analyzer: Arc<SynchronizationAnalyzer>,
-    /// Pattern recognition engine
-    pub pattern_engine: Arc<TestPatternRecognitionEngine>,
-    /// Real-time profiler
-    pub real_time_profiler: Arc<RealTimeTestProfiler>,
-    /// Background profiling tasks
-    pub background_tasks: Vec<JoinHandle<()>>,
-    /// Shutdown signal
-    pub shutdown: Arc<AtomicBool>,
-}
-
 pub struct TestDependency {
     /// Source test identifier
     pub source_test: String,
@@ -686,53 +594,6 @@ pub struct TestFilter {
     pub criteria: HashMap<String, String>,
     pub include_patterns: Vec<String>,
     pub exclude_patterns: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RecognitionHistory {
-    pub patterns_recognized: Vec<String>,
-    pub recognition_timestamps: Vec<DateTime<Utc>>,
-    pub accuracy_history: Vec<f64>,
-    pub total_recognitions: usize,
-}
-
-/// Placeholder - actual implementation in pattern_engine.rs
-#[derive(Debug, Clone)]
-pub struct TestPatternRecognitionEngine {
-    pub enabled: bool,
-    pub algorithms: Vec<String>,
-    pub confidence_threshold: f64,
-    pub history: RecognitionHistory,
-}
-
-impl TestPatternRecognitionEngine {
-    pub fn new() -> Self {
-        Self {
-            enabled: true,
-            algorithms: vec!["default".to_string()],
-            confidence_threshold: 0.8,
-            history: RecognitionHistory {
-                patterns_recognized: Vec::new(),
-                recognition_timestamps: Vec::new(),
-                accuracy_history: Vec::new(),
-                total_recognitions: 0,
-            },
-        }
-    }
-
-    pub fn recognize_test_patterns(
-        &self,
-        _test_data: &TestExecutionData,
-    ) -> TestCharacterizationResult<Vec<TestPattern>> {
-        // Placeholder implementation
-        Ok(Vec::new())
-    }
-}
-
-impl Default for TestPatternRecognitionEngine {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 // ============================================================================
@@ -1547,13 +1408,6 @@ impl Default for BaselineModel {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct MLPatternRecognizer {
-    pub model_type: String,
-    pub recognition_threshold: f64,
-    pub patterns_detected: usize,
 }
 
 #[derive(Debug, Clone)]

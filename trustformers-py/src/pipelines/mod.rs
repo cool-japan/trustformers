@@ -21,9 +21,22 @@
 //!   checkpoint's `id2label`.
 //! * `token-classification` and `question-answering` refuse construction with
 //!   a structured `NotImplementedError` that says exactly what is missing --
-//!   see [`PyTokenClassificationPipeline`].
+//!   see [`PyTokenClassificationPipeline`]. As of this pass, real
+//!   `BertForTokenClassification`/`BertForQuestionAnswering` Python wrappers
+//!   exist (`crate::models::PyBertForTokenClassification`/
+//!   `PyBertForQuestionAnswering`) and can be called directly for real
+//!   per-position logits, and the `simple`-aggregation NER/QA extraction math
+//!   itself is real and tested too (`span::aggregate_entities_simple`/
+//!   `span::extract_answer`) -- what still blocks the *pipeline* (which must
+//!   report HuggingFace's character-level `start`/`end` keys) is that
+//!   `trustformers-tokenizers`'s `WordPieceTokenizer`/`BPETokenizer` still set
+//!   `TokenizedInput::offset_mapping` to `None` unconditionally (re-verified
+//!   2026-08-24; see [`span_pipeline_unavailable`]), so `span`'s two
+//!   functions have no real offsets to be handed today and are not yet wired
+//!   into a live pipeline.
 
 mod scoring;
+mod span;
 
 use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -436,19 +449,41 @@ impl PyTextClassificationPipeline {
 
 /// Why the two span-level pipelines cannot be built yet.
 ///
-/// Both need character offsets to report where in the input a prediction
-/// falls, and this workspace's tokenizers set `TokenizedInput::offset_mapping`
-/// to `None` unconditionally (`trustformers-tokenizers`' WordPiece and BPE
-/// encoders both do). Reporting token indices under HuggingFace's `start` /
-/// `end` keys -- which are *character* offsets -- would be wrong in a way
-/// callers cannot detect.
+/// This used to cite two gaps: no Python wrapper for the underlying BERT task
+/// model, and no character offsets from this crate's tokenizers. The first
+/// gap is closed -- `crate::models::PyBertForTokenClassification` and
+/// `PyBertForQuestionAnswering` are real, callable Python classes today (real
+/// forward pass, real logits, real loss when labels/positions are given). The
+/// second gap is not: re-verified 2026-08-24 by reading
+/// `trustformers-tokenizers` directly (not trusting any handoff note) --
+/// `WordPieceTokenizer::encode`/`encode_pair` (`src/wordpiece.rs`, what BERT
+/// checkpoints use) still construct every `TokenizedInput` with
+/// `offset_mapping: None`, unconditionally, with no offset-computing code path
+/// anywhere in the file. `BPETokenizer` (`src/bpe.rs`) gained a real, tested
+/// `tokenize_with_offsets` helper this wave, but it is (a) not part of the
+/// `Tokenizer` trait `encode`/`encode_pair` this crate's `PipelineTokenizer`
+/// actually calls -- those two still hardcode `offset_mapping: None` exactly
+/// as before -- and (b) BPE-only, so it would not help BERT/WordPiece checkpoints
+/// in any case. Reporting token indices under HuggingFace's `start`/`end` keys
+/// -- which are *character* offsets -- would be wrong in a way callers cannot
+/// detect: this crate's own offset convention (`span::slice_text`,
+/// `BPETokenizer::tokenize_with_offsets`) is *byte* offsets, not character
+/// offsets (see `span`'s module doc), so even a real offset-producing
+/// tokenizer would need an extra byte->codepoint conversion step, not
+/// implemented anywhere here, before its output could honestly fill these
+/// keys. So this pipeline refuses to construct rather than build an object
+/// that can only ever fail, or worse, silently mis-report spans.
 fn span_pipeline_unavailable(task: &str, model_name: &str, head_name: &str) -> PyErr {
     PyNotImplementedError::new_err(format!(
         "the '{task}' pipeline is not available. `trustformers_models::bert::{model_name}` is a \
-         real model with a real {head_name} head, but this crate exposes no Python wrapper for \
-         it, and the pipeline could not report HuggingFace's character-level `start`/`end` keys \
-         in any case: trustformers-tokenizers does not produce an offset mapping yet. This is a \
-         refusal rather than the placeholder result the pipeline used to return."
+         real model with a real {head_name} head, and this crate now exposes a real Python \
+         wrapper for it (`trustformers.{model_name}`) -- call it directly for real per-position \
+         logits. But this HuggingFace-shaped pipeline still cannot report the character-level \
+         `start`/`end` keys HuggingFace's output format needs: trustformers-tokenizers's \
+         WordPieceTokenizer and BPETokenizer `Tokenizer`-trait `encode`/`encode_pair` methods \
+         (what this crate's tokenizer wrappers call) both still set \
+         `TokenizedInput::offset_mapping` to `None` unconditionally (re-verified 2026-08-24). This \
+         is a refusal rather than the placeholder result the pipeline used to return."
     ))
 }
 
@@ -457,7 +492,10 @@ fn span_pipeline_unavailable(task: &str, model_name: &str, head_name: &str) -> P
 /// Construction always fails; see [`span_pipeline_unavailable`]. The class
 /// stays registered so `trustformers.TokenClassificationPipeline` keeps
 /// resolving, but it can no longer hand back the fixed `B-PER` / `"John"` /
-/// `0..4` entity it used to invent for every input.
+/// `0..4` entity it used to invent for every input. For real per-token
+/// inference without HuggingFace's `start`/`end` character offsets, call
+/// `trustformers.BertForTokenClassification` directly instead of this
+/// pipeline.
 #[pyclass(name = "TokenClassificationPipeline", module = "trustformers", extends = PyPipeline)]
 pub struct PyTokenClassificationPipeline;
 
@@ -483,7 +521,9 @@ impl PyTokenClassificationPipeline {
 ///
 /// Construction always fails; see [`span_pipeline_unavailable`]. It used to
 /// answer the literal string `"Example answer"` with `score: 0.85` for every
-/// question.
+/// question. For real start/end logits without HuggingFace's `start`/`end`
+/// character offsets, call `trustformers.BertForQuestionAnswering` directly
+/// instead of this pipeline.
 #[pyclass(name = "QuestionAnsweringPipeline", module = "trustformers", extends = PyPipeline)]
 pub struct PyQuestionAnsweringPipeline;
 

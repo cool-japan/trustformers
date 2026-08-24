@@ -761,17 +761,23 @@ impl MobilePerformanceProfiler {
             Some(gpu_samples.iter().sum::<f32>() / gpu_samples.len() as f32)
         };
 
-        let battery_samples: Vec<f32> = metrics
+        // A genuine mAh figure needs a time integral of current, and current
+        // needs a voltage to turn a power reading into. `metrics` is
+        // chronological (the collector only ever appends), so consecutive
+        // entries with both a power and a voltage reading form the intervals
+        // `integrate_battery_consumed_mah` integrates over; a voltage-less
+        // power reading contributes to neither endpoint, so it simply isn't
+        // part of any interval.
+        let battery_series: Vec<(u64, f64, f64)> = metrics
             .iter()
-            .filter_map(|m| m.battery.as_ref().map(|battery| battery.power_consumption_mw))
+            .filter_map(|m| {
+                let battery = m.battery.as_ref()?;
+                let power_mw = battery.power_consumption_mw?;
+                let voltage_v = battery.voltage_v?;
+                (voltage_v > 0.0).then_some((m.timestamp, power_mw as f64, voltage_v as f64))
+            })
             .collect();
-        // mW summed over the sampled snapshots, expressed in mAh-equivalent
-        // units the way this summary has always reported it.
-        let battery_consumed_mah = if battery_samples.is_empty() {
-            None
-        } else {
-            Some(battery_samples.iter().sum::<f32>() / 1000.0)
-        };
+        let battery_consumed_mah = integrate_battery_consumed_mah(&battery_series);
 
         let throttling_samples: Vec<f32> = metrics
             .iter()
@@ -907,5 +913,119 @@ impl MobilePerformanceProfiler {
         }
 
         Ok(())
+    }
+}
+
+/// Integrate a chronological series of `(timestamp_ms, power_mw, voltage_v)`
+/// battery readings into a total charge throughput in mAh.
+///
+/// Current is computed pointwise at each reading (`I = P / V`, `P = V * I`
+/// rearranged) *before* averaging: each consecutive pair of readings is one
+/// interval, and the interval's average current in mA is the arithmetic mean
+/// of the two endpoints' own `power / voltage` currents (the trapezoidal
+/// rule applied to the current samples), integrated over the interval's
+/// elapsed time in hours. This is deliberately not the trapezoidal average
+/// power divided by the trapezoidal average voltage -- `avg(P) / avg(V)` is
+/// not the same quantity as `avg(P / V)` whenever voltage varies within an
+/// interval (division is nonlinear), so computing the ratio first and
+/// averaging second is required for the result to actually be an average
+/// current. `readings` with fewer than two entries yield `None` -- there is
+/// no interval to integrate over, so there is nothing to report rather than
+/// a number derived from a single instant.
+fn integrate_battery_consumed_mah(readings: &[(u64, f64, f64)]) -> Option<f32> {
+    if readings.len() < 2 {
+        return None;
+    }
+
+    let mut milliamp_hours = 0.0f64;
+    for pair in readings.windows(2) {
+        let (t0, power0_mw, voltage0_v) = pair[0];
+        let (t1, power1_mw, voltage1_v) = pair[1];
+        let elapsed_hours = t1.saturating_sub(t0) as f64 / 3_600_000.0; // ms -> hours
+        let current0_ma = power0_mw / voltage0_v;
+        let current1_ma = power1_mw / voltage1_v;
+        let avg_current_ma = (current0_ma + current1_ma) / 2.0;
+        milliamp_hours += avg_current_ma * elapsed_hours;
+    }
+    Some(milliamp_hours as f32)
+}
+
+#[cfg(test)]
+mod battery_integral_tests {
+    use super::integrate_battery_consumed_mah;
+
+    /// Fewer than two readings: nothing to integrate over.
+    #[test]
+    fn empty_and_single_reading_yield_none() {
+        assert_eq!(integrate_battery_consumed_mah(&[]), None);
+        assert_eq!(integrate_battery_consumed_mah(&[(0, 1000.0, 5.0)]), None);
+    }
+
+    /// Constant 1000 mW at 5 V for exactly one hour: I = P / V = 200 mA,
+    /// held for 1 h, so the integral is exactly 200 mAh.
+    #[test]
+    fn constant_power_and_voltage_for_one_hour() {
+        let one_hour_ms = 3_600_000u64;
+        let readings = [(0u64, 1000.0f64, 5.0f64), (one_hour_ms, 1000.0, 5.0)];
+        let mah = integrate_battery_consumed_mah(&readings).expect("two readings");
+        assert!((mah - 200.0).abs() < 1e-3, "got {mah}");
+    }
+
+    /// A linear power ramp at constant voltage: the trapezoidal average power
+    /// over the interval equals the arithmetic mean of the endpoints, so the
+    /// result must match the constant-power case at that mean power.
+    #[test]
+    fn linear_power_ramp_matches_its_average() {
+        let one_hour_ms = 3_600_000u64;
+        let ramp = [(0u64, 500.0f64, 5.0f64), (one_hour_ms, 1500.0, 5.0)];
+        let mah = integrate_battery_consumed_mah(&ramp).expect("two readings");
+        // Average power 1000 mW at 5 V -> 200 mA -> 200 mAh over 1 h, same as
+        // the constant-power test above.
+        assert!((mah - 200.0).abs() < 1e-3, "got {mah}");
+    }
+
+    /// Three readings covering two half-hour intervals accumulate rather
+    /// than only reflecting the first or last interval.
+    #[test]
+    fn multiple_intervals_accumulate() {
+        let half_hour_ms = 1_800_000u64;
+        let readings = [
+            (0u64, 1000.0f64, 5.0f64),       // 200 mA
+            (half_hour_ms, 1000.0, 5.0),     // 200 mA, 0.5 h -> 100 mAh
+            (half_hour_ms * 2, 2000.0, 5.0), // ramps to 400 mA; avg 300 mA, 0.5 h -> 150 mAh
+        ];
+        let mah = integrate_battery_consumed_mah(&readings).expect("three readings");
+        assert!((mah - 250.0).abs() < 1e-3, "got {mah}"); // 100 + 150
+    }
+
+    /// A zero-length interval (two readings with the same timestamp)
+    /// contributes nothing, and must not divide by a zero elapsed time.
+    #[test]
+    fn zero_length_interval_contributes_nothing() {
+        let readings = [(1_000u64, 1000.0f64, 5.0f64), (1_000u64, 1000.0, 5.0)];
+        let mah = integrate_battery_consumed_mah(&readings).expect("two readings");
+        assert!((mah - 0.0).abs() < 1e-6, "got {mah}");
+    }
+
+    /// Every other test above holds voltage constant across the interval, so
+    /// they cannot tell the correct `avg(P / V)` from the wrong `avg(P) /
+    /// avg(V)` -- the two formulas coincide when voltage doesn't move. This
+    /// test varies voltage within a single interval to discriminate them.
+    ///
+    /// P0 = 1000 mW at V0 = 5 V  -> I0 = 200 mA
+    /// P1 = 1000 mW at V1 = 10 V -> I1 = 100 mA
+    /// Correct trapezoidal average current = (200 + 100) / 2 = 150 mA, held
+    /// for 1 h -> 150 mAh. The wrong `avg(P) / avg(V)` formula would instead
+    /// give avg(P) = 1000 mW, avg(V) = 7.5 V -> 133.33... mA -> ~133.33 mAh,
+    /// which this assertion rejects.
+    #[test]
+    fn varying_voltage_averages_current_not_power_over_voltage() {
+        let one_hour_ms = 3_600_000u64;
+        let readings = [(0u64, 1000.0f64, 5.0f64), (one_hour_ms, 1000.0, 10.0)];
+        let mah = integrate_battery_consumed_mah(&readings).expect("two readings");
+        assert!(
+            (mah - 150.0).abs() < 1e-3,
+            "got {mah}, expected 150.0 (not ~133.33)"
+        );
     }
 }

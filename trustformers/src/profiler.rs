@@ -5,9 +5,9 @@
 //! easy-to-use profiling capabilities for models, pipelines, and operations.
 
 use crate::core::performance::{
-    BenchmarkResult, BenchmarkSuite, LatencyMetrics, MemoryMetrics, MetricsTracker,
-    OptimizationAdvisor, OptimizationSuggestion, PerformanceProfiler as CoreProfiler,
-    ProfileResult, ThroughputMetrics,
+    AnalysisContext, BenchmarkResult, BenchmarkSuite, HardwareInfo, LatencyMetrics, MemoryMetrics,
+    MetricsTracker, OptimizationAdvisor, OptimizationSuggestion, PerformanceImprovement,
+    PerformanceProfiler as CoreProfiler, ProfileResult, ThroughputMetrics,
 };
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
@@ -245,10 +245,14 @@ impl Profiler {
 
     /// The optimization advisor this profiler was constructed with.
     ///
-    /// [`Self::generate_optimization_suggestions`] does not call
-    /// [`OptimizationAdvisor::analyze`] on it — see that method's doc comment
-    /// — so this is exposed for callers who want the advisor's real,
-    /// rule-based analysis directly.
+    /// [`Self::generate_optimization_suggestions`] runs this advisor's real,
+    /// rule-based [`OptimizationAdvisor::analyze`] every time a session ends
+    /// with `enable_advisor` set (see that method's doc comment for the
+    /// `AnalysisContext` it assembles). This accessor is exposed for callers
+    /// who want to run the advisor directly against their own context —
+    /// for example one that carries a real `model_graph` or
+    /// `current_config`, neither of which this high-level profiler has
+    /// access to.
     pub fn advisor(&self) -> &OptimizationAdvisor {
         &self.advisor
     }
@@ -347,7 +351,12 @@ impl Profiler {
 
         // Generate optimization suggestions
         let optimization_suggestions = if self.config.enable_advisor {
-            self.generate_optimization_suggestions(&operations)
+            self.generate_optimization_suggestions(
+                &operations,
+                &latency_metrics,
+                memory_metrics.as_ref(),
+                &throughput_metrics,
+            )
         } else {
             Vec::new()
         };
@@ -720,59 +729,102 @@ impl Profiler {
         }
     }
 
-    /// Flag the single slowest recorded operation as worth optimizing.
+    /// Real, rule-based optimization suggestions from
+    /// [`OptimizationAdvisor::analyze`].
+    ///
+    /// Assembles an [`AnalysisContext`] from real hardware detection (see
+    /// [`detect_hardware_info`], which mirrors
+    /// [`crate::enhanced_profiler::EnhancedProfiler::detect_hardware`]'s
+    /// honest `sysinfo`/`num_cpus` pattern) and this session's real latency/
+    /// memory/throughput metrics, then runs the advisor's full rule set once
+    /// per measured operation -- so the kernel-fusion rule sees each
+    /// operation's real call count and average duration -- and once with no
+    /// specific operation, so hardware/memory-driven rules (parallelization,
+    /// gradient checkpointing, memory fragmentation, ...) still get a chance
+    /// to fire on a session that measured nothing yet. Results are
+    /// deduplicated by suggestion id, since the same rule can legitimately
+    /// fire once per operation.
+    ///
+    /// `model_graph` and `current_config` stay at their defaults (`None`/
+    /// empty): this high-level profiler has no model graph or live
+    /// configuration to hand the advisor, so rules that need either
+    /// (attention/flash-attention/quantization sizing, or "is X already
+    /// enabled") simply do not fire rather than being fed an invented graph
+    /// or config.
     ///
     /// # Known limitation
     ///
-    /// This is a minimal heuristic (one rule: "the slowest operation took
-    /// over 100ms"), not [`Self::advisor`]'s rule-based
-    /// [`OptimizationAdvisor::analyze`] — that needs an `AnalysisContext`
-    /// assembled from real hardware detection and the session's latency/
-    /// memory/throughput metrics, which this method does not build. Wiring
-    /// it in is real, scoped follow-up work, not something to fake here.
-    /// `expected_improvement`'s percentages are honestly `None` (no measured
-    /// or modelled estimate exists) rather than a plausible-looking constant.
+    /// The advisor's rule *preconditions* are evaluated against real
+    /// measurements (a `ParallelizationRule` suggestion means `cpu_cores`
+    /// really was read as `> 4`; a `GradientCheckpointingRule` suggestion
+    /// means peak RSS really did exceed 80% of measured system memory), but
+    /// each rule's own `expected_improvement` percentages in
+    /// `trustformers-core` are fixed per-rule constants ("Flash Attention:
+    /// -50% latency"), not something derived from this session's
+    /// measurements. Keeping Wave 4's honesty invariant means this method
+    /// does not forward those numbers: `expected_improvement` is
+    /// overwritten to all-`None` at this boundary for every suggestion
+    /// returned here, so nothing that reaches [`ProfileResults`] claims a
+    /// percentage this profiler did not itself measure or model.
     fn generate_optimization_suggestions(
         &self,
         operations: &HashMap<String, ProfileResult>,
+        latency_metrics: &LatencyMetrics,
+        memory_metrics: Option<&MemoryMetrics>,
+        throughput_metrics: &ThroughputMetrics,
     ) -> Vec<OptimizationSuggestion> {
+        let hardware_info = detect_hardware_info();
+        let latency_metrics =
+            if latency_metrics.count > 0 { Some(latency_metrics.clone()) } else { None };
+        let throughput_metrics =
+            if throughput_metrics.total_tokens > 0 || throughput_metrics.total_batches > 0 {
+                Some(throughput_metrics.clone())
+            } else {
+                None
+            };
+
+        let build_context = |profile_results: Option<ProfileResult>| AnalysisContext {
+            model_graph: None,
+            profile_results,
+            latency_metrics: latency_metrics.clone(),
+            memory_metrics: memory_metrics.cloned(),
+            throughput_metrics: throughput_metrics.clone(),
+            hardware_info: hardware_info.clone(),
+            current_config: HashMap::new(),
+        };
+
+        // Once with no specific operation, so hardware/memory-driven rules
+        // get a chance to fire even when nothing has been profiled yet;
+        // once per measured operation, so the kernel-fusion rule sees each
+        // operation's real call count and average duration.
+        let mut contexts = vec![build_context(None)];
+        contexts.extend(operations.values().cloned().map(|op| build_context(Some(op))));
+
+        let mut seen_ids = std::collections::HashSet::new();
         let mut suggestions = Vec::new();
-
-        // Find slow operations
-        let mut sorted_ops: Vec<_> = operations.iter().collect();
-        sorted_ops.sort_by_key(|(_, item)| std::cmp::Reverse(item.total_time));
-
-        if let Some((name, result)) = sorted_ops.first() {
-            if result.total_time > Duration::from_millis(100) {
-                suggestions.push(OptimizationSuggestion {
-                    id: "slow_operation".to_string(),
-                    category: crate::core::performance::OptimizationCategory::Compute,
-                    impact: crate::core::performance::ImpactLevel::High,
-                    difficulty: crate::core::performance::Difficulty::Medium,
-                    title: format!("Optimize slow operation: {}", name),
-                    description: format!("Operation {} is taking {:.2}ms, consider optimization", name, result.total_time.as_secs_f64() * 1000.0),
-                    implementation_steps: vec![
-                        "Profile the operation in detail".to_string(),
-                        "Consider algorithmic improvements".to_string(),
-                        "Enable hardware acceleration".to_string(),
-                    ],
-                    // No measurement or model backs a specific percentage
-                    // here, so these are honestly `None` rather than an
-                    // invented (if plausible-looking) number.
-                    expected_improvement: crate::core::performance::PerformanceImprovement {
-                        latency_reduction: None,
-                        throughput_increase: None,
-                        memory_reduction: None,
-                        other_metrics: std::collections::HashMap::new(),
-                    },
-                    code_examples: Some(vec![crate::core::performance::CodeExample {
-                        language: "rust".to_string(),
-                        code: format!("// Optimize {} operation\n// Consider using GPU acceleration or kernel fusion", name),
-                        description: "Example optimization approach".to_string(),
-                    }]),
-                    warnings: vec![],
-                    related_suggestions: vec![],
-                });
+        for context in &contexts {
+            match self.advisor.analyze(context) {
+                Ok(report) => {
+                    for mut suggestion in report.suggestions {
+                        if !seen_ids.insert(suggestion.id.clone()) {
+                            continue;
+                        }
+                        // See "Known limitation" above: these percentages are
+                        // fixed per-rule constants, not measurements this
+                        // profiler made, so they must not be reported as if
+                        // they were.
+                        suggestion.expected_improvement = PerformanceImprovement {
+                            latency_reduction: None,
+                            throughput_increase: None,
+                            memory_reduction: None,
+                            other_metrics: HashMap::new(),
+                        };
+                        suggestions.push(suggestion);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("optimization advisor analysis failed: {e}");
+                },
             }
         }
 
@@ -1009,8 +1061,67 @@ pub struct ProfileSessionInfo {
 }
 
 // ---------------------------------------------------------------------------
-// Real memory sources
+// Real hardware and memory sources
 // ---------------------------------------------------------------------------
+
+/// Real hardware detection for the optimization advisor's [`AnalysisContext`].
+///
+/// Mirrors [`crate::enhanced_profiler::EnhancedProfiler::detect_hardware`]'s
+/// honest pattern: CPU model, core count and system memory are real
+/// `sysinfo`/`num_cpus` readings; SIMD capability flags come from
+/// [`trustformers_core::kernels::SIMDCpuFeatures::detect`]'s real
+/// `is_x86_feature_detected!`/`is_aarch64_feature_detected!` probes -- only
+/// features the running CPU actually reports are listed. No pure-Rust GPU
+/// enumeration is linked into this crate, so `gpu_model` and `gpu_memory_mb`
+/// stay honestly `None` rather than an invented device.
+fn detect_hardware_info() -> HardwareInfo {
+    let mut system = sysinfo::System::new();
+    system.refresh_cpu_all();
+    system.refresh_memory();
+
+    let cpu_cores = sysinfo::System::physical_core_count().unwrap_or_else(num_cpus::get);
+    let cpu_model = system
+        .cpus()
+        .first()
+        .map(|cpu| cpu.brand().trim().to_string())
+        .filter(|brand| !brand.is_empty());
+    let system_memory_mb = (system.total_memory() / (1024 * 1024)) as usize;
+
+    let features = trustformers_core::kernels::SIMDCpuFeatures::detect();
+    let mut simd_capabilities = Vec::new();
+    for (present, name) in [
+        (
+            features.avx512f && features.avx512vl && features.avx512bw && features.avx512dq,
+            "avx512",
+        ),
+        (features.avx2, "avx2"),
+        (features.avx, "avx"),
+        (features.fma, "fma"),
+        (features.sse4_2, "sse4.2"),
+        (features.sse4_1, "sse4.1"),
+        (features.sse3, "sse3"),
+        (features.sse2, "sse2"),
+        (features.neon, "neon"),
+        (features.sve2, "sve2"),
+        (features.sve, "sve"),
+        (features.rvv, "rvv"),
+    ] {
+        if present {
+            simd_capabilities.push(name.to_string());
+        }
+    }
+
+    HardwareInfo {
+        cpu_model,
+        cpu_cores,
+        // No pure-Rust GPU enumeration is linked into this crate: an absent
+        // reading is the honest answer, not an invented device.
+        gpu_model: None,
+        gpu_memory_mb: None,
+        system_memory_mb,
+        simd_capabilities,
+    }
+}
 
 /// Operating-system view of this process's memory.
 #[derive(Debug, Clone, Copy)]
@@ -1118,24 +1229,154 @@ mod tests {
     #[test]
     fn test_generate_optimization_suggestions_does_not_fabricate_improvement_numbers() {
         let profiler = Profiler::new().expect("operation failed in test");
-        let mut slow_op = ProfileResult::new("slow_op".to_string());
-        slow_op.total_time = Duration::from_millis(150);
+        // `call_count > 100` and `avg_time < 1ms` deterministically satisfies
+        // the real `KernelFusionRule`'s precondition regardless of which
+        // machine runs this test -- unlike e.g. `ParallelizationRule`, whose
+        // firing depends on the real number of CPU cores this test happens
+        // to run on. This keeps the assertion below meaningful (a non-empty,
+        // reproducible suggestion list) without hardcoding a total count
+        // that some other, environment-dependent rule could also affect.
+        let mut frequent_op = ProfileResult::new("frequent_op".to_string());
+        frequent_op.call_count = 150;
+        frequent_op.avg_time = Duration::from_micros(500);
         let mut operations = HashMap::new();
-        operations.insert("slow_op".to_string(), slow_op);
+        operations.insert("frequent_op".to_string(), frequent_op);
 
-        let suggestions = profiler.generate_optimization_suggestions(&operations);
-        assert_eq!(
-            suggestions.len(),
-            1,
-            "a >100ms operation should produce exactly one suggestion"
+        let latency_metrics = LatencyMetrics::default();
+        let throughput_metrics = ThroughputMetrics {
+            tokens_per_second: 0.0,
+            batches_per_second: 0.0,
+            samples_per_second: 0.0,
+            avg_batch_size: 0.0,
+            avg_sequence_length: 0.0,
+            total_tokens: 0,
+            total_batches: 0,
+            total_duration: Duration::ZERO,
+        };
+
+        let suggestions = profiler.generate_optimization_suggestions(
+            &operations,
+            &latency_metrics,
+            None,
+            &throughput_metrics,
         );
-        let improvement = &suggestions[0].expected_improvement;
-        assert_eq!(
-            improvement.latency_reduction, None,
-            "no measurement or model backs a specific percentage; it must not be fabricated"
+
+        assert!(
+            suggestions.iter().any(|s| s.id == "kernel_fusion"),
+            "a frequently-called sub-millisecond operation should trigger the real, \
+             rule-based kernel-fusion suggestion, not an empty list"
         );
-        assert_eq!(improvement.throughput_increase, None);
-        assert_eq!(improvement.memory_reduction, None);
+        // Whatever the real advisor produced on this machine (which rules
+        // beyond kernel-fusion fire depends on real, environment-specific
+        // measurements like CPU core count), none of it may carry a
+        // percentage this profiler did not itself measure or model.
+        for suggestion in &suggestions {
+            let improvement = &suggestion.expected_improvement;
+            assert_eq!(
+                improvement.latency_reduction, None,
+                "no measurement or model backs a specific percentage for suggestion \
+                 {:?}; it must not be fabricated",
+                suggestion.id
+            );
+            assert_eq!(improvement.throughput_increase, None);
+            assert_eq!(improvement.memory_reduction, None);
+        }
+    }
+
+    #[test]
+    fn test_detect_hardware_info_reports_real_values() {
+        // Mirrors `enhanced_profiler`'s own
+        // `hardware_detection_reports_real_values` test: this must be a real
+        // sysinfo/num_cpus reading, not a hardcoded stand-in.
+        let hardware = detect_hardware_info();
+        assert!(hardware.cpu_cores > 0, "a running process has CPU cores");
+        assert!(
+            hardware.system_memory_mb > 0,
+            "installed memory must be a real reading"
+        );
+        assert!(
+            hardware.gpu_model.is_none() && hardware.gpu_memory_mb.is_none(),
+            "no pure-Rust GPU enumeration is linked in, so no device may be invented"
+        );
+    }
+
+    #[test]
+    fn test_generate_optimization_suggestions_kernel_fusion_requires_the_real_precondition() {
+        let profiler = Profiler::new().expect("operation failed in test");
+        // Only 3 calls and a multi-millisecond average: does not satisfy
+        // `KernelFusionRule`'s real precondition (`call_count > 100 &&
+        // avg_time < 1ms`), so the rule must not fire for it. This is the
+        // negative counterpart to the kernel-fusion assertion in
+        // `test_generate_optimization_suggestions_does_not_fabricate_improvement_numbers`,
+        // proving the advisor is gating on the operation's real measurements
+        // rather than firing unconditionally.
+        let mut infrequent_op = ProfileResult::new("infrequent_op".to_string());
+        infrequent_op.call_count = 3;
+        infrequent_op.avg_time = Duration::from_millis(5);
+        let mut operations = HashMap::new();
+        operations.insert("infrequent_op".to_string(), infrequent_op);
+
+        let latency_metrics = LatencyMetrics::default();
+        let throughput_metrics = ThroughputMetrics {
+            tokens_per_second: 0.0,
+            batches_per_second: 0.0,
+            samples_per_second: 0.0,
+            avg_batch_size: 0.0,
+            avg_sequence_length: 0.0,
+            total_tokens: 0,
+            total_batches: 0,
+            total_duration: Duration::ZERO,
+        };
+
+        let suggestions = profiler.generate_optimization_suggestions(
+            &operations,
+            &latency_metrics,
+            None,
+            &throughput_metrics,
+        );
+
+        assert!(
+            !suggestions.iter().any(|s| s.id == "kernel_fusion"),
+            "an operation that does not satisfy the real kernel-fusion precondition must \
+             not produce a kernel-fusion suggestion"
+        );
+    }
+
+    #[test]
+    fn test_generate_optimization_suggestions_reacts_to_real_measured_memory_pressure() {
+        let profiler = Profiler::new().expect("operation failed in test");
+        let operations = HashMap::new();
+        let latency_metrics = LatencyMetrics::default();
+        let throughput_metrics = ThroughputMetrics {
+            tokens_per_second: 0.0,
+            batches_per_second: 0.0,
+            samples_per_second: 0.0,
+            avg_batch_size: 0.0,
+            avg_sequence_length: 0.0,
+            total_tokens: 0,
+            total_batches: 0,
+            total_duration: Duration::ZERO,
+        };
+        // A peak far beyond any real machine's installed memory guarantees
+        // `peak > 80% of detected system memory` regardless of which
+        // machine runs this test, so the real `GradientCheckpointingRule`
+        // fires. Before this fix, `memory_metrics` was not even a parameter
+        // this function accepted -- the advisor was never called at all, so
+        // this scenario could not previously be exercised.
+        let memory_metrics = MemoryMetrics::new(1024, usize::MAX / 4, 1024, usize::MAX / 4);
+
+        let suggestions = profiler.generate_optimization_suggestions(
+            &operations,
+            &latency_metrics,
+            Some(&memory_metrics),
+            &throughput_metrics,
+        );
+
+        assert!(
+            suggestions.iter().any(|s| s.id == "gradient_checkpointing"),
+            "a session's real measured peak memory must reach the advisor's \
+             AnalysisContext and be able to trigger the real memory-pressure rule"
+        );
     }
 
     #[test]

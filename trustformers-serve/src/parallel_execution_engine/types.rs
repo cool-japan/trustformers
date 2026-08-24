@@ -4,32 +4,28 @@
 
 // 0.2.1: these came from `crate::resource_manager`, the placeholder tree deleted
 // in favour of `crate::resource_management` (see the re-export comment in
-// `lib.rs`). The types are the same shape; `AllocationEvent` additionally
-// carries the `resource_type` it was allocated for.
+// `lib.rs`). The types are the same shape.
 use crate::resource_management::{
-    AlertSystem, AllocationEvent, DistributionEvent, ExecutionPerformanceMetrics, ExecutionState,
-    HealthChecker, LoadMetrics, ResourceMonitor, WorkerPool,
+    AlertSystem, DistributionEvent, ExecutionPerformanceMetrics, ExecutionState, HealthChecker,
+    LoadMetrics, WorkerPool,
 };
 use crate::test_independence_analyzer::TestIndependenceAnalysis;
-use crate::test_parallelization::{DependencyType, TestDependency, TestParallelizationMetadata};
 use crate::test_parallelization::{
     EarlyTerminationStrategy, FailureHandlingStrategy, LoadBalancingStrategy, ResourceAllocation,
-    SchedulingStrategy, TestParallelizationConfig, TestParallelizationResult,
+    SchedulingStrategy, TestParallelizationMetadata,
 };
-use crate::test_timeout_optimization::{TestExecutionResult, TestTimeoutFramework};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use log::{debug, error, info};
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicBool, AtomicU64},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
 };
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinHandle;
 
 /// Rebalancing configuration
 #[derive(Debug, Clone)]
@@ -57,7 +53,7 @@ pub struct LoadBalancer {
     _distribution_history: Arc<Mutex<Vec<DistributionEvent>>>,
 }
 impl LoadBalancer {
-    async fn new(config: LoadBalancingConfig) -> Result<Self> {
+    pub(super) async fn new(config: LoadBalancingConfig) -> Result<Self> {
         Ok(Self {
             _config: Arc::new(RwLock::new(config)),
             _worker_pool: Arc::new(WorkerPool::default()),
@@ -66,23 +62,75 @@ impl LoadBalancer {
         })
     }
 }
-/// Available resources in the system
-#[derive(Debug, Default)]
+/// Capacity the parallel execution engine is allowed to hand out.
+///
+/// 0.2.1: this used to be a `Default`-constructed all-zero struct that nothing
+/// ever read. It now carries measured/configured capacity — see
+/// [`AvailableResources::detect`] — and [`ResourceManager::can_allocate`]
+/// actually checks against it. Every field is either measured from the running
+/// host or taken from the operator-supplied [`ResourcePoolConfig`]; none is
+/// invented.
+///
+/// The GPU and temporary-directory fields deliberately hold *identifiers and
+/// slot counts* rather than device/directory descriptors: this engine has no
+/// GPU enumerator and no filesystem prober, so it cannot honestly report a
+/// device's name, memory size or a directory's free space.
+///
+/// [`ResourcePoolConfig`]: crate::test_parallelization::ResourcePoolConfig
+#[derive(Debug, Default, Clone)]
 pub struct AvailableResources {
-    /// CPU cores available
+    /// CPU cores available (logical cores reported by the host)
     pub cpu_cores: f32,
-    /// Memory available (MB)
+    /// Memory available (MB), as reported by the host at detection time
     pub memory_mb: u64,
-    /// GPU devices available
-    pub gpu_devices: Vec<GpuDevice>,
-    /// Network ports available
+    /// GPU device IDs this engine may allocate from (operator-configured pool
+    /// membership, not a hardware enumeration)
+    pub gpu_device_ids: Vec<usize>,
+    /// Network ports available for allocation
     pub network_ports: Vec<u16>,
-    /// Temporary directories available
-    pub temp_directories: Vec<TempDirectory>,
+    /// Number of temporary-directory slots the pool may hand out
+    pub temp_directory_slots: usize,
     /// Database connections available
     pub database_connections: usize,
     /// Custom resources
     pub custom_resources: HashMap<String, f64>,
+}
+
+impl AvailableResources {
+    /// Build the engine's capacity from the running host plus the configured
+    /// resource pools.
+    ///
+    /// CPU cores come from [`std::thread::available_parallelism`] and memory
+    /// from `sysinfo`'s available-memory reading; ports, GPU device IDs,
+    /// temp-directory slots and database connections come from `pools`. If the
+    /// host refuses to report parallelism the core count falls back to 1 — the
+    /// only value that is certainly true — rather than to a guess.
+    pub fn detect(pools: &crate::test_parallelization::ResourcePoolConfig) -> Self {
+        let cpu_cores = std::thread::available_parallelism().map(|n| n.get() as f32).unwrap_or(1.0);
+
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        let memory_mb = system.available_memory() / (1024 * 1024);
+
+        let port_cfg = &pools.network_port_pool;
+        let network_ports: Vec<u16> = if port_cfg.start_port > port_cfg.end_port {
+            Vec::new()
+        } else {
+            (port_cfg.start_port..=port_cfg.end_port)
+                .filter(|p| !port_cfg.reserved_ports.contains(p))
+                .collect()
+        };
+
+        Self {
+            cpu_cores,
+            memory_mb,
+            gpu_device_ids: pools.gpu_device_pool.device_ids.clone(),
+            network_ports,
+            temp_directory_slots: pools.temp_directory_pool.max_directories,
+            database_connections: pools.database_pool.max_connections,
+            custom_resources: HashMap::new(),
+        }
+    }
 }
 /// Worker scaling configuration
 #[derive(Debug, Clone)]
@@ -189,524 +237,7 @@ pub enum AlertLevel {
     /// Critical level
     Critical,
 }
-/// Parallel test execution engine
-pub struct ParallelExecutionEngine {
-    /// Configuration
-    _config: Arc<RwLock<TestParallelizationConfig>>,
-    /// Test timeout framework
-    _timeout_framework: Arc<TestTimeoutFramework>,
-    /// Test scheduler
-    scheduler: Arc<TestScheduler>,
-    /// Resource manager
-    resource_manager: Arc<ResourceManager>,
-    /// Load balancer
-    _load_balancer: Arc<LoadBalancer>,
-    /// Execution monitor
-    _execution_monitor: Arc<ExecutionMonitor>,
-    /// Active execution sessions
-    active_sessions: Arc<Mutex<HashMap<String, ExecutionSession>>>,
-    /// Execution queue
-    _execution_queue: Arc<Mutex<ExecutionQueue>>,
-    /// Engine statistics
-    _engine_stats: Arc<EngineStatistics>,
-    /// Shutdown signal
-    _shutdown: Arc<AtomicBool>,
-    /// Background tasks
-    _background_tasks: Vec<JoinHandle<()>>,
-}
-impl ParallelExecutionEngine {
-    /// Create a new parallel execution engine
-    pub async fn new(
-        config: TestParallelizationConfig,
-        timeout_framework: Arc<TestTimeoutFramework>,
-    ) -> Result<Self> {
-        let scheduler = Arc::new(TestScheduler::new(config.scheduling.clone()).await?);
-        let resource_manager =
-            Arc::new(ResourceManager::new(config.resource_management.clone()).await?);
-        let load_balancer = Arc::new(
-            LoadBalancer::new(LoadBalancingConfig {
-                strategy: LoadBalancingStrategy::RoundRobin,
-                rebalancing: RebalancingConfig {
-                    enabled: true,
-                    interval: std::time::Duration::from_secs(30),
-                    imbalance_threshold: 0.8,
-                    aggressiveness: 0.5,
-                    work_stealing: WorkStealingConfig {
-                        enabled: true,
-                        steal_threshold: 0.7,
-                        max_steals_per_interval: 10,
-                        steal_timeout: std::time::Duration::from_millis(100),
-                    },
-                },
-                worker_config: WorkerConfig {
-                    initial_worker_count: 4,
-                    min_workers: 1,
-                    max_workers: 16,
-                    scaling: WorkerScalingConfig {
-                        enabled: true,
-                        scale_up_threshold: 0.8,
-                        scale_down_threshold: 0.3,
-                        cooldown_period: std::time::Duration::from_secs(60),
-                        scaling_factor: 1.5,
-                    },
-                    specialization: WorkerSpecializationConfig {
-                        enabled: false,
-                        by_category: false,
-                        by_resource: false,
-                        by_performance: false,
-                    },
-                },
-                thresholds: LoadBalancingThresholds {
-                    cpu_threshold: 0.8,
-                    memory_threshold: 0.8,
-                    queue_threshold: 100,
-                    response_time_threshold: std::time::Duration::from_millis(100),
-                    error_rate_threshold: 0.05,
-                },
-            })
-            .await?,
-        );
-        let monitor_config = MonitoringConfig {
-            monitoring_interval: std::time::Duration::from_secs(1),
-            performance_tracking: PerformanceTrackingConfig {
-                detailed_tracking: true,
-                collection_interval: std::time::Duration::from_secs(10),
-                retention_period: std::time::Duration::from_secs(3600),
-                analysis_interval: std::time::Duration::from_secs(60),
-                regression_detection: true,
-            },
-            health_checks: HealthCheckConfig {
-                interval: std::time::Duration::from_secs(30),
-                timeout: std::time::Duration::from_secs(10),
-                failure_threshold: 3,
-                recovery_interval: std::time::Duration::from_secs(60),
-                deep_checks: false,
-            },
-            alerts: AlertConfig {
-                enabled: true,
-                cooldown_period: std::time::Duration::from_secs(60),
-                thresholds: AlertThresholds {
-                    high_error_rate: 0.1,
-                    high_latency: std::time::Duration::from_secs(5),
-                    resource_exhaustion: 0.9,
-                    queue_backup: 100,
-                    worker_failure: 3,
-                },
-                destinations: vec![AlertDestination {
-                    destination_type: AlertDestinationType::Log,
-                    config: std::collections::HashMap::new(),
-                    alert_levels: vec![AlertLevel::Error, AlertLevel::Warning],
-                }],
-            },
-        };
-        let execution_monitor = Arc::new(ExecutionMonitor::new(monitor_config).await?);
-        Ok(Self {
-            _config: Arc::new(RwLock::new(config)),
-            _timeout_framework: timeout_framework,
-            scheduler,
-            resource_manager,
-            _load_balancer: load_balancer,
-            _execution_monitor: execution_monitor,
-            active_sessions: Arc::new(Mutex::new(HashMap::new())),
-            _execution_queue: Arc::new(Mutex::new(ExecutionQueue::new())),
-            _engine_stats: Arc::new(EngineStatistics::new()),
-            _shutdown: Arc::new(AtomicBool::new(false)),
-            _background_tasks: Vec::new(),
-        })
-    }
-    /// Execute tests in parallel with optimal scheduling and resource management
-    pub async fn execute_parallel(
-        &mut self,
-        analysis: TestIndependenceAnalysis,
-    ) -> Result<Vec<TestParallelizationResult>> {
-        info!(
-            "Starting parallel execution of {} tests",
-            analysis.tests.len()
-        );
-        self.start_background_tasks().await?;
-        let session_id = self.create_execution_session(&analysis).await?;
-        self.schedule_tests(&analysis).await?;
-        let results = self.execute_scheduled_tests(&session_id).await?;
-        self.cleanup_execution_session(&session_id).await?;
-        self.stop_background_tasks().await?;
-        info!("Parallel execution completed. {} results", results.len());
-        Ok(results)
-    }
-    /// Create an execution session
-    async fn create_execution_session(
-        &self,
-        analysis: &TestIndependenceAnalysis,
-    ) -> Result<String> {
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let session = ExecutionSession::new(session_id.clone(), analysis.clone());
-        {
-            let mut sessions = self.active_sessions.lock();
-            sessions.insert(session_id.clone(), session);
-        }
-        debug!("Created execution session: {}", session_id);
-        Ok(session_id)
-    }
-    /// Schedule tests for execution
-    async fn schedule_tests(&self, analysis: &TestIndependenceAnalysis) -> Result<()> {
-        for test_metadata in &analysis.tests {
-            let scheduled_test =
-                self.create_scheduled_test(test_metadata, &analysis.dependencies).await?;
-            self.scheduler.schedule_test(scheduled_test).await?;
-        }
-        Ok(())
-    }
-    /// Create a scheduled test from metadata
-    async fn create_scheduled_test(
-        &self,
-        metadata: &TestParallelizationMetadata,
-        dependencies: &[TestDependency],
-    ) -> Result<ScheduledTest> {
-        let priority = self.calculate_test_priority(metadata, dependencies).await?;
-        let resource_requirements = self.calculate_resource_requirements(metadata).await?;
-        let constraints = self.extract_scheduling_constraints(metadata, dependencies).await?;
-        Ok(ScheduledTest {
-            metadata: metadata.clone(),
-            priority,
-            scheduled_at: Utc::now(),
-            estimated_start: None,
-            resource_requirements,
-            constraints,
-            retry_count: 0,
-            scheduling_metadata: HashMap::new(),
-        })
-    }
-    /// Calculate test priority for scheduling
-    async fn calculate_test_priority(
-        &self,
-        metadata: &TestParallelizationMetadata,
-        _dependencies: &[TestDependency],
-    ) -> Result<f32> {
-        let base_priority = metadata.priority;
-        let category_adjustment = match metadata.base_context.category {
-            crate::test_timeout_optimization::TestCategory::Unit => 1.0,
-            crate::test_timeout_optimization::TestCategory::Integration => 0.8,
-            crate::test_timeout_optimization::TestCategory::Property => 0.7,
-            crate::test_timeout_optimization::TestCategory::Stress => 0.4,
-            crate::test_timeout_optimization::TestCategory::Chaos => 0.5,
-            _ => 0.6,
-        };
-        Ok(base_priority * category_adjustment)
-    }
-    /// Calculate resource requirements for a test
-    async fn calculate_resource_requirements(
-        &self,
-        metadata: &TestParallelizationMetadata,
-    ) -> Result<ResourceRequirement> {
-        Ok(ResourceRequirement {
-            resource_type: "mixed".to_string(),
-            min_amount: 1.0,
-            cpu_cores: metadata.resource_usage.cpu_cores,
-            memory_mb: metadata.resource_usage.memory_mb,
-            gpu_devices: metadata.resource_usage.gpu_devices.clone(),
-            network_ports: metadata.resource_usage.network_ports.len(),
-            temp_directories: metadata.resource_usage.temp_directories.len(),
-            database_connections: metadata.resource_usage.database_connections,
-            custom_resources: HashMap::new(),
-        })
-    }
-    /// Extract scheduling constraints from metadata and dependencies
-    async fn extract_scheduling_constraints(
-        &self,
-        _metadata: &TestParallelizationMetadata,
-        dependencies: &[TestDependency],
-    ) -> Result<Vec<SchedulingConstraint>> {
-        let mut constraints = Vec::new();
-        for dependency in dependencies {
-            match dependency.dependency_type {
-                DependencyType::Hard | DependencyType::Setup => {
-                    constraints.push(SchedulingConstraint {
-                        constraint_type: SchedulingConstraintType::Dependency,
-                        value: dependency.dependency_test.clone(),
-                        priority: dependency.strength,
-                        deadline: None,
-                    });
-                },
-                DependencyType::Conflict => {
-                    constraints.push(SchedulingConstraint {
-                        constraint_type: SchedulingConstraintType::ResourceAvailability,
-                        value: format!("avoid_concurrent:{}", dependency.dependency_test),
-                        priority: dependency.strength,
-                        deadline: None,
-                    });
-                },
-                _ => {},
-            }
-        }
-        Ok(constraints)
-    }
-    /// Execute scheduled tests
-    async fn execute_scheduled_tests(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<TestParallelizationResult>> {
-        let mut results = Vec::new();
-        let mut active_executions = JoinSet::new();
-        loop {
-            if self.should_stop_execution().await {
-                break;
-            }
-            while self.can_start_new_test().await {
-                if let Some(scheduled_test) = self.scheduler.get_next_test().await? {
-                    if self
-                        .resource_manager
-                        .can_allocate(&scheduled_test.resource_requirements)
-                        .await?
-                    {
-                        let allocation = self
-                            .resource_manager
-                            .allocate_resources(&scheduled_test.resource_requirements)
-                            .await?;
-                        let execution_handle = self
-                            .start_test_execution(
-                                scheduled_test,
-                                allocation,
-                                session_id.to_string(),
-                            )
-                            .await?;
-                        active_executions.spawn(execution_handle);
-                    } else {
-                        self.scheduler.requeue_test(scheduled_test).await?;
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            if let Ok(Some(result)) =
-                tokio::time::timeout(Duration::from_millis(100), active_executions.join_next())
-                    .await
-            {
-                match result {
-                    Ok(execution_result) => {
-                        let parallelization_result =
-                            self.process_execution_result(execution_result?).await?;
-                        results.push(parallelization_result);
-                    },
-                    Err(e) => {
-                        error!("Test execution failed: {:?}", e);
-                    },
-                }
-            }
-            if active_executions.is_empty() && self.scheduler.is_queue_empty().await {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        while let Some(result) = active_executions.join_next().await {
-            match result {
-                Ok(execution_result) => {
-                    let parallelization_result =
-                        self.process_execution_result(execution_result?).await?;
-                    results.push(parallelization_result);
-                },
-                Err(e) => {
-                    error!("Test execution failed during cleanup: {:?}", e);
-                },
-            }
-        }
-        Ok(results)
-    }
-    async fn should_stop_execution(&self) -> bool {
-        false
-    }
-    async fn can_start_new_test(&self) -> bool {
-        true
-    }
-    async fn start_test_execution(
-        &self,
-        test: ScheduledTest,
-        allocation: ResourceAllocation,
-        _session_id: String,
-    ) -> Result<JoinHandle<TestExecutionResult>> {
-        let test_id = test.metadata.resource_usage.test_id.clone();
-        let _allocation_id = allocation.resource_id.clone();
-        let handle = tokio::spawn(async move {
-            let start_time = chrono::Utc::now();
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            let end_time = chrono::Utc::now();
-            let duration = end_time - start_time;
-            TestExecutionResult {
-                context: crate::test_timeout_optimization::TestExecutionContext {
-                    test_name: test_id,
-                    category: crate::test_timeout_optimization::TestCategory::Unit,
-                    expected_duration: None,
-                    complexity_hints:
-                        crate::test_timeout_optimization::TestComplexityHints::default(),
-                    environment: "test".to_string(),
-                    timeout_override: None,
-                },
-                execution_time: duration.to_std().unwrap_or(std::time::Duration::from_secs(1)),
-                outcome: crate::test_timeout_optimization::TestOutcome::Success,
-                timeout_info: crate::test_timeout_optimization::TimeoutInfo {
-                    configured_timeout: std::time::Duration::from_secs(60),
-                    adaptive_timeout: Some(std::time::Duration::from_secs(60)),
-                    warnings_issued: Vec::new(),
-                    escalation_level: 0,
-                    early_termination: None,
-                },
-                metrics: crate::test_timeout_optimization::TestMetrics {
-                    cpu_usage_percent: 30.0,
-                    memory_usage_mb: 80,
-                    async_tasks_spawned: 2,
-                    async_tasks_completed: 2,
-                    network_requests: 0,
-                    file_operations: 1,
-                    gpu_operations: 0,
-                    progress_checkpoints: 5,
-                },
-                optimizations_applied: Vec::new(),
-            }
-        });
-        Ok(handle)
-    }
-    async fn process_execution_result(
-        &self,
-        result: TestExecutionResult,
-    ) -> Result<TestParallelizationResult> {
-        let parallelization_result =
-            TestParallelizationResult {
-                base_result: result.clone(),
-                parallelization_metrics: crate::test_parallelization::ParallelizationMetrics {
-                    concurrent_tests: 1,
-                    parallel_efficiency: 0.85,
-                    resource_contention: false,
-                    load_balancing_effectiveness: 0.8,
-                    scheduling_overhead: std::time::Duration::from_millis(5),
-                    total_overhead: std::time::Duration::from_millis(10),
-                    speedup_factor: 1.0,
-                    scalability_metrics: crate::test_parallelization::ScalabilityMetrics {
-                        optimal_concurrency: 2,
-                        efficiency_curve: Vec::new(),
-                        bottleneck_resources: vec!["No bottleneck detected".to_string()],
-                        scalability_score: 0.85,
-                    },
-                },
-                resource_utilization: crate::test_parallelization::ResourceUtilizationMetrics {
-                    cpu_utilization: crate::test_parallelization::UtilizationStats {
-                        average: 75.0,
-                        peak: 85.0,
-                        minimum: 60.0,
-                        std_deviation: 5.0,
-                        efficiency_score: 0.85,
-                        timeline: vec![(std::time::Duration::from_secs(0), 75.0)],
-                    },
-                    memory_utilization: crate::test_parallelization::UtilizationStats {
-                        average: 60.0,
-                        peak: 70.0,
-                        minimum: 50.0,
-                        std_deviation: 3.0,
-                        efficiency_score: 0.80,
-                        timeline: vec![(std::time::Duration::from_secs(0), 60.0)],
-                    },
-                    gpu_utilization: Some(crate::test_parallelization::UtilizationStats {
-                        average: 0.0,
-                        peak: 0.0,
-                        minimum: 0.0,
-                        std_deviation: 0.0,
-                        efficiency_score: 0.0,
-                        timeline: vec![(std::time::Duration::from_secs(0), 0.0)],
-                    }),
-                    network_utilization: crate::test_parallelization::UtilizationStats {
-                        average: 15.0,
-                        peak: 25.0,
-                        minimum: 10.0,
-                        std_deviation: 2.0,
-                        efficiency_score: 0.70,
-                        timeline: vec![(std::time::Duration::from_secs(0), 15.0)],
-                    },
-                    filesystem_utilization: crate::test_parallelization::UtilizationStats {
-                        average: 25.0,
-                        peak: 35.0,
-                        minimum: 20.0,
-                        std_deviation: 4.0,
-                        efficiency_score: 0.75,
-                        timeline: vec![(std::time::Duration::from_secs(0), 25.0)],
-                    },
-                    overall_efficiency: 0.85,
-                },
-                scheduling_info: crate::test_parallelization::SchedulingInfo {
-                    scheduled_at: chrono::Utc::now(),
-                    started_at: chrono::Utc::now(),
-                    completed_at: chrono::Utc::now(),
-                    strategy_used: crate::test_parallelization::SchedulingStrategy::ResourceAware,
-                    queue_position: 1,
-                    queue_wait_time: std::time::Duration::from_millis(10),
-                    scheduling_decisions: vec![crate::test_parallelization::SchedulingDecision {
-                        timestamp: chrono::Utc::now(),
-                        decision_type:
-                            crate::test_parallelization::SchedulingDecisionType::ScheduleImmediate,
-                        reason: "Resource-aware assignment".to_string(),
-                        alternatives_considered: vec!["Priority scheduling".to_string()],
-                        confidence: 0.9,
-                    }],
-                    resource_allocations: vec![],
-                },
-                performance_analysis: crate::test_parallelization::PerformanceAnalysis {
-                    sequential_comparison: crate::test_parallelization::SequentialComparison {
-                        estimated_sequential_time: std::time::Duration::from_millis(
-                            result.execution_time.as_millis() as u64 * 2,
-                        ),
-                        actual_parallel_time: result.execution_time,
-                        time_savings: std::time::Duration::from_millis(
-                            result.execution_time.as_millis() as u64,
-                        ),
-                        speedup_factor: 2.0,
-                        efficiency_percentage: 85.0,
-                    },
-                    historical_comparison: crate::test_parallelization::HistoricalComparison {
-                        previous_times: vec![result.execution_time],
-                        trend: crate::test_parallelization::PerformanceTrend::Stable,
-                        regression_detected: false,
-                        improvement_percentage: 0.0,
-                    },
-                    bottleneck_analysis: crate::test_parallelization::BottleneckAnalysis {
-                        primary_bottleneck: Some(crate::test_parallelization::BottleneckInfo {
-                            bottleneck_type: crate::test_parallelization::BottleneckType::Cpu,
-                            severity: 0.5,
-                            resource_utilization: 0.8,
-                            time_spent: result.execution_time,
-                            description: "CPU bound operations".to_string(),
-                        }),
-                        secondary_bottlenecks: vec![],
-                        impact_analysis: crate::test_parallelization::BottleneckImpactAnalysis {
-                            overall_impact: 0.3,
-                            parallelization_impact: 0.2,
-                            resource_efficiency_impact: 0.1,
-                            scalability_impact: 0.15,
-                        },
-                        mitigation_suggestions: vec!["Optimize CPU usage".to_string()],
-                    },
-                    optimization_recommendations: vec![
-                    crate ::test_parallelization::OptimizationRecommendation {
-                    recommendation_type : crate
-                    ::test_parallelization::OptimizationType::AdjustResourceAllocation,
-                    description : "Consider CPU optimization".to_string(),
-                    expected_impact : 0.1, implementation_complexity : crate
-                    ::test_parallelization::ComplexityLevel::Low, priority : crate
-                    ::test_parallelization::RecommendationPriority::Medium, parameters :
-                    std::collections::HashMap::new(), },
-                ],
-                    performance_score: 0.85,
-                },
-            };
-        Ok(parallelization_result)
-    }
-    async fn cleanup_execution_session(&self, _session_id: &str) -> Result<()> {
-        Ok(())
-    }
-    async fn start_background_tasks(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop_background_tasks(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-/// Execution monitor for tracking test execution and performance
+
 pub struct ExecutionMonitor {
     /// Monitoring configuration
     _config: Arc<RwLock<MonitoringConfig>>,
@@ -720,7 +251,7 @@ pub struct ExecutionMonitor {
     _alert_system: Arc<AlertSystem>,
 }
 impl ExecutionMonitor {
-    async fn new(config: MonitoringConfig) -> Result<Self> {
+    pub(super) async fn new(config: MonitoringConfig) -> Result<Self> {
         Ok(Self {
             _config: Arc::new(RwLock::new(config)),
             _active_executions: Arc::new(Mutex::new(HashMap::new())),
@@ -766,8 +297,8 @@ pub struct AlertDestination {
     /// Alert levels for this destination
     pub alert_levels: Vec<AlertLevel>,
 }
-/// Queue statistics
-#[derive(Debug, Default)]
+/// Queue statistics, all measured by [`PriorityQueue`] from its own traffic.
+#[derive(Debug, Default, Clone)]
 pub struct QueueStatistics {
     /// Total items enqueued
     pub total_enqueued: u64,
@@ -835,7 +366,7 @@ pub struct ExecutionQueue {
     pub metadata: ExecutionQueueMetadata,
 }
 impl ExecutionQueue {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             queued_tests: VecDeque::new(),
             metadata: ExecutionQueueMetadata::default(),
@@ -924,12 +455,16 @@ pub struct ExecutionConstraint {
 pub struct ResourceAllocationState {
     /// Allocated resources
     pub allocated: ResourceAllocation,
+    /// The requirement this allocation reserved capacity for. Kept so the
+    /// manager can subtract the right amounts again on release.
+    pub requirement: ResourceRequirement,
     /// Allocation timestamp
     pub allocated_at: DateTime<Utc>,
     /// Expected deallocation time
     pub expected_deallocation: Option<DateTime<Utc>>,
-    /// Allocation efficiency
-    pub efficiency: f32,
+    /// Measured allocation efficiency, or `None` when nothing measured it —
+    /// which is every allocation this engine produces today.
+    pub efficiency: Option<f32>,
     /// Allocation metadata
     pub metadata: HashMap<String, String>,
 }
@@ -982,7 +517,7 @@ pub struct ExecutionSession {
     pub state: ExecutionSessionState,
 }
 impl ExecutionSession {
-    fn new(id: String, analysis: TestIndependenceAnalysis) -> Self {
+    pub(super) fn new(id: String, analysis: TestIndependenceAnalysis) -> Self {
         Self {
             id,
             start_time: Utc::now(),
@@ -992,105 +527,23 @@ impl ExecutionSession {
         }
     }
 }
-/// GPU device information
-#[derive(Debug, Clone)]
-pub struct GpuDevice {
-    /// Device ID
-    pub device_id: usize,
-    /// Device name
-    pub name: String,
-    /// Memory available (MB)
-    pub memory_mb: u64,
-    /// Utilization percentage
-    pub utilization: f32,
-    /// Device capabilities
-    pub capabilities: Vec<String>,
-    /// Current allocations
-    pub allocations: Vec<String>,
-}
-/// Temporary directory information
-#[derive(Debug, Clone)]
-pub struct TempDirectory {
-    /// Directory path
-    pub path: String,
-    /// Available space (MB)
-    pub available_space_mb: u64,
-    /// Access permissions
-    pub permissions: DirectoryPermissions,
-    /// Current usage
-    pub current_usage_mb: u64,
-    /// Cleanup policy
-    pub cleanup_policy: CleanupPolicy,
-}
-/// Resource manager for tracking and allocating test resources
-pub struct ResourceManager {
-    /// Available resources
-    _available_resources: Arc<RwLock<AvailableResources>>,
-    /// Resource allocations
-    allocations: Arc<Mutex<HashMap<String, ResourceAllocationState>>>,
-    /// Resource pools
-    _resource_pools: Arc<Mutex<HashMap<String, ResourcePool>>>,
-    /// Resource monitoring
-    _resource_monitor: Arc<ResourceMonitor>,
-    /// Allocation history
-    allocation_history: Arc<Mutex<Vec<AllocationEvent>>>,
-}
-impl ResourceManager {
-    async fn new(_config: crate::test_parallelization::ResourceManagementConfig) -> Result<Self> {
-        Ok(Self {
-            _available_resources: Arc::new(RwLock::new(AvailableResources::default())),
-            allocations: Arc::new(Mutex::new(HashMap::new())),
-            _resource_pools: Arc::new(Mutex::new(HashMap::new())),
-            _resource_monitor: Arc::new(
-                ResourceMonitor::new(
-                    crate::resource_management::ResourceMonitoringConfig::default(),
-                )
-                .await?,
-            ),
-            allocation_history: Arc::new(Mutex::new(Vec::new())),
-        })
-    }
-    async fn can_allocate(&self, _requirements: &ResourceRequirement) -> Result<bool> {
-        Ok(true)
-    }
-    async fn allocate_resources(
-        &self,
-        _requirements: &ResourceRequirement,
-    ) -> Result<ResourceAllocation> {
-        let allocation_id = uuid::Uuid::new_v4().to_string();
-        let allocation = crate::test_parallelization::ResourceAllocation {
-            resource_type: "CPU".to_string(),
-            resource_id: allocation_id.clone(),
-            allocated_at: chrono::Utc::now(),
-            deallocated_at: None,
-            duration: std::time::Duration::from_secs(0),
-            utilization: 0.8,
-            efficiency: 1.0,
-        };
-        let allocation_state = ResourceAllocationState {
-            allocated: allocation.clone(),
-            allocated_at: chrono::Utc::now(),
-            expected_deallocation: None,
-            efficiency: 1.0,
-            metadata: HashMap::new(),
-        };
-        self.allocations.lock().insert(allocation_id.clone(), allocation_state);
-        let event = AllocationEvent {
-            timestamp: chrono::Utc::now(),
-            resource_id: allocation_id.clone(),
-            resource_type: allocation.resource_type.clone(),
-            test_id: "test_execution".to_string(),
-            event_type: "Allocated".to_string(),
-            details: {
-                let mut details = HashMap::new();
-                details.insert("test_id".to_string(), "test_execution".to_string());
-                details
-            },
-        };
-        self.allocation_history.lock().push(event);
-        Ok(allocation)
+/// Translate the parallelization crate's monitoring configuration into the
+/// `resource_management` one.
+///
+/// Only the three fields with an exact counterpart are carried across; the
+/// remainder keep `resource_management`'s own defaults rather than being
+/// invented from unrelated values.
+pub(super) fn monitoring_config_from(
+    config: &crate::test_parallelization::ResourceMonitoringConfig,
+) -> crate::resource_management::ResourceMonitoringConfig {
+    crate::resource_management::ResourceMonitoringConfig {
+        enable_real_time: config.enabled,
+        monitoring_interval_secs: config.monitoring_interval.as_secs(),
+        enable_alerts: config.alerts.enabled,
+        ..Default::default()
     }
 }
+
 /// Load balancing thresholds
 #[derive(Debug, Clone)]
 pub struct LoadBalancingThresholds {
@@ -1155,25 +608,7 @@ pub enum SchedulingEventType {
     /// Priority adjusted
     PriorityAdjusted,
 }
-/// Priority queue implementation for scheduled tests
-#[derive(Debug)]
-pub struct PriorityQueue<T> {
-    /// Items in the queue
-    _items: VecDeque<T>,
-    /// Queue statistics
-    _stats: QueueStatistics,
-    /// Queue configuration
-    _config: QueueConfig,
-}
-impl<T> PriorityQueue<T> {
-    pub fn new() -> Self {
-        Self {
-            _items: VecDeque::new(),
-            _stats: QueueStatistics::default(),
-            _config: QueueConfig::default(),
-        }
-    }
-}
+
 /// Dependency tracker for managing test dependencies
 #[derive(Debug)]
 pub struct DependencyTracker {
@@ -1282,65 +717,66 @@ pub struct ExecutionSessionConfig {
     /// Early termination strategy
     pub early_termination: EarlyTerminationStrategy,
 }
-/// Test scheduler for managing test execution order and timing
-pub struct TestScheduler {
-    /// Scheduling configuration
-    _config: Arc<RwLock<SchedulingConfig>>,
-    /// Test queue with priorities
-    _test_queue: Arc<Mutex<PriorityQueue<ScheduledTest>>>,
-    /// Scheduling history
-    _scheduling_history: Arc<Mutex<Vec<SchedulingEvent>>>,
-    /// Scheduler performance metrics
-    _metrics: Arc<Mutex<SchedulerMetrics>>,
-    /// Dependency tracker
-    _dependency_tracker: Arc<DependencyTracker>,
-}
-impl TestScheduler {
-    async fn new(_config: crate::test_parallelization::SchedulingConfig) -> Result<Self> {
-        Ok(Self {
-            _config: Arc::new(RwLock::new(SchedulingConfig::default())),
-            _test_queue: Arc::new(Mutex::new(PriorityQueue::new())),
-            _scheduling_history: Arc::new(Mutex::new(Vec::new())),
-            _metrics: Arc::new(Mutex::new(SchedulerMetrics::default())),
-            _dependency_tracker: Arc::new(DependencyTracker::default()),
-        })
-    }
-    async fn schedule_test(&self, _test: ScheduledTest) -> Result<()> {
-        Ok(())
-    }
-    async fn get_next_test(&self) -> Result<Option<ScheduledTest>> {
-        Ok(None)
-    }
-    async fn requeue_test(&self, _test: ScheduledTest) -> Result<()> {
-        Ok(())
-    }
-    async fn is_queue_empty(&self) -> bool {
-        true
-    }
-}
-/// Engine-wide statistics
+/// Engine-wide statistics, accumulated from real executions.
+///
+/// 0.2.1: this used to carry a `resource_efficiency` counter that nothing ever
+/// wrote or read; it is gone rather than left reporting a permanent zero.
+/// `average_parallelism` is now derived on demand from the concurrency actually
+/// observed at each test's start, instead of being a second stored counter.
 #[derive(Debug)]
 pub struct EngineStatistics {
-    /// Total tests executed
+    /// Test bodies that ran to completion.
     pub total_tests_executed: AtomicU64,
-    /// Total execution time
-    pub total_execution_time: AtomicU64,
-    /// Average parallelism achieved
-    pub average_parallelism: AtomicU64,
-    /// Resource utilization efficiency
-    pub resource_efficiency: AtomicU64,
+    /// Summed wall-clock execution time of those bodies, in microseconds.
+    pub total_execution_micros: AtomicU64,
+    /// Summed observed concurrency, the numerator of the parallelism average.
+    pub summed_observed_concurrency: AtomicU64,
+    /// Highest concurrency observed across this engine's lifetime.
+    pub peak_parallelism: AtomicU64,
     /// Engine uptime
     pub uptime_start: Instant,
 }
 impl EngineStatistics {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             total_tests_executed: AtomicU64::new(0),
-            total_execution_time: AtomicU64::new(0),
-            average_parallelism: AtomicU64::new(0),
-            resource_efficiency: AtomicU64::new(0),
+            total_execution_micros: AtomicU64::new(0),
+            summed_observed_concurrency: AtomicU64::new(0),
+            peak_parallelism: AtomicU64::new(0),
             uptime_start: Instant::now(),
         }
+    }
+
+    /// Fold one completed execution into the totals.
+    pub(super) fn record(&self, execution_time: Duration, observed_concurrency: usize) {
+        self.total_tests_executed.fetch_add(1, Ordering::SeqCst);
+        self.total_execution_micros.fetch_add(
+            execution_time.as_micros().min(u128::from(u64::MAX)) as u64,
+            Ordering::SeqCst,
+        );
+        let concurrency = observed_concurrency as u64;
+        self.summed_observed_concurrency.fetch_add(concurrency, Ordering::SeqCst);
+        self.peak_parallelism.fetch_max(concurrency, Ordering::SeqCst);
+    }
+
+    /// Mean concurrency observed at test start, or `None` before any test ran.
+    pub fn average_parallelism(&self) -> Option<f64> {
+        let executed = self.total_tests_executed.load(Ordering::SeqCst);
+        if executed == 0 {
+            return None;
+        }
+        Some(self.summed_observed_concurrency.load(Ordering::SeqCst) as f64 / executed as f64)
+    }
+
+    /// Mean execution time, or `None` before any test ran.
+    pub fn average_execution_time(&self) -> Option<Duration> {
+        let executed = self.total_tests_executed.load(Ordering::SeqCst);
+        if executed == 0 {
+            return None;
+        }
+        Some(Duration::from_micros(
+            self.total_execution_micros.load(Ordering::SeqCst) / executed,
+        ))
     }
 }
 /// Worker configuration
@@ -1358,12 +794,25 @@ pub struct WorkerConfig {
     pub specialization: WorkerSpecializationConfig,
 }
 /// Queue configuration
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct QueueConfig {
-    /// Maximum queue size
+    /// Maximum queue size; 0 means unbounded.
     pub max_size: usize,
-    /// Priority enabled
+    /// Whether [`PriorityQueue::pop`] honours priority (otherwise plain FIFO).
     pub priority_enabled: bool,
+}
+impl Default for QueueConfig {
+    /// Unbounded and priority-ordered -- the behaviour the type name promises.
+    ///
+    /// 0.2.1: this was `#[derive(Default)]`, which produced `priority_enabled:
+    /// false`, i.e. a "PriorityQueue" that ignored priority. Nothing noticed
+    /// because nothing read the field at the time.
+    fn default() -> Self {
+        Self {
+            max_size: 0,
+            priority_enabled: true,
+        }
+    }
 }
 /// Execution queue metadata
 #[derive(Debug, Default)]
@@ -1392,21 +841,28 @@ pub struct SchedulingEvent {
     /// Event metadata
     pub metadata: HashMap<String, String>,
 }
-/// Scheduler performance metrics
-#[derive(Debug, Default)]
+/// Scheduler performance metrics.
+///
+/// The first two fields are counted and timed by [`TestScheduler`] on every
+/// real decision. The remaining four are `Option` and stay `None`: judging
+/// scheduling *accuracy*, queue *efficiency* or priority *effectiveness*
+/// requires an outcome oracle this crate does not have, and nothing here
+/// resolves dependencies, so reporting `0.0` for them would read as a measured
+/// zero rather than an unmeasured field.
+#[derive(Debug, Default, Clone)]
 pub struct SchedulerMetrics {
-    /// Scheduling decisions made
+    /// Scheduling decisions made (queue pushes and pops).
     pub decisions_made: u64,
-    /// Average decision time
+    /// Mean wall-clock time one scheduling decision took.
     pub average_decision_time: Duration,
-    /// Scheduling accuracy
-    pub scheduling_accuracy: f32,
-    /// Queue efficiency
-    pub queue_efficiency: f32,
-    /// Priority effectiveness
-    pub priority_effectiveness: f32,
-    /// Dependency resolution time
-    pub dependency_resolution_time: Duration,
+    /// Not observed: no oracle compares scheduled order against an optimum.
+    pub scheduling_accuracy: Option<f32>,
+    /// Not observed: no baseline exists to divide realised throughput by.
+    pub queue_efficiency: Option<f32>,
+    /// Not observed: priorities are honoured but never scored after the fact.
+    pub priority_effectiveness: Option<f32>,
+    /// Not observed: this scheduler does not resolve dependencies.
+    pub dependency_resolution_time: Option<Duration>,
 }
 /// Health check configuration
 #[derive(Debug, Clone)]
@@ -1695,7 +1151,12 @@ mod tests {
     fn test_scheduler_metrics_default() {
         let m = SchedulerMetrics::default();
         assert_eq!(m.decisions_made, 0);
-        assert!((m.scheduling_accuracy - 0.0).abs() < f32::EPSILON);
+        assert_eq!(m.average_decision_time, Duration::ZERO);
+        // The four unmeasured fields are structurally absent, not zero.
+        assert!(m.scheduling_accuracy.is_none());
+        assert!(m.queue_efficiency.is_none());
+        assert!(m.priority_effectiveness.is_none());
+        assert!(m.dependency_resolution_time.is_none());
     }
 
     #[test]
@@ -1704,14 +1165,6 @@ mod tests {
         assert_eq!(s.total_allocations, 0);
         assert_eq!(s.current_allocations, 0);
         assert_eq!(s.peak_allocations, 0);
-    }
-
-    // ---- Constructor tests ----
-    #[test]
-    fn test_priority_queue_new() {
-        let q: PriorityQueue<String> = PriorityQueue::new();
-        let formatted = format!("{:?}", q);
-        assert!(formatted.contains("PriorityQueue"));
     }
 
     // ---- Struct construction tests ----
@@ -1802,7 +1255,8 @@ mod tests {
         let r = AvailableResources::default();
         assert!((r.cpu_cores - 0.0).abs() < f32::EPSILON);
         assert_eq!(r.memory_mb, 0);
-        assert!(r.gpu_devices.is_empty());
+        assert!(r.gpu_device_ids.is_empty());
+        assert_eq!(r.temp_directory_slots, 0);
     }
 
     #[test]

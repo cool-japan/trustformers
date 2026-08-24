@@ -258,6 +258,27 @@ fn read_power_supply_battery(root: &std::path::Path) -> Option<BatteryReading> {
     })
 }
 
+/// Take one fresh, stateless battery reading from the live system.
+///
+/// Exists for callers that want a single snapshot without owning a
+/// [`MobileBatteryManager`] -- currently `mobile_performance_profiler`'s
+/// metrics collector, which reuses this instead of re-implementing the same
+/// `#[cfg(...)]`-gated sysfs walk a second time. Same platform coverage as
+/// [`BatteryMonitor::read_battery_info`]: real telemetry on Android/Linux via
+/// [`read_power_supply_battery`], [`BatteryReading::unavailable`] everywhere
+/// else (iOS/macOS need IOKit/`UIDevice`, which this crate does not link).
+pub(crate) fn read_live_battery_reading() -> BatteryReading {
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    {
+        if let Some(reading) =
+            read_power_supply_battery(std::path::Path::new(POWER_SUPPLY_SYSFS_ROOT))
+        {
+            return reading;
+        }
+    }
+    BatteryReading::unavailable()
+}
+
 /// Power prediction system
 struct PowerPredictor {
     usage_patterns: Vec<UsagePattern>,

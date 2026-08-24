@@ -165,9 +165,15 @@ impl RealTimeTestProfiler {
     /// Stop real-time profiling operations
     pub async fn stop_profiling(&self) -> Result<()> {
         self.profiling_active.store(false, Ordering::Relaxed);
-        let mut handles = self.control_handles.lock();
-        for handle in handles.drain(..) {
-            handle.abort();
+        // The guard must not survive into the `.await`s below: a
+        // `parking_lot::MutexGuard` is not `Send`, which made the whole future
+        // non-`Send` and would have blocked the executor thread while the
+        // component shutdowns ran.
+        {
+            let mut handles = self.control_handles.lock();
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
         }
         self.metrics_collector.stop_collection().await?;
         self.streaming_analyzer.stop_analysis().await?;
@@ -187,9 +193,18 @@ impl RealTimeTestProfiler {
         self.start_test_monitoring(test_id).await?;
         Ok(())
     }
-    /// Get real-time insights and recommendations
+    /// Get real-time insights and recommendations over the collected window.
     pub async fn get_live_insights(&self) -> Result<LiveInsights> {
-        self.insights_generator.generate_current_insights().await
+        let samples = self.collected_metrics_snapshot();
+        self.insights_generator.generate_current_insights(&samples).await
+    }
+    /// Snapshot the metrics carried by the profiler's data stream.
+    ///
+    /// Cloned out under a scoped lock so the non-`Send` guard cannot survive
+    /// into an `.await` (see `RealTimeTestProfiler::stop_profiling`).
+    fn collected_metrics_snapshot(&self) -> Vec<RealTimeMetrics> {
+        let stream = self.data_stream.lock();
+        stream.iter().map(|point| point.metrics.clone()).collect()
     }
     /// Generate comprehensive real-time performance report
     pub async fn generate_live_report(&self) -> Result<RealTimeReport> {
@@ -263,6 +278,7 @@ impl RealTimeTestProfiler {
         let anomaly_detector = Arc::clone(&self.anomaly_detector);
         let insights_generator = Arc::clone(&self.insights_generator);
         let profiling_active = Arc::clone(&self.profiling_active);
+        let data_stream = Arc::clone(&self.data_stream);
         let handle = tokio::spawn(async move {
             while profiling_active.load(Ordering::Relaxed) {
                 let session_exists = { active_sessions.lock().contains_key(&test_id) };
@@ -272,7 +288,11 @@ impl RealTimeTestProfiler {
                 if let Err(e) = anomaly_detector.check_test_anomalies(&test_id).await {
                     eprintln!("Error checking anomalies for test {}: {}", test_id, e);
                 }
-                if let Err(e) = insights_generator.update_test_insights(&test_id).await {
+                let samples: Vec<RealTimeMetrics> = {
+                    let stream = data_stream.lock();
+                    stream.iter().map(|point| point.metrics.clone()).collect()
+                };
+                if let Err(e) = insights_generator.update_test_insights(&test_id, &samples).await {
                     eprintln!("Error updating insights for test {}: {}", test_id, e);
                 }
                 sleep(Duration::from_millis(500)).await;
@@ -345,9 +365,13 @@ impl StreamingAnalyzer {
     /// Stop streaming analysis
     pub async fn stop_analysis(&self) -> Result<()> {
         self.analyzing.store(false, Ordering::Relaxed);
-        let mut handles = self.analysis_handles.lock();
-        for handle in handles.drain(..) {
-            handle.abort();
+        // Scoped so the non-`Send` guard cannot survive into the
+        // `.await`s that follow (see `RealTimeTestProfiler::stop_profiling`).
+        {
+            let mut handles = self.analysis_handles.lock();
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
         }
         self.pattern_detector.stop_detection().await?;
         self.stats_analyzer.stop_analysis().await?;
@@ -432,35 +456,25 @@ pub struct RealTimeMetricsCollector {
     collecting: Arc<AtomicBool>,
     /// Current metrics buffer
     metrics_buffer: Arc<Mutex<VecDeque<RealTimeMetrics>>>,
-    /// Resource monitors
-    resource_monitors: Arc<Mutex<Vec<Box<dyn ResourceMonitorTrait + Send + Sync>>>>,
     /// Performance counters
-    collection_counters: Arc<CollectionCounters>,
+    collection_counters: Arc<Mutex<CollectionCounters>>,
     /// Collection handles
     collection_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 impl RealTimeMetricsCollector {
-    /// Create a new real-time metrics collector
+    /// Create a new real-time metrics collector.
+    ///
+    /// Before 0.2.1 this built a `Vec<Box<dyn ResourceMonitorTrait>>` from the
+    /// `monitor_*` config flags and stored it; nothing ever consulted that
+    /// vector, and the trait's default `collect_metrics` returned an all-zero
+    /// `ResourceMetrics` anyway. The flags now gate which families of key
+    /// `sample_host` actually reads from the host.
     pub async fn new(config: MetricsCollectorConfig) -> Result<Self> {
-        let mut resource_monitors: Vec<Box<dyn ResourceMonitorTrait + Send + Sync>> = Vec::new();
-        if config.monitor_cpu {
-            resource_monitors.push(Box::new(CpuMonitor::new()));
-        }
-        if config.monitor_memory {
-            resource_monitors.push(Box::new(MemoryMonitor::new()));
-        }
-        if config.monitor_io {
-            resource_monitors.push(Box::new(IoMonitor::new()));
-        }
-        if config.monitor_network {
-            resource_monitors.push(Box::new(NetworkMonitor::new()));
-        }
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
             collecting: Arc::new(AtomicBool::new(false)),
             metrics_buffer: Arc::new(Mutex::new(VecDeque::new())),
-            resource_monitors: Arc::new(Mutex::new(resource_monitors)),
-            collection_counters: Arc::new(CollectionCounters::new()),
+            collection_counters: Arc::new(Mutex::new(CollectionCounters::new())),
             collection_handles: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -476,16 +490,26 @@ impl RealTimeMetricsCollector {
     /// Stop metrics collection
     pub async fn stop_collection(&self) -> Result<()> {
         self.collecting.store(false, Ordering::Relaxed);
-        let mut handles = self.collection_handles.lock();
-        for handle in handles.drain(..) {
-            handle.abort();
+        // Scoped so the non-`Send` guard cannot survive into the
+        // `.await`s that follow (see `RealTimeTestProfiler::stop_profiling`).
+        {
+            let mut handles = self.collection_handles.lock();
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
         }
         Ok(())
     }
-    /// Collect current metrics snapshot
+    /// Collect a metrics snapshot from the running host.
+    ///
+    /// Before 0.2.1 this returned `RealTimeMetrics::new()` -- an empty map with
+    /// a fresh timestamp -- so every downstream consumer (the streaming
+    /// analyzer, the anomaly detectors, the insight engines) reasoned over a
+    /// sample window that carried no measurements at all. Each key is now read
+    /// from `sysinfo` at call time; a reading the platform does not report is
+    /// omitted from the map rather than substituted with zero.
     pub async fn collect_current_metrics(&self) -> Result<RealTimeMetrics> {
-        let mut metrics = RealTimeMetrics::new();
-        metrics.timestamp = Utc::now();
+        let metrics = Self::sample_host(&self.cloned_config());
         {
             let mut buffer = self.metrics_buffer.lock();
             buffer.push_back(metrics.clone());
@@ -493,6 +517,7 @@ impl RealTimeMetricsCollector {
                 buffer.pop_front();
             }
         }
+        self.collection_counters.lock().increment_collections();
         Ok(metrics)
     }
     /// Get recent metrics history
@@ -505,23 +530,103 @@ impl RealTimeMetricsCollector {
         let guard = self.config.read();
         guard.clone()
     }
-    /// Start the collection loop
+    /// Start the collection loop.
+    ///
+    /// Before 0.2.1 this loop cloned four `Arc`s into `_`-prefixed bindings and
+    /// then slept for 100ms per tick without touching any of them, so
+    /// `collecting == true` never produced a single sample.
     async fn start_collection_loop(&self) -> Result<()> {
         let config = self.cloned_config();
         let collecting = Arc::clone(&self.collecting);
-        let _metrics_buffer = Arc::clone(&self.metrics_buffer);
-        let _resource_monitors = Arc::clone(&self.resource_monitors);
-        let _collection_counters = Arc::clone(&self.collection_counters);
-        let _config_arc = Arc::clone(&self.config);
+        let metrics_buffer = Arc::clone(&self.metrics_buffer);
+        let collection_counters = Arc::clone(&self.collection_counters);
         let handle = tokio::spawn(async move {
             let mut interval = interval(config.collection_interval);
             while collecting.load(Ordering::Relaxed) {
                 interval.tick().await;
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let sample = Self::sample_host(&config);
+                {
+                    let mut buffer = metrics_buffer.lock();
+                    buffer.push_back(sample);
+                    if buffer.len() > DEFAULT_METRICS_BUFFER_SIZE {
+                        buffer.pop_front();
+                    }
+                }
+                collection_counters.lock().increment_collections();
             }
         });
         self.collection_handles.lock().push(handle);
         Ok(())
+    }
+
+    /// Read one host snapshot; shared by the loop and `collect_current_metrics`.
+    ///
+    /// Each `monitor_*` flag gates the family of keys it names. A reading the
+    /// platform does not report is omitted rather than substituted with zero.
+    fn sample_host(config: &MetricsCollectorConfig) -> RealTimeMetrics {
+        let mut metrics = RealTimeMetrics::new();
+        metrics.timestamp = Utc::now();
+        let mut system = sysinfo::System::new();
+        if config.monitor_cpu {
+            system.refresh_cpu_usage();
+        }
+        if config.monitor_memory {
+            system.refresh_memory();
+        }
+        let cpus = if config.monitor_cpu { system.cpus() } else { &[] };
+        if !cpus.is_empty() {
+            let total: f32 = cpus.iter().map(|cpu| cpu.cpu_usage()).sum();
+            metrics.metrics.insert(
+                "cpu_utilization_percent".to_string(),
+                (total / cpus.len() as f32) as f64,
+            );
+        }
+        let total_memory = if config.monitor_memory { system.total_memory() } else { 0 };
+        if total_memory > 0 {
+            let used_memory = system.used_memory();
+            metrics.metrics.insert("memory_total_bytes".to_string(), total_memory as f64);
+            metrics.metrics.insert("memory_used_bytes".to_string(), used_memory as f64);
+            metrics.metrics.insert(
+                "memory_utilization".to_string(),
+                used_memory as f64 / total_memory as f64,
+            );
+        }
+        if config.monitor_cpu {
+            let load = sysinfo::System::load_average();
+            if load.one > 0.0 {
+                metrics.metrics.insert("load_average_one".to_string(), load.one);
+            }
+            if let Ok(parallelism) = std::thread::available_parallelism() {
+                metrics.metrics.insert(
+                    "available_parallelism".to_string(),
+                    parallelism.get() as f64,
+                );
+            }
+        }
+        if let Ok(pid) = sysinfo::get_current_pid() {
+            system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+            if let Some(process) = system.process(pid) {
+                metrics
+                    .metrics
+                    .insert("process_memory_bytes".to_string(), process.memory() as f64);
+                metrics.metrics.insert(
+                    "process_cpu_percent".to_string(),
+                    process.cpu_usage() as f64,
+                );
+                if config.monitor_io {
+                    let disk = process.disk_usage();
+                    metrics.metrics.insert(
+                        "process_disk_read_bytes".to_string(),
+                        disk.read_bytes as f64,
+                    );
+                    metrics.metrics.insert(
+                        "process_disk_written_bytes".to_string(),
+                        disk.written_bytes as f64,
+                    );
+                }
+            }
+        }
+        metrics
     }
 }
 /// Dynamic optimization system that adjusts profiling strategies based on real-time feedback
@@ -582,9 +687,13 @@ impl AdaptiveOptimizer {
     /// Stop adaptive optimization
     pub async fn stop_optimization(&self) -> Result<()> {
         self.optimizing.store(false, Ordering::Relaxed);
-        let mut handles = self.optimization_handles.lock();
-        for handle in handles.drain(..) {
-            handle.abort();
+        // Scoped so the non-`Send` guard cannot survive into the
+        // `.await`s that follow (see `RealTimeTestProfiler::stop_profiling`).
+        {
+            let mut handles = self.optimization_handles.lock();
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
         }
         self.performance_tracker.stop_tracking().await?;
         self.effectiveness_analyzer.stop_analysis().await?;
@@ -805,9 +914,13 @@ impl PerformanceTrendAnalyzer {
     /// Stop trend analysis
     pub async fn stop_analysis(&self) -> Result<()> {
         self.analyzing.store(false, Ordering::Relaxed);
-        let mut handles = self.analysis_handles.lock();
-        for handle in handles.drain(..) {
-            handle.abort();
+        // Scoped so the non-`Send` guard cannot survive into the
+        // `.await`s that follow (see `RealTimeTestProfiler::stop_profiling`).
+        {
+            let mut handles = self.analysis_handles.lock();
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
         }
         self.time_series_db.stop_collection().await?;
         self.trend_detector.stop_detection().await?;
@@ -971,9 +1084,13 @@ impl AnomalyDetectionEngine {
     /// Stop anomaly detection
     pub async fn stop_detection(&self) -> Result<()> {
         self.detecting.store(false, Ordering::Relaxed);
-        let mut handles = self.detection_handles.lock();
-        for handle in handles.drain(..) {
-            handle.abort();
+        // Scoped so the non-`Send` guard cannot survive into the
+        // `.await`s that follow (see `RealTimeTestProfiler::stop_profiling`).
+        {
+            let mut handles = self.detection_handles.lock();
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
         }
         self.threshold_manager.stop_management().await?;
         self.alert_system.stop_alerting().await?;
@@ -1103,9 +1220,13 @@ impl RealTimeReportingEngine {
     /// Stop reporting
     pub async fn stop_reporting(&self) -> Result<()> {
         self.reporting.store(false, Ordering::Relaxed);
-        let mut handles = self.reporting_handles.lock();
-        for handle in handles.drain(..) {
-            handle.abort();
+        // Scoped so the non-`Send` guard cannot survive into the
+        // `.await`s that follow (see `RealTimeTestProfiler::stop_profiling`).
+        {
+            let mut handles = self.reporting_handles.lock();
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
         }
         self.dashboard_updater.stop_updates().await?;
         Ok(())
@@ -1201,21 +1322,36 @@ impl LiveInsightsGenerator {
     /// Stop insights generation
     pub async fn stop_generation(&self) -> Result<()> {
         self.generating.store(false, Ordering::Relaxed);
-        let mut handles = self.generation_handles.lock();
-        for handle in handles.drain(..) {
-            handle.abort();
+        // Scoped so the non-`Send` guard cannot survive into the
+        // `.await`s that follow (see `RealTimeTestProfiler::stop_profiling`).
+        {
+            let mut handles = self.generation_handles.lock();
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
         }
         self.recommendation_system.stop_recommendations().await?;
         Ok(())
     }
-    /// Generate current insights from available data
-    pub async fn generate_current_insights(&self) -> Result<LiveInsights> {
+    /// Generate current insights from the supplied observation window.
+    ///
+    /// Before 0.2.1 this ran every engine and threw the result away
+    /// (`Ok(_engine_insights) => {}`), so no engine finding ever reached a
+    /// caller; the returned `LiveInsights` held only the recommendation
+    /// descriptions.
+    pub async fn generate_current_insights(
+        &self,
+        samples: &[RealTimeMetrics],
+    ) -> Result<LiveInsights> {
         let mut insights = LiveInsights::new();
-        let engines = self.insight_engines.lock();
-        for engine in engines.iter() {
-            match engine.generate_insights() {
-                Ok(_engine_insights) => {},
-                Err(e) => eprintln!("Error generating insights from engine: {}", e),
+        let observations = InsightObservations::new(samples);
+        {
+            let engines = self.insight_engines.lock();
+            for engine in engines.iter() {
+                match engine.generate_insights(observations) {
+                    Ok(engine_insights) => insights.insights.extend(engine_insights),
+                    Err(e) => eprintln!("Error generating insights from engine: {}", e),
+                }
             }
         }
         let recommendations = self.recommendation_system.generate_recommendations().await?;
@@ -1227,18 +1363,34 @@ impl LiveInsightsGenerator {
         self.insight_cache.write().insert("current".to_string(), insights.clone());
         Ok(insights)
     }
-    /// Update insights for specific test
-    pub async fn update_test_insights(&self, test_id: &str) -> Result<()> {
-        let insights = self.generate_test_specific_insights(test_id).await?;
+    /// Update insights for a specific test from the supplied window.
+    pub async fn update_test_insights(
+        &self,
+        test_id: &str,
+        samples: &[RealTimeMetrics],
+    ) -> Result<()> {
+        let insights = self.generate_test_specific_insights(test_id, samples)?;
         self.insight_cache.write().insert(test_id.to_string(), insights);
         Ok(())
     }
-    /// Generate test-specific insights
-    async fn generate_test_specific_insights(&self, test_id: &str) -> Result<LiveInsights> {
-        let insights = LiveInsights::new();
+    /// Read back the insights cached under `key`, if any.
+    pub fn cached_insights(&self, key: &str) -> Option<LiveInsights> {
+        self.insight_cache.read().get(key).cloned()
+    }
+    /// Generate test-specific insights.
+    fn generate_test_specific_insights(
+        &self,
+        test_id: &str,
+        samples: &[RealTimeMetrics],
+    ) -> Result<LiveInsights> {
+        let mut insights = LiveInsights::new();
+        let observations = InsightObservations::new(samples);
         let engines = self.insight_engines.lock();
         for engine in engines.iter() {
-            if let Ok(_test_insights) = engine.generate_test_insights(test_id) {}
+            match engine.generate_test_insights(test_id, observations) {
+                Ok(test_insights) => insights.insights.extend(test_insights),
+                Err(e) => eprintln!("Error generating test insights from engine: {}", e),
+            }
         }
         Ok(insights)
     }
@@ -1295,7 +1447,7 @@ pub struct AdaptiveStrategySwitcher {
     /// Switching state
     switching: Arc<AtomicBool>,
     /// Available profiling strategies
-    strategies: Arc<Mutex<Vec<Box<dyn ProfilingStrategy + Send + Sync>>>>,
+    strategies: Arc<Mutex<Vec<Arc<dyn ProfilingStrategy + Send + Sync>>>>,
     /// Current active strategy
     current_strategy: Arc<RwLock<Option<String>>>,
     /// Strategy performance tracker
@@ -1312,11 +1464,11 @@ impl AdaptiveStrategySwitcher {
     pub async fn new(config: StrategySwitcherConfig) -> Result<Self> {
         let performance_tracker = Arc::new(StrategyPerformanceTracker::new());
         let selection_algorithm = None;
-        let mut strategies: Vec<Box<dyn ProfilingStrategy + Send + Sync>> = Vec::new();
-        strategies.push(Box::new(HighFrequencyStrategy::new()));
-        strategies.push(Box::new(AdaptiveSamplingStrategy::new()));
-        strategies.push(Box::new(ResourceOptimizedStrategy::new()));
-        strategies.push(Box::new(BalancedStrategy::new()));
+        let mut strategies: Vec<Arc<dyn ProfilingStrategy + Send + Sync>> = Vec::new();
+        strategies.push(Arc::new(HighFrequencyStrategy::new()));
+        strategies.push(Arc::new(AdaptiveSamplingStrategy::new()));
+        strategies.push(Arc::new(ResourceOptimizedStrategy::new()));
+        strategies.push(Arc::new(BalancedStrategy::new()));
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
             switching: Arc::new(AtomicBool::new(false)),
@@ -1342,9 +1494,13 @@ impl AdaptiveStrategySwitcher {
     /// Stop strategy switching
     pub async fn stop_switching(&self) -> Result<()> {
         self.switching.store(false, Ordering::Relaxed);
-        let mut handles = self.switching_handles.lock();
-        for handle in handles.drain(..) {
-            handle.abort();
+        // Scoped so the non-`Send` guard cannot survive into the
+        // `.await`s that follow (see `RealTimeTestProfiler::stop_profiling`).
+        {
+            let mut handles = self.switching_handles.lock();
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
         }
         self.performance_tracker.stop_tracking().await?;
         Ok(())
@@ -1382,20 +1538,22 @@ impl AdaptiveStrategySwitcher {
     /// Perform strategy switch
     async fn perform_strategy_switch(&self, new_strategy_name: &str) -> Result<StrategySwitch> {
         let old_strategy = self.current_strategy_name();
-        let strategies = self.strategies.lock();
-        for strategy in strategies.iter() {
-            if strategy.name() == new_strategy_name {
-                strategy.activate().await?;
-                break;
-            }
+        // Clone the Arc handles out of the lock before awaiting: the parking_lot
+        // MutexGuard is !Send and must not be held across `.await` (this method is
+        // reached from inside `tokio::spawn`, which requires a Send future).
+        let (to_activate, to_deactivate) = {
+            let strategies = self.strategies.lock();
+            let to_activate = strategies.iter().find(|s| s.name() == new_strategy_name).cloned();
+            let to_deactivate = old_strategy
+                .as_deref()
+                .and_then(|old_name| strategies.iter().find(|s| s.name() == old_name).cloned());
+            (to_activate, to_deactivate)
+        };
+        if let Some(strategy) = to_activate {
+            strategy.activate().await?;
         }
-        if let Some(old_name) = &old_strategy {
-            for strategy in strategies.iter() {
-                if strategy.name() == old_name {
-                    strategy.deactivate().await?;
-                    break;
-                }
-            }
+        if let Some(strategy) = to_deactivate {
+            strategy.deactivate().await?;
         }
         *self.current_strategy.write() = Some(new_strategy_name.to_string());
         let expected_improvement = self
@@ -1440,8 +1598,10 @@ impl AdaptiveStrategySwitcher {
     }
     /// Select initial strategy
     async fn select_initial_strategy(&self) -> Result<()> {
-        let config = self.config.read();
-        let initial_strategy = config.default_strategy.clone();
+        // Clone out of the lock before awaiting: the RwLockReadGuard is !Send and
+        // must not be held across `perform_strategy_switch(..).await` (this method
+        // runs inside `tokio::spawn`, which requires the future to be Send).
+        let initial_strategy = self.cloned_config().default_strategy;
         self.perform_strategy_switch(&initial_strategy).await?;
         Ok(())
     }
@@ -1535,9 +1695,13 @@ impl StreamingDataProcessor {
     /// Stop data processing
     pub async fn stop_processing(&self) -> Result<()> {
         self.processing.store(false, Ordering::Relaxed);
-        let mut handles = self.processing_handles.lock();
-        for handle in handles.drain(..) {
-            handle.abort();
+        // Scoped so the non-`Send` guard cannot survive into the
+        // `.await`s that follow (see `RealTimeTestProfiler::stop_profiling`).
+        {
+            let mut handles = self.processing_handles.lock();
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
         }
         self.filter_engine.stop_filtering().await?;
         self.aggregation_engine.stop_aggregation().await?;

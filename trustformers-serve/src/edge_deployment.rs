@@ -1,5 +1,4 @@
 // Allow dead code for infrastructure under development
-#![allow(dead_code)]
 
 // Edge Deployment Infrastructure for TrustformeRS
 // Provides comprehensive edge deployment capabilities for distributed inference

@@ -389,7 +389,7 @@ impl AnalysisOrchestrator {
             },
             AnalysisPhase::PatternRecognition => {
                 let engine = component_manager.get_pattern_engine();
-                let patterns = engine.recognize_test_patterns(test_data)?;
+                let patterns = engine.recognize_patterns(test_data).await?;
                 let pattern_strings: Vec<String> =
                     patterns.iter().map(|p| format!("{:?}", p)).collect();
                 Ok(PhaseResult::PatternRecognition(pattern_strings))
@@ -420,15 +420,20 @@ impl AnalysisOrchestrator {
                 Ok(PhaseResult::ProfilingPipeline(profile))
             },
             AnalysisPhase::RealTimeProfiler => {
+                // The real-time profiler measures the *running system* while a test
+                // executes; it produces sampling counters, not test characteristics.
+                // Read back what it actually measured instead of inventing a
+                // `TestCharacteristics` for it (see `PhaseResult::RealTimeProfiler`).
                 let profiler = component_manager.get_real_time_profiler();
-                profiler.start_profiling(&test_data.test_id)?;
+                profiler.start_profiling().await?;
+                profiler.monitor_test_execution(&test_data.test_id).await?;
 
                 tokio::time::sleep(Duration::from_millis(100)).await;
 
-                profiler.stop_profiling(&test_data.test_id)?;
+                let statistics = profiler.get_profiling_statistics().await?;
+                profiler.stop_profiling().await?;
 
-                let characteristics = TestCharacteristics::default();
-                Ok(PhaseResult::RealTimeProfiler(Box::new(characteristics)))
+                Ok(PhaseResult::RealTimeProfiler(Box::new(statistics)))
             },
         }
     }
@@ -505,12 +510,21 @@ impl AnalysisOrchestrator {
                         characteristics.resource_intensity.memory_intensity = *mem;
                     }
                 },
-                (
-                    AnalysisPhase::RealTimeProfiler,
-                    PhaseResult::RealTimeProfiler(rt_characteristics),
-                ) => {
-                    characteristics =
-                        self.merge_characteristics(characteristics, *rt_characteristics);
+                (AnalysisPhase::RealTimeProfiler, PhaseResult::RealTimeProfiler(statistics)) => {
+                    // Only measured quantities are recorded here: the profiler
+                    // cannot tell us anything about the test's resource
+                    // intensity, concurrency or synchronisation, so nothing in
+                    // `characteristics` proper is written from it.
+                    characteristics.analysis_metadata.notes.push(format!(
+                        "real-time profiler: {} samples over {:?} ({} data points processed, {} \
+                         anomalies, {} insights, buffer {:.1}% full)",
+                        statistics.total_samples,
+                        statistics.sampling_duration,
+                        statistics.data_points_processed,
+                        statistics.anomalies_detected,
+                        statistics.insights_generated,
+                        statistics.buffer_utilization * 100.0,
+                    ));
                 },
                 _ => {
                     warn!("Mismatched phase and result type");
@@ -524,42 +538,6 @@ impl AnalysisOrchestrator {
             self.calculate_confidence_score(&characteristics);
 
         Ok(characteristics)
-    }
-
-    /// Merge two test characteristics
-    fn merge_characteristics(
-        &self,
-        mut base: TestCharacteristics,
-        other: TestCharacteristics,
-    ) -> TestCharacteristics {
-        base.resource_intensity.cpu_intensity = base
-            .resource_intensity
-            .cpu_intensity
-            .max(other.resource_intensity.cpu_intensity);
-        base.resource_intensity.memory_intensity = base
-            .resource_intensity
-            .memory_intensity
-            .max(other.resource_intensity.memory_intensity);
-        base.resource_intensity.io_intensity =
-            base.resource_intensity.io_intensity.max(other.resource_intensity.io_intensity);
-        base.resource_intensity.network_intensity = base
-            .resource_intensity
-            .network_intensity
-            .max(other.resource_intensity.network_intensity);
-
-        base.concurrency_requirements.max_threads = base
-            .concurrency_requirements
-            .max_threads
-            .max(other.concurrency_requirements.max_threads);
-        base.concurrency_requirements.max_concurrent_instances = base
-            .concurrency_requirements
-            .max_concurrent_instances
-            .max(other.concurrency_requirements.max_concurrent_instances);
-
-        base.synchronization_dependencies.extend(other.synchronization_dependencies);
-        base.performance_patterns.extend(other.performance_patterns);
-
-        base
     }
 
     /// Calculate confidence score for characteristics
@@ -603,7 +581,17 @@ pub enum PhaseResult {
     SynchronizationAnalysis(Vec<String>),
     PatternRecognition(Vec<String>),
     ProfilingPipeline(TestProfile),
-    RealTimeProfiler(Box<TestCharacteristics>),
+    /// Sampling counters measured by the real-time profiler.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// This used to carry a `Box<TestCharacteristics>` that the phase filled
+    /// with `TestCharacteristics::default()` — every field zeroed — and
+    /// [`AnalysisOrchestrator::combine_phase_results`] then merged those zeros
+    /// into the real analysis. The real-time profiler has no method that
+    /// derives test characteristics, so the variant now carries the
+    /// [`ProfilingStatistics`] it genuinely measures.
+    RealTimeProfiler(Box<ProfilingStatistics>),
 }
 
 /// Test profile for profiling pipeline results

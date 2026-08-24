@@ -315,21 +315,41 @@ pub struct AggregatedMetrics {
     pub optimization_opportunities_identified: u64,
 }
 
-/// Real-time streaming metrics for live monitoring
+/// Real-time streaming metrics for live monitoring.
+///
+/// 0.2.1: every field that a collector cannot actually observe is an `Option`
+/// and is reported as `None` rather than filled with a plausible-looking
+/// number. In particular the *per-test* fields (`elapsed_time`,
+/// `current_phase`, `progress_percent`, the live error/warning counters) have
+/// no source in the host-level collectors that produce most of this struct —
+/// nothing in this crate instruments a running test's phase or progress — so
+/// those collectors leave them `None`. A producer that genuinely knows a value
+/// (for example [`super::service::TestPerformanceMonitoringService`], which
+/// builds one of these from a *completed* test's measured metrics) fills them in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamingMetrics {
     pub stream_id: String,
     pub test_id: String,
     pub timestamp: SystemTime,
-    pub elapsed_time: Duration,
-    pub current_phase: TestPhase,
-    pub progress_percent: f64,
-    pub instantaneous_cpu: f64,
+    /// Wall-clock time the test has been running, when the producer knows it.
+    pub elapsed_time: Option<Duration>,
+    /// Phase the test is in, when the producer knows it.
+    pub current_phase: Option<TestPhase>,
+    /// Completion percentage, when the producer knows it.
+    pub progress_percent: Option<f64>,
+    /// CPU usage percentage at sample time. `None` when too little time has
+    /// passed since the previous sample for a CPU delta to be meaningful.
+    pub instantaneous_cpu: Option<f64>,
+    /// Resident memory in bytes at sample time.
     pub instantaneous_memory: u64,
-    pub instantaneous_io_rate: f64,
-    pub instantaneous_network_rate: f64,
-    pub live_error_count: u64,
-    pub live_warning_count: u64,
+    /// Disk I/O throughput in bytes/second, when the producer can measure it.
+    pub instantaneous_io_rate: Option<f64>,
+    /// Network throughput in bytes/second, when the producer can measure it.
+    pub instantaneous_network_rate: Option<f64>,
+    /// Errors emitted by the test so far, when the producer counts them.
+    pub live_error_count: Option<u64>,
+    /// Warnings emitted by the test so far, when the producer counts them.
+    pub live_warning_count: Option<u64>,
     pub performance_indicators: Vec<LivePerformanceIndicator>,
     pub anomaly_flags: Vec<AnomalyFlag>,
     pub prediction_metrics: Option<PredictionMetrics>,

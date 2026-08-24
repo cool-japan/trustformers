@@ -1,3 +1,15 @@
+# The previous version of this ConfigMap held a `server.yaml` / `log4rs.yaml`
+# pair describing a config-file schema (workers, keep_alive, a
+# `default_models` auto-load list, `inference.max_batch_size`, a `log4rs`
+# logging pipeline, ...) that `trustformers-server` never reads — the binary
+# has no config-file loader at all (see `src/main.rs`) and logs through
+# `tracing`/`tracing-subscriber`, not `log4rs`. It also was never wired into
+# `deployment.yaml` (no `envFrom`/`configMapKeyRef` referenced it), so it did
+# nothing either way.
+#
+# What follows instead is the real, complete list of environment variables
+# this binary reads (grep `std::env::var` in `src/main.rs`), consumed by
+# `deployment.yaml` via `envFrom`.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -9,70 +21,21 @@ metadata:
     app.kubernetes.io/instance: trustformers
     app.kubernetes.io/component: config
 data:
-  # Server configuration
-  server.yaml: |
-    server:
-      host: 0.0.0.0
-      port: 8080
-      workers: 4
-      max_connections: 1000
-      keep_alive: 75
-      
-    models:
-      cache_dir: /var/cache/trustformers
-      max_loaded: 10
-      default_models:
-        - name: bert-base-uncased
-          type: bert
-          auto_load: true
-        - name: gpt2
-          type: gpt2
-          auto_load: false
-          
-    inference:
-      max_batch_size: 32
-      timeout_seconds: 300
-      max_sequence_length: 512
-      
-    monitoring:
-      metrics_enabled: true
-      metrics_path: /metrics
-      trace_enabled: true
-      trace_sample_rate: 0.1
-      
-    security:
-      cors_enabled: true
-      cors_origins:
-        - "*"
-      rate_limit:
-        enabled: false
-        requests_per_minute: 60
-        
-  # Logging configuration
-  log4rs.yaml: |
-    refresh_rate: 30 seconds
-    appenders:
-      stdout:
-        kind: console
-        encoder:
-          pattern: "{d} {l} {t} - {m}{n}"
-      file:
-        kind: file
-        path: /tmp/trustformers.log
-        encoder:
-          pattern: "{d(%Y-%m-%d %H:%M:%S)} [{l}] {t} - {m}{n}"
-    root:
-      level: info
-      appenders:
-        - stdout
-    loggers:
-      trustformers:
-        level: debug
-        appenders:
-          - stdout
-          - file
-        additive: false
-      axum:
-        level: info
-      tower_http:
-        level: debug
+  RUST_LOG: "trustformers_server=info,tower_http=info"
+  PORT: "8080"
+  # Maximum number of checkpoints held in memory at once; `POST /models`
+  # is refused with 503 once this many are loaded.
+  MAX_MODELS: "10"
+  # A relative `model_name` in `POST /models` resolves under this directory
+  # (see `kubernetes/pvc.yaml`, mounted here by `deployment.yaml`). An
+  # absolute `model_name` ignores this and is used as-is.
+  MODEL_CACHE_DIR: "/var/cache/trustformers"
+  # Uncomment to load one checkpoint at startup instead of requiring a
+  # POST /models call first. PRELOAD_MODEL_NAME must name a real subdirectory
+  # of MODEL_CACHE_DIR containing config.json + model.safetensors + tokenizer
+  # files, and PRELOAD_MODEL_TASK is required alongside it (one of
+  # text-classification, token-classification, question-answering,
+  # text-generation) — see README.md.
+  # PRELOAD_MODEL_NAME: "my-model"
+  # PRELOAD_MODEL_TASK: "text-classification"
+  # PRELOAD_NUM_LABELS: "2"

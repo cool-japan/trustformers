@@ -21,33 +21,40 @@ spec:
         app.kubernetes.io/name: trustformers-server
         app.kubernetes.io/instance: trustformers
         app.kubernetes.io/component: api
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8080"
-        prometheus.io/path: "/metrics"
+      # No prometheus.io/* scrape annotations: trustformers-server exposes no
+      # /metrics endpoint (verified against src/main.rs's route table), so
+      # there is nothing for a Prometheus scraper to read from this pod.
     spec:
       serviceAccountName: trustformers-server
+      # The application never calls the Kubernetes API (all configuration
+      # comes from the environment variables below, injected by kubelet, not
+      # fetched by the binary) — see kubernetes/rbac.yaml. No API access
+      # means no reason to mount a token for it.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
       containers:
       - name: trustformers-server
+        # Placeholder — this image is not published anywhere. Build it from
+        # the Dockerfile in this directory and push it to a registry you
+        # control, then point this field (or kustomization.yaml's `images:`
+        # entry) at it before applying these manifests.
         image: trustformers/server:latest
         imagePullPolicy: IfNotPresent
         ports:
         - name: http
           containerPort: 8080
           protocol: TCP
-        env:
-        - name: RUST_LOG
-          value: "info"
-        - name: MODEL_CACHE_DIR
-          value: "/var/cache/trustformers"
-        - name: MAX_MODELS
-          value: "10"
-        - name: PORT
-          value: "8080"
+        # All four variables are read for real by src/main.rs (see
+        # kubernetes/configmap.yaml). If PORT is overridden away from 8080,
+        # `containerPort` above and the two probes' `port: http` below (and
+        # kubernetes/service.yaml's `targetPort`) must be updated to match —
+        # they are independent values Kubernetes does not derive from PORT.
+        envFrom:
+        - configMapRef:
+            name: trustformers-server-config
         resources:
           requests:
             memory: "4Gi"

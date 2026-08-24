@@ -858,6 +858,55 @@ mod tests {
     }
 
     #[test]
+    fn forward_produces_nonzero_input_dependent_hidden_states() {
+        // Regression test for the Metal read-after-async-commit race.
+        //
+        // `MetalBackend::layernorm_f32` used to commit its command buffer
+        // asynchronously and then read the output buffer immediately, so it
+        // returned the zeroed contents of a buffer the GPU had not written yet.
+        // BERT's embedding LayerNorm receives a 2-D `Tensor::F32`, which is
+        // exactly the shape that takes that fast path, so with the `metal`
+        // feature compiled in *every* BERT forward pass came back all-zero —
+        // on `Device::CPU`, with no Metal tensor anywhere in the model. Two
+        // different inputs then produced the same (all-zero) hidden states.
+        //
+        // The assertions below hold on any build; they fail against the racing
+        // kernel under `--features metal`.
+        let config = loading_config();
+        let model = BertModel::new(config.clone()).expect("model must build");
+
+        let first = model
+            .forward_with_embeddings(vec![1, 2, 3], None, None)
+            .expect("forward must succeed");
+        let second = model
+            .forward_with_embeddings(vec![4, 5, 6], None, None)
+            .expect("forward must succeed");
+
+        let values = |output: &BertModelOutput| -> Vec<f32> {
+            match &output.last_hidden_state {
+                Tensor::F32(arr) => arr.iter().copied().collect(),
+                other => panic!("expected an F32 hidden state, got {other:?}"),
+            }
+        };
+        let first_values = values(&first);
+        let second_values = values(&second);
+
+        assert!(
+            first_values.iter().any(|v| v.abs() > 1e-6),
+            "the hidden state is all zeros, which is what the racing Metal \
+             LayerNorm kernel returned"
+        );
+        assert!(
+            first_values.iter().all(|v| v.is_finite()),
+            "hidden states must be finite"
+        );
+        assert_ne!(
+            first_values, second_values,
+            "different token ids must produce different hidden states"
+        );
+    }
+
+    #[test]
     fn a_backbone_only_checkpoint_reports_the_absent_task_head() {
         // Loading a pretrained backbone into a task model is legitimate, but the
         // head keeps its random initialisation and that must be visible.

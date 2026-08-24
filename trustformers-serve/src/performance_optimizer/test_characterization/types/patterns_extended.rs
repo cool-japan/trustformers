@@ -969,56 +969,50 @@ impl super::core::StreamingPipeline for ConcurrencyAnalysisPipeline {
 }
 
 impl ConcurrencyInsightEngine {
-    /// Create a new ConcurrencyInsightEngine with default settings
+    /// Create a new ConcurrencyInsightEngine.
     pub fn new() -> Self {
-        Self {
-            issues_found: 0,
-            analysis_depth: 0,
-        }
+        Self
     }
-}
 
-impl Default for ConcurrencyInsightEngine {
-    fn default() -> Self {
-        Self::new()
+    /// Summaries of the load and parallelism metrics in the window.
+    fn findings(&self, observations: super::analysis::InsightObservations<'_>) -> Vec<String> {
+        observations
+            .summaries_matching(&["load", "parallel", "thread", "concurren"])
+            .into_iter()
+            .map(|summary| {
+                format!(
+                    "`{}` over {} samples: mean {:.4}, peak {:.4}, latest {:.4}",
+                    summary.key, summary.count, summary.mean, summary.max, summary.last
+                )
+            })
+            .collect()
     }
 }
 
 impl InsightEngine for ConcurrencyInsightEngine {
-    fn generate(&self) -> String {
-        format!(
-            "Concurrency Insight Engine (issues_found={}, analysis_depth={})",
-            self.issues_found, self.analysis_depth
-        )
+    fn describe(&self) -> String {
+        "Concurrency insight engine: summarises host load and parallelism metrics over the \
+         supplied window; holds no accumulated state"
+            .to_string()
     }
 
-    fn generate_test_insights(&self, test_id: &str) -> TestCharacterizationResult<Vec<String>> {
-        // Placeholder implementation - in production, this would analyze test-specific concurrency issues
-        Ok(vec![
-            format!(
-                "Test '{}' concurrency analysis: {} issues found with analysis depth {}",
-                test_id, self.issues_found, self.analysis_depth
-            ),
-            format!(
-                "Concurrency issues suggest {} priority attention",
-                if self.issues_found > 10 {
-                    "high"
-                } else if self.issues_found > 5 {
-                    "medium"
-                } else {
-                    "low"
-                }
-            ),
-        ])
+    fn generate_test_insights(
+        &self,
+        test_id: &str,
+        observations: super::analysis::InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>> {
+        Ok(self
+            .findings(observations)
+            .into_iter()
+            .map(|insight| format!("test `{}`: {}", test_id, insight))
+            .collect())
     }
 
-    fn generate_insights(&self) -> TestCharacterizationResult<Vec<String>> {
-        // Placeholder implementation - in production, this would generate comprehensive concurrency insights
-        Ok(vec![
-            format!("Total concurrency issues found: {}", self.issues_found),
-            format!("Analysis depth level: {}", self.analysis_depth),
-            "Concurrency analysis engine active".to_string(),
-        ])
+    fn generate_insights(
+        &self,
+        observations: super::analysis::InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>> {
+        Ok(self.findings(observations))
     }
 }
 

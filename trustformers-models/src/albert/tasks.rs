@@ -3,7 +3,7 @@
 
 use crate::albert::config::AlbertConfig;
 use crate::albert::model::AlbertModel;
-use crate::weight_loading::binding::{bind_head_layer_norm, bind_head_linear};
+use crate::weight_loading::binding::{bind_head_layer_norm, bind_head_linear, BoundNamespaces};
 use crate::weight_loading::checkpoint::{Checkpoint, LoadReport};
 use std::io::Read;
 use trustformers_core::device::Device;
@@ -483,6 +483,13 @@ impl Model for AlbertForMaskedLM {
 /// constructor initialisation, and the call returned `Ok(())`. Each wrapper now
 /// binds its own head off the same parsed checkpoint.
 impl AlbertForSequenceClassification {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["classifier."]);
+
     /// Load the encoder and the pooled classification head.
     ///
     /// # Errors
@@ -500,11 +507,19 @@ impl AlbertForSequenceClassification {
             [self.num_labels, hidden],
             &mut self.classifier,
         )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }
 
 impl AlbertForTokenClassification {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["classifier."]);
+
     /// Load the encoder and the per-token classification head.
     ///
     /// # Errors
@@ -522,11 +537,19 @@ impl AlbertForTokenClassification {
             [self.num_labels, hidden],
             &mut self.classifier,
         )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }
 
 impl AlbertForQuestionAnswering {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["qa_outputs."]);
+
     /// Load the encoder and the span head.
     ///
     /// # Errors
@@ -544,11 +567,19 @@ impl AlbertForQuestionAnswering {
             [2, hidden],
             &mut self.qa_outputs,
         )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }
 
 impl AlbertForMaskedLM {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["predictions."]);
+
     /// Load the encoder and the masked-LM prediction head.
     ///
     /// ALBERT's head projects back down to the *embedding* width before the
@@ -607,6 +638,7 @@ impl AlbertForMaskedLM {
             None => report.note_absent(canonical_bias),
         }
 
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }

@@ -60,6 +60,19 @@ tokio-test.workspace = true
 name = "export_round_trip"
 required-features = ["gpt2", "bert", "llama", "mistral", "t5"]
 
+# Both Metal examples reach for `trustformers_models::gpt2`, which only exists
+# behind the `gpt2` feature. Their bodies are `#[cfg(feature = "metal")]`-gated
+# but a `use` path is not conditional on `gpt2`, so `--features metal` on its own
+# used to fail the build with E0433 before the target was ever run. Declaring the
+# features they need makes cargo skip the target instead.
+[[example]]
+name = "test_gpt2_metal"
+required-features = ["gpt2", "metal"]
+
+[[example]]
+name = "test_gpt2_generation_fixed"
+required-features = ["gpt2", "metal"]
+
 [features]
 default = ["bert"]
 bert = []

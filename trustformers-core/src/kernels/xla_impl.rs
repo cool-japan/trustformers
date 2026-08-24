@@ -3,9 +3,18 @@
 
 //! XLA (Accelerated Linear Algebra) backend implementation for TrustformeRS
 //!
-//! This module provides integration with Google's XLA compiler for optimized
-//! execution of tensor operations across various hardware backends including
-//! CPUs, GPUs, and TPUs.
+//! This module models the client/computation/buffer API surface (device
+//! configuration, computation caching, buffer handles) that a real
+//! integration with Google's XLA compiler would expose. It does **not**
+//! link or execute a real XLA runtime: `--features xla` has zero
+//! dependencies (`xla = []` in `Cargo.toml`), the `extern "C"` FFI
+//! declarations further down are permanently disabled with `cfg(any())`,
+//! and every public method that would need actual XLA compilation or
+//! execution returns a structured [`HardwareResult`] error naming exactly
+//! what is missing ("no XLA runtime is linked") instead of fabricating
+//! output tensors, device counts, or timings. See the `HONESTY NOTE` above
+//! the `extern "C"` block for the full rationale and what wiring a real
+//! backend would require.
 
 use crate::errors::compute_error;
 use crate::hardware::{DataType, HardwareCapabilities, HardwareMetrics, HardwareResult};

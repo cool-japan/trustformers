@@ -151,6 +151,70 @@ pub(crate) fn language_modeling_cross_entropy(
     mean_nll(&shifted_rows, &shifted_targets)
 }
 
+/// Extractive question-answering loss: the mean of the start-position and
+/// end-position cross-entropies, exactly as HuggingFace's
+/// `BertForQuestionAnswering.forward` computes it when `start_positions` /
+/// `end_positions` are given.
+///
+/// Unlike [`classification_cross_entropy`], the "class axis" here is the
+/// sequence position, not the tensor's trailing dimension: `start_logits` /
+/// `end_logits` carry exactly one score per input position (whatever the
+/// tensor's exact rank -- `[seq_len]` or `[1, seq_len]` or `[1, seq_len, 1]`,
+/// depending on how the head's `split` leaves the singleton axis), so this
+/// flattens the whole tensor into one row of `seq_len` scores rather than
+/// chunking it by a trailing "num_classes" dimension the way
+/// [`classification_cross_entropy`] does.
+///
+/// # Errors
+///
+/// Fails when `start_logits` and `end_logits` do not cover the same number of
+/// positions, when either position tensor does not hold exactly one index (a
+/// single-example forward pass has exactly one start and one end position),
+/// or when a position is not a valid index into the sequence.
+pub(crate) fn qa_span_cross_entropy(
+    start_logits: &Tensor,
+    end_logits: &Tensor,
+    start_position: &Tensor,
+    end_position: &Tensor,
+) -> Result<f32, TrustformersError> {
+    let start_row = start_logits.to_vec_f32()?;
+    let end_row = end_logits.to_vec_f32()?;
+    if start_row.len() != end_row.len() {
+        return Err(runtime_error(format!(
+            "start_logits and end_logits must cover the same number of sequence positions, got {} \
+             and {}",
+            start_row.len(),
+            end_row.len()
+        )));
+    }
+    let seq_len = start_row.len();
+    if seq_len == 0 {
+        return Err(runtime_error(
+            "start_logits/end_logits have no sequence positions".to_string(),
+        ));
+    }
+
+    let start_target = label_indices(start_position, seq_len)?;
+    let end_target = label_indices(end_position, seq_len)?;
+    if start_target.len() != 1 {
+        return Err(runtime_error(format!(
+            "start_positions must hold exactly one index for this single-example forward pass, \
+             got {}",
+            start_target.len()
+        )));
+    }
+    if end_target.len() != 1 {
+        return Err(runtime_error(format!(
+            "end_positions must hold exactly one index for this single-example forward pass, got {}",
+            end_target.len()
+        )));
+    }
+
+    let start_loss = mean_nll(&[start_row.as_slice()], &start_target)?;
+    let end_loss = mean_nll(&[end_row.as_slice()], &end_target)?;
+    Ok((start_loss + end_loss) / 2.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +352,118 @@ mod tests {
             result.is_err(),
             "one token has no next token to predict; that must be an error, not a number"
         );
+    }
+
+    // ---- qa_span_cross_entropy ----
+
+    #[test]
+    fn qa_loss_depends_on_both_positions() {
+        // Five positions; a confident (and correct) start-at-1/end-at-3 must
+        // score much better than the same logits scored against a rotated,
+        // wrong pair of positions.
+        let start_logits = tensor(&[5], vec![-9.0, 9.0, -9.0, -9.0, -9.0]);
+        let end_logits = tensor(&[5], vec![-9.0, -9.0, -9.0, 9.0, -9.0]);
+        let right = qa_span_cross_entropy(
+            &start_logits,
+            &end_logits,
+            &tensor(&[1], vec![1.0]),
+            &tensor(&[1], vec![3.0]),
+        )
+        .expect("valid positions score");
+        let wrong = qa_span_cross_entropy(
+            &start_logits,
+            &end_logits,
+            &tensor(&[1], vec![0.0]),
+            &tensor(&[1], vec![4.0]),
+        )
+        .expect("valid positions score");
+        assert!(
+            wrong > right + 1.0,
+            "the wrong span must cost far more ({wrong} vs {right})"
+        );
+    }
+
+    #[test]
+    fn qa_loss_matches_the_closed_form_value() {
+        // Two positions, 5 apart, exactly like the classification closed-form
+        // test: -log(softmax) of the larger is log(1 + e^-5), for both start
+        // and end, so the mean is the same value again.
+        let start_logits = tensor(&[2], vec![0.0, 5.0]);
+        let end_logits = tensor(&[2], vec![0.0, 5.0]);
+        let loss = qa_span_cross_entropy(
+            &start_logits,
+            &end_logits,
+            &tensor(&[1], vec![1.0]),
+            &tensor(&[1], vec![1.0]),
+        )
+        .expect("valid positions score");
+        let expected = (1.0f32 + (-5.0f32).exp()).ln();
+        assert!((loss - expected).abs() < 1e-6, "expected {expected}, got {loss}");
+    }
+
+    /// A tampered start position must change the loss: the replaced
+    /// implementation this guards against ignored `start_positions`/
+    /// `end_positions` entirely (no such implementation ever existed here,
+    /// but this is the exact property `BertForSequenceClassification`'s loss
+    /// was once missing -- see `classification_loss_depends_on_the_labels`).
+    #[test]
+    fn qa_loss_changes_when_the_start_position_is_tampered_with() {
+        let start_logits = tensor(&[4], vec![0.0, 8.0, 0.0, 0.0]);
+        let end_logits = tensor(&[4], vec![0.0, 0.0, 0.0, 8.0]);
+        let correct = qa_span_cross_entropy(
+            &start_logits,
+            &end_logits,
+            &tensor(&[1], vec![1.0]),
+            &tensor(&[1], vec![3.0]),
+        )
+        .expect("valid positions score");
+        let tampered = qa_span_cross_entropy(
+            &start_logits,
+            &end_logits,
+            &tensor(&[1], vec![2.0]),
+            &tensor(&[1], vec![3.0]),
+        )
+        .expect("valid positions score");
+        assert_ne!(correct, tampered);
+    }
+
+    #[test]
+    fn qa_loss_rejects_mismatched_position_counts() {
+        let start_logits = tensor(&[3], vec![0.0, 1.0, 2.0]);
+        let end_logits = tensor(&[3], vec![0.0, 1.0, 2.0]);
+        // Two start positions for a single-example forward pass is invalid.
+        assert!(qa_span_cross_entropy(
+            &start_logits,
+            &end_logits,
+            &tensor(&[2], vec![0.0, 1.0]),
+            &tensor(&[1], vec![2.0])
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn qa_loss_rejects_logits_of_different_lengths() {
+        let start_logits = tensor(&[3], vec![0.0, 1.0, 2.0]);
+        let end_logits = tensor(&[4], vec![0.0, 1.0, 2.0, 3.0]);
+        assert!(qa_span_cross_entropy(
+            &start_logits,
+            &end_logits,
+            &tensor(&[1], vec![0.0]),
+            &tensor(&[1], vec![0.0])
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn qa_loss_rejects_an_out_of_range_position() {
+        let start_logits = tensor(&[3], vec![0.0, 1.0, 2.0]);
+        let end_logits = tensor(&[3], vec![0.0, 1.0, 2.0]);
+        assert!(qa_span_cross_entropy(
+            &start_logits,
+            &end_logits,
+            &tensor(&[1], vec![9.0]),
+            &tensor(&[1], vec![0.0])
+        )
+        .is_err());
     }
 }

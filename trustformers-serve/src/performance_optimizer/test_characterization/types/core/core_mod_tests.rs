@@ -86,21 +86,6 @@ fn test_test_execution_data_default() {
 }
 
 #[test]
-fn test_test_pattern_recognition_engine_new() {
-    let engine = TestPatternRecognitionEngine::new();
-    assert!(engine.enabled);
-    assert!((engine.confidence_threshold - 0.8).abs() < 1e-9);
-    assert_eq!(engine.algorithms.len(), 1);
-    assert_eq!(engine.history.total_recognitions, 0);
-}
-
-#[test]
-fn test_test_pattern_recognition_engine_default() {
-    let engine = TestPatternRecognitionEngine::default();
-    assert!(engine.enabled);
-}
-
-#[test]
 fn test_estimation_result_fields() {
     let result = EstimationResult {
         algorithm: "conservative".to_string(),

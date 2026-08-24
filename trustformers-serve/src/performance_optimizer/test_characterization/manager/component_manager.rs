@@ -2,12 +2,13 @@
 //!
 //! Manager for component lifecycle and coordination.
 
+use super::super::pattern_engine::TestPatternRecognitionEngine;
+use super::super::real_time_profiler::RealTimeTestProfiler;
 use super::super::types::*;
 use super::super::{profiling_pipeline::*, synchronization_analyzer::*};
 use super::*;
 
 use anyhow::Result;
-use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -81,11 +82,12 @@ impl ComponentManager {
         let profiling_pipeline =
             Arc::new(TestProfilingPipeline::new(configs.profiling_pipeline_config.clone()).await?);
 
-        let pattern_engine = Arc::new(TestPatternRecognitionEngine::new());
+        let pattern_engine = Arc::new(
+            TestPatternRecognitionEngine::new(configs.pattern_engine_config.clone()).await?,
+        );
 
-        let real_time_profiler = Arc::new(RealTimeTestProfiler::new(Arc::new(RwLock::new(
-            configs.real_time_profiler_config.clone(),
-        ))));
+        let real_time_profiler =
+            Arc::new(RealTimeTestProfiler::new(configs.real_time_profiler_config.clone()).await?);
 
         let mut health_status = ComponentHealthStatus::default();
         health_status.resource_analyzer_healthy = true;

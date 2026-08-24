@@ -771,10 +771,112 @@ pub trait AnomalyDetector: std::fmt::Debug + Send + Sync {
     fn detect_anomalies(&self) -> TestCharacterizationResult<Vec<AnomalyInfo>>;
 }
 
+/// Summary of one metric key across an observation window.
+#[derive(Debug, Clone)]
+pub struct MetricSummary {
+    /// The metric key this summarises.
+    pub key: String,
+    /// Number of samples that carried the key.
+    pub count: usize,
+    /// Arithmetic mean of those samples.
+    pub mean: f64,
+    /// Smallest observed value.
+    pub min: f64,
+    /// Largest observed value.
+    pub max: f64,
+    /// Most recent observed value.
+    pub last: f64,
+}
+
+/// The samples an insight engine reasons over.
+///
+/// Before 0.2.1 `InsightEngine` took no input at all: every implementation
+/// produced prose from struct fields that nothing ever wrote to, so an engine
+/// with `insights_generated: 0` still announced an "optimization potential" or a
+/// "priority attention" level. Engines now see the profiler's real sample
+/// window and report only what it supports; an empty window yields no insights.
+#[derive(Debug, Clone, Copy)]
+pub struct InsightObservations<'a> {
+    /// Samples collected over the observation window, oldest first.
+    pub samples: &'a [super::core::RealTimeMetrics],
+}
+
+impl<'a> InsightObservations<'a> {
+    /// Wrap a sample window.
+    pub fn new(samples: &'a [super::core::RealTimeMetrics]) -> Self {
+        Self { samples }
+    }
+
+    /// True when no sample was collected.
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    /// Every metric key present in the window, sorted and de-duplicated.
+    pub fn keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> =
+            self.samples.iter().flat_map(|sample| sample.metrics.keys().cloned()).collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// Values recorded for `key`, in sample order.
+    pub fn series(&self, key: &str) -> Vec<f64> {
+        self.samples
+            .iter()
+            .filter_map(|sample| sample.metrics.get(key).copied())
+            .filter(|value| value.is_finite())
+            .collect()
+    }
+
+    /// Summary of `key`, or `None` when no sample carried a finite value for it.
+    pub fn summary(&self, key: &str) -> Option<MetricSummary> {
+        let values = self.series(key);
+        let first = *values.first()?;
+        let mut min = first;
+        let mut max = first;
+        let mut total = 0.0;
+        for value in &values {
+            min = min.min(*value);
+            max = max.max(*value);
+            total += value;
+        }
+        Some(MetricSummary {
+            key: key.to_string(),
+            count: values.len(),
+            mean: total / values.len() as f64,
+            min,
+            max,
+            last: *values.last()?,
+        })
+    }
+
+    /// Summaries for every key whose name contains one of `needles`.
+    pub fn summaries_matching(&self, needles: &[&str]) -> Vec<MetricSummary> {
+        self.keys()
+            .into_iter()
+            .filter(|key| needles.iter().any(|needle| key.contains(needle)))
+            .filter_map(|key| self.summary(&key))
+            .collect()
+    }
+}
+
+/// Produces human-readable findings from an observed metric window.
 pub trait InsightEngine: std::fmt::Debug + Send + Sync {
-    fn generate(&self) -> String;
-    fn generate_test_insights(&self, test_id: &str) -> TestCharacterizationResult<Vec<String>>;
-    fn generate_insights(&self) -> TestCharacterizationResult<Vec<String>>;
+    /// What this engine covers. Describes the engine, not any accumulated state.
+    fn describe(&self) -> String;
+    /// Findings scoped to one test id.
+    fn generate_test_insights(
+        &self,
+        test_id: &str,
+        observations: InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>>;
+    /// Findings over the whole window.
+    fn generate_insights(
+        &self,
+        observations: InsightObservations<'_>,
+    ) -> TestCharacterizationResult<Vec<String>>;
 }
 
 // Implementations

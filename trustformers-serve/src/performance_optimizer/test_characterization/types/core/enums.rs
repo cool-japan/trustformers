@@ -402,6 +402,12 @@ pub enum TestCharacterizationError {
         component: String,
         details: HashMap<String, String>,
     },
+    /// A capability this build does not provide.
+    ///
+    /// Returned where an operation could only be satisfied by inventing a
+    /// result: the message names exactly what is missing.
+    #[error("Not supported by {component}: {message}")]
+    NotSupported { message: String, component: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

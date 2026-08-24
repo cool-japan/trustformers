@@ -8,7 +8,7 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::types::PriorityQueue;
+use super::scheduling::PriorityQueue;
 
 impl<T> Default for PriorityQueue<T> {
     fn default() -> Self {

@@ -13,7 +13,7 @@
 //! substitute, and `WeightBinder::finish` turns the accumulated gaps into one
 //! error naming all of them.
 
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::layers::{Embedding, LayerNorm, Linear};
 use trustformers_core::tensor::Tensor;
 
@@ -219,6 +219,108 @@ impl DecoderShapes {
             q_width: num_attention_heads * head_dim,
             kv_width: num_key_value_heads * head_dim,
         }
+    }
+}
+
+/// The checkpoint namespaces a task wrapper binds for itself.
+///
+/// # Why strictness has to be contextual
+///
+/// A bare encoder load has to tolerate whole head namespaces: HuggingFace ships
+/// `cls.predictions.*`, `classifier.*` and `qa_outputs.*` inside the same file
+/// as the encoder, so `BertModel::load_from_checkpoint` would fail on every real
+/// `bert-base-uncased` checkpoint if it refused them. That tolerance lives in
+/// each architecture's `ALLOWED_UNUSED_PREFIXES`.
+///
+/// A *task wrapper* is in the opposite position. It binds those very namespaces,
+/// so an entry left over inside one is not "a head this model does not have" —
+/// it is a name this model failed to recognise. Under the encoder's policy alone
+/// a typo such as `cls.predictions.transform.dens.weight` starts with `cls.`,
+/// lands in [`LoadReport::ignored`], and the load reports success while the
+/// dense layer silently keeps its random initialisation.
+///
+/// [`BoundNamespaces::verify`] closes exactly that gap: after the wrapper has
+/// bound its head, every checkpoint entry still unconsumed *inside a namespace
+/// the wrapper claims* becomes an error, while namespaces it does not claim stay
+/// as tolerant as before. A wrapper that claims `cls.predictions.` therefore
+/// still accepts a checkpoint's `cls.seq_relationship.*` NSP head, and a
+/// checkpoint with no head at all still loads (nothing is left over — the gap is
+/// reported through [`LoadReport::missing`] instead).
+#[derive(Debug, Clone, Copy)]
+pub struct BoundNamespaces<'a> {
+    /// Namespaces (matched with `starts_with`) this wrapper binds itself.
+    prefixes: &'a [&'a str],
+    /// Non-parameter buffer names (matched with `ends_with`) that stay tolerated
+    /// even inside a claimed namespace.
+    tolerated_suffixes: &'a [&'a str],
+}
+
+impl<'a> BoundNamespaces<'a> {
+    /// Claim a set of namespaces with no buffer exceptions.
+    pub const fn new(prefixes: &'a [&'a str]) -> Self {
+        Self {
+            prefixes,
+            tolerated_suffixes: &[],
+        }
+    }
+
+    /// Claim namespaces, excepting registered buffers matched by suffix.
+    ///
+    /// Needed where a head namespace legitimately carries a non-parameter entry
+    /// (a `position_ids` range, a cached mask) that no setter consumes.
+    pub const fn with_tolerated_suffixes(
+        prefixes: &'a [&'a str],
+        tolerated_suffixes: &'a [&'a str],
+    ) -> Self {
+        Self {
+            prefixes,
+            tolerated_suffixes,
+        }
+    }
+
+    /// The namespaces this wrapper claims.
+    pub fn prefixes(&self) -> &'a [&'a str] {
+        self.prefixes
+    }
+
+    /// Whether this entry falls inside a claimed namespace and is not an
+    /// explicitly tolerated buffer.
+    fn claims(&self, name: &str) -> bool {
+        self.prefixes.iter().any(|prefix| name.starts_with(prefix))
+            && !self.tolerated_suffixes.iter().any(|suffix| name.ends_with(suffix))
+    }
+
+    /// Fail when the checkpoint holds an unrecognised tensor inside a namespace
+    /// this wrapper binds.
+    ///
+    /// Call it *after* every head tensor has been bound, so that
+    /// [`LoadReport::mark_loaded`] has already moved the recognised names out of
+    /// [`LoadReport::ignored`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when any entry under a claimed namespace was left unconsumed,
+    /// naming every offender and the namespaces that were claimed.
+    pub fn verify(&self, report: &LoadReport) -> Result<()> {
+        let unrecognised: Vec<&str> = report
+            .ignored
+            .iter()
+            .map(String::as_str)
+            .filter(|name| self.claims(name))
+            .collect();
+        if unrecognised.is_empty() {
+            return Ok(());
+        }
+        Err(TrustformersError::weight_load_error(format!(
+            "checkpoint holds {} tensor(s) this model does not recognise inside the head \
+             namespace(s) it binds ({}): {}. A bare encoder load tolerates a whole head \
+             namespace it does not bind, but this model binds these names, so an unconsumed \
+             entry here is a name it failed to match — most often a misspelling — not an \
+             absent head",
+            unrecognised.len(),
+            self.prefixes.join(", "),
+            unrecognised.join(", "),
+        )))
     }
 }
 

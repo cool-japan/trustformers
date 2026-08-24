@@ -222,8 +222,8 @@ mod tests {
             allocated_at: chrono::Utc::now(),
             deallocated_at: None,
             duration: Duration::from_secs(0),
-            utilization: 0.5,
-            efficiency: 0.8,
+            utilization: Some(0.5),
+            efficiency: Some(0.8),
         }
     }
 

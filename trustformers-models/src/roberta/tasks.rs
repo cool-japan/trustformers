@@ -3,7 +3,7 @@
 
 use crate::roberta::config::RobertaConfig;
 use crate::roberta::model::RobertaModel;
-use crate::weight_loading::binding::{bind_head_layer_norm, bind_head_linear};
+use crate::weight_loading::binding::{bind_head_layer_norm, bind_head_linear, BoundNamespaces};
 use crate::weight_loading::checkpoint::{Checkpoint, LoadReport};
 use std::io::Read;
 use trustformers_core::device::Device;
@@ -400,6 +400,13 @@ impl Model for RobertaForQuestionAnswering {
 /// binds its own head off the same parsed checkpoint and records the outcome in
 /// the [`LoadReport`].
 impl RobertaForSequenceClassification {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["classifier."]);
+
     /// Load the encoder and the two-layer classification head.
     ///
     /// # Errors
@@ -424,11 +431,19 @@ impl RobertaForSequenceClassification {
             [self.num_labels, hidden],
             &mut self.classifier.out_proj,
         )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }
 
 impl RobertaForMaskedLM {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["lm_head."]);
+
     /// Load the encoder and the masked-LM head.
     ///
     /// RoBERTa's head is `lm_head.dense` → GELU → `lm_head.layer_norm` →
@@ -485,11 +500,19 @@ impl RobertaForMaskedLM {
             None => report.note_absent(canonical_bias),
         }
 
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }
 
 impl RobertaForTokenClassification {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["classifier."]);
+
     /// Load the encoder and the per-token classification head.
     ///
     /// # Errors
@@ -507,11 +530,19 @@ impl RobertaForTokenClassification {
             [self.num_labels, hidden],
             &mut self.classifier,
         )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }
 
 impl RobertaForQuestionAnswering {
+    /// The checkpoint namespaces this wrapper binds, and therefore must fully
+    /// consume.
+    ///
+    /// See [`BoundNamespaces`] for why a wrapper is stricter than the bare
+    /// encoder over the very names it binds.
+    const BOUND_NAMESPACES: BoundNamespaces<'static> = BoundNamespaces::new(&["qa_outputs."]);
+
     /// Load the encoder and the span head.
     ///
     /// # Errors
@@ -529,6 +560,7 @@ impl RobertaForQuestionAnswering {
             [2, hidden],
             &mut self.qa_outputs,
         )?;
+        Self::BOUND_NAMESPACES.verify(&report)?;
         Ok(report)
     }
 }

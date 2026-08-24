@@ -3,8 +3,19 @@
 
 //! Intel oneAPI backend implementation for TrustformeRS
 //!
-//! This module provides integration with Intel's oneAPI unified programming model,
-//! supporting DPC++ (SYCL), oneDNN, oneMKL, and Intel GPU/CPU optimization.
+//! This module models the context/queue/kernel-cache API surface (DPC++
+//! (SYCL) queues, oneDNN, oneMKL, Intel GPU/CPU device selection) that a
+//! real integration with Intel's oneAPI unified programming model would
+//! expose. It does **not** link or execute a real oneAPI runtime:
+//! `--features oneapi` has zero dependencies (`oneapi = []` in
+//! `Cargo.toml`), the `extern "C"` FFI declarations further down are
+//! permanently disabled with `cfg(any())`, and every public method that
+//! would need actual SYCL/oneDNN/oneMKL execution returns a structured
+//! [`HardwareResult`] error naming exactly what is missing ("no
+//! SYCL/oneDNN/oneMKL runtime is linked") instead of fabricating output
+//! tensors, device counts, or timings. See the `HONESTY NOTE` above the
+//! `extern "C"` block for the full rationale and what wiring a real backend
+//! would require.
 
 #![allow(dead_code)] // oneAPI backend implementation with FFI bindings
 

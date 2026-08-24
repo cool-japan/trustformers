@@ -82,7 +82,7 @@ pub use types::*;
 pub use allocation::{LoadMetrics, ResourceAllocator, WorkerPool};
 pub use cleanup::{CleanupEvent, CleanupManager, CleanupTask};
 pub use custom_resources::CustomResourceManager;
-pub use database_management::DatabaseConnectionManager;
+pub use database_management::{DatabaseSlot, DatabaseSlotAllocator, DatabaseType};
 pub use directory_management::{DirectoryUsageTracking, TempDirectoryInfo, TempDirectoryManager};
 pub use gpu_manager::{
     GpuAllocation, GpuDeviceInfo, GpuMonitoringSystem, GpuPerformanceTracker, GpuResourceManager,
