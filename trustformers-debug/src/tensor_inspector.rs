@@ -122,19 +122,61 @@ pub struct AdvancedTensorAnalysis {
 /// Spectral analysis of tensor values
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpectralAnalysis {
-    pub eigenvalues: Vec<f64>,
+    /// Every singular value of the matrix, sorted descending.
+    ///
+    /// This field used to be called `eigenvalues` and held a single number
+    /// produced by ten steps of power iteration -- which is not an eigenvalue
+    /// for a non-symmetric matrix and was hardcoded to `0.0` for every
+    /// non-square matrix. Singular values are what a rectangular matrix
+    /// actually has, and these are the real ones from a full SVD.
+    pub singular_values: Vec<f64>,
+    /// 2-norm condition number `sigma_max / sigma_min`.
+    ///
+    /// `f64::INFINITY` when the smallest singular value is numerically zero,
+    /// i.e. the matrix is singular. (The previous value, `lambda_max` divided
+    /// by the Frobenius norm, was not a condition number under any definition.)
     pub condition_number: f64,
+    /// Numerical rank: the number of singular values above the standard
+    /// LAPACK/NumPy tolerance `max(rows, cols) * sigma_max * f64::EPSILON`.
     pub rank: usize,
+    /// Spectral norm (largest singular value).
     pub spectral_norm: f64,
+    /// Roy & Vetterli (2007) effective rank: `exp(H(p))` where `p_i` is the
+    /// singular-value distribution `sigma_i / sum(sigma)` and `H` is its
+    /// Shannon entropy in nats. Lies in `[1, rank]`.
+    pub effective_rank: f64,
 }
 
 /// Information content metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InformationContent {
+    /// Shannon entropy (bits) of the tensor's values after quantising them
+    /// into 100 equal-width buckets over `[min, max]`.
     pub entropy: f64,
-    pub mutual_information: f64,
-    pub effective_rank: f64,
-    pub compression_ratio: f64,
+    /// Mutual information with another tensor.
+    ///
+    /// Always `None` from [`TensorInspector::perform_advanced_analysis`]: mutual
+    /// information is a property of a *pair* of aligned variables and this call
+    /// only ever sees one tensor, so there is nothing to compute it against.
+    /// It used to be published as a hardcoded `0.0`, which reads as "measured
+    /// zero mutual information".
+    pub mutual_information: Option<f64>,
+    /// Perplexity `2^entropy` of the quantised value distribution, i.e. the
+    /// effective number of distinct value buckets the tensor occupies.
+    ///
+    /// This was called `effective_rank`, which in linear algebra means
+    /// `exp(H(singular value distribution))` -- an entirely different quantity
+    /// that this function cannot compute because it never sees the matrix
+    /// shape. The real effective rank now lives on
+    /// [`SpectralAnalysis::effective_rank`].
+    pub value_distribution_perplexity: f64,
+    /// Fraction of elements that are distinct at a `1e-10` tolerance
+    /// (`distinct / total`).
+    ///
+    /// This was called `compression_ratio`, which it is not: nothing is
+    /// compressed and no codec is consulted. It is a crude proxy for
+    /// redundancy, so it is now named for what it measures.
+    pub distinct_value_fraction: f64,
 }
 
 /// Stability metrics
@@ -214,7 +256,12 @@ impl TensorInspector {
         let values: Vec<f64> = tensor.iter().map(|x| x.clone().into()).collect();
         let shape = tensor.shape().to_vec();
 
-        let stats = self.compute_tensor_stats(&values, &shape, std::mem::size_of::<T>())?;
+        let stats = self.compute_tensor_stats(
+            &values,
+            &shape,
+            std::mem::size_of::<T>(),
+            std::any::type_name::<T>(),
+        )?;
         let distribution = if self.should_compute_distribution() {
             Some(self.compute_distribution(&values)?)
         } else {
@@ -265,8 +312,12 @@ impl TensorInspector {
         let values: Vec<f64> = gradients.iter().map(|x| x.clone().into()).collect();
         let shape = gradients.shape().to_vec();
 
-        let gradient_stats =
-            self.compute_tensor_stats(&values, &shape, std::mem::size_of::<T>())?;
+        let gradient_stats = self.compute_tensor_stats(
+            &values,
+            &shape,
+            std::mem::size_of::<T>(),
+            std::any::type_name::<T>(),
+        )?;
 
         if let Some(tensor_info) = self.tracked_tensors.get_mut(&tensor_id) {
             tensor_info.gradient_stats = Some(gradient_stats);
@@ -323,6 +374,18 @@ impl TensorInspector {
     }
 
     /// Get tensors by layer name
+    /// Id of the most recently inspected tensor with this name, if any.
+    ///
+    /// Names are not unique (the same tensor can be inspected at many steps),
+    /// so this returns the newest by inspection timestamp.
+    pub fn tensor_id_for_name(&self, name: &str) -> Option<Uuid> {
+        self.tracked_tensors
+            .values()
+            .filter(|info| info.name == name)
+            .max_by_key(|info| info.timestamp)
+            .map(|info| info.id)
+    }
+
     pub fn get_tensors_by_layer(&self, layer_name: &str) -> Vec<&TensorInfo> {
         self.tracked_tensors
             .values()
@@ -544,11 +607,18 @@ impl TensorInspector {
 
     // Private helper methods
 
+    /// Compute [`TensorStats`] for an already-flattened `f64` view of a tensor.
+    ///
+    /// `dtype` must be the caller's real element type name (the callers pass
+    /// `std::any::type_name::<T>()`); it used to be hardcoded to `"f64"`, which
+    /// reported the analysis working type rather than the tensor's own dtype and
+    /// was therefore wrong for every `f32`/`f16`/integer tensor ever inspected.
     fn compute_tensor_stats(
         &self,
         values: &[f64],
         shape: &[usize],
         element_size: usize,
+        dtype: &str,
     ) -> Result<TensorStats> {
         let total_elements = values.len();
         let mean = values.iter().sum::<f64>() / total_elements as f64;
@@ -586,7 +656,7 @@ impl TensorInspector {
 
         Ok(TensorStats {
             shape: shape.to_vec(),
-            dtype: "f64".to_string(), // Simplified for now
+            dtype: dtype.to_string(),
             total_elements,
             mean,
             std,
@@ -647,7 +717,12 @@ impl TensorInspector {
             .take(100) // Limit outliers to avoid memory issues
             .collect();
 
-        // Basic skewness and kurtosis (simplified formulas)
+        // Population (method-of-moments) skewness `g1 = m3 / m2^(3/2)` and
+        // population EXCESS kurtosis `g2 = m4 / m2^2 - 3`, both computed over
+        // the NaN-filtered values with the biased (divide-by-n) central
+        // moments. These are the standard estimators -- not an approximation --
+        // and they match `scipy.stats.skew(bias=True)` /
+        // `scipy.stats.kurtosis(bias=True, fisher=True)` exactly.
         let mean = sorted_values.iter().sum::<f64>() / sorted_values.len() as f64;
         let variance = sorted_values.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
             / sorted_values.len() as f64;
@@ -803,15 +878,22 @@ impl TensorInspector {
     /// can be tracked across many tensors without unbounded memory growth.
     /// With only `(mean, std, ...)` for each side there is no honest way to
     /// recover the cross term, so this returns `None` rather than a
-    /// fabricated constant. (`compute_simple_correlation`, used by
-    /// [`Self::compute_relationship_analysis`], computes a real Pearson
-    /// correlation when real paired values are available.)
+    /// fabricated constant. [`Self::compute_relationship_analysis`] returns an
+    /// empty relationship map for the same reason.
     fn compute_correlation(&self, _stats1: &TensorStats, _stats2: &TensorStats) -> Option<f64> {
         None
     }
 
     // Advanced analysis helper methods
 
+    /// Real spectral analysis of a 2-D tensor via a full singular value
+    /// decomposition (`nalgebra`, Pure Rust).
+    ///
+    /// Returns `Ok(None)` -- an honest absence, never fabricated numbers --
+    /// when the tensor is not a 2-D matrix, when the element count does not
+    /// match `rows * cols`, when any element is non-finite (an SVD of a matrix
+    /// containing NaN/inf is meaningless), or when the iterative SVD does not
+    /// converge.
     fn compute_spectral_analysis(
         &self,
         values: &[f64],
@@ -824,65 +906,69 @@ impl TensorInspector {
 
         let rows = shape[0];
         let cols = shape[1];
+        if rows == 0 || cols == 0 || rows.saturating_mul(cols) != values.len() {
+            tracing::debug!(
+                rows,
+                cols,
+                len = values.len(),
+                "skipping spectral analysis: shape does not match the element count"
+            );
+            return Ok(None);
+        }
+        if values.iter().any(|v| !v.is_finite()) {
+            tracing::debug!("skipping spectral analysis: matrix contains non-finite entries");
+            return Ok(None);
+        }
 
-        // Simple eigenvalue estimation using power iteration for the largest eigenvalue
-        let largest_eigenvalue = self.power_iteration(values, rows, cols)?;
-
-        // Estimate condition number using Frobenius norm ratio
-        let frobenius_norm = (values.iter().map(|x| x * x).sum::<f64>()).sqrt();
-        let condition_number = if frobenius_norm > 1e-12 {
-            largest_eigenvalue / frobenius_norm.max(1e-12)
-        } else {
-            f64::INFINITY
+        let matrix = nalgebra::DMatrix::<f64>::from_row_slice(rows, cols, values);
+        // `try_new` returns `None` instead of panicking when the implicit-shift
+        // QR sweep fails to converge; `0` means "no iteration cap".
+        let Some(svd) = nalgebra::linalg::SVD::try_new(matrix, false, false, f64::EPSILON, 0)
+        else {
+            tracing::debug!(
+                rows,
+                cols,
+                "SVD did not converge; reporting no spectral analysis"
+            );
+            return Ok(None);
         };
 
-        // Estimate rank by counting non-zero singular values (simplified)
-        let rank = values.iter().filter(|&&x| x.abs() > 1e-10).count().min(rows.min(cols));
+        let mut singular_values: Vec<f64> = svd.singular_values.iter().copied().collect();
+        // nalgebra does not guarantee an ordering, and every metric below
+        // depends on sigma_max / sigma_min.
+        singular_values.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+        let sigma_max = singular_values.first().copied().unwrap_or(0.0);
+        let sigma_min = singular_values.last().copied().unwrap_or(0.0);
+
+        // Standard LAPACK/NumPy numerical-rank tolerance.
+        let tol = rows.max(cols) as f64 * sigma_max * f64::EPSILON;
+        let rank = singular_values.iter().filter(|&&s| s > tol).count();
+
+        let condition_number = if sigma_min > tol { sigma_max / sigma_min } else { f64::INFINITY };
+
+        // Roy & Vetterli (2007), "The effective rank: a measure of effective
+        // dimensionality": erank(A) = exp(H(p)), p_i = sigma_i / sum(sigma).
+        let sigma_sum: f64 = singular_values.iter().sum();
+        let effective_rank = if sigma_sum > 0.0 {
+            let entropy: f64 = singular_values
+                .iter()
+                .map(|&s| s / sigma_sum)
+                .filter(|&p| p > 0.0)
+                .map(|p| -p * p.ln())
+                .sum();
+            entropy.exp()
+        } else {
+            0.0
+        };
 
         Ok(Some(SpectralAnalysis {
-            eigenvalues: vec![largest_eigenvalue], // Simplified - only largest
+            singular_values,
             condition_number,
             rank,
-            spectral_norm: largest_eigenvalue,
+            spectral_norm: sigma_max,
+            effective_rank,
         }))
-    }
-
-    fn power_iteration(&self, matrix: &[f64], rows: usize, cols: usize) -> Result<f64> {
-        if rows != cols {
-            return Ok(0.0); // Non-square matrices
-        }
-
-        let n = rows;
-        let mut x = vec![1.0; n];
-        let mut lambda = 0.0;
-
-        // Simple power iteration (few iterations for performance)
-        for _ in 0..10 {
-            let mut ax = vec![0.0; n];
-
-            // Matrix-vector multiplication: Ax
-            for i in 0..n {
-                for j in 0..n {
-                    ax[i] += matrix[i * n + j] * x[j];
-                }
-            }
-
-            // Compute Rayleigh quotient
-            let dot_ax_x: f64 = ax.iter().zip(x.iter()).map(|(a, b)| a * b).sum();
-            let dot_x_x: f64 = x.iter().map(|a| a * a).sum();
-
-            if dot_x_x > 1e-12 {
-                lambda = dot_ax_x / dot_x_x;
-            }
-
-            // Normalize
-            let norm = (ax.iter().map(|a| a * a).sum::<f64>()).sqrt();
-            if norm > 1e-12 {
-                x = ax.iter().map(|a| a / norm).collect();
-            }
-        }
-
-        Ok(lambda.abs())
     }
 
     fn compute_information_content(&self, values: &[f64]) -> Result<InformationContent> {
@@ -918,21 +1004,23 @@ impl TensorInspector {
             0.0
         };
 
-        // Effective rank estimation using entropy
-        let effective_rank = if entropy > 0.0 { 2.0_f64.powf(entropy) } else { 1.0 };
+        // Perplexity of the quantised value distribution: 2^H.
+        let value_distribution_perplexity = if entropy > 0.0 { 2.0_f64.powf(entropy) } else { 1.0 };
 
-        // Simple compression ratio estimation
         let mut sorted_values = values.to_vec();
         sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         sorted_values.dedup_by(|a, b| (*a - *b).abs() < 1e-10);
         let unique_values = sorted_values.len();
-        let compression_ratio = unique_values as f64 / values.len() as f64;
+        let distinct_value_fraction =
+            if values.is_empty() { 0.0 } else { unique_values as f64 / values.len() as f64 };
 
         Ok(InformationContent {
             entropy,
-            mutual_information: 0.0, // Would need multiple tensors to compute
-            effective_rank,
-            compression_ratio,
+            // Single-tensor call: there is no second variable to share
+            // information with, so this is an honest absence.
+            mutual_information: None,
+            value_distribution_perplexity,
+            distinct_value_fraction,
         })
     }
 
@@ -982,54 +1070,29 @@ impl TensorInspector {
         })
     }
 
-    fn compute_relationship_analysis(&self, values: &[f64]) -> Result<RelationshipAnalysis> {
-        // Simple relationship analysis within the tensor
-        let mut cross_correlations = HashMap::new();
-        let mut dependency_strength = HashMap::new();
-        let causal_relationships = Vec::new(); // Would need temporal data
-
-        // For now, just compute some basic relationships
-        for tensor_info in self.tracked_tensors.values() {
-            if tensor_info.stats.total_elements > 0 {
-                let correlation =
-                    self.compute_simple_correlation(values, &[tensor_info.stats.mean]);
-                cross_correlations.insert(tensor_info.id, correlation);
-                dependency_strength.insert(tensor_info.id, correlation.abs());
-            }
-        }
-
+    /// Cross-tensor relationships for the tensor being analysed.
+    ///
+    /// Always empty, and deliberately so. Pearson correlation needs paired
+    /// per-element values from both tensors, but [`Self::tracked_tensors`]
+    /// retains only [`TensorStats`] summaries (see [`Self::compute_correlation`]
+    /// for the same reasoning) -- the raw values of previously inspected
+    /// tensors are dropped so tracking stays O(1) per tensor.
+    ///
+    /// The previous implementation looked like it computed something: it called
+    /// `compute_simple_correlation(values, &[other.stats.mean])`, correlating an
+    /// N-element vector against a ONE-element vector. With `min_len == 1` the
+    /// second sum-of-squares term is identically zero, so the denominator was
+    /// always below the `1e-12` guard and the function returned `0.0` for every
+    /// pair, every time. Publishing that as a measured cross-correlation of
+    /// zero is worse than publishing nothing.
+    fn compute_relationship_analysis(&self, _values: &[f64]) -> Result<RelationshipAnalysis> {
         Ok(RelationshipAnalysis {
-            cross_correlations,
-            dependency_strength,
-            causal_relationships,
+            cross_correlations: HashMap::new(),
+            dependency_strength: HashMap::new(),
+            // Causal discovery needs temporal ordering across tensors, which
+            // this call does not receive.
+            causal_relationships: Vec::new(),
         })
-    }
-
-    fn compute_simple_correlation(&self, values1: &[f64], values2: &[f64]) -> f64 {
-        if values1.is_empty() || values2.is_empty() {
-            return 0.0;
-        }
-
-        let mean1 = values1.iter().sum::<f64>() / values1.len() as f64;
-        let mean2 = values2.iter().sum::<f64>() / values2.len() as f64;
-
-        let min_len = values1.len().min(values2.len());
-        let numerator: f64 = values1
-            .iter()
-            .zip(values2.iter())
-            .take(min_len)
-            .map(|(x, y)| (x - mean1) * (y - mean2))
-            .sum();
-
-        let sum_sq1: f64 = values1.iter().take(min_len).map(|x| (x - mean1).powi(2)).sum();
-        let sum_sq2: f64 = values2.iter().take(min_len).map(|y| (y - mean2).powi(2)).sum();
-
-        let denominator = (sum_sq1 * sum_sq2).sqrt();
-        if denominator > 1e-12 {
-            numerator / denominator
-        } else {
-            0.0
-        }
     }
 
     fn compute_summary_stats(&self) -> HashMap<String, f64> {
@@ -1158,6 +1221,174 @@ mod tests {
     fn make_tensor(values: &[f64], shape: &[usize]) -> ArrayD<f64> {
         ArrayD::from_shape_vec(IxDyn(shape), values.to_vec())
             .expect("tensor creation should succeed")
+    }
+
+    // ---- honesty regression tests (Wave 6c debug-sweep2) -----------------
+
+    #[test]
+    fn dtype_reports_the_real_element_type_not_a_hardcoded_f64() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let tensor: ArrayD<f32> =
+            ArrayD::from_shape_vec(IxDyn(&[2, 2]), vec![1.0f32, 2.0, 3.0, 4.0]).expect("tensor");
+        let id = inspector.inspect_tensor(&tensor, "f32_tensor", None, None).expect("inspect");
+        let info = inspector.get_tensor_info(id).expect("tracked");
+        assert_eq!(
+            info.stats.dtype, "f32",
+            "dtype was hardcoded to \"f64\" before"
+        );
+        assert_eq!(info.stats.memory_usage_bytes, 4 * 4);
+    }
+
+    #[test]
+    fn spectral_rank_is_a_real_rank_not_a_non_zero_element_count() {
+        let config = make_config();
+        let inspector = TensorInspector::new(&config);
+        // Every entry non-zero, but every row identical: real rank is 1.
+        // The old implementation counted non-zero ENTRIES (9) and clamped to
+        // min(rows, cols) = 3.
+        let ones = make_tensor(&[1.0; 9], &[3, 3]);
+        let analysis = inspector.perform_advanced_analysis(&ones, None).expect("analysis");
+        let spectral = analysis.spectral_analysis.expect("2-D matrix must get spectral analysis");
+        assert_eq!(spectral.rank, 1, "rank-1 matrix must report rank 1");
+        assert!(
+            spectral.condition_number.is_infinite(),
+            "a singular matrix is ill-conditioned"
+        );
+        assert!(
+            (spectral.spectral_norm - 3.0).abs() < 1e-9,
+            "sigma_max of the 3x3 all-ones matrix is exactly 3, got {}",
+            spectral.spectral_norm
+        );
+        assert!(
+            (spectral.effective_rank - 1.0).abs() < 1e-9,
+            "one non-zero singular value => effective rank 1, got {}",
+            spectral.effective_rank
+        );
+    }
+
+    #[test]
+    fn spectral_condition_number_matches_the_closed_form() {
+        let config = make_config();
+        let inspector = TensorInspector::new(&config);
+        // diag(4, 1): singular values 4 and 1 => cond = 4, rank 2.
+        let m = make_tensor(&[4.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let spectral = inspector
+            .perform_advanced_analysis(&m, None)
+            .expect("analysis")
+            .spectral_analysis
+            .expect("2-D matrix");
+        assert_eq!(spectral.rank, 2);
+        assert!(
+            (spectral.condition_number - 4.0).abs() < 1e-9,
+            "{}",
+            spectral.condition_number
+        );
+        assert_eq!(spectral.singular_values.len(), 2);
+        assert!((spectral.singular_values[0] - 4.0).abs() < 1e-9);
+        assert!((spectral.singular_values[1] - 1.0).abs() < 1e-9);
+        assert!(
+            spectral.singular_values[0] >= spectral.singular_values[1],
+            "singular values must come back sorted descending"
+        );
+    }
+
+    #[test]
+    fn spectral_analysis_handles_rectangular_matrices() {
+        let config = make_config();
+        let inspector = TensorInspector::new(&config);
+        // 2x3 with rank 2. The old power_iteration returned 0.0 for every
+        // non-square matrix and published it as the spectral norm.
+        let m = make_tensor(&[1.0, 0.0, 0.0, 0.0, 2.0, 0.0], &[2, 3]);
+        let spectral = inspector
+            .perform_advanced_analysis(&m, None)
+            .expect("analysis")
+            .spectral_analysis
+            .expect("2-D matrix");
+        assert!(
+            spectral.spectral_norm > 0.0,
+            "must not be the old hardcoded 0.0"
+        );
+        assert!((spectral.spectral_norm - 2.0).abs() < 1e-9);
+        assert_eq!(spectral.rank, 2);
+    }
+
+    #[test]
+    fn spectral_analysis_is_absent_for_non_finite_matrices() {
+        let config = make_config();
+        let inspector = TensorInspector::new(&config);
+        let m = make_tensor(&[1.0, f64::NAN, 3.0, 4.0], &[2, 2]);
+        let analysis = inspector.perform_advanced_analysis(&m, None).expect("analysis");
+        assert!(
+            analysis.spectral_analysis.is_none(),
+            "an SVD of a NaN matrix is meaningless: report absence, not numbers"
+        );
+    }
+
+    #[test]
+    fn mutual_information_is_absent_rather_than_a_measured_zero() {
+        let config = make_config();
+        let inspector = TensorInspector::new(&config);
+        let m = make_tensor(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        let info = inspector
+            .perform_advanced_analysis(&m, None)
+            .expect("analysis")
+            .information_content;
+        assert!(
+            info.mutual_information.is_none(),
+            "one tensor cannot yield a real MI"
+        );
+        assert!(
+            info.entropy > 0.0,
+            "entropy over distinct values must be positive"
+        );
+        assert!(info.value_distribution_perplexity >= 1.0);
+        assert!(
+            (info.distinct_value_fraction - 1.0).abs() < 1e-12,
+            "4 distinct of 4"
+        );
+    }
+
+    #[test]
+    fn relationship_analysis_reports_nothing_instead_of_a_fabricated_zero() {
+        let config = make_config();
+        let mut inspector = TensorInspector::new(&config);
+        let a = make_tensor(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        inspector.inspect_tensor(&a, "a", None, None).expect("inspect");
+        let b = make_tensor(&[5.0, 6.0, 7.0, 8.0], &[2, 2]);
+        let rel = inspector
+            .perform_advanced_analysis(&b, None)
+            .expect("analysis")
+            .relationship_analysis;
+        // The old code inserted a 0.0 "correlation" for every tracked tensor.
+        assert!(
+            rel.cross_correlations.is_empty(),
+            "raw values of past tensors are not retained, so no correlation is computable"
+        );
+        assert!(rel.dependency_strength.is_empty());
+    }
+
+    #[test]
+    fn skewness_and_kurtosis_match_the_population_estimators() {
+        let config = make_config();
+        let inspector = TensorInspector::new(&config);
+        // Symmetric data => skew 0; this exact sample has a known excess
+        // kurtosis of -1.3 for the population (Fisher) estimator.
+        let data = vec![-2.0, -1.0, 0.0, 1.0, 2.0];
+        let tensor = make_tensor(&data, &[5]);
+        let dist = inspector.compute_distribution(&data).expect("distribution");
+        assert!(
+            dist.skewness.abs() < 1e-12,
+            "symmetric data has zero skew: {}",
+            dist.skewness
+        );
+        // m2 = 2, m4 = 6.8 => g2 = 6.8 / 4 - 3 = -1.3
+        assert!(
+            (dist.kurtosis + 1.3).abs() < 1e-12,
+            "population excess kurtosis must be -1.3, got {}",
+            dist.kurtosis
+        );
+        let _ = tensor;
     }
 
     #[test]

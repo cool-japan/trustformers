@@ -81,16 +81,28 @@ impl SafeConcurrencyEstimator {
             safety_validation: String::new(),
         };
 
-        // Run all algorithms sequentially (trait objects can't be easily cloned for parallel execution)
-        let algorithms = self.algorithms.lock();
+        // Run every algorithm under a scoped lock, then await outside it.
+        //
+        // A `parking_lot::MutexGuard` is not `Send`, so holding one across the
+        // `.await`s below made this whole future non-`Send`. That went unnoticed
+        // while the only live caller was a shadow type that never ran this code;
+        // `manager/orchestrator.rs` spawns the real analysis with
+        // `tokio::spawn`, which requires `Send`.
+        let raw_estimations: Vec<(String, TestCharacterizationResult<usize>, Duration)> = {
+            let algorithms = self.algorithms.lock();
+            algorithms
+                .iter()
+                .map(|algorithm| {
+                    let algorithm_name = algorithm.name().to_string();
+                    let estimation_start = Instant::now();
+                    let result = algorithm.estimate_safe_concurrency(&preliminary_result);
+                    (algorithm_name, result, estimation_start.elapsed())
+                })
+                .collect()
+        };
+
         let mut estimations = Vec::new();
-
-        for algorithm in algorithms.iter() {
-            let algorithm_name = algorithm.name().to_string();
-            let estimation_start = Instant::now();
-            let result = algorithm.estimate_safe_concurrency(&preliminary_result);
-            let duration = estimation_start.elapsed();
-
+        for (algorithm_name, result, duration) in raw_estimations {
             match result {
                 Ok(estimation) => {
                     estimations.push(EstimationResult {
@@ -111,8 +123,6 @@ impl SafeConcurrencyEstimator {
                 },
             }
         }
-
-        drop(algorithms);
 
         if estimations.is_empty() {
             anyhow::bail!("All estimation algorithms failed");

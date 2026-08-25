@@ -502,3 +502,294 @@ fn growing_the_batch_predicts_amortised_communication() {
         result.performance_improvement
     );
 }
+
+// ---- Honest-contract tests for AutoScaler::execute_scale_up/execute_scale_down ----
+
+fn scaling_metrics(avg_gpu_utilization: f32, node_count: usize) -> PerformanceMetrics {
+    let samples = node_count.max(1);
+    PerformanceMetrics {
+        throughput: 100.0,
+        gpu_utilization: vec![avg_gpu_utilization; samples],
+        memory_usage: vec![0.5; samples],
+        communication_overhead: 0.1,
+        compression_ratio: 1.0,
+        bandwidth_utilization: 100.0,
+        step_time: Duration::from_millis(10),
+    }
+}
+
+fn scaler_with_zero_cooldown(min_nodes: usize, max_nodes: usize) -> AutoScaler {
+    AutoScaler::new(AutoScalerConfig {
+        min_nodes,
+        max_nodes,
+        strategy: ScalingStrategy::Performance,
+        scale_up_threshold: 0.85,
+        scale_down_threshold: 0.6,
+        scaling_cooldown: Duration::from_secs(0),
+        predictive_scaling: false,
+        cost_priority: 0.3,
+    })
+}
+
+/// A [`NodeProvider`] test double that records every call it receives (so
+/// tests can prove it was actually invoked, not just that no error
+/// surfaced) and can be configured to under-provision/under-terminate.
+#[derive(Default)]
+struct CountingNodeProvider {
+    provision_calls: Mutex<Vec<usize>>,
+    terminate_calls: Mutex<Vec<usize>>,
+    provision_shortfall: usize,
+    terminate_shortfall: usize,
+}
+
+impl NodeProvider for CountingNodeProvider {
+    fn provision_nodes(&self, count: usize) -> Result<usize> {
+        self.provision_calls.lock().expect("lock should not be poisoned").push(count);
+        Ok(count.saturating_sub(self.provision_shortfall))
+    }
+
+    fn terminate_nodes(&self, count: usize) -> Result<usize> {
+        self.terminate_calls.lock().expect("lock should not be poisoned").push(count);
+        Ok(count.saturating_sub(self.terminate_shortfall))
+    }
+}
+
+#[test]
+fn test_scale_up_without_node_provider_is_a_structured_error_not_fake_success() {
+    let mut scaler = scaler_with_zero_cooldown(2, 16);
+
+    let result = scaler.update_and_scale(&scaling_metrics(0.95, 2));
+
+    let err = result.expect_err("scale-up with no NodeProvider must fail, not fabricate success");
+    assert!(err.to_string().contains("NodeProvider"), "{err}");
+    assert_eq!(
+        scaler.get_current_nodes(),
+        2,
+        "current_nodes must not change: no node was actually provisioned"
+    );
+    assert!(
+        scaler.get_scaling_history().is_empty(),
+        "no scaling event actually happened, so none should be recorded"
+    );
+}
+
+#[test]
+fn test_scale_down_without_node_provider_is_a_structured_error_not_fake_success() {
+    // `with_min_nodes` only ever RAISES `current_nodes` to meet a new
+    // minimum, never lowers it (see its doc comment / implementation) --
+    // so starting at min_nodes=5 and then lowering the configured minimum
+    // to 2 leaves current_nodes at 5, strictly above the new min_nodes,
+    // with no NodeProvider involved anywhere.
+    let mut scaler = AutoScaler::new(AutoScalerConfig {
+        min_nodes: 5,
+        max_nodes: 16,
+        strategy: ScalingStrategy::Performance,
+        scale_up_threshold: 0.85,
+        scale_down_threshold: 0.6,
+        scaling_cooldown: Duration::from_secs(0),
+        predictive_scaling: false,
+        cost_priority: 0.3,
+    })
+    .with_min_nodes(2);
+    assert_eq!(scaler.get_current_nodes(), 5);
+
+    let result = scaler.update_and_scale(&scaling_metrics(0.1, 5));
+
+    let err = result.expect_err("scale-down with no NodeProvider must fail, not fabricate success");
+    assert!(err.to_string().contains("NodeProvider"), "{err}");
+    assert_eq!(
+        scaler.get_current_nodes(),
+        5,
+        "current_nodes must not change: no node was actually terminated"
+    );
+    assert!(
+        scaler.get_scaling_history().is_empty(),
+        "no scaling event actually happened, so none should be recorded"
+    );
+}
+
+#[test]
+fn test_scale_up_with_node_provider_succeeds_and_is_actually_invoked() {
+    let provider = Arc::new(CountingNodeProvider::default());
+    let mut scaler = scaler_with_zero_cooldown(2, 16).with_node_provider(provider.clone());
+
+    let decision = scaler
+        .update_and_scale(&scaling_metrics(0.95, 2))
+        .expect("scale-up must succeed once a NodeProvider covers the request");
+
+    assert!(
+        matches!(decision, ScalingDecision::ScaleUp(1)),
+        "{decision:?}"
+    );
+    assert_eq!(
+        provider.provision_calls.lock().expect("lock should not be poisoned").as_slice(),
+        [1],
+        "the provider must actually be asked for the node, not bypassed"
+    );
+    assert_eq!(scaler.get_current_nodes(), 3);
+    assert_eq!(scaler.get_scaling_history().len(), 1);
+    assert_eq!(scaler.get_scaling_history()[0].nodes_changed, 1);
+}
+
+#[test]
+fn test_scale_down_with_node_provider_succeeds_and_is_actually_invoked() {
+    let provider = Arc::new(CountingNodeProvider::default());
+    let mut scaler = scaler_with_zero_cooldown(2, 16).with_node_provider(provider.clone());
+
+    scaler
+        .update_and_scale(&scaling_metrics(0.95, 2))
+        .expect("scale-up must succeed in test");
+    assert_eq!(scaler.get_current_nodes(), 3);
+
+    let decision = scaler
+        .update_and_scale(&scaling_metrics(0.1, 3))
+        .expect("scale-down must succeed once a NodeProvider covers the request");
+
+    assert!(
+        matches!(decision, ScalingDecision::ScaleDown(1)),
+        "{decision:?}"
+    );
+    assert_eq!(
+        provider.terminate_calls.lock().expect("lock should not be poisoned").as_slice(),
+        [1],
+        "the provider must actually be asked to terminate the node, not bypassed"
+    );
+    assert_eq!(scaler.get_current_nodes(), 2);
+}
+
+#[test]
+fn test_scale_up_partial_provisioning_is_reported_as_failure_but_reflects_reality() {
+    let provider = Arc::new(CountingNodeProvider {
+        provision_shortfall: 1,
+        ..Default::default()
+    });
+    let mut scaler = scaler_with_zero_cooldown(4, 16).with_node_provider(provider.clone());
+
+    // avg_utilization 0.99 against a 0.85 threshold with current_nodes=4
+    // computes a request for 2 nodes; the provider only provisions 1.
+    let err = scaler
+        .update_and_scale(&scaling_metrics(0.99, 4))
+        .expect_err("provisioning fewer nodes than requested must be reported as an error");
+
+    assert!(
+        err.to_string().contains('2') && err.to_string().contains('1'),
+        "{err}"
+    );
+    assert_eq!(
+        provider.provision_calls.lock().expect("lock should not be poisoned").as_slice(),
+        [2]
+    );
+    assert_eq!(
+        scaler.get_current_nodes(),
+        5,
+        "current_nodes must reflect the 1 node actually provisioned, not the 2 requested"
+    );
+    assert_eq!(scaler.get_scaling_history().len(), 1);
+    assert_eq!(scaler.get_scaling_history()[0].nodes_changed, 1);
+}
+
+/// Regression: `execute_scale_up`/`execute_scale_down` used to record a
+/// hardcoded `ScalingEvent::reason` ("Performance threshold exceeded" /
+/// "Low utilization detected") no matter which `ScalingStrategy` actually
+/// fired -- false for three of the four strategies. Each strategy method
+/// now returns the reason it genuinely computed, threaded through
+/// unchanged into the event.
+#[test]
+fn test_scale_up_reason_names_the_queue_based_strategy_not_a_hardcoded_string() {
+    let provider = Arc::new(CountingNodeProvider::default());
+    let mut scaler = AutoScaler::new(AutoScalerConfig {
+        min_nodes: 2,
+        max_nodes: 16,
+        strategy: ScalingStrategy::QueueBased,
+        scale_up_threshold: 0.85,
+        scale_down_threshold: 0.6,
+        scaling_cooldown: Duration::from_secs(0),
+        predictive_scaling: false,
+        cost_priority: 0.3,
+    })
+    .with_node_provider(provider);
+
+    // GPU utilization 0.5 is nowhere near the Performance strategy's own
+    // 0.85 scale-up threshold, so this decision can only be explained by
+    // `scaling_metrics`'s fixed low throughput (100.0, i.e. a 0.1 ratio
+    // against queue_based_scaling's assumed 1000/sec baseline) -- the
+    // QueueBased strategy actually configured, not GPU utilization.
+    let decision = scaler
+        .update_and_scale(&scaling_metrics(0.5, 2))
+        .expect("QueueBased scale-up must succeed once a NodeProvider covers the request");
+    assert!(
+        matches!(decision, ScalingDecision::ScaleUp(1)),
+        "{decision:?}"
+    );
+
+    let history = scaler.get_scaling_history();
+    assert_eq!(history.len(), 1);
+    let reason = &history[0].reason;
+    assert!(
+        reason.contains("Queue-based") && reason.contains("throughput"),
+        "reason must name the strategy that actually fired: {reason}"
+    );
+    assert!(
+        !reason.contains("Performance threshold exceeded") && !reason.contains("GPU utilization"),
+        "reason must not be the old hardcoded Performance-strategy string: {reason}"
+    );
+}
+
+#[test]
+fn test_scale_down_reason_names_the_cost_optimized_strategy_not_a_hardcoded_string() {
+    let provider = Arc::new(CountingNodeProvider::default());
+    let mut scaler = AutoScaler::new(AutoScalerConfig {
+        min_nodes: 1,
+        max_nodes: 16,
+        strategy: ScalingStrategy::CostOptimized,
+        scale_up_threshold: 0.85,
+        scale_down_threshold: 0.6,
+        scaling_cooldown: Duration::from_secs(0),
+        predictive_scaling: false,
+        cost_priority: 0.3,
+    })
+    .with_node_provider(provider);
+
+    // Seed a second node via a genuine cost-optimized scale-up so there is
+    // room to scale back down below it.
+    scaler
+        .update_and_scale(&scaling_metrics(0.99, 1))
+        .expect("seed scale-up failed");
+    assert_eq!(scaler.get_current_nodes(), 2);
+
+    let decision = scaler
+        .update_and_scale(&scaling_metrics(0.1, 2))
+        .expect("CostOptimized scale-down must succeed once a NodeProvider covers the request");
+    assert!(
+        matches!(decision, ScalingDecision::ScaleDown(1)),
+        "{decision:?}"
+    );
+
+    let history = scaler.get_scaling_history();
+    assert_eq!(history.len(), 2);
+    let reason = &history[1].reason;
+    assert!(
+        reason.contains("Cost-optimized") && reason.contains("savings"),
+        "reason must name the strategy that actually fired: {reason}"
+    );
+    assert!(
+        !reason.contains("Low utilization detected"),
+        "reason must not be the old hardcoded Performance-strategy string: {reason}"
+    );
+}
+
+#[test]
+fn test_simulated_node_provider_lets_update_and_scale_succeed_end_to_end() {
+    let mut scaler =
+        scaler_with_zero_cooldown(2, 16).with_node_provider(Arc::new(SimulatedNodeProvider::new()));
+
+    let decision = scaler
+        .update_and_scale(&scaling_metrics(0.95, 2))
+        .expect("SimulatedNodeProvider must let scaling succeed end to end");
+
+    assert!(
+        matches!(decision, ScalingDecision::ScaleUp(1)),
+        "{decision:?}"
+    );
+    assert_eq!(scaler.get_current_nodes(), 3);
+}

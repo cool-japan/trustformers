@@ -455,6 +455,28 @@ pub struct GpuRealTimeMetrics {
 
     /// Fan speeds (percentage for each fan)
     pub fan_speeds: Vec<f32>,
+
+    /// Total VRAM on the device, in MB, as the driver reports it.
+    ///
+    /// `None` when the producer could not read it. Consumers that want a
+    /// memory *percentage* need this; see
+    /// [`crate::resource_management::gpu_manager::types::GpuRealTimeMetrics::memory_usage_percent`]
+    /// for why a hardcoded card size is not an acceptable substitute.
+    pub total_memory_mb: Option<u64>,
+}
+
+impl GpuRealTimeMetrics {
+    /// Memory usage as a percentage of the device's real VRAM.
+    ///
+    /// `None` when [`Self::total_memory_mb`] is absent or zero: the percentage
+    /// is genuinely unknown, and a consumer must skip its threshold rather than
+    /// compare against a guess.
+    pub fn memory_usage_percent(&self) -> Option<f32> {
+        match self.total_memory_mb {
+            Some(total) if total > 0 => Some((self.memory_usage_mb as f32 / total as f32) * 100.0),
+            _ => None,
+        }
+    }
 }
 
 /// GPU clock speed information

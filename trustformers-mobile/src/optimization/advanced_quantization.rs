@@ -1259,7 +1259,7 @@ mod tests {
                     battery_health_percent: Some(100),
                     charging_status: ChargingStatus::Discharging,
                     is_charging: false,
-                    power_save_mode: false,
+                    power_save_mode: Some(false),
                     low_power_mode_available: true,
                 },
                 available_backends: vec![crate::MobileBackend::CPU, crate::MobileBackend::GPU],

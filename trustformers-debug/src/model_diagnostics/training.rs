@@ -212,25 +212,47 @@ impl TrainingDynamicsAnalyzer {
         efficiency.min(1.0)
     }
 
-    /// Detect overfitting indicators.
+    /// Detect overfitting indicators from the recorded training metrics.
+    ///
+    /// [`ModelPerformanceMetrics`] carries no validation split, so the
+    /// validation-flavoured variants of [`OverfittingIndicator`]
+    /// (`TrainValidationGap`, `ValidationLossIncreasing`,
+    /// `HighVarianceInValidation`) are never raised here -- they exist for
+    /// callers that really do hold validation data. The two signals this can
+    /// honestly report are a collapsed *training* loss and high variance of the
+    /// *training* loss.
+    ///
+    /// This previously pushed `PerfectTrainingAccuracy` whenever the mean
+    /// training LOSS fell below `0.01` (loss is not accuracy) and
+    /// `HighVarianceInValidation` from the variance of the TRAINING loss (there
+    /// is no validation series to take a variance of).
     pub fn detect_overfitting_indicators(&self) -> Vec<OverfittingIndicator> {
         let mut indicators = Vec::new();
 
-        // Check for validation accuracy indicators (simulated for now)
         if self.metrics_history.len() > 10 {
-            let recent_losses: Vec<f64> =
-                self.metrics_history.iter().rev().take(10).map(|m| m.loss).collect();
+            let recent: Vec<&ModelPerformanceMetrics> =
+                self.metrics_history.iter().rev().take(10).collect();
+            let recent_losses: Vec<f64> = recent.iter().map(|m| m.loss).collect();
 
-            // Simulate validation gap detection
             let avg_loss = recent_losses.iter().sum::<f64>() / recent_losses.len() as f64;
             if avg_loss < 0.01 {
-                indicators.push(OverfittingIndicator::PerfectTrainingAccuracy);
+                indicators.push(OverfittingIndicator::NearZeroTrainingLoss { loss: avg_loss });
             }
 
-            // Check for loss variance indicating overfitting
+            // Real accuracy, when the caller actually recorded one.
+            let accuracies: Vec<f64> = recent.iter().filter_map(|m| m.accuracy).collect();
+            if !accuracies.is_empty() {
+                let avg_accuracy = accuracies.iter().sum::<f64>() / accuracies.len() as f64;
+                if avg_accuracy >= 0.999 {
+                    indicators.push(OverfittingIndicator::PerfectTrainingAccuracy {
+                        accuracy: avg_accuracy,
+                    });
+                }
+            }
+
             let variance = self.calculate_variance(&recent_losses);
             if variance > 0.05 {
-                indicators.push(OverfittingIndicator::HighVarianceInValidation);
+                indicators.push(OverfittingIndicator::HighVarianceInTrainingLoss { variance });
             }
         }
 
@@ -250,7 +272,7 @@ impl TrainingDynamicsAnalyzer {
                 });
             }
 
-            // Low accuracy (simulated)
+            // Real recorded accuracy, when the caller supplied one.
             if let Some(accuracy) = current_metrics.accuracy {
                 if accuracy < 0.5 {
                     indicators.push(UnderfittingIndicator::LowTrainingAccuracy {

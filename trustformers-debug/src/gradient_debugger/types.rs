@@ -25,10 +25,30 @@ pub struct GradientFlow {
     pub gradient_norm: f64,
     pub gradient_mean: f64,
     pub gradient_std: f64,
-    pub gradient_max: f64,
-    pub gradient_min: f64,
-    pub dead_neurons_ratio: f64,
-    pub active_neurons_ratio: f64,
+    /// Largest gradient element, when the real per-element tensor was
+    /// available (see
+    /// [`crate::gradient_debugger::debugger::GradientDebugger::record_gradient_values`]).
+    ///
+    /// `None` for the reduced entry point `record_gradient_flow`, which only
+    /// receives norm/mean/std. It used to be filled with `mean + std`, which is
+    /// not a maximum of anything -- for Gaussian-ish gradients the true max is
+    /// several sigma out, and for any skewed distribution `mean + std` can even
+    /// fall below the actual maximum's own sign.
+    pub gradient_max: Option<f64>,
+    /// Smallest gradient element; `None` for the reduced entry point, for the
+    /// same reason as [`Self::gradient_max`] (it used to be `mean - std`).
+    pub gradient_min: Option<f64>,
+    /// Fraction of gradient elements whose magnitude is at or below
+    /// [`GradientDebugConfig::dead_gradient_magnitude`].
+    ///
+    /// `None` for the reduced entry point. It used to come from a three-step
+    /// constant ladder over the gradient NORM (`0.9` / `0.3` / `0.05`), which
+    /// asserted that 90% of a layer's neurons were dead purely because the
+    /// aggregate norm was small -- and that fabricated ratio drove real
+    /// [`GradientAlert::DeadNeurons`] alerts.
+    pub dead_neurons_ratio: Option<f64>,
+    /// `1 - dead_neurons_ratio`, and `None` whenever that is `None`.
+    pub active_neurons_ratio: Option<f64>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -41,6 +61,17 @@ pub struct GradientHistory {
     pub gradient_stds: VecDeque<f64>,
     pub step_numbers: VecDeque<usize>,
     pub max_history_length: usize,
+    /// Real element count of this layer's gradient tensor, when a caller
+    /// has reported one via
+    /// [`crate::gradient_debugger::debugger::GradientDebugger::set_layer_parameter_count`].
+    /// `record_gradient_flow` only ever receives reduced scalar statistics
+    /// (norm/mean/std) -- never the tensor itself -- so this stays `None`
+    /// (an honest absence, not a placeholder) unless a caller with access
+    /// to the real tensor shape opts in. `#[serde(default)]` keeps this
+    /// backward-compatible with snapshots serialized before this field
+    /// existed.
+    #[serde(default)]
+    pub parameter_count: Option<usize>,
 }
 
 impl GradientHistory {
@@ -52,6 +83,7 @@ impl GradientHistory {
             gradient_stds: VecDeque::with_capacity(max_length),
             step_numbers: VecDeque::with_capacity(max_length),
             max_history_length: max_length,
+            parameter_count: None,
         }
     }
 
@@ -119,9 +151,23 @@ pub enum GradientAlert {
 pub struct GradientDebugConfig {
     pub vanishing_threshold: f64,
     pub exploding_threshold: f64,
+    /// Fraction of dead elements in a layer that raises
+    /// [`GradientAlert::DeadNeurons`].
     pub dead_neuron_threshold: f64,
+    /// Magnitude at or below which a single gradient element counts as dead.
+    ///
+    /// Only used by
+    /// [`crate::gradient_debugger::debugger::GradientDebugger::record_gradient_values`],
+    /// which is the only entry point that sees per-element gradients.
+    #[serde(default = "default_dead_gradient_magnitude")]
+    pub dead_gradient_magnitude: f64,
     pub oscillation_variance_threshold: f64,
     pub no_gradient_steps_threshold: usize,
+}
+
+/// Default for [`GradientDebugConfig::dead_gradient_magnitude`].
+fn default_dead_gradient_magnitude() -> f64 {
+    1e-8
 }
 
 impl Default for GradientDebugConfig {
@@ -130,6 +176,7 @@ impl Default for GradientDebugConfig {
             vanishing_threshold: 1e-7,
             exploding_threshold: 10.0,
             dead_neuron_threshold: 0.1, // 10% dead neurons trigger alert
+            dead_gradient_magnitude: default_dead_gradient_magnitude(),
             oscillation_variance_threshold: 100.0,
             no_gradient_steps_threshold: 10,
         }

@@ -84,7 +84,7 @@ impl Default for MobileDeviceInfo {
                 battery_health_percent: Some(100),
                 charging_status: ChargingStatus::NotCharging,
                 is_charging: false,
-                power_save_mode: false,
+                power_save_mode: Some(false),
                 low_power_mode_available: true,
             },
             available_backends: vec![MobileBackend::CPU],
@@ -262,6 +262,7 @@ pub enum ThermalState {
     Critical,
     Emergency,
     Shutdown,
+    Unknown,
 }
 
 /// Temperature sensor information
@@ -290,8 +291,11 @@ pub struct PowerInfo {
     pub charging_status: ChargingStatus,
     /// Is charging (derived from charging_status)
     pub is_charging: bool,
-    /// Power save mode active
-    pub power_save_mode: bool,
+    /// Power save mode active. `None` when this cannot be verified on the
+    /// current platform (see
+    /// [`MobileDeviceDetector::is_power_save_mode_active`]) -- distinct
+    /// from `Some(false)`, which asserts a real check found it inactive.
+    pub power_save_mode: Option<bool>,
     /// Low power mode available
     pub low_power_mode_available: bool,
 }
@@ -770,13 +774,36 @@ impl MobileDeviceDetector {
     }
 
     fn adjust_for_power_state(config: &mut MobileConfig, power_info: &PowerInfo) {
-        if power_info.power_save_mode || power_info.battery_level_percent.unwrap_or(100) < 20 {
+        // Neither `power_save_mode` nor `battery_level_percent` is
+        // observable on most builds today: no pure-Rust API reaches
+        // Android's `PowerManager.isPowerSaveMode()` / iOS's
+        // `ProcessInfo.isLowPowerModeEnabled`, and the real battery read
+        // (`get_battery_info`) is Android/Linux-`power_supply`-sysfs only.
+        // The previous `power_info.battery_level_percent.unwrap_or(100)`
+        // fabricated "fully charged" on every platform without a real
+        // reading, silently defeating both branches below everywhere
+        // except Android/Linux. This function is the one-shot
+        // "best config given what is actually known" path
+        // (`generate_optimized_config`), not a live safety gate, so the
+        // fix is not to swing to the opposite fabrication ("assume
+        // critical" -- which would pin every unmeasured device to the most
+        // restrictive config and make the tier-based selection above
+        // pointless); instead each signal only contributes when it is
+        // genuinely known, and with neither known no power-based
+        // adjustment is made at all.
+        let power_save_active = power_info.power_save_mode.unwrap_or(false);
+        let battery_critically_low =
+            power_info.battery_level_percent.is_some_and(|level| level < 20);
+        let battery_moderately_low =
+            power_info.battery_level_percent.is_some_and(|level| level < 50);
+
+        if power_save_active || battery_critically_low {
             // Aggressive power saving
             config.memory_optimization = MemoryOptimization::Maximum;
             config.num_threads = 1;
             config.enable_batching = false;
             config.backend = MobileBackend::CPU; // Prefer CPU over GPU/NPU
-        } else if power_info.battery_level_percent.unwrap_or(100) < 50 {
+        } else if battery_moderately_low {
             // Moderate power saving
             config.num_threads = (config.num_threads / 2).max(1);
             config.max_batch_size = (config.max_batch_size / 2).max(1);
@@ -983,14 +1010,34 @@ impl MobileDeviceDetector {
         None
     }
 
+    /// Delegates to the same real read [`crate::thermal_power`]'s live
+    /// monitor uses (`read_platform_temperature` + `temperature_to_state`)
+    /// so this one-shot detection and a running `ThermalPowerManager`
+    /// agree on what a given physical reading means, instead of running
+    /// two independently maintained thermal pipelines. `ThermalState::Unknown`
+    /// when the platform genuinely cannot be read (iOS; most desktop/CI
+    /// hosts, which expose no `sysinfo` thermal component) -- previously a
+    /// hardcoded `ThermalState::Nominal` under a
+    /// '// Platform-specific thermal state detection' comment that
+    /// performed no detection at all.
     fn get_current_thermal_state() -> ThermalState {
-        // Platform-specific thermal state detection
-        ThermalState::Nominal
+        crate::thermal_power::read_platform_temperature()
+            .map(crate::thermal_power::temperature_to_state)
+            .unwrap_or(ThermalState::Unknown)
     }
 
+    /// Whether the target OS has a thermal-management facility at all --
+    /// a static, `cfg`-determined fact about the platform, not whether
+    /// *this build* can currently read a value from it (Android's sysfs
+    /// read can fail on a locked-down OEM image even though the platform
+    /// genuinely throttles; iOS throttles even though this crate has no
+    /// FFI binding to query `ProcessInfo.thermalState`). Previously a
+    /// hardcoded `true` under a
+    /// '// Check if platform supports thermal throttling' comment that
+    /// checked nothing, so every platform -- including a plain desktop
+    /// build with no such facility -- reported throttling support.
     fn is_thermal_throttling_supported() -> bool {
-        // Check if platform supports thermal throttling
-        true
+        cfg!(any(target_os = "android", target_os = "ios"))
     }
 
     fn enumerate_temperature_sensors() -> Vec<TemperatureSensor> {
@@ -1012,12 +1059,27 @@ impl MobileDeviceDetector {
         ChargingStatus::Unknown
     }
 
-    fn is_power_save_mode_active() -> bool {
-        false
+    /// `None` when this cannot be verified. Whether the OS-level power
+    /// saver is currently toggled on requires Android's
+    /// `PowerManager.isPowerSaveMode()` or iOS's
+    /// `ProcessInfo.isLowPowerModeEnabled` -- both JNI/Objective-C APIs
+    /// with no pure-Rust binding in this workspace's dependency set, and
+    /// COOLJAPAN policy keeps FFI feature-gated off by default. Previously
+    /// a hardcoded `false` with no explanatory comment, which asserted
+    /// "never power-saving" for every device unconditionally.
+    fn is_power_save_mode_active() -> Option<bool> {
+        None
     }
 
+    /// Static OS-capability fact, not a live measurement: iOS has offered
+    /// system-wide Low Power Mode since iOS 9, Android system-wide
+    /// Battery Saver since API 21 (Lollipop) -- both comfortably below any
+    /// version this crate plausibly targets, so `true` for either is a
+    /// real fact about the platform rather than a guess. A generic/desktop
+    /// build has no such crate-modeled concept, so `false` rather than the
+    /// previous blanket `true` regardless of platform.
     fn is_low_power_mode_available() -> bool {
-        true
+        cfg!(any(target_os = "android", target_os = "ios"))
     }
 
     // Performance benchmarking methods
@@ -1405,5 +1467,181 @@ mod tests {
         assert_eq!(memory_info.total_memory, memory_info.total_mb);
         assert_eq!(memory_info.available_memory, memory_info.available_mb);
         assert!(memory_info.total_mb > 0);
+    }
+
+    /// Regression test for the previous `get_current_thermal_state`
+    /// hardcoded `ThermalState::Nominal` under a
+    /// '// Platform-specific thermal state detection' comment that
+    /// performed no detection. On the desktop hosts this crate's tests
+    /// actually run on, `thermal_power::read_platform_temperature` is very
+    /// likely to fail (no `sysinfo` thermal component exposed), which the
+    /// old code could never distinguish from a genuinely cool, measured
+    /// device -- both produced the identical `Nominal`. This asserts the
+    /// honest outcome instead: either a real state derived from a real
+    /// reading, or `Unknown` when no reading was possible, never a
+    /// fabricated default.
+    #[test]
+    fn test_get_current_thermal_state_is_real_reading_or_honestly_unknown() {
+        // `read_platform_temperature` is a genuinely live hardware sensor
+        // read on hosts that expose one, and this workspace's test runs
+        // share the machine with several parallel `cargo build`/`test`
+        // jobs that visibly move CPU temperature during a run -- a naive
+        // "read, call get_current_thermal_state(), read again, compare"
+        // can flake right at a bucket boundary if the temperature crosses
+        // it between the bracketing reads (observed on this exact test
+        // host with a single stale `before`/`after` pair). Bracketing each
+        // attempt immediately around the call under test, and accepting
+        // the call's result whenever it falls within (inclusive of) the
+        // bracket -- which is always true unless
+        // `get_current_thermal_state` is not actually deriving from a real
+        // reading -- with a small bounded retry for the rare case a
+        // boundary is crossed exactly during the call itself, keeps this
+        // tied to real sensor data without being sensitive to normal
+        // thermal drift under concurrent CI load.
+        const MAX_ATTEMPTS: usize = 20;
+
+        let mut last_seen = None;
+        for _ in 0..MAX_ATTEMPTS {
+            let before = crate::thermal_power::read_platform_temperature()
+                .ok()
+                .map(crate::thermal_power::temperature_to_state);
+            let state = MobileDeviceDetector::get_current_thermal_state();
+            let after = crate::thermal_power::read_platform_temperature()
+                .ok()
+                .map(crate::thermal_power::temperature_to_state);
+
+            match (before, after) {
+                (None, None) => {
+                    // The platform could not be read on either side of the
+                    // call either: the honest outcome is Unknown, not the
+                    // previous fabricated Nominal default.
+                    assert_eq!(
+                        state,
+                        ThermalState::Unknown,
+                        "an unreadable platform must report Unknown, not the previous \
+                         fabricated Nominal default"
+                    );
+                    return;
+                },
+                (b, a) => {
+                    // At least one bracketing read succeeded: the real
+                    // in-between state must match one of the buckets that
+                    // genuinely straddle it.
+                    if b == Some(state) || a == Some(state) {
+                        return;
+                    }
+                    last_seen = Some((b, state, a));
+                },
+            }
+        }
+
+        panic!(
+            "get_current_thermal_state() never fell within its bracketing live reads across \
+             {MAX_ATTEMPTS} attempts (last seen before/state/after = {last_seen:?}) -- it must \
+             derive from a real reading via read_platform_temperature + temperature_to_state, \
+             not a fabricated default"
+        );
+    }
+
+    /// Regression test for the previous `is_thermal_throttling_supported`
+    /// hardcoded `true` under a
+    /// '// Check if platform supports thermal throttling' comment that
+    /// checked nothing. It is now a static `cfg!`-determined platform
+    /// fact: `true` only on Android/iOS, `false` everywhere else
+    /// (including the desktop hosts this test actually runs on).
+    #[test]
+    fn test_is_thermal_throttling_supported_reflects_real_platform_not_blanket_true() {
+        let supported = MobileDeviceDetector::is_thermal_throttling_supported();
+        assert_eq!(
+            supported,
+            cfg!(any(target_os = "android", target_os = "ios"))
+        );
+    }
+
+    /// Regression test for the previous `is_power_save_mode_active`
+    /// hardcoded `false` with no platform check behind it at all. No
+    /// pure-Rust binding reaches the real OS API on any target this crate
+    /// builds for today, so the honest answer is always `None`
+    /// ("cannot verify"), never an asserted `Some(false)`.
+    #[test]
+    fn test_is_power_save_mode_active_is_honestly_unverifiable() {
+        assert_eq!(MobileDeviceDetector::is_power_save_mode_active(), None);
+    }
+
+    /// Regression test for the previous `is_low_power_mode_available`
+    /// hardcoded `true` regardless of platform. This is a static
+    /// OS-capability fact (Low Power Mode / Battery Saver both predate
+    /// every version this crate plausibly targets), so `true` on
+    /// Android/iOS and `false` elsewhere -- not a blanket `true` on a
+    /// desktop/generic build with no such crate-modeled concept.
+    #[test]
+    fn test_is_low_power_mode_available_reflects_real_platform_not_blanket_true() {
+        let available = MobileDeviceDetector::is_low_power_mode_available();
+        assert_eq!(
+            available,
+            cfg!(any(target_os = "android", target_os = "ios"))
+        );
+    }
+
+    /// Regression test for the previous `adjust_for_power_state` reading
+    /// `power_info.battery_level_percent.unwrap_or(100)`, which fabricated
+    /// "fully charged" for every platform where the real battery read is
+    /// unavailable (every non-Android/Linux target). With neither
+    /// `power_save_mode` nor `battery_level_percent` known, no power-based
+    /// adjustment should fire at all -- distinct from both "assume fully
+    /// charged" (the old bug) and "assume critical" (the opposite
+    /// fabrication).
+    #[test]
+    fn test_adjust_for_power_state_makes_no_change_when_nothing_is_known() {
+        let power_info = PowerInfo {
+            battery_capacity_mah: None,
+            battery_level_percent: None,
+            battery_level: None,
+            battery_health_percent: None,
+            charging_status: ChargingStatus::Unknown,
+            is_charging: false,
+            power_save_mode: None,
+            low_power_mode_available: false,
+        };
+        let mut config = MobileConfig::default();
+        let original_threads = config.num_threads;
+        let original_batch = config.max_batch_size;
+        let original_memory_opt = config.memory_optimization;
+        let original_backend = config.backend;
+
+        MobileDeviceDetector::adjust_for_power_state(&mut config, &power_info);
+
+        assert_eq!(config.num_threads, original_threads);
+        assert_eq!(config.max_batch_size, original_batch);
+        assert_eq!(config.memory_optimization, original_memory_opt);
+        assert_eq!(config.backend, original_backend);
+    }
+
+    /// A genuinely known low battery must still trigger the moderate power
+    /// saving branch -- confirms the fix did not also break the case where
+    /// the signal *is* available (e.g. real Android/Linux
+    /// `power_supply` sysfs reads).
+    #[test]
+    fn test_adjust_for_power_state_still_reacts_to_a_known_low_battery() {
+        let power_info = PowerInfo {
+            battery_capacity_mah: Some(3000),
+            battery_level_percent: Some(30),
+            battery_level: Some(30),
+            battery_health_percent: Some(90),
+            charging_status: ChargingStatus::Discharging,
+            is_charging: false,
+            power_save_mode: Some(false),
+            low_power_mode_available: false,
+        };
+        let mut config = MobileConfig {
+            num_threads: 8,
+            max_batch_size: 8,
+            ..MobileConfig::default()
+        };
+
+        MobileDeviceDetector::adjust_for_power_state(&mut config, &power_info);
+
+        assert_eq!(config.num_threads, 4);
+        assert_eq!(config.max_batch_size, 4);
     }
 }

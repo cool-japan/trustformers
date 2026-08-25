@@ -789,7 +789,8 @@ impl ModelServingManager {
             }
         };
 
-        // Simulate processing (in a real implementation, this would call the actual model)
+        // Run inference through the installed model function (see process_inference: it
+        // returns a structured error if none was installed via set_inference_fn).
         let start_time = Instant::now();
         let output = self.process_inference(&request).await;
         let processing_time = start_time.elapsed();

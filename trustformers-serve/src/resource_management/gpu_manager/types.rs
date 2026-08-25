@@ -309,7 +309,19 @@ pub struct GpuDeviceInfo {
     /// Currently available memory in MB
     pub available_memory_mb: u64,
 
-    /// Current utilization percentage (0.0 to 100.0)
+    /// Utilization percentage (0.0 to 100.0) recorded on this device *record*.
+    ///
+    /// This is a discovery-time snapshot, and discovery has no utilization
+    /// source: `discover_gpu_devices` writes `0.0` here and nothing in this
+    /// crate ever updates it. It is therefore **not** a live reading -- treat
+    /// it as "unknown", and read live utilization from
+    /// `GpuResourceManager::device_telemetry` or the monitoring system's
+    /// `GpuRealTimeMetrics` instead.
+    ///
+    /// 0.2.1: several call sites used this as a *fallback* for a live figure,
+    /// which meant an absent live reading silently became "0% utilized, fully
+    /// idle" and every load-balancing and health decision keyed on it went the
+    /// permissive way.
     pub utilization_percent: f32,
 
     /// List of device capabilities
@@ -418,6 +430,34 @@ pub struct GpuRealTimeMetrics {
 
     /// Fan speeds (percentage for each fan)
     pub fan_speeds: Vec<f32>,
+
+    /// Total VRAM on the device, in MB, as the driver reports it.
+    ///
+    /// `None` when the sample's producer could not read it. Consumers that want
+    /// a *percentage* need this: `memory_usage_mb` alone cannot be turned into
+    /// one, and inventing a card size to divide by is a fabrication.
+    ///
+    /// 0.2.1: both consumers of these metrics -- the alert system's memory
+    /// threshold check and the monitoring system's high-memory warning --
+    /// computed `memory_usage_mb / 24576.0`, i.e. they assumed every GPU in the
+    /// world has exactly 24 GiB of VRAM. On a 12 GiB card that halved the real
+    /// percentage and silenced genuine alerts; on an 80 GiB card it inflated it
+    /// and fired false ones.
+    pub total_memory_mb: Option<u64>,
+}
+
+impl GpuRealTimeMetrics {
+    /// Memory usage as a percentage of the device's real VRAM.
+    ///
+    /// `None` when [`Self::total_memory_mb`] is absent or zero: the percentage
+    /// is genuinely unknown, and a consumer must skip its threshold rather than
+    /// compare against a guess.
+    pub fn memory_usage_percent(&self) -> Option<f32> {
+        match self.total_memory_mb {
+            Some(total) if total > 0 => Some((self.memory_usage_mb as f32 / total as f32) * 100.0),
+            _ => None,
+        }
+    }
 }
 
 /// GPU clock speed information

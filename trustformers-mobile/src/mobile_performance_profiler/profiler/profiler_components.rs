@@ -820,19 +820,31 @@ impl PerformanceAnalyzer {
 
         if let Some(thermal) = metrics.thermal.as_ref() {
             let thermal_score = match thermal.thermal_state {
-                ThermalState::Nominal => 100.0,
-                ThermalState::Fair => 80.0,
-                ThermalState::Serious => 60.0,
-                ThermalState::Critical => 20.0,
-                ThermalState::Emergency => 5.0,
-                ThermalState::Shutdown => 0.0,
+                ThermalState::Nominal => Some(100.0),
+                ThermalState::Fair => Some(80.0),
+                ThermalState::Serious => Some(60.0),
+                ThermalState::Critical => Some(20.0),
+                ThermalState::Emergency => Some(5.0),
+                ThermalState::Shutdown => Some(0.0),
+                // `ThermalMetrics.thermal_state` is only ever populated (see
+                // `SystemMetricsCollector::collect_thermal_metrics`,
+                // collector.rs:404-407) from a genuinely measured
+                // `hottest_component_celsius()` reading bucketed by
+                // `thermal_state_for`, which never produces `Unknown` -- this
+                // arm exists only to satisfy the shared enum's
+                // exhaustiveness. Excluded from the component scores for the
+                // same reason an absent `metrics.thermal` already is, rather
+                // than contributing a fabricated number.
+                ThermalState::Unknown => None,
             };
-            component_scores.insert("thermal".to_string(), thermal_score);
-            if thermal_score < 70.0 {
-                recommendations.push(format!(
-                    "Device at {:.1} C -- reduce inference frequency to allow cooldown",
-                    thermal.temperature_c
-                ));
+            if let Some(thermal_score) = thermal_score {
+                component_scores.insert("thermal".to_string(), thermal_score);
+                if thermal_score < 70.0 {
+                    recommendations.push(format!(
+                        "Device at {:.1} C -- reduce inference frequency to allow cooldown",
+                        thermal.temperature_c
+                    ));
+                }
             }
         }
 

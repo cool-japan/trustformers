@@ -1,6 +1,6 @@
 # trustformers-optim TODO List
 
-**Version:** 0.2.1 (unreleased) | **Status:** Stable | **Tests:** ~995 as of 2026-07-09, not independently re-run this pass — see root `TODO.md` for the current workspace-wide baseline (20,629 passed / 43 skipped / 0 failed, 2026-08-24) | **SLoC:** 65,983 (`tokei`, verified 2026-08-24 — up from 50,431 on 2026-07-09) | **Updated:** 2026-08-24 (SLoC/date/two stale-checkbox corrections only; narrative largely unreviewed since 2026-07-09)
+**Version:** 0.2.1 (unreleased) | **Status:** Stable | **Tests:** 1197 passed / 1 skipped / 0 failed as of 2026-08-25 (`cargo nextest run -p trustformers-optim --no-fail-fast`, independently re-run — see the 2026-08-25 honesty-pass addendum near the end of this file) | **SLoC:** 65,983 (`tokei`, verified 2026-08-24 — up from 50,431 on 2026-07-09, not re-measured after the 2026-08-25 pass) | **Updated:** 2026-08-25 (production-hardening honesty pass on `performance_validation.rs`/`federated.rs`/`advanced_distributed_features.rs` — see addendum; earlier narrative largely unreviewed since 2026-07-09)
 
 ## Overview
 
@@ -391,7 +391,36 @@ optimizer.register_parameters(parameters)?;
       `.with_gradient_compression(CompressionType::PowerSGD { rank })`, `.with_dynamic_batching()`,
       `.with_fault_tolerance()`), gradient compression, dynamic batching, fault tolerance
 - [x] `advanced_distributed_features`: `AutoScaler`, `PerformanceMLOptimizer`, `SmartCheckpointManager`
-      (auto-scaling, ML-based performance tuning, differential checkpointing)
+      (auto-scaling, ML-based performance tuning, differential checkpointing) — `AutoScaler`
+      **honesty-audited 2026-08-25.** Before this pass, `execute_scale_up`/`execute_scale_down` (reached
+      from `update_and_scale`) unconditionally mutated `current_nodes` and pushed a `ScalingEvent` for a
+      compute fleet that did not exist — no node was ever actually requested or terminated. Fixed via a
+      `NodeProvider` trait (the cluster-provisioning callback this workspace has no real substrate for,
+      same pattern as `elastic_training::WorkerProvisioner` in `trustformers-training`): without one
+      attached via `AutoScaler::with_node_provider`, `update_and_scale` now returns
+      `TrustformersError::invalid_state` whenever it decides to scale up/down, instead of fabricating
+      success; `current_nodes`/`get_scaling_history` are updated with exactly the count the provider
+      reports actually provisioning/terminating (even under partial provisioning, which is still reported
+      as an error). A `SimulatedNodeProvider` is provided for callers that explicitly want a labelled
+      dry run (benchmarks/demos/tests) instead of a real substrate. Separately (found on a second honesty
+      pass over this same fix): the recorded `ScalingEvent::reason` was ALSO fabricated -- hardcoded to
+      `"Performance threshold exceeded"`/`"Low utilization detected"` regardless of which of the four
+      `ScalingStrategy` variants actually produced the decision, so `get_scaling_history()` reported a
+      false trigger for `QueueBased`/`Predictive`/`CostOptimized` scaling (only `Performance` was ever
+      accidentally correct). Fixed: `performance_based_scaling`/`queue_based_scaling`/
+      `predictive_scaling`/`cost_optimized_scaling` now each return `(ScalingDecision, String)`, building
+      the reason from the actual values that drove the decision (mirroring
+      `elastic_training::ScalingDecision::reason`'s `format!("High utilization: {:.2}", ...)` pattern);
+      `execute_scale_up`/`execute_scale_down` record whatever reason the firing strategy actually
+      computed. 8 new tests cover the honest contract: 6 for the `NodeProvider` fix, 2 proving the
+      recorded reason names the strategy that actually fired (`QueueBased`/`CostOptimized`) rather than
+      the old hardcoded strings.
+      **Known follow-up (deferred, out of ownership):** `examples/comprehensive_distributed_training_benchmarks.rs`
+      constructs `AutoScaler` with no provider and calls `update_and_scale` in a loop expecting `Ok` on
+      every step; it still compiles, but now returns `Err` the first time a scale-up/down decision fires.
+      Needs `.with_node_provider(Arc::new(advanced_distributed_features::SimulatedNodeProvider::new()))`
+      added where the `AutoScaler` is constructed (~L796) to keep it a running simulation instead of
+      erroring out.
 
 ### Asynchronous / staleness-tolerant training
 - [x] `Hogwild`, `ElasticAveraging`, `ParameterServer`, `AsyncSGD`, `DelayedGradient` (with configurable
@@ -407,7 +436,21 @@ optimizer.register_parameters(parameters)?;
 
 - [x] **FedAvg**, **FedProx** — federated averaging / proximal-term federated optimization
 - [x] **Differential privacy** (`DifferentialPrivacy`, configurable `NoiseMechanism`) and
-      **secure aggregation** (`SecureAggregation`)
+      **secure aggregation** (`SecureAggregation`) — **honesty-audited 2026-08-25.**
+      `SecureAggregation::generate_masks` previously built masks for hardcoded shapes
+      (`[100,50]`/`[50]`/`[50,20]`/`[20]`) unrelated to any caller's model, and its per-client
+      independently-seeded masks did not actually cancel on summation despite `secure_aggregate`'s
+      comment claiming they did (the sum carried the masks' own mean as bias). Fixed: `generate_masks` now
+      takes the caller's real `parameter_shapes` plus the round's `all_client_ids`, and implements the
+      standard pairwise-masking construction (Bonawitz et al.) — for every other participating client, both
+      sides derive the same PRG seed and add/subtract the same values by a deterministic sign rule, so
+      summing every participant's mask cancels exactly (to floating-point rounding). `secure_aggregate`'s
+      doc comment now states precisely what this protects (server never sees an individual update) and
+      what it does not (no secret-sharing-based dropout recovery — a missing participant's masks are not
+      cancelled and bias the result; `threshold` only checks a client count, not that the update set
+      matches a `generate_masks` call). Both functions still have zero in-tree callers. 5 new tests,
+      including one proving two clients' masks are exact (bit-for-bit) negatives of each other and one
+      proving `secure_aggregate` recovers the true average of real per-client updates through the masks.
 - [x] **EWC**, **PackNet**, **memory replay** (`MemoryReplay`) — catastrophic-forgetting mitigation
 
 ## Hardware-Aware & Performance
@@ -436,7 +479,26 @@ optimizer.register_parameters(parameters)?;
       integration)
 - [x] **Monitoring & recommendation** — `OptimizerMonitor`, `OptimizerSelector`, `ConvergenceIndicators`
 - [x] **Performance validation harness** — `PerformanceValidator` (correctness, convergence, memory,
-      regression, and distributed-training validation)
+      regression, and distributed-training validation) — **honesty-audited 2026-08-25.**
+      `StatisticalAnalyzer::analyze` previously returned `p_value: 0.05` as a hardcoded constant for
+      every input; separately, `MathematicalProperty::SparsityHandling` was an undisclosed alias for
+      `Convergence` ("assume true if convergence is achieved"). Fixed: `analyze` now takes an optional
+      `target_step_time` and, when given one, computes a real two-sided one-sample Student-t p-value
+      (via `trustformers_core::statistics`, the exact-Student-t primitives already used elsewhere in this
+      workspace, not a normal approximation) against it; `StatisticalMetrics::p_value` is `Option<f64>`,
+      `None` when there is no target. `benchmark_optimizer` (the only caller) threads its optimizer's
+      matching entry from `PerformanceValidator::baseline_results` (set via `set_baseline`) through as
+      that target — a real, already-existing signal, keyed by optimizer name so a baseline for one
+      optimizer cannot leak into another's test. `SparsityHandling` now checks something real: that the
+      parameter update produced by an exactly-zero gradient (decaying momentum / decoupled weight decay
+      only, since there is no new signal) stays finite and does not grow step over step, independent of
+      whether the run converged. 7 new tests across both fixes: 5 for the p-value fix, including two
+      proving the p-value actually responds to the data (a target matching the sample is not significant;
+      a target 100x the sample mean is) and an integration test proving `benchmark_optimizer` only uses a
+      baseline keyed to the matching optimizer name; 2 for `SparsityHandling`, proving it is no longer an
+      alias for `Convergence` (a scenario that genuinely converges but never exercises a zero-gradient
+      step must now fail `SparsityHandling` while still passing `Convergence`) and that the built-in
+      "Sparse Gradient Handling" test case's real zero-gradient steps genuinely satisfy the new check.
 - [x] **ONNX export** — `ONNXOptimizerExporter`
 - [x] **Optimizer surgery** — `optimizer_surgery` module (875 lines): migrates momentum/variance/EMA
       state between Adam, AdamW, SGD, and Lion mid-training (re-exported at crate root)
@@ -607,3 +669,42 @@ Schedule-Free Adam/SGD, Sophia, L-BFGS, Newton-CG, SSBFGS, SSBroyden, and more (
 simplified reference implementations)
 **Quantized:** 8-bit Adam/AdamW, 4-bit Adam, per-layer bit-width selection
 **Distributed:** ZeRO stages 1/2/3 (incl. async-overlap stage 3), FSDP-style sharding, multi-node training
+
+---
+
+**2026-08-25 addendum (production-hardening honesty pass, `performance_validation.rs` +
+`federated.rs` + `advanced_distributed_features.rs` only):** see the updated bullets above (Tooling ->
+Performance validation harness; Federated & Continual Learning -> secure aggregation; Distributed &
+Scaled Training -> Enhanced distributed trainer) for the fixes: `StatisticalAnalyzer::analyze`'s
+`p_value` and `MathematicalProperty::SparsityHandling` (both no longer fabricated/aliased);
+`SecureAggregation::generate_masks` (caller-supplied shapes, real pairwise-cancelling masks); `AutoScaler`
+(a `NodeProvider` trait replaces silent fleet fabrication, mirroring
+`elastic_training::WorkerProvisioner` in `trustformers-training`, AND the `ScalingEvent::reason` recorded
+for a firing decision is now the real per-strategy trigger instead of a constant that was only ever
+accurate for the `Performance` strategy -- found on a second pass over the same file after the first
+fabrication was fixed but this second one was missed). Gates throughout this pass (re-run by the instance
+that closed it out, after every edit including the `reason` fix): `cargo check -p trustformers-optim
+--all-targets` and `cargo clippy -p trustformers-optim --all-targets -- -D warnings` both `EXIT=0`;
+`cargo nextest run -p trustformers-optim --no-fail-fast` currently reports 1197 passed / 1 skipped / 0
+failed. This pass added 20 new tests across the three files (verified via `git diff` against the commit
+this branch started from): 5 in `federated.rs` for `SecureAggregation`; 8 in
+`advanced_distributed_features/tests.rs` for `AutoScaler`/`NodeProvider` (6 for the fleet-fabrication fix,
+2 proving the recorded `reason` names the strategy that actually fired -- `QueueBased`/`CostOptimized` --
+rather than the old hardcoded `Performance`-strategy strings); and 7 in `performance_validation_tests.rs`
+for `StatisticalAnalyzer::analyze`'s p-value fix (5, covering both the statistical behavior and the
+`benchmark_optimizer`/`baseline_results` wiring) and `SparsityHandling` (2, added by the instance that
+closed out this pass after confirming the real check landed with genuine logic but no dedicated
+regression test of its own -- one proving it independently fails when convergence is real but no
+zero-gradient step ever occurred, one proving it passes on the built-in "Sparse Gradient Handling" case's
+real zero-gradient steps). Nothing else in either crate's `src/` was in scope for this pass and nothing
+else was touched; `examples/comprehensive_distributed_training_benchmarks.rs` constructs `AutoScaler`
+with no `NodeProvider` and is a known, deliberately-deferred follow-up (outside this package's ownership)
+-- see the `AutoScaler` bullet above for the one-line fix it needs. Swept (this pass, both crates'
+`examples/`/`benches/` dirs) for other callers of every changed signature
+(`AutoScaler`/`update_and_scale`/`generate_masks`/`secure_aggregate`/`StatisticalAnalyzer::analyze`,
+`create_checkpoint`/`execute_scaling`/`idle_cost_percentage`/`efficiency_score`) and for any workspace
+crate depending on `trustformers-optim`/`trustformers-training` that references the touched public types
+(`trustformers`, `trustformers-py`, `trustformers-c` all depend on both crates but none reference
+`EfficiencyMetrics`/`CostTracker`/`ElasticTrainingCoordinator`/`SecureAggregation`/`AutoScaler`/
+`StatisticalMetrics` anywhere in their own `src/`/`examples/`) -- the one example above is the only
+runtime-behavior consequence found.

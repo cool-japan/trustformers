@@ -56,6 +56,9 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
             batched_scaled_matmul_softmax_gen_pipeline: Arc::clone(
                 &backend.batched_scaled_matmul_softmax_gen_pipeline,
             ),
+            batched_scaled_matmul_softmax_gen_causal_pipeline: Arc::clone(
+                &backend.batched_scaled_matmul_softmax_gen_causal_pipeline,
+            ),
             concat_seq_dim_pipeline: Arc::clone(&backend.concat_seq_dim_pipeline),
             flash_attention_pipeline: Arc::clone(&backend.flash_attention_pipeline),
             mps_ops: Arc::clone(&backend.mps_ops),

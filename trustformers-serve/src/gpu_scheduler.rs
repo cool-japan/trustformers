@@ -1058,11 +1058,31 @@ impl GpuScheduler {
 
             match sample {
                 Ok(Some(sample)) => {
+                    // Each reading is written only when the driver actually
+                    // reported it. 0.2.1: the telemetry sample used to fall
+                    // back to `0` for an unreadable sensor, so this wrote
+                    // "0 MB used, 0% utilized" -- a perfectly idle GPU -- into
+                    // the status table whenever a sensor was unavailable.
                     let mut gpu_status = self.gpu_status.write().await;
                     if let Some(status) = gpu_status.get_mut(&gpu_id) {
-                        status.used_memory_mb = sample.memory_used_mb as usize;
-                        status.utilization_percent = sample.utilization_percent;
-                        status.last_updated = chrono::Utc::now();
+                        let mut updated = false;
+                        if let Some(memory_used_mb) = sample.memory_used_mb {
+                            status.used_memory_mb = memory_used_mb as usize;
+                            updated = true;
+                        }
+                        if let Some(utilization_percent) = sample.utilization_percent {
+                            status.utilization_percent = utilization_percent;
+                            updated = true;
+                        }
+                        if updated {
+                            status.last_updated = chrono::Utc::now();
+                        } else {
+                            tracing::debug!(
+                                "GPU {} telemetry carried no memory or utilization reading; \
+                                 leaving its status unchanged",
+                                gpu_id
+                            );
+                        }
                     }
                 },
                 Ok(None) => {

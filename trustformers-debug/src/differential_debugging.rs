@@ -503,7 +503,7 @@ pub struct RegressionAssessment {
 /// freedom or `StudentsT` distribution parameters are not finite/positive
 /// (all statrs invariants) -- callers get an honest absence rather than a
 /// nonsensical or NaN test result.
-fn welch_t_test(
+pub(crate) fn welch_t_test(
     a: &[f64],
     b: &[f64],
     significance_threshold: f64,

@@ -139,7 +139,20 @@ impl ProfilerConfig {
     }
 }
 
-/// Detailed operation profile
+/// Detailed operation profile.
+///
+/// Only carries what this profiler can genuinely measure from
+/// `start_operation`/`end_operation`'s inputs: wall-clock timing (real)
+/// and WASM linear-memory growth (real, via
+/// [`crate::get_wasm_memory_usage`]). A previous version also reported
+/// `cpu_time_ms`/`gpu_time_ms` (an invented fixed 80/20 split of
+/// `duration_ms`), `gpu_memory_used`/`flops`/`memory_bandwidth_gb_s`/
+/// `cache_hits`/`cache_misses`/`input_shape`/`output_shape` (constant
+/// lookup tables keyed only by `operation_type`, unrelated to what the
+/// operation actually did) — none of that is derivable from what
+/// `start_operation`/`end_operation` receive today (no per-op byte
+/// counts, cache instrumentation, or GPU timer), so those fields have
+/// been removed rather than kept as permanently-`None` placeholders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationProfile {
     pub operation_type: OperationType,
@@ -147,36 +160,54 @@ pub struct OperationProfile {
     pub start_time: f64,
     pub end_time: f64,
     pub duration_ms: f64,
-    pub cpu_time_ms: f64,
-    pub gpu_time_ms: f64,
-    pub memory_allocated: usize,
     pub memory_peak: usize,
-    pub gpu_memory_used: usize,
-    pub flops: u64,
-    pub memory_bandwidth_gb_s: f32,
-    pub cache_hits: u32,
-    pub cache_misses: u32,
-    pub input_shape: Vec<usize>,
-    pub output_shape: Vec<usize>,
+    /// WASM linear-memory growth (bytes) observed between
+    /// `start_operation` and `end_operation`, via
+    /// [`crate::get_wasm_memory_usage`]. Real, but a narrower quantity
+    /// than "bytes this operation allocated": the allocator only grows
+    /// the linear memory in whole pages and never shrinks it, so this is
+    /// `0` for any operation served entirely from already-grown heap, and
+    /// counts a page grown for unrelated concurrent allocation the same
+    /// as one caused by this operation.
+    pub wasm_memory_growth_bytes: usize,
 }
 
-/// Resource usage sample
+/// Resource usage sample.
+///
+/// Only carries what this profiler can genuinely measure: WASM linear
+/// memory (real) and, when the browser's Battery Status API is present,
+/// the real battery level (see
+/// [`crate::performance_profiler::PerformanceProfiler::refresh_battery_status`]).
+/// A previous version also reported `cpu_usage`/`gpu_usage`/
+/// `cache_hit_rate`/`gpu_memory`/`power_consumption`/`thermal_state`/
+/// `cpu_temperature`/`gpu_temperature`/`network_bytes` — no standard
+/// browser API exposes process/system CPU or GPU utilization, GPU memory
+/// usage, device temperature, or power draw to a web page (WebGPU
+/// deliberately omits memory/utilization queries to resist
+/// fingerprinting), and this profiler tracks no real cache or network
+/// byte counters — so those were either a literal formula over
+/// `Date::now()`, a hardcoded constant, or built from other fields in
+/// this same list. Removed rather than kept as permanently-`None`
+/// placeholders, since none of them is ever measurable under this
+/// profiler's current inputs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceSample {
     pub timestamp: f64,
     pub resource_type: ResourceType,
+    /// Headline reading for `resource_type`: memory in MB (not raw
+    /// bytes - `f32` only holds integers exactly up to ~16.7 million, so
+    /// a byte count would silently round for any heap above ~16MB) for
+    /// `WAMSMemory` samples, battery level (0.0-1.0) for `Battery`
+    /// samples. See `wasm_memory` for the exact byte count.
     pub value: f32,
-    pub cpu_usage: f32,
-    pub gpu_usage: f32,
     pub wasm_memory: usize,
-    pub gpu_memory: usize,
-    pub network_bytes: usize,
-    pub cache_hit_rate: f32,
-    pub battery_level: f32,
-    pub power_consumption: f32,
-    pub thermal_state: f32, // 0.0 = cool, 1.0 = hot
-    pub cpu_temperature: f32,
-    pub gpu_temperature: f32,
+    /// Real battery level (0.0-1.0) from the browser's Battery Status
+    /// API, cached by the most recent
+    /// `PerformanceProfiler::refresh_battery_status()` call. `None` when
+    /// that has never been called, is still pending, or the API is
+    /// unavailable (most browsers besides Firefox for Android have
+    /// removed it) - never a fabricated reading.
+    pub battery_level: Option<f32>,
 }
 
 /// Performance bottleneck
@@ -190,7 +221,12 @@ pub struct Bottleneck {
     pub recommendation: String,
 }
 
-/// Performance summary
+/// Performance summary.
+///
+/// `resource_efficiency` (0.0-1.0, "how well CPU/GPU are utilized") has
+/// been removed: it was computed purely from `ResourceSample`'s
+/// (fabricated, now-deleted) `cpu_usage`/`gpu_usage` fields, so there was
+/// no real quantity left to compute it from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceSummary {
     pub total_time_ms: f64,
@@ -198,7 +234,6 @@ pub struct PerformanceSummary {
     pub average_fps: f32,
     pub bottlenecks: Vec<Bottleneck>,
     pub top_operations: Vec<(String, f64)>, // (operation, time_ms)
-    pub resource_efficiency: f32,           // 0.0 to 1.0
     pub recommendations: Vec<String>,
 }
 
@@ -225,18 +260,34 @@ pub struct AdaptiveOptimizer {
     pub performance_baselines: Vec<PerformanceBaseline>,
 }
 
-/// Record of optimization adaptations
+/// Record of optimization adaptations.
+///
+/// `improvement_ratio`/`confidence_score` are always `None`: this
+/// profiler switches strategy based on a real trigger metric crossing a
+/// real threshold (see `check_and_trigger_adaptation`), but never runs
+/// the same workload under two strategies to compare, and has no trained
+/// model — so there is no measurement to report for "how much better is
+/// the new strategy". A previous version multiplied a hardcoded
+/// per-transition-pair table (e.g. 2.5x for CPU-preferred to
+/// GPU-preferred) by factors derived from fabricated CPU/GPU usage
+/// telemetry and reported the result as "ML-powered estimation" with a
+/// flat 0.8 "confidence".
 #[derive(Debug, Clone)]
 pub struct AdaptationRecord {
     pub timestamp: f64,
     pub old_strategy: OptimizationStrategy,
     pub new_strategy: OptimizationStrategy,
     pub trigger_metric: String,
-    pub improvement_ratio: f32,
-    pub confidence_score: f32,
+    pub improvement_ratio: Option<f32>,
+    pub confidence_score: Option<f32>,
 }
 
-/// Performance baseline for comparison
+/// Performance baseline for comparison.
+///
+/// `avg_accuracy` is always `None`: this profiler only ever observes
+/// timing and memory, never a model's actual output vs. ground truth, so
+/// it has no accuracy signal to average - a previous version wrote a
+/// flat `0.95` regardless of the operations backing the baseline.
 #[derive(Debug, Clone)]
 pub struct PerformanceBaseline {
     pub name: String,
@@ -244,7 +295,7 @@ pub struct PerformanceBaseline {
     pub avg_latency_ms: f64,
     pub avg_throughput: f32,
     pub avg_memory_mb: f32,
-    pub avg_accuracy: f32,
+    pub avg_accuracy: Option<f32>,
 }
 
 /// Real-time performance trend

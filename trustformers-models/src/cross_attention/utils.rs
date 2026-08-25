@@ -1,4 +1,7 @@
-use trustformers_core::{errors::Result, tensor::Tensor};
+use trustformers_core::{
+    errors::{invalid_input, unsupported_operation, Result},
+    tensor::Tensor,
+};
 
 /// Output structure for cross-attention operations
 #[derive(Debug, Clone)]
@@ -215,14 +218,29 @@ pub fn create_hierarchical_mask(
     Ok(masks)
 }
 
-/// Compute attention statistics
+/// Compute attention statistics.
+///
+/// `attention_weights` is expected to be `[batch_size, num_heads, seq_len, seq_len]` when
+/// `num_heads > 0` (per-head stats select along dimension 1); the overall statistics only
+/// require at least one dimension. Returns a structured error, rather than panicking, when
+/// the tensor's rank doesn't support the requested `num_heads`.
 pub fn compute_attention_stats(
     attention_weights: &Tensor,
     num_heads: usize,
 ) -> Result<AttentionStats> {
     let shape = attention_weights.shape();
-    let _batch_size = shape[0];
-    let _seq_len = shape[2];
+    if shape.is_empty() {
+        return Err(invalid_input(
+            "compute_attention_stats: attention_weights tensor has no dimensions",
+        ));
+    }
+    if num_heads > 0 && shape.len() < 2 {
+        return Err(invalid_input(format!(
+            "compute_attention_stats: num_heads={num_heads} > 0 requires attention_weights to \
+             have at least 2 dimensions (expected [batch_size, num_heads, seq_len, seq_len]), \
+             got shape {shape:?}"
+        )));
+    }
 
     // Compute overall statistics
     let entropy = compute_entropy(attention_weights)?;
@@ -256,25 +274,107 @@ pub fn compute_attention_stats(
     })
 }
 
-fn compute_entropy(_tensor: &Tensor) -> Result<f32> {
-    // Simplified entropy computation
-    // In practice, this would use proper entropy calculation
-    Ok(0.5) // Placeholder
+/// Shannon entropy of the attention distribution, in nats, averaged across every attended-from
+/// position in `tensor`.
+///
+/// `tensor` holds one or more attention-weight rows along its last dimension (the softmax
+/// axis: for each query position, the weights over key positions sum to ~1). Entropy is
+/// computed per row as `-sum(p * ln(p))` over that last dimension (zero-weight entries
+/// contribute 0, matching the standard `0 * ln(0) = 0` convention), then averaged over all
+/// rows so the result is a single scalar summarizing the whole tensor. A uniform distribution
+/// over `n` positions has entropy `ln(n)` (maximum); a one-hot distribution has entropy `0`
+/// (minimum).
+fn compute_entropy(tensor: &Tensor) -> Result<f32> {
+    let shape = tensor.shape();
+    let last_dim = *shape
+        .last()
+        .ok_or_else(|| invalid_input("attention tensor has no dimensions"))?;
+    if last_dim == 0 {
+        return Err(invalid_input("attention tensor's last dimension is empty"));
+    }
+
+    let data = tensor.data()?;
+    if data.is_empty() {
+        return Err(invalid_input("attention tensor has no elements"));
+    }
+
+    let mut total_entropy = 0.0f64;
+    let mut num_rows = 0usize;
+    for row in data.chunks(last_dim) {
+        let mut row_entropy = 0.0f64;
+        for &p in row {
+            let p = p as f64;
+            if p > 0.0 {
+                row_entropy -= p * p.ln();
+            }
+        }
+        total_entropy += row_entropy;
+        num_rows += 1;
+    }
+
+    Ok((total_entropy / num_rows as f64) as f32)
 }
 
-fn compute_min_max(_tensor: &Tensor) -> Result<(f32, f32)> {
-    // Simplified min/max computation
-    Ok((0.0, 1.0)) // Placeholder
+/// Minimum and maximum attention weight anywhere in `tensor`.
+fn compute_min_max(tensor: &Tensor) -> Result<(f32, f32)> {
+    let data = tensor.data()?;
+    let mut iter = data.iter().copied();
+    let first = iter.next().ok_or_else(|| invalid_input("attention tensor has no elements"))?;
+
+    let (min, max) = iter.fold((first, first), |(min, max), v| (min.min(v), max.max(v)));
+    Ok((min, max))
 }
 
-fn compute_sparsity(_tensor: &Tensor, _threshold: f32) -> Result<f32> {
-    // Simplified sparsity computation
-    Ok(0.1) // Placeholder
+/// Fraction of attention weights at or below `threshold`, i.e. the fraction of (query, key)
+/// pairs the model effectively ignores.
+fn compute_sparsity(tensor: &Tensor, threshold: f32) -> Result<f32> {
+    let data = tensor.data()?;
+    if data.is_empty() {
+        return Err(invalid_input("attention tensor has no elements"));
+    }
+
+    let below = data.iter().filter(|&&v| v <= threshold).count();
+    Ok(below as f32 / data.len() as f32)
 }
 
-fn compute_top_positions(_tensor: &Tensor, _k: usize) -> Result<Vec<usize>> {
-    // Simplified top-k computation
-    Ok(vec![0, 1, 2, 3, 4]) // Placeholder
+/// Indices of the `k` most-attended positions along `tensor`'s last dimension, averaged over
+/// every attended-from row and ranked by that average weight (descending; ties broken by
+/// ascending index). When multiple query positions are present, this reports which key
+/// positions receive the most attention on average across them, not per-query top-k.
+fn compute_top_positions(tensor: &Tensor, k: usize) -> Result<Vec<usize>> {
+    let shape = tensor.shape();
+    let last_dim = *shape
+        .last()
+        .ok_or_else(|| invalid_input("attention tensor has no dimensions"))?;
+    if last_dim == 0 {
+        return Err(invalid_input("attention tensor's last dimension is empty"));
+    }
+
+    let data = tensor.data()?;
+    if data.is_empty() {
+        return Err(invalid_input("attention tensor has no elements"));
+    }
+
+    let mut sums = vec![0.0f64; last_dim];
+    let mut num_rows = 0usize;
+    for row in data.chunks(last_dim) {
+        for (pos, &v) in row.iter().enumerate() {
+            sums[pos] += v as f64;
+        }
+        num_rows += 1;
+    }
+
+    let mut averaged: Vec<(usize, f64)> =
+        sums.into_iter().map(|s| s / num_rows as f64).enumerate().collect();
+    // Descending by average weight; ascending index breaks ties so the result is deterministic.
+    averaged.sort_by(|(idx_a, val_a), (idx_b, val_b)| {
+        val_b
+            .partial_cmp(val_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(idx_a.cmp(idx_b))
+    });
+
+    Ok(averaged.into_iter().take(k.min(last_dim)).map(|(idx, _)| idx).collect())
 }
 
 /// Apply attention dropout
@@ -344,42 +444,122 @@ pub fn reshape_from_multihead(tensor: Tensor, hidden_size: usize) -> Result<Tens
     tensor.transpose(1, 2)?.reshape(&[batch_size, seq_len, hidden_size])
 }
 
-/// Pool tensor for hierarchical attention
+/// Pool tensor for hierarchical attention.
 pub fn pool_tensor(tensor: Tensor, pooling_factor: usize, method: PoolingMethod) -> Result<Tensor> {
     match method {
         PoolingMethod::Average => average_pool_1d(tensor, pooling_factor),
         PoolingMethod::Max => max_pool_1d(tensor, pooling_factor),
-        PoolingMethod::Learnable => {
-            // Placeholder for learnable pooling
-            average_pool_1d(tensor, pooling_factor)
-        },
+        PoolingMethod::Learnable => Err(unsupported_operation(
+            "pool_tensor(PoolingMethod::Learnable)",
+            "this free function carries no learned-weight parameter to pool with -- real \
+             learnable pooling in this crate is HierarchicalCrossAttention's per-level \
+             `pooling_layers` (a Linear applied after PoolingMethod::Average pooling; see \
+             HierarchicalAttentionConfig::learnable_pooling). Use PoolingMethod::Average or \
+             PoolingMethod::Max with this function instead of silently substituting one of them.",
+        )),
     }
 }
 
-/// Pooling methods for hierarchical attention
+/// Pooling methods for hierarchical attention.
 #[derive(Debug, Clone)]
 pub enum PoolingMethod {
-    /// Average pooling
+    /// Average pooling (implemented; see [`average_pool_1d`]).
     Average,
-    /// Max pooling
+    /// Max pooling (implemented; see [`max_pool_1d`]).
     Max,
-    /// Learnable pooling
+    /// Learned pooling weights. **Not implemented by [`pool_tensor`]**: this free function has
+    /// no parameter through which to supply learned weights, so selecting this variant returns
+    /// a structured error rather than silently behaving like [`PoolingMethod::Average`]. Real
+    /// learnable pooling in this crate is `HierarchicalCrossAttention`'s `pooling_layers` (see
+    /// `HierarchicalAttentionConfig::learnable_pooling`).
     Learnable,
 }
 
-fn average_pool_1d(tensor: Tensor, _pooling_factor: usize) -> Result<Tensor> {
-    // Simplified average pooling
-    // In practice, this would use proper pooling operations
-    Ok(tensor)
+/// Validates that `tensor` is rank-3 `[batch, seq_len, hidden]` -- the shape convention every
+/// pooling/interpolation helper below assumes, matching [`reshape_for_multihead`]'s convention
+/// for the same tensors -- and returns its three dimensions.
+fn expect_batch_seq_hidden(tensor: &Tensor, op: &str) -> Result<(usize, usize, usize)> {
+    let shape = tensor.shape();
+    if shape.len() != 3 {
+        return Err(invalid_input(format!(
+            "{op} expects a [batch, seq_len, hidden] (rank-3) tensor, got shape {shape:?}"
+        )));
+    }
+    let (batch, seq_len, hidden) = (shape[0], shape[1], shape[2]);
+    if seq_len == 0 {
+        return Err(invalid_input(format!(
+            "{op}: seq_len must be greater than 0, got shape {shape:?}"
+        )));
+    }
+    Ok((batch, seq_len, hidden))
 }
 
-fn max_pool_1d(tensor: Tensor, _pooling_factor: usize) -> Result<Tensor> {
-    // Simplified max pooling
-    // In practice, this would use proper pooling operations
-    Ok(tensor)
+/// Real 1-D average pooling over the sequence axis (dim 1) of a `[batch, seq_len, hidden]`
+/// tensor.
+///
+/// Uses **fixed, non-overlapping windows** of `pooling_factor` sequence positions (stride equal
+/// to the window size) rather than resampling to a fixed target length -- [`interpolate_tensor`]
+/// is the fixed-target-length operation. The output sequence length is
+/// `seq_len.div_ceil(pooling_factor)`, matching [`create_hierarchical_mask`]'s per-level length
+/// formula (`pooling_factor.pow(level)` combined with `div_ceil`), so a mask built for hierarchy
+/// level `L+1` lines up with a tensor pooled one step from level `L` -- this is the contract
+/// `HierarchicalCrossAttention::forward`'s per-level pooling actually needs. A trailing partial
+/// window (when `seq_len` doesn't evenly divide by `pooling_factor`) is averaged over only its
+/// actual members; it is never zero-padded.
+fn average_pool_1d(tensor: Tensor, pooling_factor: usize) -> Result<Tensor> {
+    pool_1d_windows(tensor, pooling_factor, "average_pool_1d", |window| {
+        window.iter().sum::<f32>() / window.len() as f32
+    })
 }
 
-/// Interpolate tensor for hierarchical attention
+/// Real 1-D max pooling over the sequence axis. See [`average_pool_1d`] for the window-size /
+/// output-length contract (identical here; each window is reduced with `max` instead of
+/// `average`).
+fn max_pool_1d(tensor: Tensor, pooling_factor: usize) -> Result<Tensor> {
+    pool_1d_windows(tensor, pooling_factor, "max_pool_1d", |window| {
+        window.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+    })
+}
+
+/// Shared windowed-pooling implementation for [`average_pool_1d`] and [`max_pool_1d`]: splits
+/// the sequence axis into fixed, non-overlapping windows of `pooling_factor` positions each
+/// (the last window truncated, not padded, when `seq_len` doesn't divide evenly) and reduces
+/// every window -- independently per batch element and per hidden channel -- with
+/// `reduce_window`.
+fn pool_1d_windows(
+    tensor: Tensor,
+    pooling_factor: usize,
+    op: &str,
+    reduce_window: impl Fn(&[f32]) -> f32,
+) -> Result<Tensor> {
+    if pooling_factor == 0 {
+        return Err(invalid_input(format!(
+            "{op}: pooling_factor must be greater than 0"
+        )));
+    }
+    let (batch, seq_len, hidden) = expect_batch_seq_hidden(&tensor, op)?;
+    let data = tensor.data()?;
+
+    let out_seq_len = seq_len.div_ceil(pooling_factor);
+    let mut out = vec![0.0f32; batch * out_seq_len * hidden];
+    let mut window = Vec::with_capacity(pooling_factor);
+
+    for b in 0..batch {
+        for os in 0..out_seq_len {
+            let start = os * pooling_factor;
+            let end = (start + pooling_factor).min(seq_len);
+            for h in 0..hidden {
+                window.clear();
+                window.extend((start..end).map(|s| data[(b * seq_len + s) * hidden + h]));
+                out[(b * out_seq_len + os) * hidden + h] = reduce_window(&window);
+            }
+        }
+    }
+
+    Tensor::from_vec(out, &[batch, out_seq_len, hidden])
+}
+
+/// Interpolate tensor for hierarchical attention.
 pub fn interpolate_tensor(
     tensor: Tensor,
     target_length: usize,
@@ -391,21 +571,516 @@ pub fn interpolate_tensor(
     }
 }
 
-/// Interpolation methods
+/// Interpolation methods.
 #[derive(Debug, Clone)]
 pub enum InterpolationMethod {
-    /// Linear interpolation
+    /// Linear interpolation (implemented; see [`linear_interpolate`]).
     Linear,
-    /// Nearest neighbor interpolation
+    /// Nearest neighbor interpolation (implemented; see [`nearest_interpolate`]).
     Nearest,
 }
 
-fn linear_interpolate(tensor: Tensor, _target_length: usize) -> Result<Tensor> {
-    // Simplified linear interpolation
-    Ok(tensor)
+/// Continuous source-axis positions for resampling a length-`src_len` sequence to `target_len`
+/// positions, "align corners" style: when `target_len > 1` and `src_len > 1`, the first and last
+/// output positions map exactly to the first and last source positions
+/// (`src_pos(i) = i * (src_len - 1) / (target_len - 1)`); a single output position, or any
+/// resampling of a single-element source, maps to the source's midpoint. Shared by
+/// [`linear_interpolate`] and [`nearest_interpolate`] so both agree on "where in the source
+/// sequence output position `i` comes from" -- they differ only in how they turn that continuous
+/// position into a value.
+fn resample_positions_align_corners(src_len: usize, target_len: usize) -> Vec<f32> {
+    if target_len == 0 {
+        return Vec::new();
+    }
+    if target_len == 1 || src_len <= 1 {
+        let mid = src_len.saturating_sub(1) as f32 / 2.0;
+        return vec![mid; target_len];
+    }
+    let scale = (src_len - 1) as f32 / (target_len - 1) as f32;
+    (0..target_len).map(|i| i as f32 * scale).collect()
 }
 
-fn nearest_interpolate(tensor: Tensor, _target_length: usize) -> Result<Tensor> {
-    // Simplified nearest neighbor interpolation
-    Ok(tensor)
+/// Real linear interpolation resampling the sequence axis (dim 1) of a `[batch, seq_len,
+/// hidden]` tensor to exactly `target_length` positions -- a **fixed target length**, unlike
+/// [`average_pool_1d`]/[`max_pool_1d`]'s fixed-window contract (their `pooling_factor` sets a
+/// window size, not a target length). Each output position linearly blends its two nearest
+/// source positions (see [`resample_positions_align_corners`]); output positions that land
+/// exactly on a source position -- including both sequence endpoints when `target_length > 1` --
+/// reproduce that source value exactly.
+fn linear_interpolate(tensor: Tensor, target_length: usize) -> Result<Tensor> {
+    if target_length == 0 {
+        return Err(invalid_input(
+            "linear_interpolate: target_length must be greater than 0",
+        ));
+    }
+    let (batch, seq_len, hidden) = expect_batch_seq_hidden(&tensor, "linear_interpolate")?;
+    let data = tensor.data()?;
+    let positions = resample_positions_align_corners(seq_len, target_length);
+
+    let mut out = vec![0.0f32; batch * target_length * hidden];
+    for b in 0..batch {
+        for (ti, &pos) in positions.iter().enumerate() {
+            let pos = pos.max(0.0);
+            let s0 = (pos.floor() as usize).min(seq_len - 1);
+            let s1 = (s0 + 1).min(seq_len - 1);
+            let frac = (pos - s0 as f32).clamp(0.0, 1.0);
+            for h in 0..hidden {
+                let v0 = data[(b * seq_len + s0) * hidden + h];
+                let v1 = data[(b * seq_len + s1) * hidden + h];
+                out[(b * target_length + ti) * hidden + h] = v0 * (1.0 - frac) + v1 * frac;
+            }
+        }
+    }
+
+    Tensor::from_vec(out, &[batch, target_length, hidden])
+}
+
+/// Real nearest-neighbor interpolation resampling the sequence axis to exactly `target_length`
+/// positions (fixed target length; see [`linear_interpolate`]'s doc for the pooling-vs-
+/// interpolation contract distinction). Each output position takes the value of the closest
+/// source position from [`resample_positions_align_corners`], rounding **half away from zero**
+/// ([`f32::round`]'s convention) when a position lands exactly between two source indices.
+fn nearest_interpolate(tensor: Tensor, target_length: usize) -> Result<Tensor> {
+    if target_length == 0 {
+        return Err(invalid_input(
+            "nearest_interpolate: target_length must be greater than 0",
+        ));
+    }
+    let (batch, seq_len, hidden) = expect_batch_seq_hidden(&tensor, "nearest_interpolate")?;
+    let data = tensor.data()?;
+    let positions = resample_positions_align_corners(seq_len, target_length);
+
+    let mut out = vec![0.0f32; batch * target_length * hidden];
+    for b in 0..batch {
+        for (ti, &pos) in positions.iter().enumerate() {
+            let s = (pos.round().max(0.0) as usize).min(seq_len - 1);
+            for h in 0..hidden {
+                out[(b * target_length + ti) * hidden + h] = data[(b * seq_len + s) * hidden + h];
+            }
+        }
+    }
+
+    Tensor::from_vec(out, &[batch, target_length, hidden])
+}
+
+#[cfg(test)]
+mod attention_stats_tests {
+    use super::*;
+
+    /// A uniform distribution over `n` positions has closed-form entropy `ln(n)`.
+    #[test]
+    fn test_compute_entropy_uniform_distribution_equals_ln_n() {
+        let n = 4;
+        let uniform = vec![1.0f32 / n as f32; n];
+        let tensor = Tensor::from_vec(uniform, &[1, n]).expect("tensor construction");
+
+        let entropy = compute_entropy(&tensor).expect("compute_entropy");
+        assert!(
+            (entropy - (n as f32).ln()).abs() < 1e-5,
+            "uniform-{n} entropy should be ln({n}) = {}, got {entropy}",
+            (n as f32).ln()
+        );
+    }
+
+    /// A one-hot distribution (all mass on a single position) has entropy exactly 0.
+    #[test]
+    fn test_compute_entropy_one_hot_is_zero() {
+        let one_hot = vec![0.0f32, 0.0, 1.0, 0.0, 0.0];
+        let tensor = Tensor::from_vec(one_hot, &[1, 5]).expect("tensor construction");
+
+        let entropy = compute_entropy(&tensor).expect("compute_entropy");
+        assert!(
+            entropy.abs() < 1e-6,
+            "one-hot entropy should be 0, got {entropy}"
+        );
+    }
+
+    /// Entropy is averaged across every row when more than one attention distribution is
+    /// present: one uniform-2 row (entropy ln(2)) and one one-hot row (entropy 0) average to
+    /// ln(2) / 2.
+    #[test]
+    fn test_compute_entropy_averages_across_rows() {
+        let data = vec![0.5f32, 0.5, 1.0, 0.0];
+        let tensor = Tensor::from_vec(data, &[2, 2]).expect("tensor construction");
+
+        let entropy = compute_entropy(&tensor).expect("compute_entropy");
+        let expected = (2.0f32).ln() / 2.0;
+        assert!(
+            (entropy - expected).abs() < 1e-5,
+            "expected average entropy {expected}, got {entropy}"
+        );
+    }
+
+    #[test]
+    fn test_compute_min_max_known_values() {
+        let data = vec![0.3f32, 0.1, 0.9, 0.4, 0.05, 0.6];
+        let tensor = Tensor::from_vec(data, &[2, 3]).expect("tensor construction");
+
+        let (min, max) = compute_min_max(&tensor).expect("compute_min_max");
+        assert!((min - 0.05).abs() < 1e-6, "expected min 0.05, got {min}");
+        assert!((max - 0.9).abs() < 1e-6, "expected max 0.9, got {max}");
+    }
+
+    #[test]
+    fn test_compute_min_max_constant_tensor() {
+        let data = vec![0.25f32; 6];
+        let tensor = Tensor::from_vec(data, &[2, 3]).expect("tensor construction");
+
+        let (min, max) = compute_min_max(&tensor).expect("compute_min_max");
+        assert!((min - 0.25).abs() < 1e-6);
+        assert!((max - 0.25).abs() < 1e-6);
+    }
+
+    /// Fraction of weights at/below the threshold: 3 of 6 values here are <= 0.1.
+    #[test]
+    fn test_compute_sparsity_known_fraction() {
+        let data = vec![0.05f32, 0.5, 0.1, 0.6, 0.02, 0.9];
+        let tensor = Tensor::from_vec(data, &[2, 3]).expect("tensor construction");
+
+        let sparsity = compute_sparsity(&tensor, 0.1).expect("compute_sparsity");
+        assert!(
+            (sparsity - 0.5).abs() < 1e-6,
+            "expected sparsity 3/6 = 0.5, got {sparsity}"
+        );
+    }
+
+    #[test]
+    fn test_compute_sparsity_all_above_threshold_is_zero() {
+        let data = vec![0.5f32, 0.6, 0.7, 0.8];
+        let tensor = Tensor::from_vec(data, &[1, 4]).expect("tensor construction");
+
+        let sparsity = compute_sparsity(&tensor, 0.1).expect("compute_sparsity");
+        assert!(sparsity.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_sparsity_all_below_threshold_is_one() {
+        let data = vec![0.0f32, 0.01, 0.02, 0.03];
+        let tensor = Tensor::from_vec(data, &[1, 4]).expect("tensor construction");
+
+        let sparsity = compute_sparsity(&tensor, 0.1).expect("compute_sparsity");
+        assert!((sparsity - 1.0).abs() < 1e-6);
+    }
+
+    /// Single-row top-k: the 3 largest weights are at positions 4 (0.9), 1 (0.7), 3 (0.5),
+    /// strictly in that descending order.
+    #[test]
+    fn test_compute_top_positions_known_top_k() {
+        let data = vec![0.1f32, 0.7, 0.05, 0.5, 0.9, 0.2];
+        let tensor = Tensor::from_vec(data, &[1, 6]).expect("tensor construction");
+
+        let top = compute_top_positions(&tensor, 3).expect("compute_top_positions");
+        assert_eq!(top, vec![4, 1, 3]);
+    }
+
+    /// k larger than the available positions is clamped to the dimension size rather than
+    /// erroring or padding.
+    #[test]
+    fn test_compute_top_positions_k_larger_than_dimension_is_clamped() {
+        let data = vec![0.2f32, 0.5, 0.3];
+        let tensor = Tensor::from_vec(data, &[1, 3]).expect("tensor construction");
+
+        let top = compute_top_positions(&tensor, 10).expect("compute_top_positions");
+        assert_eq!(top, vec![1, 2, 0]);
+    }
+
+    /// With two rows, top positions are ranked by the average weight across rows: position 0
+    /// averages (0.9+0.1)/2=0.5, position 1 averages (0.1+0.9)/2=0.5 (tie -> lower index
+    /// first), position 2 averages (0.0+0.0)/2=0.0.
+    #[test]
+    fn test_compute_top_positions_averages_across_rows() {
+        let data = vec![0.9f32, 0.1, 0.0, 0.1, 0.9, 0.0];
+        let tensor = Tensor::from_vec(data, &[2, 3]).expect("tensor construction");
+
+        let top = compute_top_positions(&tensor, 2).expect("compute_top_positions");
+        assert_eq!(top, vec![0, 1]);
+    }
+
+    /// End-to-end: compute_attention_stats on a shape [batch=1, heads=2, seq_q=1, seq_k=4]
+    /// tensor where head 0 is uniform (entropy ln(4)) and head 1 is one-hot (entropy 0)
+    /// produces per-head stats matching the closed-form values, and overall stats computed
+    /// over the whole flattened tensor.
+    #[test]
+    fn test_compute_attention_stats_end_to_end_per_head() {
+        // [batch=1, heads=2, seq_q=1, seq_k=4]
+        let data = vec![
+            0.25f32, 0.25, 0.25, 0.25, // head 0: uniform
+            0.0, 0.0, 1.0, 0.0, // head 1: one-hot at position 2
+        ];
+        let tensor = Tensor::from_vec(data, &[1, 2, 1, 4]).expect("tensor construction");
+
+        let stats = compute_attention_stats(&tensor, 2).expect("compute_attention_stats");
+        assert_eq!(stats.head_stats.len(), 2);
+
+        let head0 = &stats.head_stats[0];
+        assert_eq!(head0.head_idx, 0);
+        assert!(
+            (head0.entropy - (4.0f32).ln()).abs() < 1e-5,
+            "head 0 (uniform-4) entropy should be ln(4), got {}",
+            head0.entropy
+        );
+
+        let head1 = &stats.head_stats[1];
+        assert_eq!(head1.head_idx, 1);
+        assert!(
+            head1.entropy.abs() < 1e-6,
+            "head 1 (one-hot) entropy should be 0, got {}",
+            head1.entropy
+        );
+        assert_eq!(
+            head1.top_positions[0], 2,
+            "head 1's top position should be index 2"
+        );
+
+        // Overall min/max is taken over the whole flattened tensor: min 0.0, max 1.0.
+        assert!((stats.min_weight - 0.0).abs() < 1e-6);
+        assert!((stats.max_weight - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_entropy_rejects_empty_tensor() {
+        let tensor = Tensor::from_vec(Vec::new(), &[0]).expect("tensor construction");
+        assert!(compute_entropy(&tensor).is_err());
+    }
+
+    /// Regression test: `compute_attention_stats` used to index `shape[0]`/`shape[2]`
+    /// unconditionally and would panic on any tensor of rank < 3 (e.g. a caller passing a
+    /// single already-selected 2-D [seq_q, seq_k] slice with num_heads > 0). It must now
+    /// return a structured error instead of panicking.
+    #[test]
+    fn test_compute_attention_stats_rejects_low_rank_tensor_instead_of_panicking() {
+        let data = vec![0.5f32, 0.5];
+        let tensor = Tensor::from_vec(data, &[2]).expect("tensor construction");
+
+        let result = compute_attention_stats(&tensor, 2);
+        assert!(
+            result.is_err(),
+            "rank-1 tensor with num_heads=2 must error, not panic"
+        );
+    }
+
+    /// num_heads=0 does not need to select along a head dimension, so a 1-D tensor is valid
+    /// input for the overall-only statistics path.
+    #[test]
+    fn test_compute_attention_stats_zero_heads_accepts_1d_tensor() {
+        let data = vec![0.25f32, 0.25, 0.25, 0.25];
+        let tensor = Tensor::from_vec(data, &[4]).expect("tensor construction");
+
+        let stats = compute_attention_stats(&tensor, 0).expect("compute_attention_stats");
+        assert!(stats.head_stats.is_empty());
+        assert!((stats.entropy - (4.0f32).ln()).abs() < 1e-5);
+    }
+}
+
+#[cfg(test)]
+mod pooling_and_interpolation_tests {
+    use super::*;
+
+    /// Builds a `[batch=1, seq_len=values.len(), hidden=1]` tensor so `seq_data` below can read
+    /// the pooled/interpolated sequence straight back out in order.
+    fn seq_tensor(values: &[f32]) -> Tensor {
+        Tensor::from_vec(values.to_vec(), &[1, values.len(), 1]).expect("tensor construction")
+    }
+
+    fn seq_data(tensor: &Tensor) -> Vec<f32> {
+        tensor.data().expect("tensor data")
+    }
+
+    fn assert_close(actual: &[f32], expected: &[f32], tol: f32) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "length mismatch: actual {actual:?}, expected {expected:?}"
+        );
+        for (i, (&a, &e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() < tol,
+                "index {i}: expected {e}, got {a} (full actual={actual:?}, expected={expected:?})"
+            );
+        }
+    }
+
+    // -- average_pool_1d (via pool_tensor / PoolingMethod::Average) --
+
+    /// Even ratio: seq_len=4, pooling_factor=2 -> two full, non-overlapping windows.
+    #[test]
+    fn test_average_pool_even_ratio() {
+        let input = seq_tensor(&[1.0, 2.0, 3.0, 4.0]);
+        let out = pool_tensor(input, 2, PoolingMethod::Average).expect("pooling must succeed");
+        assert_eq!(out.shape(), vec![1, 2, 1]);
+        assert_close(&seq_data(&out), &[1.5, 3.5], 1e-6);
+    }
+
+    /// Odd ratio: seq_len=5, pooling_factor=2 -> output length ceil(5/2)=3, and the last window
+    /// has only one member (averaged over just that member, not zero-padded).
+    #[test]
+    fn test_average_pool_odd_ratio_has_partial_last_window() {
+        let input = seq_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let out = pool_tensor(input, 2, PoolingMethod::Average).expect("pooling must succeed");
+        assert_eq!(out.shape(), vec![1, 3, 1]);
+        assert_close(&seq_data(&out), &[1.5, 3.5, 5.0], 1e-6);
+    }
+
+    /// Length-1 edge case: a single sequence position pools to itself, unchanged.
+    #[test]
+    fn test_average_pool_length_one_is_unchanged() {
+        let input = seq_tensor(&[7.0]);
+        let out = pool_tensor(input, 3, PoolingMethod::Average).expect("pooling must succeed");
+        assert_eq!(out.shape(), vec![1, 1, 1]);
+        assert_close(&seq_data(&out), &[7.0], 1e-6);
+    }
+
+    /// Pooling must reduce only the sequence axis: each (batch, hidden-channel) pair is pooled
+    /// independently, so batch 1's values must not leak into batch 0's windows or vice versa,
+    /// and hidden channel 0/1 must not mix.
+    #[test]
+    fn test_average_pool_independent_per_batch_and_channel() {
+        // shape [batch=2, seq=4, hidden=2]
+        let data = vec![
+            1.0, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0, // batch 0
+            100.0, 1.0, 200.0, 2.0, 300.0, 3.0, 400.0, 4.0, // batch 1
+        ];
+        let input = Tensor::from_vec(data, &[2, 4, 2]).expect("tensor construction");
+        let out = pool_tensor(input, 2, PoolingMethod::Average).expect("pooling must succeed");
+        assert_eq!(out.shape(), vec![2, 2, 2]);
+        assert_close(
+            &out.data().expect("data"),
+            &[1.5, 15.0, 3.5, 35.0, 150.0, 1.5, 350.0, 3.5],
+            1e-6,
+        );
+    }
+
+    // -- max_pool_1d --
+
+    #[test]
+    fn test_max_pool_even_ratio() {
+        let input = seq_tensor(&[1.0, 5.0, 3.0, 7.0]);
+        let out = pool_tensor(input, 2, PoolingMethod::Max).expect("pooling must succeed");
+        assert_close(&seq_data(&out), &[5.0, 7.0], 1e-6);
+    }
+
+    #[test]
+    fn test_max_pool_odd_ratio_has_partial_last_window() {
+        let input = seq_tensor(&[1.0, 5.0, 3.0, 7.0, 2.0]);
+        let out = pool_tensor(input, 2, PoolingMethod::Max).expect("pooling must succeed");
+        assert_close(&seq_data(&out), &[5.0, 7.0, 2.0], 1e-6);
+    }
+
+    #[test]
+    fn test_max_pool_length_one_is_unchanged() {
+        let input = seq_tensor(&[9.0]);
+        let out = pool_tensor(input, 5, PoolingMethod::Max).expect("pooling must succeed");
+        assert_close(&seq_data(&out), &[9.0], 1e-6);
+    }
+
+    // -- PoolingMethod::Learnable: structured refusal, never a silent Average alias --
+
+    #[test]
+    fn test_pool_learnable_returns_structured_error_not_average_alias() {
+        let input = seq_tensor(&[1.0, 2.0, 3.0, 4.0]);
+        let result = pool_tensor(input, 2, PoolingMethod::Learnable);
+        assert!(
+            result.is_err(),
+            "Learnable must not silently succeed by aliasing Average"
+        );
+        let message = result.expect_err("checked above").to_string().to_lowercase();
+        assert!(
+            message.contains("unsupported"),
+            "expected an unsupported-operation refusal, got: {message}"
+        );
+    }
+
+    #[test]
+    fn test_pooling_factor_zero_is_rejected() {
+        let input = seq_tensor(&[1.0, 2.0, 3.0]);
+        assert!(pool_tensor(input, 0, PoolingMethod::Average).is_err());
+    }
+
+    // -- linear_interpolate --
+
+    /// Upsampling an already-linear sequence: every output position (on- or off-grid) matches
+    /// the linear ramp exactly.
+    #[test]
+    fn test_linear_interpolate_upsample_matches_hand_computed_values() {
+        let input = seq_tensor(&[0.0, 1.0, 2.0]);
+        let out = interpolate_tensor(input, 5, InterpolationMethod::Linear)
+            .expect("interpolation must succeed");
+        assert_eq!(out.shape(), vec![1, 5, 1]);
+        // positions = [0, 0.5, 1, 1.5, 2] -> values = [0, 0.5, 1, 1.5, 2]
+        assert_close(&seq_data(&out), &[0.0, 0.5, 1.0, 1.5, 2.0], 1e-5);
+    }
+
+    /// Downsampling with output positions that land strictly between source grid points.
+    #[test]
+    fn test_linear_interpolate_downsample_off_grid_matches_hand_computed_values() {
+        let input = seq_tensor(&[0.0, 10.0, 20.0, 30.0, 40.0]);
+        let out = interpolate_tensor(input, 4, InterpolationMethod::Linear)
+            .expect("interpolation must succeed");
+        // positions = [0, 4/3, 8/3, 4] -> values = [0, 40/3, 80/3, 40]
+        assert_close(&seq_data(&out), &[0.0, 40.0 / 3.0, 80.0 / 3.0, 40.0], 1e-3);
+    }
+
+    /// A single-element source has nothing to interpolate between: every output position must
+    /// broadcast that one value.
+    #[test]
+    fn test_linear_interpolate_single_element_source_broadcasts() {
+        let input = seq_tensor(&[42.0]);
+        let out = interpolate_tensor(input, 4, InterpolationMethod::Linear)
+            .expect("interpolation must succeed");
+        assert_close(&seq_data(&out), &[42.0, 42.0, 42.0, 42.0], 1e-6);
+    }
+
+    /// target_length == 1 resamples to the source's midpoint.
+    #[test]
+    fn test_linear_interpolate_target_length_one_is_the_midpoint() {
+        let input = seq_tensor(&[1.0, 2.0, 3.0, 4.0]);
+        let out = interpolate_tensor(input, 1, InterpolationMethod::Linear)
+            .expect("interpolation must succeed");
+        // midpoint position = (4-1)/2 = 1.5 -> blend of data[1]=2 and data[2]=3 -> 2.5
+        assert_close(&seq_data(&out), &[2.5], 1e-6);
+    }
+
+    // -- nearest_interpolate --
+
+    /// Upsampling; also locks in the round-half-away-from-zero tie-break at the two positions
+    /// that land exactly halfway between source indices.
+    #[test]
+    fn test_nearest_interpolate_upsample_matches_hand_computed_values() {
+        let input = seq_tensor(&[10.0, 20.0, 30.0]);
+        let out = interpolate_tensor(input, 5, InterpolationMethod::Nearest)
+            .expect("interpolation must succeed");
+        // positions [0, 0.5, 1, 1.5, 2] round (half-away-from-zero) to indices [0,1,1,2,2].
+        assert_close(&seq_data(&out), &[10.0, 20.0, 20.0, 30.0, 30.0], 1e-6);
+    }
+
+    #[test]
+    fn test_nearest_interpolate_downsample_matches_hand_computed_values() {
+        let input = seq_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let out = interpolate_tensor(input, 4, InterpolationMethod::Nearest)
+            .expect("interpolation must succeed");
+        // positions [0, 4/3, 8/3, 4] round to indices [0, 1, 3, 4].
+        assert_close(&seq_data(&out), &[1.0, 2.0, 4.0, 5.0], 1e-6);
+    }
+
+    #[test]
+    fn test_nearest_interpolate_length_one_source_broadcasts() {
+        let input = seq_tensor(&[7.0]);
+        let out = interpolate_tensor(input, 3, InterpolationMethod::Nearest)
+            .expect("interpolation must succeed");
+        assert_close(&seq_data(&out), &[7.0, 7.0, 7.0], 1e-6);
+    }
+
+    // -- shape validation --
+
+    #[test]
+    fn test_pool_tensor_rejects_non_rank_3_input() {
+        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("tensor construction");
+        assert!(pool_tensor(input, 2, PoolingMethod::Average).is_err());
+    }
+
+    #[test]
+    fn test_interpolate_tensor_rejects_zero_target_length() {
+        let input = seq_tensor(&[1.0, 2.0, 3.0]);
+        assert!(interpolate_tensor(input, 0, InterpolationMethod::Linear).is_err());
+    }
 }

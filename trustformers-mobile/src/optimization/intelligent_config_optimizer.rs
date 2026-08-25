@@ -581,6 +581,21 @@ impl IntelligentConfigOptimizer {
             ThermalState::Critical => 0.3,
             ThermalState::Emergency => 0.1,
             ThermalState::Shutdown => 0.0,
+            // `device_info::ThermalState` gained this variant so device_info's
+            // thermal-capability detection could report "not verifiable on
+            // this platform" honestly instead of a fabricated `Nominal` --
+            // see device_info.rs. That makes `Unknown` the *common* case
+            // here today (no in-tree platform read exists yet outside
+            // Android), so unlike the two profiler scoring tables (which
+            // exclude an unmeasured thermal family from their average
+            // entirely), a neutral midpoint keeps `overall_score` from
+            // systematically penalizing every device down toward the
+            // "Critical" end just because thermal detection isn't wired up.
+            // `overall_score` has no consumer in this file today (checked:
+            // only `.available_memory`, `.performance_tier`,
+            // `.npu_available`, `.gpu_available` gate decisions), so this
+            // choice is reporting-only, not decision-changing.
+            ThermalState::Unknown => 0.5,
         };
 
         let overall_score = (performance_score + memory_score + thermal_score) / 3.0;
@@ -899,7 +914,7 @@ mod tests {
                 battery_health_percent: Some(100),
                 charging_status: ChargingStatus::NotCharging,
                 is_charging: false,
-                power_save_mode: false,
+                power_save_mode: Some(false),
                 low_power_mode_available: true,
             },
             performance_scores: PerformanceScores {

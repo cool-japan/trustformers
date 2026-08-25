@@ -15,12 +15,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::performance_optimizer::performance_modeling::types::{
-    DistributionInfo, DistributionType, PerformancePredictor, PredictionRequest, ResidualAnalysis,
-    TestDataStatistics, ValidationConfig, ValidationDetails, ValidationMetric, ValidationResult,
+    PerformancePredictor, PredictionRequest, ValidationConfig, ValidationMetric, ValidationResult,
 };
 use crate::performance_optimizer::types::PerformanceDataPoint;
 
 use super::functions::{MetricCalculator, ValidationStrategy};
+use super::residuals::measured_details;
 use super::types::{HoldOutValidation, MAECalculator, RMSECalculator, RSquaredCalculator};
 
 #[async_trait]
@@ -77,30 +77,7 @@ impl ValidationStrategy for HoldOutValidation {
             metrics,
             cv_scores: vec![confidence],
             confidence,
-            details: ValidationDetails {
-                test_samples: predictions.len(),
-                test_statistics: TestDataStatistics {
-                    mean_target: actuals.iter().sum::<f64>() as f32 / actuals.len() as f32,
-                    target_std: 1.0,
-                    feature_correlations: HashMap::new(),
-                    distribution_info: DistributionInfo {
-                        distribution_type: DistributionType::Normal,
-                        parameters: HashMap::new(),
-                        normality_p_value: 0.5,
-                    },
-                },
-                prediction_errors: predictions
-                    .iter()
-                    .zip(actuals.iter())
-                    .map(|(p, a)| (p - a) as f32)
-                    .collect(),
-                residual_analysis: ResidualAnalysis {
-                    autocorrelation: 0.1,
-                    heteroscedasticity_p_value: 0.5,
-                    normality_p_value: 0.5,
-                    outliers: Vec::new(),
-                },
-            },
+            details: measured_details(&predictions, &actuals),
             validated_at: Utc::now(),
         })
     }

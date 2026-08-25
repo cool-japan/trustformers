@@ -6,12 +6,10 @@
 //! generation utilities from `trustformers_models::generation_utils`.
 
 use crate::generation_utils::{GenerationConfig, GenerationMode, GenerationUtils, KVCache};
-use crate::gpt2::model::{Gpt2LMHeadModel, Gpt2LMOutput};
-use scirs2_core::ndarray::s;
+use crate::gpt2::model::{last_token_logits, Gpt2LMHeadModel, Gpt2LMOutput};
 use scirs2_core::random::*;
 use trustformers_core::{
-    errors::{tensor_op_error, Result, TrustformersError},
-    tensor::Tensor,
+    errors::{Result, TrustformersError},
     traits::{Model, TokenizedInput},
 };
 
@@ -594,44 +592,17 @@ impl Gpt2LMHeadModel {
         // Forward pass
         let output: Gpt2LMOutput = self.forward(input)?;
 
-        // Extract last token logits
-        match &output.logits {
-            Tensor::F32(arr) => {
-                let shape = arr.shape();
-                if shape.len() != 3 {
-                    return Err(tensor_op_error(
-                        "tensor_operation",
-                        format!("Expected 3D logits tensor, got {}D", shape.len()),
-                    ));
-                }
-
-                let seq_len = shape[1];
-                let vocab_size = shape[2];
-
-                // Get last token's logits: [batch=0, seq_len-1, :]
-                let last_logits = arr.slice(s![0, seq_len - 1, ..]);
-
-                // Convert to Vec<f32>
-                let logits_vec: Vec<f32> = last_logits.iter().copied().collect();
-
-                if logits_vec.len() != vocab_size {
-                    return Err(tensor_op_error(
-                        "tensor_operation",
-                        format!(
-                            "Logits size mismatch: expected {}, got {}",
-                            vocab_size,
-                            logits_vec.len()
-                        ),
-                    ));
-                }
-
-                Ok(logits_vec)
-            },
-            _ => Err(tensor_op_error(
-                "tensor_operation",
-                "Unsupported tensor type for logits".to_string(),
-            )),
-        }
+        // Extract last token logits.
+        //
+        // Shared with `Gpt2LMHeadModel`'s own generators (`generate`,
+        // `generate_greedy`, `generate_greedy_with_cache`, `generate_beam_search`):
+        // this used to be a private copy that matched `Tensor::F32` only, so every
+        // `GenerativeModel` method - `generate_greedy`, `generate_top_k`,
+        // `generate_top_p`, `generate_contrastive`, `generate_beam_search` - failed
+        // with "Unsupported tensor type for logits" on a model whose weights had been
+        // moved to the GPU with `weights_to_gpu`, while the inherent methods of the
+        // same model happily generated. One decoder now serves both.
+        last_token_logits(&output.logits)
     }
 }
 

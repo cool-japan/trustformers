@@ -16,12 +16,12 @@ use chrono::Utc;
 use tracing;
 
 use crate::performance_optimizer::performance_modeling::types::{
-    DistributionInfo, DistributionType, PerformancePredictor, PredictionRequest, ResidualAnalysis,
-    TestDataStatistics, ValidationConfig, ValidationDetails, ValidationMetric, ValidationResult,
+    PerformancePredictor, PredictionRequest, ValidationConfig, ValidationMetric, ValidationResult,
 };
 use crate::performance_optimizer::types::PerformanceDataPoint;
 
 use super::functions::{MetricCalculator, ValidationStrategy};
+use super::residuals::measured_details;
 use super::types::{CrossValidation, MAECalculator, RMSECalculator, RSquaredCalculator};
 
 #[async_trait]
@@ -85,30 +85,7 @@ impl ValidationStrategy for CrossValidation {
             metrics,
             cv_scores: fold_scores,
             confidence: average_score.clamp(0.0, 1.0),
-            details: ValidationDetails {
-                test_samples: all_predictions.len(),
-                test_statistics: TestDataStatistics {
-                    mean_target: all_actuals.iter().sum::<f64>() as f32 / all_actuals.len() as f32,
-                    target_std: 1.0,
-                    feature_correlations: HashMap::new(),
-                    distribution_info: DistributionInfo {
-                        distribution_type: DistributionType::Normal,
-                        parameters: HashMap::new(),
-                        normality_p_value: 0.5,
-                    },
-                },
-                prediction_errors: all_predictions
-                    .iter()
-                    .zip(all_actuals.iter())
-                    .map(|(p, a)| (p - a) as f32)
-                    .collect(),
-                residual_analysis: ResidualAnalysis {
-                    autocorrelation: 0.05,
-                    heteroscedasticity_p_value: 0.6,
-                    normality_p_value: 0.7,
-                    outliers: Vec::new(),
-                },
-            },
+            details: measured_details(&all_predictions, &all_actuals),
             validated_at: Utc::now(),
         })
     }

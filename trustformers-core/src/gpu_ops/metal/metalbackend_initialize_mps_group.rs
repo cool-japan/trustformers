@@ -566,8 +566,6 @@ impl MetalBackend {
             TrustformersError::hardware_error("Failed to lock buffer cache", "stack_gpu_buffers")
         })?;
         cache.insert(output_id, output_buffer_arc.clone());
-        // let ptr = output_buffer_arc.contents() as *const f32;
-        // let output_slice = unsafe { std::slice::from_raw_parts(ptr, total_elements) };
         Ok(output_id)
     }
     /// Split QKV tensor on GPU (eliminates CPU transfer for attention)
@@ -677,10 +675,6 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         self.commit_async(command_buffer);
-        // {
-        //     let ptr = output_buffer.contents() as *const f32;
-        //     let output_slice = unsafe { std::slice::from_raw_parts(ptr, total_size) };
-        //     if seq_len <= 15 {
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {

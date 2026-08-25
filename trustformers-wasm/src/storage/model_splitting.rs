@@ -738,62 +738,92 @@ impl ModelLoadingSession {
         }
     }
 
-    /// Load chunks by priority
-    pub async fn load_by_priority(&mut self) -> Result<f64, JsValue> {
-        let loading_order = self.splitter.get_loading_order();
-        let mut loaded_count = 0;
-        let total_count = loading_order.length() as usize;
+    /// Pure-Rust core of [`Self::load_by_priority`]: takes the loading
+    /// order and chunk list directly (no `js_sys`/`JsValue`), so it can be
+    /// exercised by native unit tests — the same wasm-facing/pure-core
+    /// split `split_model`/`split_model_inner` already use elsewhere in
+    /// this file.
+    ///
+    /// Materializes each chunk's real, decompressed bytes (via
+    /// [`resolve_chunk_data`], which also verifies the chunk's checksum)
+    /// and records the real result in `loaded_components`/`loaded_size` —
+    /// a previous version instead ran a `setTimeout` sized at "100ms per
+    /// MB" per chunk and drove `loading_progress` to 100% without ever
+    /// touching `loaded_components`/`loaded_size`, so the reported
+    /// progress contradicted the session's own (untouched) state. The
+    /// chunk bytes are already resident in `chunks` (populated by
+    /// `split_model`), so there is no real network I/O here — loading is
+    /// synchronous CPU work (decompression + checksum verification), never
+    /// an invented delay.
+    fn load_by_priority_inner(
+        loading_order: &[String],
+        chunks: &[ModelChunk],
+        total_size: usize,
+        loaded_components: &mut BTreeMap<ChunkType, bool>,
+        loaded_size: &mut usize,
+    ) -> Result<f64, String> {
+        let mut progress = 0.0;
 
-        for i in 0..loading_order.length() {
-            let chunk_id = loading_order.get(i).as_string().ok_or_else(|| {
-                JsValue::from_str("loading order should contain string chunk IDs")
-            })?;
+        for chunk_id in loading_order {
+            let chunk = chunks
+                .iter()
+                .find(|c| &c.id == chunk_id)
+                .ok_or_else(|| format!("loading order references unknown chunk id '{chunk_id}'"))?;
 
-            // Simulate loading delay
-            self.simulate_chunk_loading(&chunk_id).await?;
+            // Real decompression + checksum verification (never a fake
+            // delay) — errors (a bad checksum, a corrupt compressed
+            // stream) propagate instead of being reported as loaded.
+            let data = resolve_chunk_data(chunks, chunk_id)?
+                .ok_or_else(|| format!("chunk '{chunk_id}' not found while loading"))?;
 
-            loaded_count += 1;
-            self.loading_progress = (loaded_count as f64 / total_count as f64) * 100.0;
-
-            web_sys::console::log_1(
-                &format!(
-                    "Loaded chunk {}: {:.1}% complete",
-                    chunk_id, self.loading_progress
-                )
-                .into(),
-            );
+            loaded_components.insert(chunk.chunk_type, true);
+            *loaded_size += data.len();
+            progress = if total_size > 0 {
+                ((*loaded_size as f64 / total_size as f64) * 100.0).min(100.0)
+            } else {
+                100.0
+            };
         }
 
-        Ok(self.loading_progress)
+        Ok(progress)
     }
 
-    /// Simulate chunk loading with delay
-    async fn simulate_chunk_loading(&mut self, chunk_id: &str) -> Result<(), JsValue> {
-        // Simulate network delay based on chunk size
-        let delay_ms = if let Some(chunk_data) = self.splitter.get_chunk_data(chunk_id)? {
-            let size_mb = chunk_data.length() as f64 / (1024.0 * 1024.0);
-            (size_mb * 100.0) as u32 // 100ms per MB simulation
-        } else {
-            100 // Default delay
-        };
+    /// Load chunks by priority. This stays `async fn` only to keep the
+    /// existing public API stable for JS callers that already `await` it —
+    /// see [`Self::load_by_priority_inner`] for why loading itself does
+    /// not need to await anything.
+    pub async fn load_by_priority(&mut self) -> Result<f64, JsValue> {
+        // A plain `Vec<String>`, read directly off the (same-module) private
+        // field rather than through `ModelSplitter::get_loading_order`'s
+        // `js_sys::Array` — that indirection buys nothing here and would
+        // only add unnecessary JS-value construction to the hot path.
+        let loading_order = self.splitter.loading_order.clone();
+        let total_count = loading_order.len();
 
-        // Create a promise that resolves after delay
-        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-            if let Some(window) = web_sys::window() {
-                if let Ok(timeout_id) = window
-                    .set_timeout_with_callback_and_timeout_and_arguments_0(
-                        &resolve,
-                        delay_ms as i32,
-                    )
-                {
-                    // Store timeout_id if needed for cleanup
-                    let _ = timeout_id;
-                }
-            }
-        });
+        let progress = Self::load_by_priority_inner(
+            &loading_order,
+            &self.splitter.chunks,
+            self.total_size,
+            &mut self.loaded_components,
+            &mut self.loaded_size,
+        )
+        .map_err(|e| JsValue::from_str(&e))?;
+        self.loading_progress = progress;
 
-        wasm_bindgen_futures::JsFuture::from(promise).await?;
-        Ok(())
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(
+            &format!(
+                "Loaded {total_count} chunk(s) by priority: {progress:.1}% complete \
+                 ({loaded_size} of {total_size} bytes)",
+                loaded_size = self.loaded_size,
+                total_size = self.total_size,
+            )
+            .into(),
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = total_count;
+
+        Ok(self.loading_progress)
     }
 
     /// Get loading progress percentage
@@ -1048,5 +1078,130 @@ mod tests {
         let decompressed = decompress_bytes(&compressed).expect("decompression should succeed");
         assert_eq!(decompressed.len(), raw.len());
         assert_ne!(decompressed.len(), (raw.len() as f64 * 0.7) as usize);
+    }
+
+    // -----------------------------------------------------------------
+    // `ModelLoadingSession::load_by_priority`: real progress, no invented
+    // delay.
+    // -----------------------------------------------------------------
+
+    fn split_for_test(model_data: &[u8]) -> ModelSplitter {
+        let mut config = ChunkConfig::new();
+        config.set_max_chunk_size_mb(0.05); // force multiple chunks
+        let mut splitter = ModelSplitter::new(config);
+        splitter
+            .split_model_inner(model_data, "test-model", "1.0.0")
+            .expect("splitting real data must succeed");
+        splitter
+    }
+
+    #[test]
+    fn test_load_by_priority_updates_loaded_components_and_size_for_real() {
+        // Regression test for the old `simulate_chunk_loading`: it ran a
+        // `setTimeout` sized at "100ms per MB" and drove `loading_progress`
+        // to 100% while `loaded_components`/`loaded_size` stayed at their
+        // initial (empty/zero) values forever. Here, after loading, both
+        // must reflect what was actually materialized.
+        let mut state = 99u32;
+        let model_data: Vec<u8> = (0..200_000)
+            .map(|_| {
+                state = state.wrapping_mul(1103515245).wrapping_add(12345);
+                (state >> 16) as u8
+            })
+            .collect();
+        let splitter = split_for_test(&model_data);
+        assert!(splitter.chunks.len() > 1, "expected multiple chunks");
+        // `total_size_bytes()` (and `loaded_size`, which accumulates real
+        // *decompressed* bytes) are both measured in original/logical
+        // bytes — not `chunk.size_bytes`, which is each chunk's on-wire
+        // *stored* (possibly DEFLATE-compressed) size and so does not sum
+        // back to the original length.
+        let expected_total_size = splitter.total_size_bytes();
+        assert_eq!(expected_total_size, model_data.len());
+        let expected_types: std::collections::BTreeSet<ChunkType> =
+            splitter.chunks.iter().map(|c| c.chunk_type).collect();
+        let loading_order = splitter.loading_order.clone();
+        let chunks = splitter.chunks.clone();
+
+        let mut loaded_components = BTreeMap::new();
+        let mut loaded_size = 0usize;
+        let progress = ModelLoadingSession::load_by_priority_inner(
+            &loading_order,
+            &chunks,
+            expected_total_size,
+            &mut loaded_components,
+            &mut loaded_size,
+        )
+        .expect("loading real, checksum-verified chunks must succeed");
+
+        assert_eq!(
+            loaded_size, expected_total_size,
+            "loaded_size must equal the sum of every chunk's real size, not stay at 0"
+        );
+        assert!(
+            (progress - 100.0).abs() < 1e-9,
+            "progress must reflect real completion, got {progress}"
+        );
+        for chunk_type in expected_types {
+            assert_eq!(
+                loaded_components.get(&chunk_type),
+                Some(&true),
+                "{chunk_type:?} must be marked loaded, not left untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn test_load_by_priority_reports_partial_progress_and_rejects_corruption() {
+        let raw_a = std::vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let raw_b = std::vec![9u8, 10, 11, 12];
+        let mut chunk_a = make_chunk("a", &raw_a, false);
+        chunk_a.chunk_type = ChunkType::Embeddings;
+        let mut chunk_b = make_chunk("b", &raw_b, false);
+        chunk_b.chunk_type = ChunkType::Vocabulary;
+        chunk_b.data[0] ^= 0xFF; // corrupt chunk "b" after checksumming
+        let total_size = raw_a.len() + raw_b.len();
+
+        let mut loaded_components = BTreeMap::new();
+        let mut loaded_size = 0usize;
+        let err = ModelLoadingSession::load_by_priority_inner(
+            &std::vec!["a".to_string(), "b".to_string()],
+            &std::vec![chunk_a, chunk_b],
+            total_size,
+            &mut loaded_components,
+            &mut loaded_size,
+        )
+        .expect_err("a corrupted chunk must fail its checksum check, not report success");
+        assert!(err.contains("integrity check"), "unexpected error: {err}");
+
+        // The first (uncorrupted) chunk must still have been recorded
+        // before the second one failed — no invented all-or-nothing
+        // progress jump.
+        assert_eq!(loaded_size, raw_a.len());
+        assert_eq!(loaded_components.get(&ChunkType::Embeddings), Some(&true));
+        assert_eq!(loaded_components.get(&ChunkType::Vocabulary), None);
+    }
+
+    #[test]
+    fn test_load_by_priority_wasm_bindgen_wrapper_runs_synchronously() {
+        // Exercises the real `pub async fn load_by_priority` (not just its
+        // `_inner` core) end to end on a native target: it must complete
+        // without ever needing a real network delay or a JS/wasm32
+        // environment on its success path.
+        let model_data = std::vec![0x42u8; 150_000];
+        let splitter = split_for_test(&model_data);
+        // See the comment in the test above: this must be the logical
+        // (pre-compression) total, not a sum of stored chunk sizes — the
+        // repeated `0x42` bytes here compress extremely well, so the two
+        // would differ by orders of magnitude.
+        let expected_total_size = splitter.total_size_bytes();
+        let mut session = ModelLoadingSession::new(splitter);
+
+        let progress = futures::executor::block_on(session.load_by_priority())
+            .expect("loading must succeed natively with no JS/network dependency");
+
+        assert!((progress - 100.0).abs() < 1e-9);
+        assert_eq!(session.loaded_size, expected_total_size);
+        assert!(session.loaded_components.values().all(|&loaded| loaded));
     }
 }

@@ -17,11 +17,20 @@
 //!   classification (memory-bound vs compute-bound vs latency-bound).
 //! * [`find_fusion_opportunities`] — kernel-sequence fusion detection using
 //!   producer/consumer semantics and an Amdahl-style memory-traffic speedup model.
+//! * [`establish_baseline`] / [`compare_to_baseline`] / [`detect_regression`] —
+//!   performance-regression detection: a real baseline execution-time
+//!   distribution estimated from measured samples, tested against later
+//!   samples with a genuine Welch's t-test (unequal variances, unequal
+//!   sample sizes) rather than a constant "stable" verdict.
 
 // reason: some `AmpereDeviceLimits` fields document device constants that are not
 // read by every analyzer (they exist so the model is complete and auditable).
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+use std::time::{Duration, SystemTime};
+
+use statrs::distribution::{ContinuousCDF, StudentsT};
 use uuid::Uuid;
 
 use crate::advanced_gpu_profiler::{
@@ -30,8 +39,10 @@ use crate::advanced_gpu_profiler::{
 };
 
 use super::{
-    DataDependency, DependencyType, FusionFeasibility, FusionOpportunity, FusionType,
-    KernelProfileData, SynchronizationComplexity,
+    BaselineComparison, BaselineProfile, DataDependency, DependencyType, FusionFeasibility,
+    FusionOpportunity, FusionType, KernelProfileData, PerformanceDistribution, PerformanceTrend,
+    RegressionAlert, RegressionSeverity, RegressionThresholds, RegressionType,
+    SynchronizationComplexity,
 };
 
 /// Documented NVIDIA Ampere `sm_86`-class device limits used for CPU-side
@@ -978,6 +989,388 @@ pub fn find_fusion_opportunities(kernel_sequence: &[String]) -> Vec<FusionOpport
         });
     }
     out
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Performance regression detection
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Real statistics backing `PerformanceRegressionDetector`: establish a
+// baseline execution-time distribution from a kernel's early measurements,
+// then test later measurements against it with a genuine Welch's t-test
+// (unequal variances, unequal sample sizes) -- the same technique already
+// used by `crate::differential_debugging::welch_t_test`. No constant ever
+// stands in for a value that was not actually computed from real samples;
+// every "not enough data yet" case returns `None` rather than a fabricated
+// "stable" / "0.95 significant" verdict.
+
+/// Minimum number of execution-time samples required before a baseline
+/// performance distribution can be established for a kernel. Below this,
+/// [`establish_baseline`] must not be called -- there is nothing yet to
+/// compare against.
+pub const MIN_BASELINE_SAMPLES: usize = 10;
+
+/// Minimum number of *recent* (post-baseline, within the configured
+/// detection window) samples required before a comparison against the
+/// established baseline is attempted.
+pub const MIN_COMPARISON_SAMPLES: usize = 5;
+
+/// Convert a [`SystemTime`] to nanoseconds since the Unix epoch, saturating
+/// to 0 rather than panicking if the clock ever reads before the epoch.
+pub fn system_time_to_ns(t: SystemTime) -> u64 {
+    t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(Duration::ZERO).as_nanos() as u64
+}
+
+/// Build a [`BaselineProfile`] from a kernel's first `samples_secs.len()`
+/// real execution-time measurements (in seconds). Percentiles use the
+/// nearest-rank method; the outlier threshold is the conventional
+/// mean + 3*std_dev; the confidence interval on the mean uses the exact
+/// Student's t critical value for `n - 1` degrees of freedom (not a fixed
+/// z=1.96, which is only exact as n -> infinity).
+///
+/// Panics if `samples_secs` is empty -- callers must gate on
+/// `samples_secs.len() >= MIN_BASELINE_SAMPLES` first (see
+/// `PerformanceRegressionDetector::check_regression`).
+pub fn establish_baseline(kernel_name: &str, samples_secs: &[f64]) -> BaselineProfile {
+    let n = samples_secs.len();
+    assert!(n > 0, "establish_baseline requires at least one sample");
+
+    let mean = samples_secs.iter().sum::<f64>() / n as f64;
+    let variance = if n > 1 {
+        samples_secs.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0)
+    } else {
+        0.0
+    };
+    let std_dev = variance.sqrt();
+
+    let mut sorted = samples_secs.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let percentile_secs = |p: f64| -> f64 {
+        let rank = (p / 100.0 * (n - 1) as f64).round() as usize;
+        sorted[rank.min(n - 1)]
+    };
+    let percentiles: HashMap<u8, Duration> = [50u8, 90, 95, 99]
+        .iter()
+        .map(|&p| {
+            (
+                p,
+                Duration::from_secs_f64(percentile_secs(p as f64).max(0.0)),
+            )
+        })
+        .collect();
+
+    let outlier_threshold = Duration::from_secs_f64((mean + 3.0 * std_dev).max(0.0));
+
+    let confidence_interval = if n > 1 && std_dev > 0.0 {
+        StudentsT::new(0.0, 1.0, n as f64 - 1.0)
+            .ok()
+            .map(|t_dist| {
+                let margin = t_dist.inverse_cdf(0.975) * std_dev / (n as f64).sqrt();
+                (
+                    Duration::from_secs_f64((mean - margin).max(0.0)),
+                    Duration::from_secs_f64((mean + margin).max(0.0)),
+                )
+            })
+            .unwrap_or((
+                Duration::from_secs_f64(mean.max(0.0)),
+                Duration::from_secs_f64(mean.max(0.0)),
+            ))
+    } else {
+        (
+            Duration::from_secs_f64(mean.max(0.0)),
+            Duration::from_secs_f64(mean.max(0.0)),
+        )
+    };
+
+    BaselineProfile {
+        kernel_name: kernel_name.to_string(),
+        baseline_performance: Duration::from_secs_f64(mean.max(0.0)),
+        performance_distribution: PerformanceDistribution {
+            mean: Duration::from_secs_f64(mean.max(0.0)),
+            std_dev: Duration::from_secs_f64(std_dev.max(0.0)),
+            percentiles,
+            outlier_threshold,
+            sample_count: n,
+        },
+        established_date: SystemTime::now(),
+        confidence_interval,
+    }
+}
+
+/// Real outcome of comparing a recent execution-time sample against an
+/// established baseline via Welch's t-test.
+#[derive(Debug, Clone, Copy)]
+pub struct BaselineTestOutcome {
+    /// `(recent_mean - baseline_mean) / baseline_mean`, as a fraction
+    /// (`0.10` == 10% slower, `-0.10` == 10% faster).
+    pub relative_change: f64,
+    /// 95% confidence interval on `relative_change`, same units.
+    pub relative_change_ci: (f64, f64),
+    pub t_statistic: f64,
+    /// Two-tailed p-value from the Welch-Satterthwaite Student's
+    /// t-distribution.
+    pub p_value: f64,
+    pub degrees_of_freedom: f64,
+    /// `recent_variance / baseline_variance`. `>> 1.0` means the recent
+    /// window is meaningfully MORE erratic than the baseline
+    /// (independent of whether the mean moved) -- see
+    /// [`detect_regression`]'s one-sided `is_volatile` gate, which only
+    /// fires on this side: a ratio `<< 1.0` means the kernel got MORE
+    /// consistent, which is not volatility.
+    pub variance_ratio: f64,
+}
+
+/// Real Welch's t-test (unequal variances, unequal sample sizes) between a
+/// kernel's baseline execution-time distribution (summarised by its mean,
+/// std-dev and sample count) and a window of recent raw measurements (both
+/// in seconds).
+///
+/// Returns `None` -- never a fabricated result -- when there are fewer
+/// than 2 baseline or recent samples, when either variance is not
+/// finite, or when the resulting degrees of freedom or `StudentsT`
+/// parameters are not finite/positive (all `statrs` invariants). Callers
+/// must treat `None` as "no comparison possible right now", never as
+/// "stable".
+///
+/// When *both* the baseline and the recent window are exactly constant
+/// (zero variance on both sides -- common with synthetic/mocked timings,
+/// or a kernel with genuinely deterministic execution time), the
+/// classical Welch standard error is zero and the textbook t-statistic
+/// is 0/0. That is not "no data": it is the most repeatable measurement
+/// possible on both sides, so the well-defined limiting outcome is
+/// reported directly rather than discarded as `None`. Two equal
+/// constants are a real, maximally-confident "no difference"
+/// (`p_value = 1.0`); two different constants are a real,
+/// maximally-confident difference (`t -> +/-infinity`, `p_value = 0.0`,
+/// the limit as variance -> 0 of the ordinary formula below).
+pub fn compare_to_baseline(
+    baseline_mean_secs: f64,
+    baseline_std_secs: f64,
+    baseline_n: usize,
+    recent_samples_secs: &[f64],
+) -> Option<BaselineTestOutcome> {
+    let n_recent = recent_samples_secs.len();
+    if baseline_n < 2 || n_recent < 2 {
+        return None;
+    }
+
+    let recent_mean = recent_samples_secs.iter().sum::<f64>() / n_recent as f64;
+    let recent_var = recent_samples_secs.iter().map(|v| (v - recent_mean).powi(2)).sum::<f64>()
+        / (n_recent as f64 - 1.0);
+    let baseline_var = baseline_std_secs * baseline_std_secs;
+
+    if !baseline_var.is_finite() || !recent_var.is_finite() {
+        return None;
+    }
+
+    if baseline_var <= 0.0 && recent_var <= 0.0 {
+        let relative_change = if baseline_mean_secs != 0.0 {
+            (recent_mean - baseline_mean_secs) / baseline_mean_secs
+        } else {
+            0.0
+        };
+        let degrees_of_freedom = (baseline_n + n_recent) as f64 - 2.0;
+        let identical = (recent_mean - baseline_mean_secs).abs()
+            <= f64::EPSILON * baseline_mean_secs.abs().max(recent_mean.abs()).max(1.0);
+        return Some(if identical {
+            BaselineTestOutcome {
+                relative_change: 0.0,
+                relative_change_ci: (0.0, 0.0),
+                t_statistic: 0.0,
+                p_value: 1.0,
+                degrees_of_freedom,
+                variance_ratio: 1.0,
+            }
+        } else {
+            BaselineTestOutcome {
+                relative_change,
+                relative_change_ci: (relative_change, relative_change),
+                t_statistic: if recent_mean > baseline_mean_secs {
+                    f64::INFINITY
+                } else {
+                    f64::NEG_INFINITY
+                },
+                p_value: 0.0,
+                degrees_of_freedom,
+                variance_ratio: 1.0,
+            }
+        });
+    }
+
+    let se_baseline_sq = baseline_var / baseline_n as f64;
+    let se_recent_sq = recent_var / n_recent as f64;
+    let standard_error = (se_baseline_sq + se_recent_sq).sqrt();
+    if standard_error <= 0.0 || !standard_error.is_finite() {
+        return None;
+    }
+
+    let t_statistic = (recent_mean - baseline_mean_secs) / standard_error;
+
+    // Welch-Satterthwaite equation for the effective degrees of freedom.
+    let degrees_of_freedom = (se_baseline_sq + se_recent_sq).powi(2)
+        / (se_baseline_sq.powi(2) / (baseline_n as f64 - 1.0)
+            + se_recent_sq.powi(2) / (n_recent as f64 - 1.0));
+    if !degrees_of_freedom.is_finite() || degrees_of_freedom <= 0.0 {
+        return None;
+    }
+
+    let t_dist = StudentsT::new(0.0, 1.0, degrees_of_freedom).ok()?;
+    // Two-tailed p-value: P(|T| >= |t_statistic|).
+    let p_value = 2.0 * (1.0 - t_dist.cdf(t_statistic.abs()));
+
+    let relative_change = if baseline_mean_secs != 0.0 {
+        (recent_mean - baseline_mean_secs) / baseline_mean_secs
+    } else {
+        0.0
+    };
+    // 95% CI on the relative change, propagated from the same Welch
+    // standard error (converted from absolute seconds to a fraction of the
+    // baseline mean) via the t-distribution's critical value.
+    let critical_value = t_dist.inverse_cdf(0.975);
+    let relative_margin = if baseline_mean_secs != 0.0 {
+        (critical_value * standard_error) / baseline_mean_secs.abs()
+    } else {
+        0.0
+    };
+    let variance_ratio = if baseline_var > 0.0 {
+        recent_var / baseline_var
+    } else if recent_var > 0.0 {
+        f64::INFINITY
+    } else {
+        1.0
+    };
+
+    Some(BaselineTestOutcome {
+        relative_change,
+        relative_change_ci: (
+            relative_change - relative_margin,
+            relative_change + relative_margin,
+        ),
+        t_statistic,
+        p_value,
+        degrees_of_freedom,
+        variance_ratio,
+    })
+}
+
+/// Map a (non-negative) regression magnitude to a severity bucket using
+/// the detector's own configured thresholds -- never a hardcoded cutoff.
+///
+/// `RegressionThresholds` has 4 fields for 4 [`RegressionSeverity`]
+/// variants, but `minor_threshold` is consumed elsewhere as the entry gate
+/// for "counts as a regression at all" (see
+/// [`PerformanceRegressionDetector::check_regression`] /
+/// [`detect_regression`]) -- everything reaching this function has
+/// already cleared it, so it does not double as a bucket boundary here.
+/// The 3 remaining fields give the 3 boundaries a 4-bucket split needs,
+/// matching the ranges documented on [`RegressionSeverity`] itself
+/// (Minor < moderate_threshold, Moderate < major_threshold, Major <
+/// critical_threshold's *documented* range i.e. `major_threshold`,
+/// Critical beyond that). `critical_threshold` is intentionally not
+/// referenced here -- see its own doc comment.
+pub fn classify_severity(magnitude: f64, thresholds: &RegressionThresholds) -> RegressionSeverity {
+    if magnitude >= thresholds.major_threshold {
+        RegressionSeverity::Critical
+    } else if magnitude >= thresholds.moderate_threshold {
+        RegressionSeverity::Major
+    } else if magnitude >= thresholds.minor_threshold {
+        RegressionSeverity::Moderate
+    } else {
+        RegressionSeverity::Minor
+    }
+}
+
+/// Full real outcome of one regression check: the honest
+/// [`BaselineComparison`] to publish via `get_status`, the trend
+/// classification, and a [`RegressionAlert`] when (and only when) the
+/// slowdown is both statistically significant and beyond
+/// `thresholds.minor_threshold`.
+pub struct RegressionCheckOutcome {
+    pub baseline_comparison: BaselineComparison,
+    pub performance_trend: PerformanceTrend,
+    pub new_alert: Option<RegressionAlert>,
+}
+
+/// Real regression decision from a [`BaselineTestOutcome`], using the
+/// detector's own configured `thresholds` for both the significance level
+/// (`confidence_level`, e.g. 0.95 -> alpha = 0.05) and the severity
+/// cutoffs -- never a hardcoded significance or a `has_regression` that
+/// cannot become `true`.
+pub fn detect_regression(
+    kernel_name: &str,
+    baseline: &BaselineProfile,
+    outcome: BaselineTestOutcome,
+    thresholds: &RegressionThresholds,
+) -> RegressionCheckOutcome {
+    let alpha = (1.0 - thresholds.confidence_level).clamp(0.0, 1.0);
+    let is_significant = outcome.p_value < alpha;
+    // A recent window whose variance is >=3x the baseline's is itself a
+    // real, computed "got more erratic" signal, independent of whether
+    // the mean shifted significantly. Deliberately ONE-SIDED: a recent
+    // variance that SHRANK relative to baseline (ratio <= 1/3) means the
+    // kernel became MORE consistent, the opposite of volatile -- that
+    // case must fall through to the ordinary
+    // Stable/Degrading/Improving classification below, not be mislabeled
+    // "Volatile".
+    let is_volatile = outcome.variance_ratio >= 3.0;
+
+    let performance_trend = if is_volatile {
+        PerformanceTrend::Volatile
+    } else if !is_significant {
+        PerformanceTrend::Stable
+    } else if outcome.relative_change > 0.0 {
+        PerformanceTrend::Degrading
+    } else {
+        PerformanceTrend::Improving
+    };
+
+    let magnitude = outcome.relative_change.abs();
+    let new_alert = if is_significant
+        && outcome.relative_change > 0.0
+        && magnitude >= thresholds.minor_threshold
+    {
+        let current_performance = Duration::from_secs_f64(
+            (baseline.baseline_performance.as_secs_f64() * (1.0 + outcome.relative_change))
+                .max(0.0),
+        );
+        Some(RegressionAlert {
+            alert_id: Uuid::new_v4(),
+            kernel_name: kernel_name.to_string(),
+            alert_type: RegressionType::PerformanceDegradation,
+            severity: classify_severity(magnitude, thresholds),
+            current_performance,
+            baseline_performance: baseline.baseline_performance,
+            regression_magnitude: magnitude,
+            detection_timestamp: SystemTime::now(),
+            potential_causes: vec![
+                format!(
+                    "Execution time {:.1}% slower than baseline ({:.3}ms -> {:.3}ms), \
+                     Welch's t-test p={:.4} < alpha={:.4} (df={:.1})",
+                    magnitude * 100.0,
+                    baseline.baseline_performance.as_secs_f64() * 1000.0,
+                    current_performance.as_secs_f64() * 1000.0,
+                    outcome.p_value,
+                    alpha,
+                    outcome.degrees_of_freedom,
+                ),
+                "Check this kernel's launch-config / memory-access / compute-utilization \
+                 analyses for a likely mechanism"
+                    .to_string(),
+            ],
+        })
+    } else {
+        None
+    };
+
+    RegressionCheckOutcome {
+        baseline_comparison: BaselineComparison {
+            current_vs_baseline: outcome.relative_change * 100.0,
+            statistical_significance: 1.0 - outcome.p_value,
+            confidence_interval: outcome.relative_change_ci,
+        },
+        performance_trend,
+        new_alert,
+    }
 }
 
 #[cfg(test)]

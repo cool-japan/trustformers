@@ -109,6 +109,16 @@ struct ThermalMonitor {
     temperature_history: VecDeque<TemperatureReading>,
     last_check: Instant,
     check_interval: Duration,
+    /// Test-only override for [`Self::read_temperature`]: `None` means "use
+    /// the real platform read"; `Some(None)` forces a read failure;
+    /// `Some(Some(celsius))` forces a successful reading of `celsius`. This
+    /// exists because the real reads are either platform-gated
+    /// (`target_os = "android"/"ios"`, not exercised by this workspace's
+    /// desktop test runs) or genuinely nondeterministic (desktop `sysinfo`
+    /// sensor availability varies by host) -- deterministic tests need a
+    /// way to inject a reading instead of relying on either.
+    #[cfg(test)]
+    test_override: Option<Option<f32>>,
 }
 
 /// Temperature reading with timestamp
@@ -525,8 +535,20 @@ impl ThermalPowerManager {
     // Private implementation methods
 
     fn evaluate_thermal_throttling(&self) -> Result<Option<ThrottleLevel>> {
-        let current_temp = self.thermal_monitor.get_current_temperature()?;
         let thermal_state = self.thermal_monitor.current_state;
+
+        // An unverifiable reading must not resolve to "no throttling" (that
+        // would assume the device is safe with no evidence, the very
+        // fabrication this pass removes) nor to "emergency" (every build
+        // without a wired sensor -- every non-Android build today, and
+        // Android itself before a real zone is readable -- would then run
+        // permanently crippled). Hold whatever throttle level was already
+        // in effect; the next successful reading re-evaluates normally.
+        if thermal_state == ThermalState::Unknown {
+            return Ok(Some(self.throttling_controller.current_throttle_level));
+        }
+
+        let current_temp = self.thermal_monitor.get_current_temperature()?;
 
         let new_level = match thermal_state {
             ThermalState::Critical | ThermalState::Emergency => ThrottleLevel::Emergency,
@@ -618,6 +640,24 @@ impl ThermalPowerManager {
     }
 
     fn evaluate_power_optimization(&self) -> Result<bool> {
+        // `unwrap_or(100)`, unchanged from before this pass: this mirrors
+        // `can_run_inference_now` below (`if let Some(battery) = ...`,
+        // which skips its low-battery check entirely when unmeasured)
+        // rather than the fail-closed-on-an-explicit-constraint pattern
+        // used in `network_optimization::check_download_constraints` /
+        // `android_work_manager`'s `is_battery_low`. Those two guard a
+        // constraint the *caller* explicitly opted into (`wifi_only`,
+        // `require_battery_not_low`) and must refuse outright when it
+        // cannot be verified; this is a continuously-running background
+        // heuristic with no caller-declared constraint to honor, so
+        // "unknown" defaulting to "don't force the aggressive branch"
+        // keeps every reachable code path in this manager agreeing on what
+        // an unmeasured battery means, instead of two functions here
+        // silently disagreeing with a third (`can_run_inference_now`) two
+        // screens down. Deliberately out of scope for this pass: this
+        // manager's mission is `read_temperature`'s fabricated readings
+        // (see below), not re-deriving this file's existing
+        // unknown-battery policy.
         let battery_level = self.power_monitor.battery_level.unwrap_or(100);
         let charging = matches!(self.power_monitor.charging_status, ChargingStatus::Charging);
         let power_consumption = self.power_monitor.power_consumption_mw.unwrap_or(0.0);
@@ -643,6 +683,11 @@ impl ThermalPowerManager {
     }
 
     fn apply_power_optimization(&mut self, config: &mut MobileConfig) -> Result<()> {
+        // `unwrap_or(100)`: same reasoning as `evaluate_power_optimization`
+        // above -- unchanged from before this pass, kept consistent with
+        // the other two battery-reading sites in this file rather than
+        // flipped to a fail-closed default that only this one function
+        // would apply.
         let battery_level = self.power_monitor.battery_level.unwrap_or(100);
 
         if battery_level < self.config.power_thresholds.critical_battery_percent {
@@ -669,7 +714,15 @@ impl ThermalPowerManager {
         request: &InferenceRequest,
         config: &MobileConfig,
     ) -> Result<bool> {
-        // Check thermal constraints
+        // Check thermal constraints. Deliberately does NOT also block on
+        // `ThermalState::Unknown`: only a *confirmed* emergency reading
+        // halts inference outright. Blocking here whenever thermal state is
+        // merely unverifiable would halt inference on every build without a
+        // wired sensor -- every non-Android target today -- which is a much
+        // larger behavior change than removing the fabricated reading this
+        // pass targets. `evaluate_thermal_throttling`/`apply_thermal_optimizations`
+        // already respond to `Unknown` with a conservative hedge (hold/reduce),
+        // short of an outright halt.
         if self.thermal_monitor.current_state == ThermalState::Emergency {
             return Ok(false);
         }
@@ -712,7 +765,11 @@ impl ThermalPowerManager {
                 config.num_threads = (config.num_threads / 2).max(1);
                 config.enable_batching = false;
             },
-            ThermalState::Fair => {
+            // An unread-able thermal state gets the same mild,
+            // non-disruptive hedge as `Fair` rather than the previous
+            // silent no-op (which is exactly "assume `Nominal` with no
+            // evidence" -- the fabrication this pass removes).
+            ThermalState::Fair | ThermalState::Unknown => {
                 config.num_threads = (config.num_threads * 3 / 4).max(1);
             },
             _ => {},
@@ -779,10 +836,16 @@ impl ThermalPowerManager {
 impl ThermalMonitor {
     fn new(check_interval: Duration, max_history: usize) -> Self {
         Self {
-            current_state: ThermalState::Nominal,
+            // Honestly "we have not taken a reading yet", not the
+            // previously-implied "device is running cool" (`Nominal`) --
+            // the same epistemic state a failed read produces below, so
+            // both start and error paths agree on what "no data" means.
+            current_state: ThermalState::Unknown,
             temperature_history: VecDeque::with_capacity(max_history),
             last_check: Instant::now(),
             check_interval,
+            #[cfg(test)]
+            test_override: None,
         }
     }
 
@@ -797,24 +860,40 @@ impl ThermalMonitor {
 
     fn update(&mut self) -> Result<()> {
         if self.last_check.elapsed() >= self.check_interval {
-            let temperature = self.read_temperature()?;
-            let thermal_state = Self::temperature_to_state(temperature);
+            match self.read_temperature() {
+                Ok(temperature) => {
+                    let thermal_state = temperature_to_state(temperature);
 
-            let reading = TemperatureReading {
-                timestamp: Instant::now(),
-                temperature_celsius: temperature,
-                thermal_state,
-                sensor_name: "CPU".to_string(), // Simplified
-            };
+                    let reading = TemperatureReading {
+                        timestamp: Instant::now(),
+                        temperature_celsius: temperature,
+                        thermal_state,
+                        sensor_name: "CPU".to_string(), // Simplified
+                    };
 
-            self.temperature_history.push_back(reading);
+                    self.temperature_history.push_back(reading);
 
-            // Limit history size
-            while self.temperature_history.len() > self.temperature_history.capacity() {
-                self.temperature_history.pop_front();
+                    // Limit history size
+                    while self.temperature_history.len() > self.temperature_history.capacity() {
+                        self.temperature_history.pop_front();
+                    }
+
+                    self.current_state = thermal_state;
+                },
+                Err(e) => {
+                    // A platform that cannot be read (iOS, a desktop build
+                    // with no exposed sensor, an Android device that denies
+                    // the sysfs read) is not a failure of the monitoring
+                    // *cycle* -- power monitoring and stats still need to
+                    // run this tick. It genuinely is not know-able whether
+                    // the device is `Nominal`, so it must not silently stay
+                    // pinned at whatever state a previous successful read
+                    // (or the constructor) left behind.
+                    tracing::warn!("thermal reading unavailable: {e}");
+                    self.current_state = ThermalState::Unknown;
+                },
             }
 
-            self.current_state = thermal_state;
             self.last_check = Instant::now();
         }
 
@@ -832,53 +911,159 @@ impl ThermalMonitor {
     }
 
     fn read_temperature(&self) -> Result<f32> {
-        // Platform-specific temperature reading
-        #[cfg(target_os = "android")]
-        {
-            self.read_android_temperature()
+        #[cfg(test)]
+        if let Some(forced) = self.test_override {
+            return forced.ok_or_else(|| {
+                TrustformersError::runtime_error(
+                    "test override: forced temperature read failure".into(),
+                )
+                .into()
+            });
         }
 
-        #[cfg(target_os = "ios")]
-        {
-            self.read_ios_temperature()
-        }
-
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        {
-            // Simulate temperature for testing
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-
-            let mut hasher = DefaultHasher::new();
-            self.last_check.elapsed().as_millis().hash(&mut hasher);
-            let hash_val = hasher.finish();
-            let variation = (hash_val % 20) as f32; // 0-19°C variation
-            Ok(45.0 + variation) // 45-64°C
-        }
+        // Platform-specific temperature reading, shared with
+        // `device_info::MobileDeviceDetector::get_current_thermal_state`
+        // (device_info.rs) so both entry points agree on what a given
+        // physical temperature means instead of running two independently
+        // maintained bucketing schemes.
+        read_platform_temperature()
     }
+}
 
+/// Real platform temperature read: Android via `/sys/class/thermal`, a
+/// structured error on iOS (no pure-Rust API reaches
+/// `ProcessInfo.thermalState`), and a best-effort `sysinfo::Components`
+/// read elsewhere. `pub(crate)` (rather than a method on the private
+/// [`ThermalMonitor`], which is not itself visible outside this module) so
+/// `device_info::MobileDeviceDetector` can report the same real reading
+/// through `get_current_thermal_state` instead of the fabricated constant
+/// it previously returned.
+pub(crate) fn read_platform_temperature() -> Result<f32> {
     #[cfg(target_os = "android")]
-    fn read_android_temperature(&self) -> Result<f32> {
-        // Read from /sys/class/thermal/thermal_zone*/temp
-        // This is a simplified implementation
-        Ok(50.0) // Placeholder
+    {
+        read_android_temperature()
     }
 
     #[cfg(target_os = "ios")]
-    fn read_ios_temperature(&self) -> Result<f32> {
-        // Use iOS thermal state APIs
-        // This is a simplified implementation
-        Ok(48.0) // Placeholder
+    {
+        read_ios_temperature()
     }
 
-    fn temperature_to_state(temperature: f32) -> ThermalState {
-        match temperature {
-            t if t < 55.0 => ThermalState::Nominal,
-            t if t < 65.0 => ThermalState::Fair,
-            t if t < 75.0 => ThermalState::Serious,
-            t if t < 85.0 => ThermalState::Critical,
-            _ => ThermalState::Emergency,
-        }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        read_desktop_temperature()
+    }
+}
+
+#[cfg(target_os = "android")]
+fn read_android_temperature() -> Result<f32> {
+    // Real read of /sys/class/thermal/thermal_zone*/temp, which this
+    // function's comment already claimed but, before this fix, never did
+    // (it returned `Ok(50.0) // Placeholder` unconditionally). Each zone
+    // file holds one integer in millidegrees Celsius (the kernel
+    // `thermal_sysfs` convention). Devices expose a variable number of
+    // zones (CPU cores, GPU, battery, skin, PMIC, modem, ...) at contiguous
+    // indices starting from 0, in no guaranteed order and with no
+    // guarantee every index is present or world-readable on every OEM
+    // build; this scans a generous range and reports the hottest zone that
+    // parsed to a physically plausible value, the same "report the single
+    // hottest measured figure" choice
+    // `mobile_performance_profiler::collector::hottest_component_celsius`
+    // (collector.rs:508-517) makes for its own (already real) sensor
+    // enumeration. No zone readable at all -- absent thermal class, every
+    // zone permission-denied -- is a structured error, never a fabricated
+    // fallback.
+    use std::fs;
+
+    const MAX_THERMAL_ZONES: u32 = 64;
+    // The kernel reports implausible sentinel values (e.g. -1 or 0) for an
+    // unpopulated zone; -40..200 C comfortably bounds every real silicon
+    // reading without accepting those sentinels.
+    const PLAUSIBLE_MILLIDEGREES: std::ops::RangeInclusive<i64> = -40_000..=200_000;
+
+    let hottest_millidegrees: Option<i64> = (0..MAX_THERMAL_ZONES)
+        .filter_map(|zone| {
+            fs::read_to_string(format!("/sys/class/thermal/thermal_zone{zone}/temp")).ok()
+        })
+        .filter_map(|contents| contents.trim().parse::<i64>().ok())
+        .filter(|millidegrees| PLAUSIBLE_MILLIDEGREES.contains(millidegrees))
+        .max();
+
+    hottest_millidegrees.map(|m| m as f32 / 1000.0).ok_or_else(|| {
+        TrustformersError::runtime_error(
+            format!(
+                "no readable /sys/class/thermal/thermal_zone*/temp sensor (checked zones 0-{})",
+                MAX_THERMAL_ZONES - 1
+            )
+            .into(),
+        )
+        .into()
+    })
+}
+
+#[cfg(target_os = "ios")]
+fn read_ios_temperature() -> Result<f32> {
+    // `ProcessInfo.thermalState` is the only thermal signal iOS exposes,
+    // and it is an Objective-C/Swift API with no pure-Rust binding in this
+    // workspace's dependency set -- reaching it needs Objective-C FFI,
+    // which COOLJAPAN policy keeps feature-gated off by default (this
+    // crate's default build stays C/Objective-C-free). Before this fix
+    // this returned `Ok(48.0) // Placeholder`, a value nothing here ever
+    // measured.
+    Err(TrustformersError::runtime_error(
+        "iOS thermal state requires ProcessInfo.thermalState via Objective-C FFI, which this \
+         build does not implement"
+            .into(),
+    )
+    .into())
+}
+
+/// This crate targets mobile; a desktop/CI build has no guaranteed thermal
+/// sensor. `sysinfo::Components` reads real hardware sensors where the
+/// host OS exposes them (Linux ACPI/hwmon, Windows WMI) -- the same
+/// mechanism
+/// `mobile_performance_profiler::collector::hottest_component_celsius`
+/// (collector.rs:508-517) already uses for the profiler's (also real)
+/// telemetry, duplicated here rather than widened to `pub(crate)` there:
+/// this package does not own `collector.rs`, and the read is six lines.
+/// Apple Silicon and most containers expose no components at all, in
+/// which case there genuinely is nothing to report and this says so
+/// rather than inventing a number -- this previously returned
+/// `45.0 + hash(elapsed) % 20` under a "simulate temperature for testing"
+/// comment, feeding a fabricated reading into live thermal state on every
+/// desktop build.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn read_desktop_temperature() -> Result<f32> {
+    use sysinfo::Components;
+
+    Components::new_with_refreshed_list()
+        .iter()
+        .filter_map(|component| component.temperature())
+        .fold(None::<f32>, |hottest, celsius| {
+            Some(hottest.map_or(celsius, |best| best.max(celsius)))
+        })
+        .ok_or_else(|| {
+            TrustformersError::runtime_error(
+                "no thermal sensor is exposed on this platform via sysinfo; cannot read a real \
+                 device temperature outside Android/iOS"
+                    .into(),
+            )
+            .into()
+        })
+}
+
+/// Bucket a measured temperature into the shared [`ThermalState`] scale.
+/// `pub(crate)` for the same reason as [`read_platform_temperature`]:
+/// `device_info::MobileDeviceDetector::get_current_thermal_state` buckets
+/// through this exact function so a given physical reading maps to the
+/// same state everywhere in the crate.
+pub(crate) fn temperature_to_state(temperature: f32) -> ThermalState {
+    match temperature {
+        t if t < 55.0 => ThermalState::Nominal,
+        t if t < 65.0 => ThermalState::Fair,
+        t if t < 75.0 => ThermalState::Serious,
+        t if t < 85.0 => ThermalState::Critical,
+        _ => ThermalState::Emergency,
     }
 }
 
@@ -933,37 +1118,23 @@ impl PowerMonitor {
     }
 
     fn read_power_info(&self) -> Result<(Option<u8>, ChargingStatus, Option<f32>)> {
-        // Platform-specific power reading
-        #[cfg(target_os = "android")]
-        {
-            self.read_android_power_info()
-        }
-
-        #[cfg(target_os = "ios")]
-        {
-            self.read_ios_power_info()
-        }
-
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        {
-            // Simulate power info for testing
-            let battery = Some(75u8); // 75% battery
-            let charging = ChargingStatus::Discharging;
-            let power = Some(2500.0); // 2.5W consumption
-            Ok((battery, charging, power))
-        }
-    }
-
-    #[cfg(target_os = "android")]
-    fn read_android_power_info(&self) -> Result<(Option<u8>, ChargingStatus, Option<f32>)> {
-        // Use Android BatteryManager APIs
-        Ok((Some(80), ChargingStatus::Discharging, Some(2000.0)))
-    }
-
-    #[cfg(target_os = "ios")]
-    fn read_ios_power_info(&self) -> Result<(Option<u8>, ChargingStatus, Option<f32>)> {
-        // Use iOS UIDevice battery APIs
-        Ok((Some(85), ChargingStatus::Discharging, Some(1800.0)))
+        // Real reading via the same `power_supply` sysfs walk
+        // `battery.rs`'s `MobileBatteryManager` already uses
+        // (`read_live_battery_reading`, battery.rs:270): live data on
+        // Android/Linux, an honestly-absent `BatteryReading::unavailable()`
+        // (all `None` / `ChargingStatus::Unknown`) everywhere else,
+        // including iOS/macOS, which need IOKit/`UIDevice` this crate does
+        // not link. Reused rather than re-implemented -- this function
+        // previously fabricated `Ok((Some(80), Discharging, Some(2000.0)))`
+        // on Android, `(Some(85), .., Some(1800.0))` on iOS and
+        // `(Some(75), .., Some(2500.0))` on every desktop build, none of
+        // them backed by any real read.
+        let reading = crate::battery::read_live_battery_reading();
+        Ok((
+            reading.level_percent,
+            reading.charging_status,
+            reading.power_consumption_mw,
+        ))
     }
 
     fn estimate_time_remaining(
@@ -1018,16 +1189,22 @@ impl PowerAwareScheduler {
         self.inference_queue.insert(insert_pos, request);
     }
 
-    fn get_next_ready_inference(&mut self, _config: &MobileConfig) -> Option<ScheduledInference> {
-        // For now, just return the highest priority request
-        self.inference_queue.pop_front().map(|request| {
-            ScheduledInference {
-                scheduled_time: Instant::now(),
-                expected_completion: Instant::now()
-                    + Duration::from_millis(request.estimated_duration_ms),
-                config: MobileConfig::default(), // Would be optimized config
-                request,
-            }
+    /// Pop the highest-priority queued request (queue order is already
+    /// priority-sorted by [`Self::queue_request`]) and schedule it against
+    /// the caller's real `config` -- previously `config: MobileConfig::default()
+    /// // Would be optimized config`, which discarded the `config`
+    /// parameter entirely and handed back a request scheduled with an
+    /// unrelated default configuration instead of the one the caller
+    /// actually passed in (the same real config
+    /// [`ThermalPowerManager::schedule_inference`]'s immediate-run path
+    /// already uses via `current_config.clone()`).
+    fn get_next_ready_inference(&mut self, config: &MobileConfig) -> Option<ScheduledInference> {
+        self.inference_queue.pop_front().map(|request| ScheduledInference {
+            scheduled_time: Instant::now(),
+            expected_completion: Instant::now()
+                + Duration::from_millis(request.estimated_duration_ms),
+            config: config.clone(),
+            request,
         })
     }
 }
@@ -1173,7 +1350,11 @@ mod tests {
     #[test]
     fn test_thermal_monitor() {
         let monitor = ThermalMonitor::new(Duration::from_secs(1), 100);
-        assert_eq!(monitor.current_state, ThermalState::Nominal);
+        // Regression guard for the previous fabrication: a freshly
+        // constructed monitor has taken no reading yet and must report
+        // that honestly (`Unknown`), not the previous `Nominal` default
+        // that implied a measurement nothing had taken.
+        assert_eq!(monitor.current_state, ThermalState::Unknown);
         assert!(monitor.temperature_history.is_empty());
     }
 
@@ -1202,25 +1383,225 @@ mod tests {
 
     #[test]
     fn test_temperature_to_thermal_state() {
+        assert_eq!(temperature_to_state(45.0), ThermalState::Nominal);
+        assert_eq!(temperature_to_state(60.0), ThermalState::Fair);
+        assert_eq!(temperature_to_state(70.0), ThermalState::Serious);
+        assert_eq!(temperature_to_state(80.0), ThermalState::Critical);
+        assert_eq!(temperature_to_state(90.0), ThermalState::Emergency);
+    }
+
+    // --- Regression tests for the removed fabrications -----------------
+
+    #[test]
+    fn test_read_temperature_reports_injected_success_deterministically() {
+        let mut monitor = ThermalMonitor::new(Duration::from_secs(1), 10);
+        monitor.test_override = Some(Some(72.5));
         assert_eq!(
-            ThermalMonitor::temperature_to_state(45.0),
-            ThermalState::Nominal
+            monitor.read_temperature().expect("override should succeed"),
+            72.5
         );
-        assert_eq!(
-            ThermalMonitor::temperature_to_state(60.0),
-            ThermalState::Fair
+    }
+
+    #[test]
+    fn test_read_temperature_reports_injected_failure_not_a_fabricated_value() {
+        let mut monitor = ThermalMonitor::new(Duration::from_secs(1), 10);
+        monitor.test_override = Some(None);
+        assert!(monitor.read_temperature().is_err());
+    }
+
+    #[test]
+    fn test_update_sets_unknown_state_on_read_failure_without_failing_the_cycle() {
+        let mut monitor = ThermalMonitor::new(Duration::from_millis(0), 10);
+        monitor.test_override = Some(Some(90.0));
+        // First tick: a real (injected) reading moves current_state off Unknown.
+        monitor
+            .update()
+            .expect("update should succeed even though the monitor is fresh");
+        assert_eq!(monitor.current_state, ThermalState::Emergency);
+        assert_eq!(monitor.temperature_history.len(), 1);
+
+        // Second tick: the platform can no longer be read (e.g. permission
+        // revoked, sensor unplugged). `update()` must still return `Ok`
+        // (thermal unreadability is not a failure of the whole monitoring
+        // cycle -- power monitoring and stats must still run) but must
+        // honestly downgrade to `Unknown`, not keep reporting the stale
+        // `Emergency` reading as if it were still current.
+        monitor.last_check = Instant::now() - Duration::from_secs(1);
+        monitor.test_override = Some(None);
+        monitor.update().expect("a read failure must not fail the whole update cycle");
+        assert_eq!(monitor.current_state, ThermalState::Unknown);
+        // No fabricated reading is appended to the history on failure.
+        assert_eq!(monitor.temperature_history.len(), 1);
+    }
+
+    #[test]
+    fn test_evaluate_thermal_throttling_holds_current_level_when_unknown() {
+        let device_info = MobileDeviceInfo::default();
+        let mut manager = ThermalPowerManager::new(ThermalPowerConfig::default(), &device_info)
+            .expect("manager creation should succeed");
+        manager.throttling_controller.current_throttle_level = ThrottleLevel::Moderate;
+        manager.thermal_monitor.current_state = ThermalState::Unknown;
+
+        let level = manager
+            .evaluate_thermal_throttling()
+            .expect("an unknown thermal state must not error the evaluation");
+        // Neither escalated to Emergency nor silently cleared to None --
+        // whatever level was already in effect is held.
+        assert_eq!(level, Some(ThrottleLevel::Moderate));
+    }
+
+    #[test]
+    fn test_apply_thermal_optimizations_hedges_on_unknown_state() {
+        let device_info = MobileDeviceInfo::default();
+        let mut manager = ThermalPowerManager::new(ThermalPowerConfig::default(), &device_info)
+            .expect("manager creation should succeed");
+        manager.thermal_monitor.current_state = ThermalState::Unknown;
+
+        let mut config = MobileConfig {
+            num_threads: 8,
+            ..MobileConfig::default()
+        };
+        manager.apply_thermal_optimizations(&mut config);
+        // Same mild reduction as `Fair`: `(8 * 3 / 4).max(1) == 6`.
+        assert_eq!(config.num_threads, 6);
+    }
+
+    #[test]
+    fn test_power_monitor_read_power_info_is_real_or_honestly_absent() {
+        let monitor = PowerMonitor::new(Duration::from_secs(1), 10);
+        let (level, status, power) =
+            monitor.read_power_info().expect("read_power_info should not fail");
+
+        #[cfg(not(any(target_os = "android", target_os = "linux")))]
+        {
+            // On every platform this crate cannot read (which, on the
+            // macOS/Windows hosts this workspace's tests actually run on,
+            // is every platform), the reading must be honestly absent --
+            // never the previous fabricated `Some(75)/Discharging/Some(2500.0)`.
+            assert_eq!(level, None);
+            assert_eq!(status, ChargingStatus::Unknown);
+            assert_eq!(power, None);
+        }
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            // Real sysfs data if this host exposes a `power_supply` class,
+            // an honest absence otherwise -- either is acceptable, a
+            // fabricated non-absent-but-wrong value is not checkable here
+            // without a real battery, so this simply exercises the call.
+            let _ = (level, status, power);
+        }
+    }
+
+    /// This crate's thermal-reading fabrication (the mission this pass
+    /// fixes) is independent of how an *unmeasured battery* is treated:
+    /// this file's three battery-reading sites --
+    /// `evaluate_power_optimization`, `apply_power_optimization` (both
+    /// `unwrap_or(100)`) and `can_run_inference_now`
+    /// (`if let Some(battery) = ..` -- skips its check entirely when
+    /// `None`) -- already agreed with each other before this pass, on
+    /// "treat unmeasured as not-a-problem", and stay that way here on
+    /// purpose: changing that policy is a separate decision from removing
+    /// a fabricated thermal reading, and flipping only one or two of the
+    /// three sites would make them disagree with each other, which is
+    /// worse than any single consistent choice. This test locks in that
+    /// the three sites still agree, so a future pass that revisits the
+    /// policy has to update all of them together rather than silently
+    /// diverging again.
+    #[test]
+    fn test_unmeasured_battery_is_treated_the_same_way_across_this_file() {
+        let device_info = MobileDeviceInfo::default();
+        let mut manager = ThermalPowerManager::new(ThermalPowerConfig::default(), &device_info)
+            .expect("manager creation should succeed");
+        assert_eq!(manager.power_monitor.battery_level, None);
+
+        // `evaluate_power_optimization` (Balanced strategy, the branch that
+        // reads `battery_level`): `unwrap_or(100)` reads as "not low", so
+        // no optimization is judged necessary from battery level alone.
+        let mut config = ThermalPowerConfig::default();
+        config.power_strategy = PowerOptimizationStrategy::Balanced;
+        let balanced_manager = ThermalPowerManager::new(config, &device_info)
+            .expect("manager creation should succeed");
+        assert!(
+            !balanced_manager
+                .evaluate_power_optimization()
+                .expect("evaluation should not error on an unmeasured battery"),
+            "unwrap_or(100) means an unmeasured battery reads as not-low here"
         );
-        assert_eq!(
-            ThermalMonitor::temperature_to_state(70.0),
-            ThermalState::Serious
+
+        // `apply_power_optimization`: same `unwrap_or(100)` reads as
+        // "above every threshold", so neither the critical nor the
+        // moderate branch fires and the config is left untouched.
+        let mut mobile_config = MobileConfig::default();
+        let original_threads = mobile_config.num_threads;
+        let original_memory_opt = mobile_config.memory_optimization;
+        manager
+            .apply_power_optimization(&mut mobile_config)
+            .expect("apply_power_optimization should not error on an unmeasured battery");
+        assert_eq!(mobile_config.num_threads, original_threads);
+        assert_eq!(mobile_config.memory_optimization, original_memory_opt);
+
+        // `can_run_inference_now`: its `if let Some(battery) = ..` skips
+        // the low-battery check outright when unmeasured, so a
+        // Background-priority request is not refused on that basis alone
+        // (thermal Unknown does not block it either, per
+        // `can_run_inference_now`'s own doc comment above). Uses a
+        // nonzero `num_threads` deliberately: `MobileConfig::default()`'s
+        // `num_threads: 0` means "auto-detect" everywhere else in this
+        // crate, but `can_run_inference_now`'s own
+        // `config.num_threads == 0` check treats it as "halted" (the
+        // sentinel Emergency throttling sets) -- a pre-existing collision
+        // between those two meanings of `0`, unrelated to the
+        // unmeasured-battery behavior this test targets, so it is worked
+        // around here rather than fixed (out of scope for this pass).
+        let request = InferenceRequest {
+            id: "req-1".to_string(),
+            priority: InferencePriority::Background,
+            estimated_duration_ms: 10,
+            power_budget_mw: None,
+            deadline: None,
+        };
+        mobile_config.num_threads = 4;
+        assert!(manager
+            .can_run_inference_now(&request, &mobile_config)
+            .expect("evaluation should not error on an unmeasured battery"));
+    }
+
+    /// Regression test for `PowerAwareScheduler::get_next_ready_inference`'s
+    /// previous `config: MobileConfig::default() // Would be optimized
+    /// config`, which discarded its `_config` parameter entirely and
+    /// scheduled the popped request against an unrelated default
+    /// configuration instead of the real one the caller passed in.
+    #[test]
+    fn test_get_next_inference_uses_the_real_caller_config_not_a_default() {
+        let device_info = MobileDeviceInfo::default();
+        let mut manager = ThermalPowerManager::new(ThermalPowerConfig::default(), &device_info)
+            .expect("manager creation should succeed");
+
+        // A config that differs from `MobileConfig::default()` in a field
+        // `get_next_ready_inference` copies verbatim, so a fallback to the
+        // default is directly observable.
+        let mut real_config = MobileConfig::default();
+        assert_ne!(
+            real_config.num_threads, 7,
+            "sanity: default must not already be 7"
         );
+        real_config.num_threads = 7;
+
+        manager.inference_scheduler.queue_request(InferenceRequest {
+            id: "queued-1".to_string(),
+            priority: InferencePriority::Normal,
+            estimated_duration_ms: 5,
+            power_budget_mw: None,
+            deadline: None,
+        });
+
+        let scheduled = manager
+            .get_next_inference(&real_config)
+            .expect("a request was queued, so one must come back");
         assert_eq!(
-            ThermalMonitor::temperature_to_state(80.0),
-            ThermalState::Critical
-        );
-        assert_eq!(
-            ThermalMonitor::temperature_to_state(90.0),
-            ThermalState::Emergency
+            scheduled.config.num_threads, 7,
+            "the scheduled inference must carry the real caller config, not \
+             MobileConfig::default()"
         );
     }
 }

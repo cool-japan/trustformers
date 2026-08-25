@@ -1,18 +1,14 @@
-use anyhow::Result;
 use chrono::{DateTime, Utc};
-use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, VecDeque},
-    sync::{atomic::AtomicBool, Arc},
+    collections::HashMap,
     time::{Duration, Instant},
 };
-use tokio::task::JoinHandle;
 
 // Import commonly used types from core
 use super::core::{
     AccuracyRecord, ComplexityLevel, IsolationLevel, MatchQualityMetrics, PriorityLevel,
-    SafeConcurrencyEstimator, StoredPattern, TestExecutionData,
+    StoredPattern,
 };
 
 // Import cross-module types
@@ -22,7 +18,7 @@ use super::network_io::AccessPattern;
 use super::performance::PatternAlgorithmResult;
 use super::quality::{SafetyConstraints, VersionControl};
 use super::reporting::RecommendationType;
-use super::resources::{ResourceConflict, ResourceConflictDetector, ResourceSharingCapabilities};
+use super::resources::{ResourceConflict, ResourceSharingCapabilities};
 
 // Re-export types moved to patterns_extended module for backward compatibility
 pub use super::patterns_extended::*;
@@ -710,107 +706,25 @@ impl Default for ConcurrencyRequirements {
     }
 }
 
-#[derive(Debug)]
-pub struct ConcurrencyRequirementsDetector {
-    /// Detector configuration
-    pub config: Arc<RwLock<ConcurrencyDetectorConfig>>,
-    /// Concurrency analysis algorithms
-    pub analyzers: Vec<Arc<dyn ConcurrencyAnalyzer + Send + Sync>>,
-    /// Safe concurrency estimator
-    pub estimator: Arc<SafeConcurrencyEstimator>,
-    /// Resource conflict detector
-    pub conflict_detector: Arc<ResourceConflictDetector>,
-    /// Sharing capability analyzer
-    pub sharing_analyzer: Arc<SharingCapabilityAnalyzer>,
-    /// Analysis cache
-    pub cache: Arc<Mutex<HashMap<String, ConcurrencyAnalysisResult>>>,
-    /// Detection history
-    pub history: Arc<Mutex<DetectionHistory>>,
-    /// Background analysis tasks
-    pub background_tasks: Vec<JoinHandle<()>>,
-    /// Shutdown signal
-    pub shutdown: Arc<AtomicBool>,
-}
-
-impl ConcurrencyRequirementsDetector {
-    /// Create a new ConcurrencyRequirementsDetector with the given configuration
-    pub async fn new(config: ConcurrencyDetectorConfig) -> Result<Self> {
-        Ok(Self {
-            config: Arc::new(RwLock::new(config)),
-            analyzers: Vec::new(),
-            estimator: Arc::new(SafeConcurrencyEstimator::default()),
-            conflict_detector: Arc::new(ResourceConflictDetector::default()),
-            sharing_analyzer: Arc::new(SharingCapabilityAnalyzer {
-                strategies: HashMap::new(),
-                current_strategy: String::from("default"),
-                patterns_database: Arc::new(RwLock::new(SharingPatternsDatabase::new())),
-                cache: Arc::new(Mutex::new(HashMap::new())),
-                performance_tracker: HashMap::new(),
-                config: HashMap::new(),
-                quality_thresholds: HashMap::new(),
-                history: VecDeque::new(),
-                validation_rules: Vec::new(),
-            }),
-            cache: Arc::new(Mutex::new(HashMap::new())),
-            history: Arc::new(Mutex::new(DetectionHistory {
-                detections: Vec::new(),
-                detection_accuracy: Vec::new(),
-                total_detections: 0,
-            })),
-            background_tasks: Vec::new(),
-            shutdown: Arc::new(AtomicBool::new(false)),
-        })
-    }
-
-    /// Detect concurrency requirements for a given test
-    pub async fn detect_concurrency_requirements(
-        &self,
-        test_data: &TestExecutionData,
-    ) -> Result<ConcurrencyRequirements> {
-        // Check cache first
-        let test_id = &test_data.test_id;
-        {
-            let cache = self.cache.lock();
-            if let Some(result) = cache.get(test_id) {
-                return Ok(result.requirements.clone());
-            }
-        }
-
-        // Build a basic concurrency analysis result
-        let analysis_result = ConcurrencyAnalysisResult {
-            test_id: test_id.clone(),
-            max_safe_concurrency: 1,
-            recommended_concurrency: 1,
-            resource_conflicts: Vec::new(),
-            lock_dependencies: Vec::new(),
-            sharing_capabilities: Vec::new(),
-            safety_constraints: SafetyConstraints::default(),
-            recommendations: Vec::new(),
-            confidence: 0.5,
-            performance_impact: 0.0,
-            timestamp: chrono::Utc::now(),
-            requirements: ConcurrencyRequirements::default(),
-            estimation_details: String::from("Default estimation"),
-            conflict_analysis: String::from("No conflicts detected"),
-            sharing_analysis: String::from("No sharing analysis performed"),
-            deadlock_analysis: String::from("No deadlock analysis performed"),
-            risk_assessment: String::from("Low risk"),
-            thread_analysis: String::from("Single thread recommended"),
-            lock_analysis: String::from("No locks detected"),
-            pattern_analysis: String::from("No patterns detected"),
-            safety_validation: String::from("Safe for single-threaded execution"),
-            analysis_duration: Duration::from_millis(1),
-        };
-
-        // Cache the result
-        {
-            let mut cache = self.cache.lock();
-            cache.insert(test_id.clone(), analysis_result.clone());
-        }
-
-        Ok(analysis_result.requirements)
-    }
-}
+// `ConcurrencyRequirementsDetector` was deleted from this module in 0.2.1. It
+// was a shadow of `concurrency_detector::ConcurrencyRequirementsDetector` --
+// same name, same `new(ConcurrencyDetectorConfig)` signature -- and because
+// `test_characterization::types::*` is glob re-exported alongside the real
+// module, `manager/component_manager.rs` was resolving the name to *this* one.
+//
+// That mattered: the real detector runs eight analyses over the test's recorded
+// data. This one ignored `test_data` apart from its id and returned a
+// `ConcurrencyAnalysisResult` it wrote by hand -- `max_safe_concurrency: 1`,
+// `confidence: 0.5`, `analysis_duration: 1ms`, and the strings "No conflicts
+// detected", "No sharing analysis performed", "No deadlock analysis performed",
+// "Low risk", "Single thread recommended", "No locks detected", "No patterns
+// detected", "Safe for single-threaded execution" -- then cached it under the
+// test id so the fabrication was returned again on every later call.
+// `manager/orchestrator.rs` fed those requirements into scheduling.
+//
+// The real detector is now imported by name in `component_manager.rs`; it
+// exposes `analyze_concurrency`, which returns the full result rather than just
+// the requirements.
 
 #[derive(Debug, Clone)]
 pub struct ConcurrencySafetyRule {
@@ -1078,13 +992,25 @@ pub struct PatternMatchState {
     pub state_confidence: f64,
 }
 
+/// Advice attached to a detected concurrency pattern.
+///
+/// ## Changed in 0.2.1
+///
+/// `expected_improvement` and `implementation_effort` used to be an
+/// unconditional `f64` and `String`. Their producer had no measurement to put
+/// in either -- the number came from a lookup table keyed on the pattern's
+/// name, the effort string from bucketing a hardcoded 0.5 -- so both are now
+/// `Option` and `None` means "not predicted", which is the honest answer until
+/// something actually runs a scaling experiment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternOptimizationRecommendation {
     pub pattern_type: String,
     pub optimization_type: String,
     pub description: String,
-    pub expected_improvement: f64,
-    pub implementation_effort: String,
+    /// Predicted improvement, or `None` when nothing measured one.
+    pub expected_improvement: Option<f64>,
+    /// Estimated implementation effort, or `None` when nothing assessed it.
+    pub implementation_effort: Option<String>,
     pub recommendations: Vec<String>,
 }
 

@@ -437,9 +437,16 @@ impl GpuLoadBalancer {
                     / device.total_memory_mb as f64;
                 memory_usage_ratio <= constraint.value
             },
-            GpuConstraintType::MaxUtilization => {
-                device.utilization_percent as f64 <= constraint.value
-            },
+            // 0.2.1: this compared `GpuDeviceInfo::utilization_percent`, a
+            // discovery-time 0.0 that nothing updates, so the constraint was
+            // satisfied by every device unconditionally. This selector has no
+            // live reading available at this point, so it cannot evaluate the
+            // limit at all -- and reporting an unverifiable limit as *met* is
+            // what made it useless. `GpuResourceManager::verify_device_requirements`
+            // does check it, against real telemetry.
+            GpuConstraintType::MaxUtilization => false,
+            // Likewise not checked here. `true` means "this selector does not
+            // evaluate this constraint", not "the device satisfies it".
             GpuConstraintType::MinPerformance => true,
             GpuConstraintType::PowerLimit => true,
             GpuConstraintType::TemperatureLimit => true,
@@ -455,14 +462,19 @@ impl GpuLoadBalancer {
         let selected = devices
             .values()
             .min_by(|a, b| {
+                // A device with no live load reading is *unknown*, not idle.
+                // 0.2.1: this fell back to `GpuDeviceInfo::utilization_percent`,
+                // which discovery fixes at 0.0 and never updates, so an
+                // unmonitored device always looked like the least loaded one
+                // and won every least-loaded selection.
                 let load_a = device_loads
                     .get(&a.device_id)
                     .map(|load| load.utilization)
-                    .unwrap_or(a.utilization_percent / 100.0);
+                    .unwrap_or(f32::INFINITY);
                 let load_b = device_loads
                     .get(&b.device_id)
                     .map(|load| load.utilization)
-                    .unwrap_or(b.utilization_percent / 100.0);
+                    .unwrap_or(f32::INFINITY);
                 load_a.partial_cmp(&load_b).unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|device| device.device_id);
@@ -518,10 +530,12 @@ impl GpuLoadBalancer {
         let mut best_score = f32::NEG_INFINITY;
         for device in devices.values() {
             let weight = device_weights.get(&device.device_id).copied().unwrap_or(1.0);
-            let load = device_loads
-                .get(&device.device_id)
-                .map(|load| load.utilization)
-                .unwrap_or(device.utilization_percent / 100.0);
+            // No live load reading means this device cannot be scored; skip it
+            // rather than scoring it as idle. See `GpuDeviceInfo::utilization_percent`.
+            let Some(load) = device_loads.get(&device.device_id).map(|load| load.utilization)
+            else {
+                continue;
+            };
             let score = weight * (1.0 - load);
             if score > best_score {
                 best_score = score;
@@ -553,10 +567,13 @@ impl GpuLoadBalancer {
         device_loads: &HashMap<usize, DeviceLoadInfo>,
     ) -> f32 {
         let base_score = device.total_memory_mb as f32 / 1000.0;
-        let load_penalty = device_loads
-            .get(&device.device_id)
-            .map(|load| load.utilization)
-            .unwrap_or(device.utilization_percent / 100.0);
+        // Without a live load reading the penalty is unknown. Charging the full
+        // penalty is the conservative choice: an unmonitored device must not
+        // out-score a measured, lightly-loaded one. See
+        // `GpuDeviceInfo::utilization_percent` for why the record's own figure
+        // is not a usable fallback.
+        let load_penalty =
+            device_loads.get(&device.device_id).map(|load| load.utilization).unwrap_or(1.0);
         base_score * (1.0 - load_penalty)
     }
     /// Select device using memory-optimized strategy
@@ -650,13 +667,23 @@ impl GpuLoadBalancer {
                 LoadBalancingStrategy::LeastLoaded => {
                     let device_loads = self.device_loads.read();
                     devices
-                        .iter()
-                        .map(|(id, device)| {
-                            let load = device_loads
-                                .get(id)
-                                .map(|load| load.utilization)
-                                .unwrap_or(device.utilization_percent / 100.0);
-                            (*id, 1.0 - load)
+                        .keys()
+                        .map(|id| {
+                            // 0.2.1: this fell back to `GpuDeviceInfo::utilization_percent`,
+                            // the same discovery-time 0.0 the dedicated `select_least_loaded`
+                            // was fixed to stop trusting -- an unmonitored device scored
+                            // `1.0 - 0.0 = 1.0` and beat every genuinely measured device in
+                            // the sum-then-max combination below. A missing reading now
+                            // contributes `-INFINITY`: added into any finite total from the
+                            // other strategies in this hybrid it still leaves the device
+                            // unelectable, so the invariant holds regardless of how many
+                            // other (possibly uniform) strategies are mixed in, unlike
+                            // simply omitting the device for this round would.
+                            let score = match device_loads.get(id).map(|load| load.utilization) {
+                                Some(load) => 1.0 - load,
+                                None => f32::NEG_INFINITY,
+                            };
+                            (*id, score)
                         })
                         .collect::<HashMap<_, _>>()
                 },

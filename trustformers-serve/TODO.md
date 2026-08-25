@@ -367,10 +367,12 @@ let tracing_config = TracingConfig {
 ```
 
 `src/distributed_tracing/` contains a *separate* exporter that does POST spans
-to Jaeger/Zipkin/OTLP endpoints. It was **not** audited in the 2026-08-24 pass
-(the module is owned elsewhere), so treat the "Integration with Jaeger/Zipkin"
-checkbox above as describing `distributed_tracing/`, not `tracing/`, and as
-unverified.
+to Jaeger/Zipkin/OTLP endpoints — treat the "Integration with Jaeger/Zipkin"
+checkbox above as describing `distributed_tracing/`, not `tracing/`. It was
+**not** audited in the 2026-08-24 pass (the module was owned elsewhere at the
+time); it was audited end-to-end in Wave 6 (2026-08-25) — see "`distributed_tracing/`
+audit (Wave 6)" below for the fabrications found and fixed, and for why two
+exporters genuinely exist rather than one.
 
 ---
 
@@ -660,6 +662,289 @@ now covered by a test that a `Default::default()` regression would fail):
 module at all) and `impl Clone for DeploymentManager` (replacing a private
 `clone_for_background` no caller could reach).
 
+**`resource_management/gpu_manager/**` audit (first pass over this tree)**
+
+The data path is genuinely real: `discover_gpu_devices` and
+`collect_device_metrics` shell out to `nvidia-smi` and return `Ok(None)` when it
+is unavailable or silent, so a host with no NVIDIA GPU gets an empty catalogue
+rather than an invented one, and `run_benchmark` already refused to synthesise a
+score (now covered by a regression test). One real fabrication was found and
+fixed:
+
+- `alert_system/types.rs:557` and `monitoring/types.rs:459` both computed GPU
+  memory usage as `memory_usage_mb / 24576.0` -- i.e. they assumed **every** GPU
+  has exactly 24 GiB of VRAM. On a 12 GiB card that halved the true percentage
+  and silenced genuine memory alerts; on an 80 GiB card it inflated it and would
+  fire false ones. `GpuRealTimeMetrics` now carries
+  `total_memory_mb: Option<u64>` (filled from what discovery read for that
+  device, threaded through the monitoring hand-off), and both consumers use the
+  new `memory_usage_percent()`, which returns `None` when the size is unknown so
+  the threshold is skipped rather than evaluated against a guess.
+
+A second, subtler one in the same tree: `GpuTelemetrySample`'s doc claimed
+"sensors the driver marks as unavailable are represented as `None` or `NaN`
+rather than as a plausible number", but only `fan_percent` was `Option`. The
+`nvidia-smi` parse fell back to `0` for `utilization_percent`, `memory_used_mb`
+and both clocks -- so an unreadable utilization sensor reported an **idle** GPU,
+the direction that hides a problem. `gpu_scheduler::update_gpu_memory_monitoring`
+wrote that `0` straight into its status table, `dynamic_gpu_allocation` passed it
+on as a real utilization, and the health check compared it against
+`utilization_threshold` and passed. (Temperature and power were already `NaN` on
+failure, which no comparison passes, so those two were safe.) Every field is now
+`Option`; the three consumers skip an absent reading instead of writing a zero,
+the health check raises "Utilization sensor is unavailable" as an explicit issue,
+and `collect_device_metrics` skips a sample it cannot represent honestly rather
+than publishing an "idle, empty" GPU into the monitoring stream.
+
+A third, with the widest blast radius: `GpuDeviceInfo::utilization_percent` is
+written as `0.0` by `discover_gpu_devices` and **never updated by anything**, yet
+five call sites used it as the *fallback* when a live load reading was missing.
+The effect was uniform and always permissive:
+
+- `load_balancer`'s least-loaded and weighted selectors scored an unmonitored
+  device as `0.0` load, i.e. perfectly idle, so it beat every measured device and
+  won the selection. Least-loaded now treats a missing reading as `INFINITY`
+  (never the least loaded), the weighted selector skips an unscoreable device,
+  and the memory-optimized scorer charges the full load penalty.
+- `GpuConstraintType::MaxUtilization` compared against that same `0.0` in both
+  `manager::verify_constraint` and `load_balancer`, so a `MaxUtilization`
+  constraint was satisfied by every device unconditionally — the limit an
+  operator set enforced nothing. `verify_constraint` now takes the live reading
+  (prefetched before the `parking_lot` guards, since `device_telemetry` is
+  async) and *fails* the constraint when the driver will not report utilization:
+  an unverifiable limit is not a met one. The `load_balancer` copy has no live
+  reading available at that point and now returns `false` rather than claiming
+  the constraint is met.
+- The health check's `performance_ok` fell back to it, so it was decided by a
+  constant; it now raises "Utilization sensor is unavailable" instead.
+
+`GpuConstraintType::MinPerformance`/`PowerLimit`/`TemperatureLimit` still return
+`true` unchecked; they are now commented as "this selector does not evaluate
+this constraint", not "the device satisfies it". `MinPerformance` genuinely
+cannot be evaluated: it needs a benchmark score, and `run_benchmark` correctly
+refuses to invent one.
+
+Two `gpu_manager` tests were themselves asserting against the fabrication and
+were rewritten: `test_health_check` asserted `performance_ok` on a synthetic
+device (true only because the check read the record constant), and
+`test_unhealthy_device_detection` set `device.utilization_percent = 99.0` and
+asserted the check noticed — proving nothing about a real device once the value
+stopped being read. Both now assert the real invariant: a device whose driver
+answers nothing cannot be certified healthy.
+
+The remaining `Ok(true)` returns in `manager.rs` (`assess_device_health`,
+`check_performance_requirements`) were checked and are real: each is the tail of
+a function that returns `Ok(false)` on a failed condition above it.
+
+**`gpu_manager/load_balancer` audit, continued (Wave 6)**
+
+The first pass above fixed `select_least_loaded`, `select_performance_based`
+(via `calculate_performance_score`) and `select_memory_optimized` (via
+`calculate_memory_score`) to stop trusting `GpuDeviceInfo::utilization_percent`
+as a fallback for a device with no live load reading. It missed that
+`select_hybrid` — reachable via `LoadBalancingStrategy::Hybrid` — carries its
+own, separate copy of the `LeastLoaded` scoring logic rather than calling
+`select_least_loaded`, and that copy still had the original bug verbatim: an
+unmonitored device scored `1.0 - 0.0 = 1.0` and, being added into the hybrid's
+per-strategy score sum, beat every genuinely measured device regardless of how
+many other strategies were mixed in. It now scores a missing reading as
+`f32::NEG_INFINITY` — added into any finite total from the hybrid's other
+strategies, this still leaves the device unelectable, unlike simply omitting
+it from that round's scoring would. The `PerformanceBased` and
+`MemoryOptimized` branches inside `select_hybrid` call the same
+`calculate_performance_score`/`calculate_memory_score` helpers the dedicated
+selectors use, so they inherited the first pass's fix automatically and needed
+no separate change; the catch-all branch for any other strategy assigns every
+device the same neutral `1.0`, which does not discriminate for or against an
+unmonitored device either. A new regression test
+(`test_hybrid_strategy_unmonitored_device_never_wins`) pins a device with no
+`update_device_load` call against one measured at 99% utilization and asserts
+the hybrid selector still prefers the measured, heavily-loaded device.
+
+**`resource_management/statistics.rs` audit (Wave 6)**
+
+`StatisticsCollector`'s analytics engine (`AnalyticsEngine` /
+`AnomalyDetector` / `PerformancePredictor` / `BottleneckAnalyzer` /
+`MetricsAggregator`) held real, growing histories of
+`SystemPerformanceSnapshot`/`ResourceUtilizationSnapshot` the whole time —
+every analysis method on top of them was simply ignoring the data and
+returning a constant instead:
+
+- `PerformancePredictor::predict` ignored its snapshots and returned
+  `predicted_value: 75.0`, `confidence_interval: (70.0, 80.0)`, `confidence:
+  0.85` for every metric, every horizon. It now fits ordinary least squares
+  over every finite recorded reading of the requested metric (elapsed seconds
+  since the first reading vs. value) and extrapolates to the requested
+  horizon; the confidence interval is the fit's residual-based prediction
+  interval (a fixed 1.96-sigma multiplier under a normal approximation, since
+  this module has no inverse-t implementation for a proper t-distribution
+  critical value); `confidence` is the fit's R², `0.0` — not a fabricated
+  "perfect fit" — when the recorded values have no variance to explain.
+  Refuses when the metric name is unrecognized, no snapshots exist, or fewer
+  than 2 finite readings of the metric exist.
+- `AnomalyDetector::detect_anomalies` and `BottleneckAnalyzer::analyze_bottlenecks`
+  both ignored their snapshots and returned `Ok(vec![])` unconditionally.
+  Anomaly detection now applies a three-sigma rule per known metric (mean and
+  sample standard deviation over every finite reading; a metric with fewer
+  than two finite readings, or zero variance, contributes no anomalies rather
+  than dividing by zero); bottleneck analysis now compares the latest
+  snapshot's utilization of each known resource against its configured
+  `BottleneckAnalysisConfig` threshold (a 0.85 default for a resource with no
+  dedicated entry), reporting one bottleneck per resource at or above
+  threshold, ranked by measured severity. Both refuse only when no snapshot
+  has ever been recorded.
+- `MetricsAggregator::aggregate_utilization_metrics` logged a message and did
+  nothing, called on the live `record_utilization` path — so
+  `get_aggregated_metrics` always returned an empty map. It now computes every
+  configured `AggregationMethod` (mean/median/min/max/std-dev/percentile/sum/
+  count) plus every configured percentile, over the most recent
+  `rolling_window_size` entries, for every series the recorded
+  `ResourceUtilizationSnapshot`s actually carry (each resource category's four
+  sub-metrics, the same per custom resource, and the six flat `SystemMetrics`
+  fields) — not an invented composite "overall utilization" figure.
+- `get_performance_statistics` published `efficiency_score: 0.85` as a
+  constant inside otherwise-real statistics. It is now the mean of each
+  snapshot's own measured `overall_efficiency` (itself a real average of
+  whichever subsystem occupancy signals had recorded activity, computed by
+  `ResourceManagementSystem::get_performance_snapshot` — not fabricated here).
+
+14 new tests lock these in, including refusal cases (empty history, single
+snapshot, unknown metric name) and positive cases (a near-perfect linear
+history yields R² > 0.99 and a prediction that continues the trend; a
+20-reading constant series plus one 99.0 outlier is flagged, a flat series is
+not; simultaneous CPU/memory threshold breaches are both reported and ranked
+by measured severity; aggregation over two recorded snapshots produces the
+correct mean/min/max).
+
+**`gpu_manager/health_monitor` audit, continued (Wave 6)**
+
+Two more fabrications in the same tree, both at device-health *birth* rather
+than during a live check:
+
+- `create_initial_health_status` used to construct a fully-healthy record
+  outright (`is_healthy: true`, `health_score: 1.0`, every `*_ok` flag `true`,
+  `current_temperature: 45.0`, `current_power: 150.0`,
+  `consecutive_healthy_checks: 1`) for a device that had never once been
+  probed — readable via `get_health_status` in the window between
+  `initialize_device_health` running and the background health-check loop's
+  first real tick. It now reports the same shape
+  `perform_comprehensive_health_check` reports for a driver that answered
+  nothing: `is_healthy: false`, `f32::NAN` for the three sensor readings (not
+  a plausible number), `consecutive_healthy_checks: 0`, and an `issues` list
+  naming each sensor as unread. Memory and hardware status are the exception —
+  those come from the device record itself (capacity/availability, reported
+  status), which really is known at discovery time, so they are computed for
+  real here exactly as the live check computes them, not marked unknown.
+  `create_initial_analytics` no longer seeds `health_history` with one
+  fabricated `(now, 1.0)` sample either — an empty history correctly reports
+  `HealthTrend::Unknown` with zero confidence until a real check contributes
+  the first point. Downstream: `allocate_gpu_devices`/`check_availability`
+  already refuse a device with `is_healthy: false`, so a device now waits for
+  its first real probe before it can be allocated — the honest reading of "we
+  do not yet know" rather than "assumed fine". No other consumer reads these
+  fields (`GpuHealthStatus`/`GpuHealthAnalytics` are not re-exported past
+  `gpu_manager`).
+- `compute_trend_analysis`'s `confidence` used to be a declared ladder keyed
+  only on how many samples the history held (20+ → 0.9, 10+ → 0.7, 5+ → 0.5,
+  else 0.2) — the previous pass through this file only documented that as a
+  known limitation rather than fixing it. It is now the least-squares fit's
+  own coefficient of determination (R², computed in `update_analytics_metrics`
+  alongside the slope it already fit): how much of the health score's variance
+  the linear trend actually explains, `0.0` before there are two samples or
+  when the history has no variance to explain (a frozen, always-identical
+  reading no longer manufactures a high-confidence trend).
+
+**`distributed_tracing/` audit (Wave 6) — the second Jaeger/Zipkin/OTLP exporter**
+
+`src/distributed_tracing/` and `src/tracing/` are not accidental duplicates:
+`tracing/` (via `tracing::legacy::export_traces`) only ever serializes spans
+to a byte buffer for a "Load JSON File" UI flow or manual inspection — it has
+no HTTP client anywhere in it, and its own `export_endpoint` field doc already
+says "for future export use". `distributed_tracing/`'s `TracingManager` is the
+only module in this crate that actually POSTs spans to a live Jaeger, Zipkin
+or OTLP collector, on a background batching loop. Given that, the right move
+is not a merge but auditing this exporter to the standard the advisories pass
+applied to `tracing/`, and sharing types where they genuinely are the same
+shape rather than re-deriving them — done below. Real fabrications and bugs
+found and fixed:
+
+- `SamplingStrategy::Adaptive`'s `should_sample` branch read `let current_load
+  = 0.5;` — a hardcoded constant, so for any given config the branch sampled
+  at exactly `min_rate` or exactly `max_rate` and never actually adapted to
+  load the way the variant's name and doc promise. `sysinfo` is already a
+  workspace dependency (see `resource_management::manager`'s identical
+  CPU-usage pattern); a cached `System` instance (`CpuLoadMonitor`, refreshed
+  at most once per 500ms — `should_sample` runs on every span start, and
+  `sysinfo` itself documents that refreshing more often makes readings less
+  accurate) now backs it with a real reading.
+- `convert_to_jaeger_format`'s `tags` and `process.tags` serialized
+  `span.attributes` (a `HashMap<String, String>`) directly, producing a flat
+  JSON object. Jaeger's real `model.KeyValue` tag is `{key, type, value}` — an
+  object keyed by attribute name is not a list of those, and a reader
+  expecting the documented shape could not parse it as tags at all. This now
+  builds `tracing::legacy::export::JaegerTag`, the already-audited type for
+  the exact same shape, rather than a second, differently-wrong one.
+- `convert_to_otlp_format` nested spans under
+  `instrumentationLibrarySpans`/`instrumentationLibrary` — the pre-1.0 OTLP
+  field names, renamed to `scopeSpans`/`scope` when OTLP went stable; a
+  current collector does not recognize the old names (see
+  `tracing::legacy::export`'s `OtlpScopeSpans`/`OtlpScope`, which already use
+  the current ones). `startTimeUnixNano`/`endTimeUnixNano` were plain JSON
+  numbers; OTLP/JSON represents protobuf `fixed64` fields as strings
+  precisely so a 64-bit nanosecond timestamp survives a round-trip through a
+  language whose numbers are `f64`-precision, which these otherwise would not.
+  Separately, `resourceSpans[].resource.attributes` never carried
+  `service.name` at all — the one resource attribute OTLP semantic
+  conventions require to identify which service emitted a trace (compare
+  `tracing::legacy::export::OpenTelemetryExport::from_spans`, which already
+  sets it) — every export from this function reported spans attributable to
+  no service. It is now always the first resource attribute.
+- Both the Jaeger and OTLP converters defaulted a root span's
+  `parentSpanID`/`parentSpanId` to `""` via `unwrap_or_default()`; a reader
+  cannot distinguish an empty-string parent from no parent. Both now emit
+  `null` for a root span, like the Zipkin converter already did.
+- `export_to_jaeger` accepted `username`/`password` from
+  `TracingBackend::Jaeger` all the way down to this function and then
+  silently discarded them (`_username`, `_password`): a caller who configured
+  credentials for an authenticated collector got unauthenticated requests,
+  reported back only as a generic export failure with no indication the
+  credentials were never sent. Now applied via HTTP Basic auth when a
+  username is present.
+- Both `export_loop` (on a failed batch) and `flush` (on any failure) used to
+  clear the queue and *then* attempt the export, so a failed export lost the
+  spans for good — fire-and-forget in the literal sense. Both now put the
+  spans back at the front of the queue (bounded by `max_span_queue_size`,
+  like any other queued span — not a separately backed-off indefinite retry)
+  before propagating the error, so the next tick, or a caller that retries,
+  can still recover them. `shutdown()` calls `flush()`, so a failure right at
+  shutdown no longer silently discards whatever was still queued. A
+  successful `flush()` now also counts toward `TracingStats::spans_exported`,
+  which previously only `export_loop` updated.
+
+Checked and already correct: `convert_to_zipkin_format`'s flat `"tags":
+span.attributes` *is* the real Zipkin v2 tag shape (unlike Jaeger's), and its
+`annotations`/`localEndpoint`/`kind` mapping matches the spec. The OTLP
+per-attribute `{key, value: {stringValue}}` shape and the numeric
+`SpanKind` → OTLP-kind mapping (`Internal=1 .. Consumer=5`) were both already
+correct. `src/distributed_tracing/**` otherwise still logs via the `log`
+facade crate rather than `tracing` (e.g. `use log::{debug, error, info,
+warn};` at the top of `types.rs`) — noted here rather than changed, since a
+facade migration across the whole subtree is a larger, separate change than
+this audit's scope and is not itself a fabrication.
+
+Named honestly rather than fixed, for the same reason (real but out of this
+audit's scope): `export_loop`'s and `flush()`'s requeue fixes above each make
+their *own* call to `export_spans` safe against loss, but the two are not
+mutually exclusive — `flush()` can run concurrently with the background
+loop's own tick (nothing serializes them), so in the narrow window where both
+observe a non-empty queue at the same instant, the queue could in principle
+be drained by one path while the other is mid-retry. Nothing in this crate
+calls `flush()` from a second task today (only `shutdown()`, itself an
+explicit one-shot call site), so the race is not reachable on any real path
+found in this audit — worth a `Mutex`-guarded single "is a
+drain-and-export in flight" flag if a genuinely concurrent caller of
+`flush()` is ever added.
+
 **Left honest but still inert, for a later pass**
 
 - `test_cicd_integration/manager.rs`: `ReportingIntegration::report_results`,
@@ -674,12 +959,18 @@ module at all) and `impl Clone for DeploymentManager` (replacing a private
 - `ReportScheduler` records schedules that nothing fires: there is no cron
   evaluator or timer in this crate.
 
-**Not in scope for this pass** — `src/distributed_tracing/types.rs` greps
-positive for `jaeger` and is owned elsewhere; its second, independent
-Jaeger/Zipkin/OTLP exporter has not been audited. `trustformers-serve/Cargo.toml`
-lines 261-274 explain the removal of the `paste` dependency by pointing at the
-`optimized_test_with_progress!` macro this pass deleted; that comment is now
-stale, and the manifest was outside this package's ownership.
+**Resolved in Wave 6** (was "Not in scope for this pass" here) — both items
+below were flagged by this pass as out of its ownership and have since been
+closed by the package that owns them:
+
+- `src/distributed_tracing/types.rs`'s second, independent Jaeger/Zipkin/OTLP
+  exporter has now been audited end-to-end; see "`distributed_tracing/` audit
+  (Wave 6)" above.
+- `trustformers-serve/Cargo.toml` lines 261-274's comment justifying the
+  `paste` dev-dependency removal, which pointed at the
+  `optimized_test_with_progress!` macro this pass deleted, has been updated to
+  say the macro is gone rather than describe it as a still-present
+  never-expanded trap.
 
 ---
 

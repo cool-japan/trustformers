@@ -142,13 +142,13 @@ mod tests {
 
         fn get_accuracy(&self) -> ModelAccuracyMetrics {
             ModelAccuracyMetrics {
-                overall_accuracy: 0.85,
+                overall_accuracy: Some(0.85),
                 r_squared: 0.82,
                 mean_absolute_error: 0.05,
                 root_mean_squared_error: 0.07,
                 cross_validation_scores: vec![0.84, 0.86, 0.85],
-                confidence_interval: (0.80, 0.90),
-                prediction_stability: 0.9,
+                mean_absolute_error_interval: Some((0.04, 0.06)),
+                prediction_stability: Some(0.9),
                 last_validated: Utc::now(),
             }
         }
@@ -387,6 +387,75 @@ mod tests {
         assert!(
             result.is_ok(),
             "best model strategy must succeed with one prediction"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache-key coverage (0.2.1 honesty regression)
+    // -----------------------------------------------------------------------
+
+    fn request_with_intensity(io_intensity: f32, network_intensity: f32) -> PredictionRequest {
+        use crate::performance_optimizer::types::{SystemState, TestCharacteristics};
+        let mut characteristics = TestCharacteristics::default();
+        characteristics.resource_intensity.io_intensity = io_intensity;
+        characteristics.resource_intensity.network_intensity = network_intensity;
+        PredictionRequest {
+            parallelism_levels: vec![4],
+            test_characteristics: characteristics,
+            system_state: SystemState::default(),
+            prediction_horizon: None,
+            confidence_level: 0.95,
+            include_uncertainty: false,
+        }
+    }
+
+    /// Regression: the cache key covered neither `io_intensity` nor
+    /// `network_intensity`, both of which the linear model reads, so two
+    /// requests differing only in those fields collided and the second was
+    /// served the first's prediction.
+    #[test]
+    fn cache_keys_separate_requests_the_models_can_tell_apart() {
+        let engine = PredictionEngine::new(PredictionEngineConfig::default());
+        let base = engine.cache_key_for_test(&request_with_intensity(0.1, 0.1));
+        let other_io = engine.cache_key_for_test(&request_with_intensity(0.9, 0.1));
+        let other_network = engine.cache_key_for_test(&request_with_intensity(0.1, 0.9));
+
+        assert_ne!(base, other_io, "I/O intensity must reach the cache key");
+        assert_ne!(
+            base, other_network,
+            "network intensity must reach the cache key"
+        );
+        assert_eq!(
+            base,
+            engine.cache_key_for_test(&request_with_intensity(0.1, 0.1)),
+            "the same request must keep the same key"
+        );
+    }
+
+    /// Regression: `optimal_parallelism` found the highest-throughput
+    /// prediction, discarded it (`.map(|_| 4)`) and reported the constant `4`
+    /// for every batch, whatever levels the batch covered.
+    #[test]
+    fn optimal_parallelism_is_the_level_that_predicted_best() {
+        let engine = PredictionEngine::new(PredictionEngineConfig::default());
+        let predictions = vec![make_prediction(10.0, 0.8), make_prediction(90.0, 0.8)];
+
+        let statistics = engine.batch_statistics_for_test(&predictions, &[2, 16]);
+        assert_eq!(
+            statistics.optimal_parallelism, 16,
+            "the second prediction is nine times higher, so its level wins"
+        );
+
+        // Reverse which level predicted best; the answer must follow the data.
+        let reversed = vec![make_prediction(90.0, 0.8), make_prediction(10.0, 0.8)];
+        let reversed_statistics = engine.batch_statistics_for_test(&reversed, &[2, 16]);
+        assert_eq!(
+            reversed_statistics.optimal_parallelism, 2,
+            "the optimum must track the throughputs, not the position"
+        );
+        assert_ne!(
+            reversed_statistics.optimal_parallelism, 4,
+            "the old code reported 4 regardless of the batch"
         );
     }
 }

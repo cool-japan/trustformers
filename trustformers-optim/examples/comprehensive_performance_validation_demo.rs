@@ -240,7 +240,14 @@ fn demo_advanced_statistical_analysis() -> Result<()> {
                     stats.confidence_interval_lower.as_secs_f64() * 1000.0,
                     stats.confidence_interval_upper.as_secs_f64() * 1000.0
                 );
-                println!("         P-value: {:.4}", stats.p_value);
+                match stats.p_value {
+                    Some(p) => println!("         P-value: {:.4}", p),
+                    // No baseline was set for this optimizer, so there is no
+                    // null hypothesis for the one-sample t-test to test
+                    // against -- printing a fabricated number here would be
+                    // exactly the bug this field's type was fixed to prevent.
+                    None => println!("         P-value: n/a (no baseline configured)"),
+                }
 
                 // Performance classification
                 let cv = stats.std_dev.as_secs_f64() / stats.mean.as_secs_f64();

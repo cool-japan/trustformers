@@ -835,6 +835,15 @@ impl InferenceSession {
         Ok(())
     }
 
+    /// The real, loaded model handle, if any — `None` before `load_model`
+    /// succeeds. `pub(crate)` so other in-crate managers that hold an
+    /// `InferenceSession` (e.g. `multi_model_manager::warmup_model`) can
+    /// run a genuine forward pass over it instead of reaching through the
+    /// private `model` field directly.
+    pub(crate) fn loaded_model(&self) -> Option<&model::WasmModel> {
+        self.model.as_ref()
+    }
+
     pub fn predict(&mut self, input: &tensor::WasmTensor) -> Result<tensor::WasmTensor, JsValue> {
         use crate::error::{ErrorBuilder, ErrorCode};
 

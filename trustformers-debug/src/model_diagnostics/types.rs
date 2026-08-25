@@ -130,8 +130,24 @@ pub enum OverfittingIndicator {
     ValidationLossIncreasing { duration_steps: usize },
     /// High variance in validation metrics
     HighVarianceInValidation,
-    /// Perfect training accuracy achieved
-    PerfectTrainingAccuracy,
+    /// Perfect (or near-perfect) training accuracy achieved.
+    ///
+    /// Requires a real [`ModelPerformanceMetrics::accuracy`] reading; it is
+    /// never inferred from the loss (see [`Self::NearZeroTrainingLoss`]).
+    PerfectTrainingAccuracy { accuracy: f64 },
+    /// Training loss has collapsed to ~0.
+    ///
+    /// A classic overfitting signal, but distinct from
+    /// [`Self::PerfectTrainingAccuracy`]: a small loss is not an accuracy
+    /// measurement, and this crate's metrics carry no validation split against
+    /// which to confirm overfitting.
+    NearZeroTrainingLoss { loss: f64 },
+    /// High variance in the *training* loss over the recent window.
+    ///
+    /// Named for training deliberately: [`ModelPerformanceMetrics`] has no
+    /// validation fields, so [`Self::HighVarianceInValidation`] can only be
+    /// raised by a caller that really has validation data.
+    HighVarianceInTrainingLoss { variance: f64 },
 }
 
 /// Underfitting indicators that can be detected.

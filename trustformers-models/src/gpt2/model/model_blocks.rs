@@ -16,6 +16,45 @@ use super::model_core::{transpose_tensor, LayerCache};
 use super::model_ops::ActivationType;
 use crate::gpt2::config::Gpt2Config;
 
+/// How many times [`Gpt2Attention::forward_with_cache`] has entered its Metal
+/// GPU-resident attention fast path in this process.
+///
+/// The fast path is entered only when the fused QKV projection actually produced a
+/// `Tensor::Metal` — i.e. when `weights_to_gpu` really moved this attention block's
+/// weights onto the GPU. A model merely *constructed* with `Device::Metal` still
+/// computes on the CPU, so "the model says Metal" and "GPU attention ran" are
+/// different claims; this counter is the only way to assert the second one, and the
+/// Metal-named tests use it so they cannot silently pass on CPU arithmetic.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+static METAL_ATTENTION_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// How many times GPT-2's Metal GPU-resident attention fast path has run in this
+/// process (monotonic, process-wide, never reset).
+///
+/// Take a reading before and after a forward pass to check whether the GPU path was
+/// actually taken: a non-zero delta proves the fused QKV projection produced a
+/// GPU-resident tensor, which only happens after a successful
+/// [`Gpt2LMHeadModel::weights_to_gpu`](super::Gpt2LMHeadModel::weights_to_gpu).
+/// Constructing a model with `Device::Metal(0)` alone does *not* move the weights and
+/// leaves every block computing on the CPU, so this counter is the difference between
+/// "configured for Metal" and "ran on Metal".
+///
+/// ```no_run
+/// # #[cfg(all(target_os = "macos", feature = "metal"))]
+/// # fn demo(model: &trustformers_models::gpt2::model::Gpt2LMHeadModel) -> Result<(), Box<dyn std::error::Error>> {
+/// use trustformers_models::gpt2::model::metal_attention_call_count;
+/// let before = metal_attention_call_count();
+/// let _ = model.generate_greedy(vec![1, 2, 3], 4)?;
+/// assert!(metal_attention_call_count() > before, "GPU attention never ran");
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub fn metal_attention_call_count() -> usize {
+    METAL_ATTENTION_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Clone)]
 pub(crate) struct Gpt2Block {
     ln_1: LayerNorm,
@@ -187,6 +226,125 @@ impl Gpt2Block {
 
         Ok(hidden_states)
     }
+}
+
+/// Rewrite a layer's GPU-resident Metal KV cache into the host layout, in place.
+///
+/// The Metal fast path stores K/V heads-major as `[batch, n_head, kv_seq_len,
+/// head_dim]`; the host path stores them as `[batch, kv_seq_len, n_head * head_dim]`
+/// and only merges `Tensor::F32`. Whenever the fast path declines a call it must
+/// convert first, otherwise the host path sees `cache.key = Some(Tensor::Metal(..))`,
+/// fails to match its `Tensor::F32` arm, and silently restarts the sequence from an
+/// empty cache - dropping the whole conversation history with no error at all.
+///
+/// The download goes through `MetalBackend::download_buffer_to_vec`, which flushes the
+/// command queue first. An empty or already-host cache is left untouched.
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn resident_cache_to_host(cache: &mut LayerCache, n_head: usize, d_head: usize) -> Result<()> {
+    use trustformers_core::gpu_ops::metal::get_metal_backend;
+
+    for (label, slot) in [("key", &mut cache.key), ("value", &mut cache.value)] {
+        let Some(Tensor::Metal(resident)) = slot.as_ref() else {
+            continue;
+        };
+        let shape = resident.shape.clone();
+        if shape.len() != 4 || shape[1] != n_head || shape[3] != d_head {
+            return Err(TrustformersError::shape_error(format!(
+                "GPU-resident KV cache {label} has shape {shape:?}, which is not the \
+                 [batch, {n_head}, kv_seq_len, {d_head}] layout the Metal attention \
+                 path writes; refusing to reinterpret it"
+            )));
+        }
+        let (batch, kv_seq_len) = (shape[0], shape[2]);
+        let hidden_size = n_head * d_head;
+        let backend = get_metal_backend()?;
+        let resident_values = backend.download_buffer_to_vec(&resident.buffer_id())?;
+        let expected = batch * n_head * kv_seq_len * d_head;
+        if resident_values.len() < expected {
+            return Err(TrustformersError::shape_error(format!(
+                "GPU-resident KV cache {label} holds {} floats but its shape {shape:?} \
+                 declares {expected}",
+                resident_values.len()
+            )));
+        }
+
+        // [batch, n_head, kv_seq_len, head_dim] -> [batch, kv_seq_len, n_head * head_dim]
+        let mut host_values = vec![0.0_f32; batch * kv_seq_len * hidden_size];
+        for b in 0..batch {
+            for head in 0..n_head {
+                for position in 0..kv_seq_len {
+                    let source = ((b * n_head + head) * kv_seq_len + position) * d_head;
+                    let target = (b * kv_seq_len + position) * hidden_size + head * d_head;
+                    host_values[target..target + d_head]
+                        .copy_from_slice(&resident_values[source..source + d_head]);
+                }
+            }
+        }
+
+        let host = ArrayD::from_shape_vec(IxDyn(&[batch, kv_seq_len, hidden_size]), host_values)
+            .map_err(|e| {
+                TrustformersError::shape_error(format!(
+                    "failed to rebuild the host KV cache {label}: {e}"
+                ))
+            })?;
+        *slot = Some(Tensor::F32(host));
+    }
+    Ok(())
+}
+
+/// Widen a `[.., q_seq_len, q_seq_len]` additive attention mask to
+/// `[1, 1, q_seq_len, kv_seq_len]` for a KV-cache continuation.
+///
+/// `Gpt2Model::forward_internal` builds its causal mask from the *new* tokens only
+/// (`create_causal_mask(seq_len)`), so when a cache already holds `kv_seq_len -
+/// q_seq_len` earlier positions the mask covers just the trailing square block of the
+/// score matrix. Every cached column is unconditionally visible to every new row - the
+/// cached positions all precede them - so the widened mask is zero there and copies
+/// the supplied block into the trailing columns. For `q_seq_len == 1` (ordinary
+/// single-token decode) that is a `[1, kv_seq_len]` row of zeros, which is why the
+/// missing widening only ever showed up on multi-token continuations.
+///
+/// Returns a structured error instead of the `ndarray` broadcast panic when the mask
+/// has a shape this rule cannot interpret.
+fn widen_cached_attention_mask(
+    mask: &ArrayD<f32>,
+    q_seq_len: usize,
+    kv_seq_len: usize,
+) -> Result<ArrayD<f32>> {
+    let shape = mask.shape();
+    let rank = shape.len();
+    let describe = || {
+        format!(
+            "attention mask of shape {shape:?} cannot be applied to attention scores \
+             of shape [.., {q_seq_len}, {kv_seq_len}]"
+        )
+    };
+    if rank < 2 || kv_seq_len < q_seq_len {
+        return Err(TrustformersError::shape_error(describe()));
+    }
+    let (mask_rows, mask_cols) = (shape[rank - 2], shape[rank - 1]);
+    // Only the "mask describes the new tokens alone" case is reconstructible.
+    if mask_rows != q_seq_len || mask_cols != q_seq_len {
+        return Err(TrustformersError::shape_error(describe()));
+    }
+    // Leading axes must be broadcastable singletons; a genuinely per-batch or
+    // per-head mask carries information this widening would silently discard.
+    if shape[..rank - 2].iter().any(|axis| *axis != 1) {
+        return Err(TrustformersError::shape_error(format!(
+            "{}; per-batch or per-head masks must already be {kv_seq_len} wide",
+            describe()
+        )));
+    }
+
+    let flat: Vec<f32> = mask.iter().copied().collect();
+    let cached = kv_seq_len - q_seq_len;
+    let mut widened = ArrayD::<f32>::zeros(IxDyn(&[1, 1, q_seq_len, kv_seq_len]));
+    for row in 0..q_seq_len {
+        for col in 0..q_seq_len {
+            widened[[0, 0, row, cached + col]] = flat[row * q_seq_len + col];
+        }
+    }
+    Ok(widened)
 }
 
 /// GPT-2 attention module
@@ -656,6 +814,22 @@ impl Gpt2Attention {
         self.forward_with_cache(hidden_states, attention_mask, None)
     }
 
+    /// Multi-head self-attention, optionally extending a KV cache.
+    ///
+    /// # `attention_mask` and the GPU fast paths
+    ///
+    /// The host path adds `attention_mask` to the raw scores and then softmaxes over
+    /// the whole key axis, so masking there is entirely the caller's mask (with no
+    /// mask at all it is bidirectional). The Metal and CUDA resident paths instead
+    /// bake causal masking into their kernels and **ignore `attention_mask`**.
+    ///
+    /// Those agree for the only mask GPT-2's own driver supplies -
+    /// [`Gpt2Model::forward_internal`](super::model_core::Gpt2Model) always passes
+    /// `create_causal_mask(seq_len)` - and that equivalence is what
+    /// `gpt2::metal_tests` pins CPU-against-GPU. They do *not* agree for a padding
+    /// mask, or for `None`; a caller that needs either must stay on the host path
+    /// (a model whose weights were never moved with `weights_to_gpu`). This is the
+    /// same documented limitation the CUDA resident path carries.
     fn forward_with_cache(
         &self,
         hidden_states: Tensor,
@@ -685,144 +859,257 @@ impl Gpt2Attention {
         // Project to Q, K, V using the combined projection
         let qkv = self.c_attn.forward(hidden_states)?;
 
+        // Metal fast-path admission control.
+        //
+        // The GPU-resident chain below is exact for every query shape GPT-2 produces:
+        //
+        //   * full prefill - empty cache, `q_seq_len == kv_seq_len`, served by the
+        //     causal fused kernel;
+        //   * single-token decode - `q_seq_len == 1` against a resident cache, served
+        //     by the generation fused kernel (with one query row there is no future
+        //     position inside the block, so its lack of a mask is harmless); and
+        //   * multi-token continuation against a warm cache
+        //     (`1 < q_seq_len < kv_seq_len`), served by the offset-masked kernel
+        //     `batched_scaled_matmul_softmax_gen_causal`.
+        //
+        // That last shape used to be excluded here. `MetalBackend::attention_with_
+        // cache_gpu_to_gpu` routed it to the *unmasked* generation kernel, so every
+        // query row in the chunk also attended to the later rows of its own chunk:
+        // measured on (q_seq 3, kv_seq 5) as an exact match to a non-causal reference
+        // and ~32% of signal magnitude away from the causal one. The shader library
+        // now carries a causal-with-offset variant and the composition selects it, so
+        // the exclusion is gone; `metal_multi_token_cache_continuation_matches_
+        // uncached_forward` asserts the chunk really runs on the GPU and stays causal.
+        //
+        // The two remaining exclusions are structural, not numeric: `reshape_to_heads_
+        // gpu` and `reshape_from_heads_gpu` address a single batch element, and the
+        // host path can only merge a host-format cache.
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        let mut layer_cache = layer_cache;
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        let metal_fast_path = if matches!(&qkv, Tensor::Metal(_)) {
+            let resident_kv_len =
+                layer_cache.as_deref().map_or(0, |cache| match (&cache.key, &cache.value) {
+                    (Some(Tensor::Metal(k)), Some(Tensor::Metal(_))) if k.shape.len() == 4 => {
+                        k.shape[2]
+                    },
+                    _ => 0,
+                });
+            let host_cache_present = layer_cache.as_deref().is_some_and(
+                |cache| matches!(&cache.key, Some(t) if !matches!(t, Tensor::Metal(_))),
+            );
+            let admitted = batch_size == 1 && !host_cache_present;
+            if !admitted {
+                // Hand any GPU-resident cache back to the host in the layout the
+                // fallback path merges, so declining never silently drops history.
+                if let Some(cache) = layer_cache.as_deref_mut() {
+                    resident_cache_to_host(cache, self.n_head, self.d_head)?;
+                }
+                tracing::debug!(
+                    batch_size,
+                    seq_len,
+                    resident_kv_len,
+                    host_cache_present,
+                    "gpt2: metal attention fast path declined, using the host path"
+                );
+            }
+            admitted
+        } else {
+            false
+        };
+
         // GPU attention path with GPU-aware KV-cache (ZERO CPU transfers!)
         #[cfg(all(target_os = "macos", feature = "metal"))]
-        if let Tensor::Metal(qkv_data) = &qkv {
+        if let (true, Tensor::Metal(qkv_data)) = (metal_fast_path, &qkv) {
             use trustformers_core::gpu_ops::metal::get_metal_backend;
             use trustformers_core::tensor::MetalTensorData;
 
+            METAL_ATTENTION_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::trace!(
+                batch_size,
+                seq_len,
+                hidden_size,
+                n_head = self.n_head,
+                d_head = self.d_head,
+                "gpt2: metal GPU-resident attention fast path"
+            );
+
             let backend = get_metal_backend()?;
 
-            // Split QKV on GPU: [batch, seq, 3*hidden] → 3x [batch, seq, hidden]
-            let (q_id, k_new_id, v_new_id) =
-                backend.split_qkv_gpu(&qkv_data.buffer_id(), batch_size, seq_len, hidden_size)?;
+            // Dead intermediates, freed on EVERY exit path (including a mid-pipeline
+            // error). Without this the fast path parked seven `MTLBuffer`s in the
+            // process-global buffer cache per layer per forward, for the life of the
+            // process. An id leaves this list exactly when something adopts it: the
+            // KV cache and the output tensor take reference-counted
+            // `MetalBufferHandle`s, and `release_buffers` is refcount-blind
+            // (`BufferCache::remove`), so releasing an adopted id would free a buffer
+            // a live tensor still points at.
+            let mut scratch: Vec<trustformers_core::gpu_ops::metal::BufferId> =
+                Vec::with_capacity(8);
+            let result = (|| -> Result<Tensor> {
+                // Split QKV on GPU: [batch, seq, 3*hidden] → 3x [batch, seq, hidden]
+                let (q_id, k_new_id, v_new_id) = backend.split_qkv_gpu(
+                    &qkv_data.buffer_id(),
+                    batch_size,
+                    seq_len,
+                    hidden_size,
+                )?;
+                scratch.extend_from_slice(&[q_id, k_new_id, v_new_id]);
 
-            // Get cached K/V buffer IDs and sequence length (if cache exists).
-            // Owned `BufferId`s (not references): they must outlive this
-            // statement to reach `concat_kv_cache` below, and `BufferId` is
-            // `Copy`, so there is no reason to borrow from the cache tensors.
-            let (cached_k_id, cached_v_id, cached_seq_len) = if let Some(cache) = &layer_cache {
-                match (&cache.key, &cache.value) {
-                    (Some(Tensor::Metal(k_metal)), Some(Tensor::Metal(v_metal))) => {
-                        let cached_shape = &k_metal.shape; // [batch, num_heads, cached_seq, head_dim]
-                        let cached_seq = cached_shape[2];
-                        (
-                            Some(k_metal.buffer_id()),
-                            Some(v_metal.buffer_id()),
-                            cached_seq,
-                        )
-                    },
-                    // First token of a sequence: the cache holds nothing yet.
-                    _ => (None, None, 0),
+                // Get cached K/V buffer IDs and sequence length (if cache exists).
+                // Owned `BufferId`s (not references): they must outlive this
+                // statement to reach `concat_kv_cache` below, and `BufferId` is
+                // `Copy`, so there is no reason to borrow from the cache tensors.
+                let (cached_k_id, cached_v_id, cached_seq_len) = if let Some(cache) = &layer_cache {
+                    match (&cache.key, &cache.value) {
+                        (Some(Tensor::Metal(k_metal)), Some(Tensor::Metal(v_metal))) => {
+                            // [batch, num_heads, cached_seq, head_dim]
+                            let cached_shape = &k_metal.shape;
+                            let cached_seq = cached_shape[2];
+                            (
+                                Some(k_metal.buffer_id()),
+                                Some(v_metal.buffer_id()),
+                                cached_seq,
+                            )
+                        },
+                        // First token of a sequence: the cache holds nothing yet.
+                        _ => (None, None, 0),
+                    }
+                } else {
+                    // This layer has no cache slot, so there is nothing to extend.
+                    (None, None, 0)
+                };
+
+                // Reshape Q, K_new, V_new to multi-head format
+                // [batch, seq, hidden] → [batch, num_heads, seq, head_dim]
+                let q_heads_id =
+                    backend.reshape_to_heads_gpu(&q_id, seq_len, self.n_head, self.d_head)?;
+                scratch.push(q_heads_id);
+                let k_new_heads_id =
+                    backend.reshape_to_heads_gpu(&k_new_id, seq_len, self.n_head, self.d_head)?;
+                scratch.push(k_new_heads_id);
+                let v_new_heads_id =
+                    backend.reshape_to_heads_gpu(&v_new_id, seq_len, self.n_head, self.d_head)?;
+                scratch.push(v_new_heads_id);
+
+                // Concatenate with cached K/V on GPU (stays on GPU!)
+                let k_heads_id = backend.concat_kv_cache(
+                    cached_k_id.as_ref(),
+                    &k_new_heads_id,
+                    batch_size,
+                    self.n_head,
+                    cached_seq_len,
+                    seq_len, // new_seq_len
+                    self.d_head,
+                )?;
+                // With an empty cache `concat_kv_cache` has nothing to concatenate and
+                // hands the *same* id straight back, so guard against queueing it twice.
+                if k_heads_id != k_new_heads_id {
+                    scratch.push(k_heads_id);
                 }
-            } else {
-                // This layer has no cache slot, so there is nothing to extend.
-                (None, None, 0)
-            };
 
-            // Reshape Q, K_new, V_new to multi-head format
-            // [batch, seq, hidden] → [batch, num_heads, seq, head_dim]
-            let q_heads_id =
-                backend.reshape_to_heads_gpu(&q_id, seq_len, self.n_head, self.d_head)?;
-            let k_new_heads_id =
-                backend.reshape_to_heads_gpu(&k_new_id, seq_len, self.n_head, self.d_head)?;
-            let v_new_heads_id =
-                backend.reshape_to_heads_gpu(&v_new_id, seq_len, self.n_head, self.d_head)?;
-
-            // Concatenate with cached K/V on GPU (stays on GPU!)
-            let k_heads_id = backend.concat_kv_cache(
-                cached_k_id.as_ref(),
-                &k_new_heads_id,
-                batch_size,
-                self.n_head,
-                cached_seq_len,
-                seq_len, // new_seq_len
-                self.d_head,
-            )?;
-
-            let v_heads_id = backend.concat_kv_cache(
-                cached_v_id.as_ref(),
-                &v_new_heads_id,
-                batch_size,
-                self.n_head,
-                cached_seq_len,
-                seq_len,
-                self.d_head,
-            )?;
-
-            let total_seq_len = cached_seq_len + seq_len;
-
-            // Execute GPU attention with cached K/V
-            // Q: [batch, num_heads, seq_len, head_dim] (current tokens)
-            // K: [batch, num_heads, total_seq_len, head_dim] (cached + new)
-            // V: [batch, num_heads, total_seq_len, head_dim] (cached + new)
-            let attn_heads_output_id = backend.attention_with_cache_gpu_to_gpu(
-                &q_heads_id,
-                &k_heads_id,
-                &v_heads_id,
-                batch_size,
-                seq_len,       // q_seq_len
-                total_seq_len, // kv_seq_len
-                self.n_head,
-                self.d_head,
-            )?;
-
-            // Reshape from [batch, num_heads, seq_len, head_dim] back to [batch, seq_len, hidden_size]
-            let attn_output_id = backend.reshape_from_heads_gpu(
-                &attn_heads_output_id,
-                seq_len,
-                self.n_head,
-                self.d_head,
-            )?;
-
-            // Update cache with full K/V (keep on GPU!). Each id is fresh out of
-            // `concat_kv_cache` above and has never been wrapped in a handle yet,
-            // so `::new` here is the required first (and only) wrap.
-            if let Some(cache) = layer_cache {
-                cache.key = Some(Tensor::Metal(MetalTensorData::new(
-                    &backend,
-                    k_heads_id,
-                    vec![batch_size, self.n_head, total_seq_len, self.d_head],
-                    qkv_data.dtype,
-                )?));
-                cache.value = Some(Tensor::Metal(MetalTensorData::new(
-                    &backend,
-                    v_heads_id,
-                    vec![batch_size, self.n_head, total_seq_len, self.d_head],
-                    qkv_data.dtype,
-                )?));
-            }
-
-            // Wrap in Metal tensor and apply output projection. `attn_output_id` is
-            // likewise fresh out of `reshape_from_heads_gpu` above.
-            let attn_output = Tensor::Metal(MetalTensorData::new(
-                &backend,
-                attn_output_id,
-                vec![batch_size, seq_len, hidden_size],
-                qkv_data.dtype,
-            )?);
-
-            // Apply output projection (stays on GPU)
-            let output = self.c_proj.forward(attn_output)?;
-
-            // Remove batch dimension if it was added
-            return if was_2d {
-                match output {
-                    Tensor::Metal(mut metal_data) if metal_data.shape[0] == 1 => {
-                        // Reshape [1, seq, hidden] → [seq, hidden]: same buffer, new
-                        // shape. Move the handle `output` already owns instead of
-                        // minting a second one for an id it already wraps —
-                        // `MetalTensorData::new`'s contract is that each raw id is
-                        // wrapped at most once and all further sharing goes through
-                        // `clone()`, which this is not (it's a single-owner reshape).
-                        metal_data.shape = vec![metal_data.shape[1], metal_data.shape[2]];
-                        Ok(Tensor::Metal(metal_data))
-                    },
-                    _ => Ok(output),
+                let v_heads_id = backend.concat_kv_cache(
+                    cached_v_id.as_ref(),
+                    &v_new_heads_id,
+                    batch_size,
+                    self.n_head,
+                    cached_seq_len,
+                    seq_len,
+                    self.d_head,
+                )?;
+                if v_heads_id != v_new_heads_id {
+                    scratch.push(v_heads_id);
                 }
-            } else {
-                Ok(output)
-            };
+
+                let total_seq_len = cached_seq_len + seq_len;
+
+                // Execute GPU attention with cached K/V
+                // Q: [batch, num_heads, seq_len, head_dim] (current tokens)
+                // K: [batch, num_heads, total_seq_len, head_dim] (cached + new)
+                // V: [batch, num_heads, total_seq_len, head_dim] (cached + new)
+                let attn_heads_output_id = backend.attention_with_cache_gpu_to_gpu(
+                    &q_heads_id,
+                    &k_heads_id,
+                    &v_heads_id,
+                    batch_size,
+                    seq_len,       // q_seq_len
+                    total_seq_len, // kv_seq_len
+                    self.n_head,
+                    self.d_head,
+                )?;
+                scratch.push(attn_heads_output_id);
+
+                // Reshape from [batch, num_heads, seq_len, head_dim] back to
+                // [batch, seq_len, hidden_size]
+                let attn_output_id = backend.reshape_from_heads_gpu(
+                    &attn_heads_output_id,
+                    seq_len,
+                    self.n_head,
+                    self.d_head,
+                )?;
+                scratch.push(attn_output_id);
+
+                // Update cache with full K/V (keep on GPU!). Neither id has been
+                // wrapped in a handle yet, so `::new` here is the required first (and
+                // only) wrap; each one is dropped from `scratch` the moment the cache
+                // adopts it.
+                if let Some(cache) = layer_cache {
+                    cache.key = Some(Tensor::Metal(MetalTensorData::new(
+                        &backend,
+                        k_heads_id,
+                        vec![batch_size, self.n_head, total_seq_len, self.d_head],
+                        qkv_data.dtype,
+                    )?));
+                    scratch.retain(|id| *id != k_heads_id);
+                    cache.value = Some(Tensor::Metal(MetalTensorData::new(
+                        &backend,
+                        v_heads_id,
+                        vec![batch_size, self.n_head, total_seq_len, self.d_head],
+                        qkv_data.dtype,
+                    )?));
+                    scratch.retain(|id| *id != v_heads_id);
+                }
+
+                // Wrap in Metal tensor and apply output projection. `attn_output_id` is
+                // likewise fresh out of `reshape_from_heads_gpu` above.
+                let attn_output = Tensor::Metal(MetalTensorData::new(
+                    &backend,
+                    attn_output_id,
+                    vec![batch_size, seq_len, hidden_size],
+                    qkv_data.dtype,
+                )?);
+                scratch.retain(|id| *id != attn_output_id);
+
+                // Apply output projection (stays on GPU)
+                let output = self.c_proj.forward(attn_output)?;
+
+                // Remove batch dimension if it was added
+                if was_2d {
+                    match output {
+                        Tensor::Metal(mut metal_data) if metal_data.shape[0] == 1 => {
+                            // Reshape [1, seq, hidden] → [seq, hidden]: same buffer, new
+                            // shape. Move the handle `output` already owns instead of
+                            // minting a second one for an id it already wraps —
+                            // `MetalTensorData::new`'s contract is that each raw id is
+                            // wrapped at most once and all further sharing goes through
+                            // `clone()`, which this is not (it's a single-owner reshape).
+                            metal_data.shape = vec![metal_data.shape[1], metal_data.shape[2]];
+                            Ok(Tensor::Metal(metal_data))
+                        },
+                        _ => Ok(output),
+                    }
+                } else {
+                    Ok(output)
+                }
+            })();
+
+            // Release before propagating: a failed forward must not leak either.
+            backend.release_buffers(&scratch)?;
+            tracing::trace!(
+                released = scratch.len(),
+                "gpt2: metal attention intermediates released"
+            );
+            return result;
         }
 
         // GPU attention path with GPU-resident KV-cache (CUDA / oxicuda).
@@ -832,8 +1119,9 @@ impl Gpt2Attention {
         // fallback below then applies.
         // Rebind mutably only for the CUDA path: `as_deref_mut` needs a
         // mutable binding, and adding `mut` to the parameter itself would
-        // trip `unused_mut` in non-CUDA builds.
-        #[cfg(feature = "cuda")]
+        // trip `unused_mut` in non-CUDA builds. On a macOS Metal build the
+        // admission control above has already taken a mutable binding.
+        #[cfg(all(feature = "cuda", not(all(target_os = "macos", feature = "metal"))))]
         let mut layer_cache = layer_cache;
         #[cfg(feature = "cuda")]
         if matches!(&qkv, Tensor::CUDA(_)) {
@@ -1109,11 +1397,28 @@ impl Gpt2Attention {
 
                 scores *= scale;
 
-                // Apply attention mask if provided
+                // Apply attention mask if provided.
+                //
+                // `scores` is [batch, n_heads, q_seq_len, kv_seq_len]. A mask whose
+                // key axis already matches `kv_seq_len` is added straight through
+                // (ndarray broadcasts the leading axes, as before). A mask that is
+                // only `q_seq_len` wide is what the KV-cache path receives - the
+                // caller builds `create_causal_mask(seq_len)` from the *new* tokens
+                // and knows nothing about the cached prefix - so it has to be widened
+                // first. Adding it blind used to abort the process with
+                // `ndarray: could not broadcast array from shape [1, 1, 2, 2] to
+                // [1, 2, 2, 5]` on any multi-token continuation.
                 if let Some(mask) = attention_mask {
                     match mask {
                         Tensor::F32(mask_arr) => {
-                            scores += mask_arr;
+                            let key_axis = mask_arr.shape().last().copied().unwrap_or(0);
+                            if key_axis == kv_seq_len {
+                                scores += mask_arr;
+                            } else {
+                                let widened =
+                                    widen_cached_attention_mask(mask_arr, q_seq_len, kv_seq_len)?;
+                                scores += &widened;
+                            }
                         },
                         _ => {
                             return Err(tensor_op_error(

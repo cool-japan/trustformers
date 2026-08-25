@@ -190,10 +190,11 @@ impl GpuHealthMonitor {
         devices: &Arc<RwLock<HashMap<usize, GpuDeviceInfo>>>,
     ) -> GpuHealthResult<()> {
         let device_map = devices.read();
+        let config = self.config.read();
         let mut health_status = self.health_status.write();
         let mut analytics = self.health_analytics.write();
         for device in device_map.values() {
-            let initial_health = Self::create_initial_health_status(device);
+            let initial_health = Self::create_initial_health_status(device, &config);
             health_status.insert(device.device_id, initial_health);
             let initial_analytics = Self::create_initial_analytics(device.device_id);
             analytics.insert(device.device_id, initial_analytics);
@@ -204,52 +205,119 @@ impl GpuHealthMonitor {
         );
         Ok(())
     }
-    /// Create initial health status for a device
-    fn create_initial_health_status(device: &GpuDeviceInfo) -> GpuHealthStatus {
+    /// Create the initial health status for a device that has not been probed
+    /// yet.
+    ///
+    /// `initialize_device_health` runs once, synchronously, right after device
+    /// discovery; the first real probe happens on the next tick of the
+    /// background health-check loop, via [`Self::perform_comprehensive_health_check`].
+    /// A device sitting between those two moments must not read as healthy
+    /// just because nothing has contradicted it yet.
+    ///
+    /// 0.2.1: this used to construct a fully-healthy record outright
+    /// (`is_healthy: true`, `health_score: 1.0`, every `*_ok` flag `true`,
+    /// plausible-looking sensor readings) for a device the driver had never
+    /// once been asked about, readable via `get_health_status` before any
+    /// check ran. The values below mirror exactly what
+    /// `perform_comprehensive_health_check` reports for a device whose
+    /// telemetry query came back empty, because "never probed" and "probed,
+    /// but the driver answered nothing" are the same state to a caller, and
+    /// both must read as unmeasured -- `f32::NAN` for the three sensor
+    /// readings the driver would supply, matching
+    /// [`GpuHealthStatus::current_utilization`]'s documented convention.
+    /// Memory and hardware status are the one exception: those come from the
+    /// device record itself (capacity/availability, reported status), which
+    /// is real and already known at discovery time, not from live telemetry,
+    /// so they are computed for real here exactly as the live check computes
+    /// them.
+    pub(crate) fn create_initial_health_status(
+        device: &GpuDeviceInfo,
+        config: &GpuHealthConfig,
+    ) -> GpuHealthStatus {
+        let memory_usage_ratio = if device.total_memory_mb == 0 {
+            0.0
+        } else {
+            (device.total_memory_mb - device.available_memory_mb) as f32
+                / device.total_memory_mb as f32
+                * 100.0
+        };
+        let memory_ok = memory_usage_ratio < config.memory_threshold;
+        let hardware_ok = matches!(
+            device.status,
+            GpuDeviceStatus::Available | GpuDeviceStatus::Busy
+        );
+        let mut issues = vec![
+            "Temperature sensor has not been read yet".to_string(),
+            "Utilization sensor has not been read yet".to_string(),
+            "Power sensor has not been read yet".to_string(),
+            "GPU driver has not answered a telemetry query yet".to_string(),
+        ];
+        // Same per-signal deductions `perform_comprehensive_health_check` applies
+        // for an absent reading (temperature/utilization/power/driver), plus the
+        // same hardware/memory terms when those real, discovery-time checks fail.
+        let mut health_score: f64 = 1.0 - 0.1 - 0.05 - 0.05 - 0.1;
+        if !memory_ok {
+            issues.push(format!(
+                "High memory usage: {:.1}% (threshold: {:.1}%)",
+                memory_usage_ratio, config.memory_threshold
+            ));
+            health_score -= 0.2;
+        }
+        if !hardware_ok {
+            issues.push(format!("Device status: {:?}", device.status));
+            health_score -= 0.4;
+        }
+        let health_score = health_score.max(0.0_f64);
         GpuHealthStatus {
             device_id: device.device_id,
-            is_healthy: true,
-            health_score: 1.0,
+            is_healthy: false,
+            health_score: health_score as f32,
             last_check: Utc::now(),
-            issues: Vec::new(),
-            temperature_ok: true,
-            memory_ok: true,
-            performance_ok: true,
-            power_ok: true,
-            driver_ok: true,
-            hardware_ok: true,
+            issues,
+            temperature_ok: false,
+            memory_ok,
+            performance_ok: false,
+            power_ok: false,
+            driver_ok: false,
+            hardware_ok,
             health_trend: HealthTrend::Unknown,
-            current_temperature: 45.0,
-            current_memory_usage: 0.0,
-            current_utilization: device.utilization_percent,
-            current_power: 150.0,
-            consecutive_healthy_checks: 1,
+            current_temperature: f32::NAN,
+            current_memory_usage: memory_usage_ratio,
+            current_utilization: f32::NAN,
+            current_power: f32::NAN,
+            consecutive_healthy_checks: 0,
             consecutive_unhealthy_checks: 0,
             time_since_last_issue: None,
             predicted_failure_time: None,
         }
     }
-    /// Create initial analytics data for a device
-    fn create_initial_analytics(device_id: usize) -> GpuHealthAnalytics {
-        let now = Utc::now();
-        let mut health_history = VecDeque::new();
-        health_history.push_back((now, 1.0));
+    /// Create the initial (empty) analytics data for a device that has not
+    /// been probed yet.
+    ///
+    /// 0.2.1: this used to seed `health_history` with one fabricated `1.0`
+    /// sample timestamped at creation, which was not a health reading at all
+    /// -- it was then fed straight into `update_analytics_metrics`'s
+    /// least-squares trend fit as real data. An empty history correctly makes
+    /// [`Self::compute_trend_analysis`] report [`HealthTrend::Unknown`] with
+    /// zero fit confidence until a real check contributes the first sample.
+    pub(crate) fn create_initial_analytics(device_id: usize) -> GpuHealthAnalytics {
         GpuHealthAnalytics {
             device_id,
-            health_history,
+            health_history: VecDeque::new(),
             temperature_history: VecDeque::new(),
             memory_history: VecDeque::new(),
             performance_history: VecDeque::new(),
-            average_health_score: 1.0,
+            average_health_score: 0.0,
             health_trend_slope: 0.0,
             health_score_stddev: 0.0,
+            trend_r_squared: 0.0,
             trend_analysis: HealthTrendAnalysis {
                 trend: HealthTrend::Unknown,
                 confidence: 0.0,
-                projected_24h: 1.0,
-                projected_7d: 1.0,
-                risk_level: HealthRiskLevel::Low,
-                recommendations: Vec::new(),
+                projected_24h: 0.0,
+                projected_7d: 0.0,
+                risk_level: HealthRiskLevel::Critical,
+                recommendations: vec!["Device has not been health-checked yet".to_string()],
             },
             prediction_model: None,
         }
@@ -320,13 +388,13 @@ impl GpuHealthMonitor {
         let mut issues = Vec::new();
         let mut health_score: f64 = 1.0;
 
-        let measured_temp =
-            telemetry.as_ref().map(|t| t.temperature_celsius).filter(|t| t.is_finite());
-        let measured_power = telemetry.as_ref().map(|t| t.power_watts).filter(|p| p.is_finite());
-        let measured_utilization = telemetry
-            .as_ref()
-            .map(|t| t.utilization_percent)
-            .unwrap_or(device.utilization_percent);
+        let measured_temp = telemetry.and_then(|t| t.temperature_celsius).filter(|t| t.is_finite());
+        let measured_power = telemetry.and_then(|t| t.power_watts).filter(|p| p.is_finite());
+        // `None` means the driver would not report utilization for this device.
+        // 0.2.1: an unreadable sensor arrived here as `0.0` and sailed under
+        // `utilization_threshold`; it is now an explicit issue.
+        let measured_utilization =
+            telemetry.and_then(|t| t.utilization_percent).filter(|u| u.is_finite());
 
         let memory_usage_ratio = if device.total_memory_mb == 0 {
             0.0
@@ -366,14 +434,24 @@ impl GpuHealthMonitor {
             ));
             health_score -= 0.2;
         }
-        let performance_ok = measured_utilization < config.utilization_threshold;
-        if !performance_ok {
-            issues.push(format!(
-                "Extremely high utilization: {:.1}% (threshold: {:.1}%)",
-                measured_utilization, config.utilization_threshold
-            ));
-            health_score -= 0.2;
-        }
+        let performance_ok = match measured_utilization {
+            Some(utilization) => {
+                let ok = utilization < config.utilization_threshold;
+                if !ok {
+                    issues.push(format!(
+                        "Extremely high utilization: {:.1}% (threshold: {:.1}%)",
+                        utilization, config.utilization_threshold
+                    ));
+                    health_score -= 0.2;
+                }
+                ok
+            },
+            None => {
+                issues.push("Utilization sensor is unavailable".to_string());
+                health_score -= 0.05;
+                false
+            },
+        };
         let power_ok = match measured_power {
             Some(power) => {
                 let ok = power < config.power_threshold;
@@ -423,7 +501,7 @@ impl GpuHealthMonitor {
             health_trend: HealthTrend::Unknown,
             current_temperature,
             current_memory_usage: memory_usage_ratio,
-            current_utilization: measured_utilization,
+            current_utilization: measured_utilization.unwrap_or(f32::NAN),
             current_power: power_consumption,
             consecutive_healthy_checks: 0,
             consecutive_unhealthy_checks: 0,
@@ -569,7 +647,7 @@ impl GpuHealthMonitor {
         }
     }
     /// Update analytics metrics
-    fn update_analytics_metrics(analytics: &mut GpuHealthAnalytics) {
+    pub(crate) fn update_analytics_metrics(analytics: &mut GpuHealthAnalytics) {
         if analytics.health_history.is_empty() {
             return;
         }
@@ -596,11 +674,62 @@ impl GpuHealthMonitor {
                 .map(|(i, (_, score))| (i as f32) * score)
                 .sum();
             let sum_x2: f32 = (0..analytics.health_history.len()).map(|i| (i as f32).powi(2)).sum();
+            // `n * sum_x2 - sum_x^2` is the variance (times n) of the index
+            // sequence `0..n`, which is strictly positive for any n >= 2 of
+            // distinct consecutive integers -- unlike an arbitrary x series,
+            // this denominator cannot be zero here.
             let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x.powi(2));
+            let intercept = (sum_y - slope * sum_x) / n;
             analytics.health_trend_slope = slope;
+            // Coefficient of determination of the same least-squares fit,
+            // i.e. how much of the score's variance the linear trend actually
+            // explains -- this is what backs `HealthTrendAnalysis::confidence`
+            // below. `sst` is the variance the mean alone would leave
+            // unexplained; when it is ~0 the history has no variance for any
+            // model to explain, so R^2 is undefined, not "perfect": report
+            // zero confidence rather than fabricate certainty from a flat
+            // series (this is also why a frozen, always-identical reading
+            // cannot manufacture a high-confidence trend here).
+            let mean_y = sum_y / n;
+            let sst: f32 = analytics
+                .health_history
+                .iter()
+                .map(|(_, score)| {
+                    let diff = score - mean_y;
+                    diff * diff
+                })
+                .sum();
+            analytics.trend_r_squared = if sst > f32::EPSILON {
+                let sse: f32 = analytics
+                    .health_history
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, score))| {
+                        let predicted = intercept + slope * i as f32;
+                        let residual = score - predicted;
+                        residual * residual
+                    })
+                    .sum();
+                (1.0 - sse / sst).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
         }
     }
-    /// Compute comprehensive trend analysis
+    /// Compute comprehensive trend analysis.
+    ///
+    /// The trend, `confidence` and the projections are all derived from the
+    /// real least-squares fit over the health history above.
+    ///
+    /// 0.2.1: `confidence` used to be a declared ladder keyed only on how many
+    /// samples the history held (20+ -> 0.9, 10+ -> 0.7, 5+ -> 0.5, else 0.2),
+    /// which reported the same "confidence" for, say, 20 points on a dead
+    /// flat line and 20 points bouncing off both ends of the score range. It
+    /// is now the fit's coefficient of determination (R^2, computed in
+    /// [`Self::update_analytics_metrics`]): how much of the score's variance
+    /// the linear trend actually explains, in `[0.0, 1.0]`, zero when there
+    /// is not yet a fit (fewer than two samples) or nothing to explain (a
+    /// history with no variance).
     pub(crate) fn compute_trend_analysis(analytics: &mut GpuHealthAnalytics) {
         let trend = if analytics.health_trend_slope > 0.01 {
             HealthTrend::Improving
@@ -611,15 +740,7 @@ impl GpuHealthMonitor {
         } else {
             HealthTrend::Unknown
         };
-        let confidence = if analytics.health_history.len() >= 20 {
-            0.9
-        } else if analytics.health_history.len() >= 10 {
-            0.7
-        } else if analytics.health_history.len() >= 5 {
-            0.5
-        } else {
-            0.2
-        };
+        let confidence = analytics.trend_r_squared;
         let current_score = analytics
             .health_history
             .back()
@@ -1186,6 +1307,12 @@ pub struct GpuHealthAnalytics {
     pub health_trend_slope: f32,
     /// Standard deviation of health scores
     pub health_score_stddev: f32,
+    /// Coefficient of determination (R^2) of the least-squares fit backing
+    /// `health_trend_slope`: how much of the score's variance the linear
+    /// trend explains, in `[0.0, 1.0]`. Zero before there are at least two
+    /// samples, and zero (not one) when the history has no variance to
+    /// explain -- see [`GpuHealthMonitor::update_analytics_metrics`].
+    pub trend_r_squared: f32,
     /// Time series health analysis
     pub trend_analysis: HealthTrendAnalysis,
     /// Predictive model data
@@ -1237,7 +1364,9 @@ pub struct GpuHealthStatus {
     pub current_temperature: f32,
     /// Current memory usage percentage
     pub current_memory_usage: f32,
-    /// Current utilization percentage
+    /// Current utilization percentage. `NaN` marks an unread sensor, matching
+    /// [`Self::current_temperature`] and [`Self::current_power`]: no threshold
+    /// comparison passes on `NaN`, so an unreadable sensor cannot read as idle.
     pub current_utilization: f32,
     /// Current power consumption (Watts)
     pub current_power: f32,

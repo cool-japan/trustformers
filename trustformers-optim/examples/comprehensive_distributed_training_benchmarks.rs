@@ -25,10 +25,28 @@
 //! ```bash
 //! cargo run --example comprehensive_distributed_training_benchmarks --release
 //! ```
+//!
+//! ## Communication backend
+//!
+//! Every `DistributedConfig` below is built with
+//! `.with_backend(CommunicationBackend::Gloo)`. `DistributedConfig::default()`
+//! otherwise selects `CommunicationBackend::Nccl`, which
+//! `EnhancedDistributedTrainer::new` refuses with a structured error unless
+//! this crate was compiled with the `nccl` feature (an NVIDIA library this
+//! workspace does not link by default -- COOLJAPAN policy keeps FFI
+//! feature-gated off). `Gloo` here resolves to `LocalCommunicator::single()`
+//! (`trustformers-core/src/parallel/local_communicator.rs`) -- a real,
+//! barrier-synchronized in-process communicator, not a mock -- which this
+//! single-process benchmark (it never spawns real multi-node workers; every
+//! "N-GPU" run below is one process simulating N devices) exercises
+//! identically to how NCCL itself would behave here anyway, since no
+//! `RANK`/`WORLD_SIZE`/`LOCAL_RANK` environment is set (both default to a
+//! single rank, world size 1).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use trustformers_core::{errors::Result, Tensor};
+use trustformers_core::{errors::Result, parallel::CommunicationBackend, Tensor};
 use trustformers_optim::{
     adam::Adam, advanced_distributed_features::*, averaged_adam::AveragedAdam,
     enhanced_distributed_training::*, sgd::SGD,
@@ -87,6 +105,7 @@ impl BenchmarkSuite {
             println!("🔍 Testing {}-GPU configuration...", gpu_count);
 
             let config = DistributedConfig::new()
+                .with_backend(CommunicationBackend::Gloo)
                 .with_gpus(gpu_count)
                 .with_gradient_compression(CompressionType::TopK { k: 1000 });
 
@@ -184,6 +203,7 @@ impl BenchmarkSuite {
 
         let gpu_count = 8; // Standard configuration for comparison
         let config = DistributedConfig::new()
+            .with_backend(CommunicationBackend::Gloo)
             .with_gpus(gpu_count)
             .with_gradient_compression(CompressionType::Adaptive);
 
@@ -357,6 +377,7 @@ impl BenchmarkSuite {
             println!("🔍 Testing {} compression...", name);
 
             let config = DistributedConfig::new()
+                .with_backend(CommunicationBackend::Gloo)
                 .with_gpus(gpu_count)
                 .with_gradient_compression(compression_type);
 
@@ -511,6 +532,7 @@ impl BenchmarkSuite {
             println!("🔍 Testing {} configuration...", name);
 
             let mut config = DistributedConfig::new()
+                .with_backend(CommunicationBackend::Gloo)
                 .with_gpus(gpu_count)
                 .with_gradient_compression(CompressionType::TopK { k: 1000 });
             config.memory_optimization = memory_config;
@@ -635,8 +657,10 @@ impl BenchmarkSuite {
         for (name, scenario) in fault_scenarios {
             println!("🔍 Testing {} scenario...", name);
 
-            let mut config =
-                DistributedConfig::new().with_gpus(gpu_count).with_fault_tolerance(true);
+            let mut config = DistributedConfig::new()
+                .with_backend(CommunicationBackend::Gloo)
+                .with_gpus(gpu_count)
+                .with_fault_tolerance(true);
             config.fault_tolerance.checkpoint_frequency = 5;
 
             let result = self.benchmark_fault_tolerance(config, optimizer.clone(), scenario)?;
@@ -757,6 +781,11 @@ impl BenchmarkSuite {
     pub fn run_auto_scaling_benchmarks(&mut self) -> Result<()> {
         println!("📈 Benchmark 6: Auto-Scaling Performance");
         println!("========================================");
+        println!(
+            "   ℹ️  Node provisioning is simulated in-process via SimulatedNodeProvider -- \
+             no real cluster or cloud nodes are provisioned, terminated, or billed by this \
+             benchmark."
+        );
 
         let scaling_strategies = vec![
             ("Performance", ScalingStrategy::Performance),
@@ -782,18 +811,46 @@ impl BenchmarkSuite {
     ) -> Result<AutoScalingBenchmarkResult> {
         let start_time = Instant::now();
 
+        // `AutoScaler::update_and_scale` reads a genuine `Instant` for its cooldown
+        // gate (see `advanced_distributed_features.rs`), and this loop below has no
+        // artificial delay of its own: without a real per-step sleep, all 50
+        // iterations complete in far under a millisecond, so even a
+        // "shortened" 10-second cooldown never elapses -- every decision would
+        // silently be `NoAction` for the whole run (verified empirically before
+        // this fix: 0 scaling events, identical numbers, for all three
+        // strategies). This sleep gives the loop genuine wall-clock cost so the
+        // cooldown below can function as a real rate limiter instead of an
+        // always-closed gate.
+        const STEP_DELAY: Duration = Duration::from_millis(25);
+
         let auto_scaler_config = AutoScalerConfig {
             min_nodes: 2,
             max_nodes: 16,
             strategy: strategy.clone(),
             scale_up_threshold: 0.85,
             scale_down_threshold: 0.6,
-            scaling_cooldown: Duration::from_secs(10), // Shorter for benchmark
+            // Shortened further than a production cooldown (which would be
+            // measured in minutes) to match this benchmark's `STEP_DELAY`-paced
+            // cadence: long enough to still rate-limit successive decisions (a
+            // real cooldown, not a disabled one), short enough that a 50-step
+            // run (50 * STEP_DELAY = 1.25s of simulated wall-clock time) crosses
+            // it several times and can show each strategy actually diverging.
+            scaling_cooldown: Duration::from_millis(100),
             predictive_scaling: true,
             cost_priority: 0.3,
         };
 
-        let mut auto_scaler = AutoScaler::new(auto_scaler_config);
+        // This benchmark exercises `AutoScaler`'s scaling *decisions*, not a real
+        // cluster: `SimulatedNodeProvider` is the in-tree, explicitly-named dry-run
+        // substrate for exactly that (benchmarks/demos/tests, per its own doc
+        // comment). Without a `NodeProvider` attached at all,
+        // `update_and_scale` returns a structured `TrustformersError` the first
+        // time it reaches a `ScaleUp`/`ScaleDown` decision rather than
+        // fabricating success -- attaching this one keeps that honest while
+        // still letting the benchmark run end to end; nothing here talks to a
+        // real cloud API.
+        let mut auto_scaler = AutoScaler::new(auto_scaler_config)
+            .with_node_provider(Arc::new(SimulatedNodeProvider::new()));
 
         let benchmark_steps = 50;
         let mut scaling_events = Vec::new();
@@ -831,6 +888,8 @@ impl BenchmarkSuite {
             // Simulate cost calculation
             let cost = auto_scaler.get_current_nodes() as f32 * 3.0; // $3 per node per hour
             cost_metrics.push(cost);
+
+            std::thread::sleep(STEP_DELAY);
         }
 
         let total_time = start_time.elapsed();
@@ -914,6 +973,7 @@ impl BenchmarkSuite {
         let (config, optimizer, model_config, steps) = match scenario {
             TrainingScenario::SmallScale => {
                 let config = DistributedConfig::new()
+                    .with_backend(CommunicationBackend::Gloo)
                     .with_gpus(2)
                     .with_gradient_compression(CompressionType::TopK { k: 500 });
                 let optimizer = AveragedAdam::for_distributed_training();
@@ -922,6 +982,7 @@ impl BenchmarkSuite {
             },
             TrainingScenario::LargeScale => {
                 let config = DistributedConfig::new()
+                    .with_backend(CommunicationBackend::Gloo)
                     .with_gpus(16)
                     .with_gradient_compression(CompressionType::PowerSGD { rank: 64 })
                     .with_dynamic_batching(true)
@@ -932,6 +993,7 @@ impl BenchmarkSuite {
             },
             TrainingScenario::ProductionInference => {
                 let config = DistributedConfig::new()
+                    .with_backend(CommunicationBackend::Gloo)
                     .with_gpus(4)
                     .with_gradient_compression(CompressionType::Quantization { bits: 8 });
                 let optimizer = AveragedAdam::for_distributed_training();
@@ -940,6 +1002,7 @@ impl BenchmarkSuite {
             },
             TrainingScenario::ResearchExperimentation => {
                 let config = DistributedConfig::new()
+                    .with_backend(CommunicationBackend::Gloo)
                     .with_gpus(8)
                     .with_gradient_compression(CompressionType::Adaptive)
                     .with_dynamic_batching(true);

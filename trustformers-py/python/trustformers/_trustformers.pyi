@@ -691,7 +691,35 @@ class TrainingArguments:
     ) -> None: ...
 
 # Utilities
-def get_device() -> str: ...
-def set_seed(seed: int) -> None: ...
-def enable_grad() -> None: ...
-def no_grad() -> None: ...
+def get_device() -> str:
+    """Returns "cuda" only when built with the `cuda` feature and a CUDA
+    backend is found (always False today: this crate has no CUDA backend).
+    Returns "metal" only when built with the `metal` feature on macOS
+    (this only confirms Metal was requested at compile time, not that a
+    live device was probed -- this crate has no Metal device-probe or
+    execution path compiled in either way). Otherwise "cpu"."""
+    ...
+
+def set_seed(seed: int) -> None:
+    """Always raises NotImplementedError: every weight this crate
+    initialises is drawn from `rand::rngs::ThreadRng` (via
+    `scirs2_core::random::thread_rng()`), an OS-entropy generator with no
+    public seeding hook anywhere in scirs2-core. Previously wrote a
+    `TRUSTFORMERS_SEED` environment variable that nothing in this
+    workspace ever read -- a silent no-op that seeded nothing."""
+    ...
+
+def enable_grad() -> None:
+    """A documented no-op, not a silent one: this runtime does not consult
+    any global gradient-computation switch anywhere (no registered
+    model's forward() builds an autodiff graph at all -- see
+    `Trainer.train()`'s docstring for the same underlying reason). Exists
+    for PyTorch-idiom API compatibility; always succeeds and never
+    changes what any computation does."""
+    ...
+
+def no_grad() -> None:
+    """The same documented no-op as `enable_grad()`, for the same reason:
+    "gradients are off" is already permanently true in this runtime,
+    independent of this call."""
+    ...

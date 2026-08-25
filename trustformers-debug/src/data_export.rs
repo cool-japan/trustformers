@@ -571,7 +571,12 @@ impl DataExportManager {
             )?;
             writeln!(file, "    <size>{}</size>", item.size)?;
 
-            // Convert content to XML (simplified)
+            // The payload is embedded as JSON inside a CDATA section rather
+            // than mapped onto XML elements: `item.content` is an arbitrary
+            // `serde_json::Value` whose shape is not known ahead of time, and a
+            // lossless generic JSON-to-XML mapping would have to invent element
+            // names for array members and for keys that are not valid XML
+            // names. CDATA keeps the round-trip exact.
             let content_json = serde_json::to_string(&item.content)?;
             writeln!(file, "    <content><![CDATA[{}]]></content>", content_json)?;
 

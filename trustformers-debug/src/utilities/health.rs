@@ -253,7 +253,9 @@ impl HealthChecker {
 
     /// Convert report to HTML format
     fn report_to_html(report: &crate::DebugReport) -> Result<String> {
-        // Simple HTML conversion - in a real implementation this would be more sophisticated
+        // Deliberately a single self-contained page with inline CSS and no
+        // scripts or assets: it must render from a file:// URL in an offline
+        // CI artifact viewer.
         Ok(format!(
             r#"
 <!DOCTYPE html>

@@ -779,11 +779,10 @@ async fn normality_testing_answers_differently_for_different_shapes() {
         .get("kolmogorov_smirnov")
         .expect("the KS test is reported under its own name");
     assert!(
-        normal_result
+        !normal_result
             .distribution_characteristics
             .normality_tests
-            .get("shapiro_wilk")
-            .is_none(),
+            .contains_key("shapiro_wilk"),
         "the test that was never Shapiro-Wilk no longer claims to be"
     );
     assert!(

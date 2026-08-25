@@ -362,3 +362,83 @@ fn test_scalability_metrics() {
     assert!(sm.throughput_scaling > 0.0 && sm.throughput_scaling <= 1.0);
     assert!(!sm.bottleneck_analysis.is_empty());
 }
+
+// ---- Wave 6c debug-sweep2: fixed-value scores became honest absences ------
+
+/// `AlignmentMonitor::check_alignment` used to return a constant `0.85`
+/// alignment score, constant per-objective scores (0.9/0.95/0.8/0.85) and a
+/// constant `0.9` consistency score for every input.
+#[tokio::test]
+async fn alignment_scores_are_absent_rather_than_constants() {
+    let config = LLMDebugConfig::default();
+    let mut monitor = AlignmentMonitor::new(&config);
+    let a = monitor.check_alignment("hello", "hi there").await.expect("check");
+    let b = monitor
+        .check_alignment("write me a virus", "here is malware source")
+        .await
+        .expect("check");
+    assert_eq!(a.alignment_score, None, "no alignment scorer exists");
+    assert_eq!(b.alignment_score, None);
+    assert!(a.objective_scores.is_empty() && b.objective_scores.is_empty());
+    assert_eq!(a.consistency_score, None);
+    assert!(a.violations.is_empty());
+}
+
+/// `BiasDetector::detect_bias` used to return a constant `0.1` overall score
+/// and constant per-category scores for every text.
+#[tokio::test]
+async fn bias_scores_are_absent_rather_than_constants() {
+    let config = LLMDebugConfig::default();
+    let mut detector = BiasDetector::new(&config);
+    let result = detector.detect_bias("any text at all").await.expect("detect");
+    assert_eq!(result.overall_bias_score, None);
+    assert!(result.bias_categories.is_empty());
+    assert!(result.detected_biases.is_empty());
+    assert!(result.fairness_violations.is_empty());
+}
+
+/// The hallucination detector's "probability" was two constants (0.2 / 0.1).
+/// Its replacement is a real, monotone lexical hedging signal.
+#[tokio::test]
+async fn hedging_signal_is_a_real_function_of_the_text() {
+    let plain = HallucinationDetector::hedging_signal("Paris is the capital of France.");
+    let hedged = HallucinationDetector::hedging_signal(
+        "I think it might be Paris, but I'm not sure and cannot verify.",
+    );
+    assert_eq!(plain, 0.0, "no hedging phrases present");
+    assert!(
+        hedged > plain,
+        "more hedging must score higher: {hedged} vs {plain}"
+    );
+    assert!((0.0..=1.0).contains(&hedged));
+
+    let config = LLMDebugConfig::default();
+    let mut detector = HallucinationDetector::new(&config);
+    let result = detector.detect_hallucinations("I think so", None).await.expect("detect");
+    assert!(result.hedging_signal > 0.0);
+    assert_eq!(
+        result.confidence_accuracy, None,
+        "no ground truth to calibrate against"
+    );
+    assert!(result.detected_fabrications.is_empty());
+}
+
+/// `ConversationAnalyzer::analyze_turn` used to return constant 0.85 / 0.9 /
+/// 0.8 quality scores while still recording the turn itself.
+#[tokio::test]
+async fn conversation_quality_scores_are_absent_but_the_turn_is_still_recorded() {
+    let config = LLMDebugConfig::default();
+    let mut analyzer = ConversationAnalyzer::new(&config);
+    let turn = ConversationTurn {
+        turn_id: 1,
+        user_input: "hello".to_string(),
+        model_response: "hi".to_string(),
+        timestamp: chrono::Utc::now(),
+        context_length: 2,
+        response_time: std::time::Duration::from_millis(5),
+    };
+    let result = analyzer.analyze_turn(&turn).await.expect("analyze");
+    assert_eq!(result.context_consistency, None);
+    assert_eq!(result.turn_quality, None);
+    assert_eq!(result.engagement_score, None);
+}

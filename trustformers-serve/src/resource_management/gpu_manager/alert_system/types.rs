@@ -553,8 +553,16 @@ impl GpuAlertSystem {
                 ));
             }
         }
-        if config.enable_memory_alerts {
-            let memory_percent = (metrics.memory_usage_mb as f32 / 24576.0) * 100.0;
+        // A memory *percentage* needs the device's real VRAM size. When the
+        // sample does not carry one the percentage is unknown, so the threshold
+        // is skipped rather than evaluated against a guess.
+        //
+        // 0.2.1: this divided by a hardcoded `24576.0` -- 24 GiB -- for every
+        // device, which under-reported usage on smaller cards (silencing real
+        // alerts) and over-reported it on larger ones.
+        if let (true, Some(memory_percent)) =
+            (config.enable_memory_alerts, metrics.memory_usage_percent())
+        {
             if memory_percent >= config.thresholds.memory_critical_percent {
                 alerts_to_trigger.push(self.create_alert(
                     device_id,

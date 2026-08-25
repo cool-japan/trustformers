@@ -119,6 +119,59 @@ pub enum ScalingStrategy {
     Custom(String),
 }
 
+/// Something that can actually provision or terminate compute nodes on a
+/// real cluster substrate (a cloud autoscaling group, Kubernetes, Slurm, an
+/// in-house fleet manager, ...).
+///
+/// [`AutoScaler`] has no such substrate of its own: without one attached via
+/// [`AutoScaler::with_node_provider`], the execution step of a scaling
+/// decision (reached through [`AutoScaler::update_and_scale`]) returns
+/// [`TrustformersError::invalid_state`] instead of mutating
+/// [`AutoScaler::get_current_nodes`] for nodes that were never actually
+/// requested or terminated. For an explicit dry run (benchmarks, demos,
+/// tests) that wants `update_and_scale` to always succeed without a real
+/// substrate, attach [`SimulatedNodeProvider`] instead -- it is honest about
+/// being a simulation because its name says so, not because it pretends to
+/// be real.
+pub trait NodeProvider: Send + Sync {
+    /// Request `count` additional compute nodes. Returns the number that
+    /// were *actually* provisioned -- implementations must not report more
+    /// than what was genuinely started, and may return fewer than `count`
+    /// if capacity is limited.
+    fn provision_nodes(&self, count: usize) -> Result<usize>;
+
+    /// Terminate `count` compute nodes. Returns the number that were
+    /// *actually* terminated.
+    fn terminate_nodes(&self, count: usize) -> Result<usize>;
+}
+
+/// A [`NodeProvider`] that does not talk to any real cluster substrate: it
+/// simply reports every requested node as provisioned/terminated.
+///
+/// Exists so callers that want to exercise [`AutoScaler`]'s scaling
+/// *decisions* end to end (benchmarks, demos, tests) can opt into that
+/// explicitly, instead of [`AutoScaler`] silently fabricating success with
+/// no substrate attached at all. Never attach this where scaling is
+/// expected to have a real effect on a real fleet.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SimulatedNodeProvider;
+
+impl SimulatedNodeProvider {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl NodeProvider for SimulatedNodeProvider {
+    fn provision_nodes(&self, count: usize) -> Result<usize> {
+        Ok(count)
+    }
+
+    fn terminate_nodes(&self, count: usize) -> Result<usize> {
+        Ok(count)
+    }
+}
+
 /// Auto-scaler for dynamic node management
 pub struct AutoScaler {
     config: AutoScalerConfig,
@@ -128,6 +181,9 @@ pub struct AutoScaler {
     scaling_history: Vec<ScalingEvent>,
     workload_predictor: WorkloadPredictor,
     cost_optimizer: CostOptimizer,
+    /// Optional real cluster substrate. `None` means this `AutoScaler` can
+    /// only compute scaling *decisions* -- see [`NodeProvider`].
+    node_provider: Option<Arc<dyn NodeProvider>>,
 }
 
 impl AutoScaler {
@@ -140,7 +196,18 @@ impl AutoScaler {
             scaling_history: Vec::new(),
             workload_predictor: WorkloadPredictor::new(),
             cost_optimizer: CostOptimizer::new(),
+            node_provider: None,
         }
+    }
+
+    /// Attach a [`NodeProvider`] so scaling decisions can act on a real
+    /// cluster substrate (or an explicit [`SimulatedNodeProvider`]) instead
+    /// of `update_and_scale` returning [`TrustformersError::invalid_state`]
+    /// whenever it decides to scale up or down.
+    #[must_use]
+    pub fn with_node_provider(mut self, provider: Arc<dyn NodeProvider>) -> Self {
+        self.node_provider = Some(provider);
+        self
     }
 
     /// Builder pattern for configuration
@@ -173,7 +240,13 @@ impl AutoScaler {
         self
     }
 
-    /// Update performance metrics and decide on scaling
+    /// Update performance metrics, decide on scaling, and -- when the
+    /// decision is to scale up or down -- execute it. Executing needs a
+    /// [`NodeProvider`] (see [`Self::with_node_provider`]); with none
+    /// attached this returns [`TrustformersError::invalid_state`] whenever
+    /// the decision is [`ScalingDecision::ScaleUp`]/[`ScalingDecision::ScaleDown`]
+    /// rather than silently deciding without acting, or acting without a
+    /// real substrate. [`ScalingDecision::NoAction`] never needs a provider.
     pub fn update_and_scale(&mut self, metrics: &PerformanceMetrics) -> Result<ScalingDecision> {
         // Add metrics to history
         self.performance_history.push_back(metrics.clone());
@@ -192,8 +265,12 @@ impl AutoScaler {
         let _avg_memory =
             metrics.memory_usage.iter().sum::<f32>() / metrics.memory_usage.len() as f32;
 
-        // Make scaling decision based on strategy
-        let decision = match &self.config.strategy {
+        // Make scaling decision based on strategy. Each strategy fn returns
+        // the REAL reason it decided what it decided, alongside the
+        // decision itself -- `execute_scale_up`/`execute_scale_down` record
+        // that reason verbatim into `ScalingEvent::reason` rather than a
+        // constant that only happens to be accurate for one strategy.
+        let (decision, reason) = match &self.config.strategy {
             ScalingStrategy::Performance => self.performance_based_scaling(avg_utilization)?,
             ScalingStrategy::QueueBased => self.queue_based_scaling(metrics)?,
             ScalingStrategy::Predictive => self.predictive_scaling(metrics)?,
@@ -206,10 +283,10 @@ impl AutoScaler {
         // Execute scaling decision
         match &decision {
             ScalingDecision::ScaleUp(nodes) => {
-                self.execute_scale_up(*nodes)?;
+                self.execute_scale_up(*nodes, &reason)?;
             },
             ScalingDecision::ScaleDown(nodes) => {
-                self.execute_scale_down(*nodes)?;
+                self.execute_scale_down(*nodes, &reason)?;
             },
             ScalingDecision::NoAction => {},
         }
@@ -217,7 +294,11 @@ impl AutoScaler {
         Ok(decision)
     }
 
-    fn performance_based_scaling(&self, avg_utilization: f32) -> Result<ScalingDecision> {
+    /// `reason` (the second element of the returned tuple) is only ever read
+    /// for the `ScaleUp`/`ScaleDown` variants -- it is genuinely unused for
+    /// `NoAction` and left empty there rather than describing a decision
+    /// that was not made.
+    fn performance_based_scaling(&self, avg_utilization: f32) -> Result<(ScalingDecision, String)> {
         if avg_utilization > self.config.scale_up_threshold
             && self.current_nodes < self.config.max_nodes
         {
@@ -228,7 +309,12 @@ impl AutoScaler {
                 ((utilization_ratio - 1.0) * self.current_nodes as f32).ceil() as usize;
             let nodes_to_add = nodes_to_add.min(self.config.max_nodes - self.current_nodes);
 
-            Ok(ScalingDecision::ScaleUp(nodes_to_add))
+            let reason = format!(
+                "Performance strategy: GPU utilization {avg_utilization:.2} exceeds the \
+                 scale-up threshold {:.2}",
+                self.config.scale_up_threshold
+            );
+            Ok((ScalingDecision::ScaleUp(nodes_to_add), reason))
         } else if avg_utilization < self.config.scale_down_threshold
             && self.current_nodes > self.config.min_nodes
         {
@@ -240,33 +326,56 @@ impl AutoScaler {
             let nodes_to_remove = nodes_to_remove.min(self.current_nodes - self.config.min_nodes);
 
             if nodes_to_remove > 0 {
-                Ok(ScalingDecision::ScaleDown(nodes_to_remove))
+                let reason = format!(
+                    "Performance strategy: GPU utilization {avg_utilization:.2} is below the \
+                     scale-down threshold {:.2}",
+                    self.config.scale_down_threshold
+                );
+                Ok((ScalingDecision::ScaleDown(nodes_to_remove), reason))
             } else {
-                Ok(ScalingDecision::NoAction)
+                Ok((ScalingDecision::NoAction, String::new()))
             }
         } else {
-            Ok(ScalingDecision::NoAction)
+            Ok((ScalingDecision::NoAction, String::new()))
         }
     }
 
-    fn queue_based_scaling(&self, metrics: &PerformanceMetrics) -> Result<ScalingDecision> {
+    fn queue_based_scaling(
+        &self,
+        metrics: &PerformanceMetrics,
+    ) -> Result<(ScalingDecision, String)> {
         // Simplified queue-based scaling (would integrate with actual queue metrics)
         let throughput_ratio = metrics.throughput / 1000.0; // Assume baseline 1000 samples/sec
 
         if throughput_ratio < 0.5 && self.current_nodes < self.config.max_nodes {
-            Ok(ScalingDecision::ScaleUp(1))
+            let reason = format!(
+                "Queue-based strategy: throughput ratio {throughput_ratio:.2} is below 0.5 \
+                 (queue backlog signal)"
+            );
+            Ok((ScalingDecision::ScaleUp(1), reason))
         } else if throughput_ratio > 2.0 && self.current_nodes > self.config.min_nodes {
-            Ok(ScalingDecision::ScaleDown(1))
+            let reason = format!(
+                "Queue-based strategy: throughput ratio {throughput_ratio:.2} is above 2.0 \
+                 (excess capacity signal)"
+            );
+            Ok((ScalingDecision::ScaleDown(1), reason))
         } else {
-            Ok(ScalingDecision::NoAction)
+            Ok((ScalingDecision::NoAction, String::new()))
         }
     }
 
-    fn predictive_scaling(&mut self, metrics: &PerformanceMetrics) -> Result<ScalingDecision> {
+    fn predictive_scaling(
+        &mut self,
+        metrics: &PerformanceMetrics,
+    ) -> Result<(ScalingDecision, String)> {
         if !self.config.predictive_scaling {
-            return self.performance_based_scaling(
+            let (decision, reason) = self.performance_based_scaling(
                 metrics.gpu_utilization.iter().sum::<f32>() / metrics.gpu_utilization.len() as f32,
-            );
+            )?;
+            return Ok((
+                decision,
+                format!("Predictive strategy disabled by config; used performance-based fallback -- {reason}"),
+            ));
         }
 
         // Update workload predictor
@@ -277,9 +386,16 @@ impl AutoScaler {
         // data; inventing a "conservative 0.75" would fabricate the input the
         // whole branch is about to act on.
         if !self.workload_predictor.can_predict() {
-            return self.performance_based_scaling(
+            let (decision, reason) = self.performance_based_scaling(
                 metrics.gpu_utilization.iter().sum::<f32>() / metrics.gpu_utilization.len() as f32,
-            );
+            )?;
+            return Ok((
+                decision,
+                format!(
+                    "Predictive strategy: not enough history to predict yet; used \
+                     performance-based fallback -- {reason}"
+                ),
+            ));
         }
 
         // Get prediction for next 10 minutes
@@ -296,8 +412,16 @@ impl AutoScaler {
         {
             let required = (predicted_load / target * self.current_nodes as f32).ceil() as usize;
             let nodes_to_add = required.saturating_sub(self.current_nodes).max(1);
-            Ok(ScalingDecision::ScaleUp(
-                nodes_to_add.min(self.config.max_nodes - self.current_nodes),
+            let reason = format!(
+                "Predictive strategy: predicted load {predicted_load:.2} over the next 10 \
+                 minutes exceeds the scale-up threshold {:.2} (10% buffer applied)",
+                self.config.scale_up_threshold
+            );
+            Ok((
+                ScalingDecision::ScaleUp(
+                    nodes_to_add.min(self.config.max_nodes - self.current_nodes),
+                ),
+                reason,
             ))
         } else if predicted_load < self.config.scale_down_threshold * 0.9 && // Add 10% buffer
                   self.current_nodes > self.config.min_nodes
@@ -306,14 +430,22 @@ impl AutoScaler {
                 ((predicted_load / target * self.current_nodes as f32).ceil() as usize).max(1);
             let nodes_to_remove = self.current_nodes.saturating_sub(target_nodes);
             if nodes_to_remove > 0 {
-                Ok(ScalingDecision::ScaleDown(
-                    nodes_to_remove.min(self.current_nodes - self.config.min_nodes),
+                let reason = format!(
+                    "Predictive strategy: predicted load {predicted_load:.2} over the next 10 \
+                     minutes is below the scale-down threshold {:.2} (10% buffer applied)",
+                    self.config.scale_down_threshold
+                );
+                Ok((
+                    ScalingDecision::ScaleDown(
+                        nodes_to_remove.min(self.current_nodes - self.config.min_nodes),
+                    ),
+                    reason,
                 ))
             } else {
-                Ok(ScalingDecision::NoAction)
+                Ok((ScalingDecision::NoAction, String::new()))
             }
         } else {
-            Ok(ScalingDecision::NoAction)
+            Ok((ScalingDecision::NoAction, String::new()))
         }
     }
 
@@ -321,7 +453,7 @@ impl AutoScaler {
         &mut self,
         avg_utilization: f32,
         metrics: &PerformanceMetrics,
-    ) -> Result<ScalingDecision> {
+    ) -> Result<(ScalingDecision, String)> {
         // Calculate cost-performance ratio
         let current_cost = self.cost_optimizer.calculate_current_cost(self.current_nodes, metrics);
 
@@ -334,9 +466,15 @@ impl AutoScaler {
             let cost_benefit_ratio = current_cost / scale_up_cost;
 
             if cost_benefit_ratio > (1.0 - self.config.cost_priority) {
-                Ok(ScalingDecision::ScaleUp(1))
+                let reason = format!(
+                    "Cost-optimized strategy: GPU utilization {avg_utilization:.2} exceeds the \
+                     scale-up threshold {:.2} and the cost-benefit ratio {cost_benefit_ratio:.2} \
+                     favors scaling up",
+                    self.config.scale_up_threshold
+                );
+                Ok((ScalingDecision::ScaleUp(1), reason))
             } else {
-                Ok(ScalingDecision::NoAction)
+                Ok((ScalingDecision::NoAction, String::new()))
             }
         } else if avg_utilization < self.config.scale_down_threshold
             && self.current_nodes > self.config.min_nodes
@@ -347,12 +485,20 @@ impl AutoScaler {
 
             if cost_savings > current_cost * 0.1 {
                 // At least 10% savings
-                Ok(ScalingDecision::ScaleDown(1))
+                let savings_pct =
+                    if current_cost > 0.0 { cost_savings / current_cost * 100.0 } else { 0.0 };
+                let reason = format!(
+                    "Cost-optimized strategy: GPU utilization {avg_utilization:.2} is below the \
+                     scale-down threshold {:.2} and scaling down projects {savings_pct:.1}% cost \
+                     savings (over the 10% minimum)",
+                    self.config.scale_down_threshold
+                );
+                Ok((ScalingDecision::ScaleDown(1), reason))
             } else {
-                Ok(ScalingDecision::NoAction)
+                Ok((ScalingDecision::NoAction, String::new()))
             }
         } else {
-            Ok(ScalingDecision::NoAction)
+            Ok((ScalingDecision::NoAction, String::new()))
         }
     }
 
@@ -364,7 +510,11 @@ impl AutoScaler {
     /// implement and has no callback for; answering
     /// [`ScalingDecision::NoAction`] would be indistinguishable from a policy
     /// that ran and decided to do nothing.
-    fn custom_scaling(&self, name: &str, _metrics: &PerformanceMetrics) -> Result<ScalingDecision> {
+    fn custom_scaling(
+        &self,
+        name: &str,
+        _metrics: &PerformanceMetrics,
+    ) -> Result<(ScalingDecision, String)> {
         Err(TrustformersError::not_implemented(format!(
             "custom scaling strategy `{name}` has no implementation registered; select one of \
              ScalingStrategy::{{Performance, QueueBased, Predictive, CostOptimized}} or drive the \
@@ -372,54 +522,97 @@ impl AutoScaler {
         )))
     }
 
-    fn execute_scale_up(&mut self, nodes: usize) -> Result<()> {
-        log::info!(
-            "scaling up: adding {} nodes (current: {})",
-            nodes,
-            self.current_nodes
-        );
+    /// Requires a [`NodeProvider`] (see [`Self::with_node_provider`]): this
+    /// `AutoScaler` has no cluster substrate of its own to request new
+    /// nodes from. Without one, returns
+    /// [`TrustformersError::invalid_state`] instead of reporting nodes as
+    /// added that were never requested. `current_nodes` and
+    /// `scaling_history` are updated with exactly the number of nodes the
+    /// provider actually reports provisioning, even when that falls short
+    /// of `nodes` (in which case this still returns an error, but
+    /// `get_current_nodes`/`get_scaling_history` reflect the real partial
+    /// result rather than either the request or nothing at all). `reason`
+    /// is recorded into the resulting `ScalingEvent` verbatim -- it must be
+    /// the real trigger the caller's configured [`ScalingStrategy`] computed
+    /// (see each strategy method's own reason string), never a constant
+    /// that only happens to describe [`ScalingStrategy::Performance`].
+    fn execute_scale_up(&mut self, nodes: usize, reason: &str) -> Result<()> {
+        let provider = self.node_provider.as_ref().ok_or_else(|| {
+            TrustformersError::invalid_state(format!(
+                "cannot add {nodes} node(s): no NodeProvider is configured (AutoScaler has no \
+                 cluster substrate of its own); attach one via AutoScaler::with_node_provider, \
+                 or SimulatedNodeProvider for an explicit dry run"
+            ))
+        })?;
 
-        self.current_nodes += nodes;
+        let provisioned = provider.provision_nodes(nodes)?;
+        self.current_nodes += provisioned;
         self.last_scaling_action = Instant::now();
 
         self.scaling_history.push(ScalingEvent {
             timestamp: SystemTime::now(),
             action: ScalingAction::ScaleUp,
-            nodes_changed: nodes,
-            reason: "Performance threshold exceeded".to_string(),
+            nodes_changed: provisioned,
+            reason: reason.to_string(),
         });
 
-        // In a real implementation, this would:
-        // 1. Request new nodes from cloud provider
-        // 2. Initialize nodes with training environment
-        // 3. Add nodes to communication topology
-        // 4. Redistribute workload
+        log::info!(
+            "scaling up: added {} node(s) (current: {})",
+            provisioned,
+            self.current_nodes
+        );
+
+        if provisioned < nodes {
+            return Err(TrustformersError::invalid_state(format!(
+                "requested {nodes} node(s) but the NodeProvider only provisioned {provisioned}"
+            )));
+        }
 
         Ok(())
     }
 
-    fn execute_scale_down(&mut self, nodes: usize) -> Result<()> {
-        log::info!(
-            "scaling down: removing {} nodes (current: {})",
-            nodes,
-            self.current_nodes
-        );
+    /// Requires a [`NodeProvider`] (see [`Self::with_node_provider`]): this
+    /// `AutoScaler` has no cluster substrate of its own to terminate real
+    /// nodes on. Without one, returns [`TrustformersError::invalid_state`]
+    /// instead of reporting nodes as removed that were never terminated.
+    /// `current_nodes` and `scaling_history` are updated with exactly the
+    /// number of nodes the provider actually reports terminating, even when
+    /// that falls short of `nodes`. `reason` is recorded into the resulting
+    /// `ScalingEvent` verbatim -- see [`Self::execute_scale_up`]'s doc
+    /// comment for why this must be the real, strategy-specific trigger.
+    fn execute_scale_down(&mut self, nodes: usize, reason: &str) -> Result<()> {
+        let provider = self.node_provider.as_ref().ok_or_else(|| {
+            TrustformersError::invalid_state(format!(
+                "cannot remove {nodes} node(s): no NodeProvider is configured (AutoScaler has \
+                 no cluster substrate of its own); attach one via \
+                 AutoScaler::with_node_provider, or SimulatedNodeProvider for an explicit dry \
+                 run"
+            ))
+        })?;
 
-        self.current_nodes -= nodes;
+        let terminated = provider.terminate_nodes(nodes)?;
+        self.current_nodes = self.current_nodes.saturating_sub(terminated);
         self.last_scaling_action = Instant::now();
 
         self.scaling_history.push(ScalingEvent {
             timestamp: SystemTime::now(),
             action: ScalingAction::ScaleDown,
-            nodes_changed: nodes,
-            reason: "Low utilization detected".to_string(),
+            nodes_changed: terminated,
+            reason: reason.to_string(),
         });
 
-        // In a real implementation, this would:
-        // 1. Gracefully remove nodes from training
-        // 2. Migrate workload to remaining nodes
-        // 3. Update communication topology
-        // 4. Terminate removed nodes
+        log::info!(
+            "scaling down: removed {} node(s) (current: {})",
+            terminated,
+            self.current_nodes
+        );
+
+        if terminated < nodes {
+            return Err(TrustformersError::invalid_state(format!(
+                "requested to remove {nodes} node(s) but the NodeProvider only terminated \
+                 {terminated}"
+            )));
+        }
 
         Ok(())
     }

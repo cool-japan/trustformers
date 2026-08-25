@@ -35,22 +35,40 @@ pub struct PerformancePrediction {
 }
 
 /// Model accuracy metrics
+///
+/// ## Changed in 0.2.1
+///
+/// `confidence_interval: (f32, f32)` and `prediction_stability: f32` were
+/// constants: `(0.8, 0.95)` and `0.85` for the linear and polynomial models,
+/// `(0.75, 0.90)` and `0.80` for the exponential one, each marked "Simplified"
+/// and each attached to every model of that kind whatever it had been trained
+/// on. The interval is now named for the quantity it brackets and is optional,
+/// and stability is optional because nothing in this crate measures it.
+///
+/// `r_squared`, `mean_absolute_error` and `root_mean_squared_error` are the
+/// figures measured on the training sample; an untrained model carries their
+/// zero/infinite initial values. `overall_accuracy` is `None` in that state, so
+/// it is the field to test before reading the others.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelAccuracyMetrics {
-    /// Overall model accuracy
-    pub overall_accuracy: f32,
+    /// Accuracy relative to the target scale, `1 - MAE / mean|y|`, clamped to
+    /// `[0, 1]`; `None` for a model that has not been trained or whose targets
+    /// have no scale.
+    pub overall_accuracy: Option<f32>,
     /// R-squared coefficient
     pub r_squared: f32,
     /// Mean absolute error
     pub mean_absolute_error: f32,
     /// Root mean squared error
     pub root_mean_squared_error: f32,
-    /// Cross-validation scores
+    /// Cross-validation scores, empty when the model was not cross-validated
     pub cross_validation_scores: Vec<f32>,
-    /// Confidence interval
-    pub confidence_interval: (f32, f32),
-    /// Prediction stability metric
-    pub prediction_stability: f32,
+    /// Normal-approximation 95% interval for [`Self::mean_absolute_error`] on
+    /// the training sample; `None` for fewer than two training points.
+    pub mean_absolute_error_interval: Option<(f32, f32)>,
+    /// Spread of the model's predictions under resampling; `None` unless a
+    /// validator measured it.
+    pub prediction_stability: Option<f32>,
     /// Last validation timestamp
     pub last_validated: DateTime<Utc>,
 }
@@ -253,14 +271,21 @@ impl Default for AdaptiveLearningConfig {
 }
 
 /// Learning update information
+///
+/// ## Changed in 0.2.1
+///
+/// A `confidence_delta: f32` field was removed. Nothing in the learning system
+/// tracks a calibrated model confidence, so the three sites that built this
+/// record filled it with the constants `0.1` (drift adaptation), `0.02`
+/// (incremental) and `0.05` (active learning) -- one constant per update kind,
+/// never a measurement. No caller read it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearningUpdate {
     /// Update type
     pub update_type: LearningUpdateType,
-    /// Performance impact
+    /// Mean relative loss reduction reported by the learners this update
+    /// touched
     pub performance_impact: f32,
-    /// Confidence change
-    pub confidence_delta: f32,
     /// Learning metrics
     pub learning_metrics: LearningMetrics,
     /// Update timestamp
@@ -283,20 +308,51 @@ pub enum LearningUpdateType {
 }
 
 /// Learning performance metrics
+///
+/// ## Changed in 0.2.1
+///
+/// Three of these numbers were constants chosen per call site rather than
+/// measurements: `gradient_norm` was `0.0` on the drift path ("Would be
+/// calculated from actual gradients"), `0.5` on the incremental path and `0.8`
+/// on the active-learning path; a `convergence_score` was `0.8`/`0.9`/`0.85`
+/// on the same three paths; and `memory_usage_mb` charged every learner a flat
+/// kilobyte. They are measured now, and each is optional because a learner is
+/// not required to be able to report it -- see
+/// [`OnlineLearner::last_gradient_norm`] and [`OnlineLearner::footprint_bytes`].
+///
+/// [`OnlineLearner::last_gradient_norm`]:
+///     crate::performance_optimizer::performance_modeling::adaptive_learning::OnlineLearner::last_gradient_norm
+/// [`OnlineLearner::footprint_bytes`]:
+///     crate::performance_optimizer::performance_modeling::adaptive_learning::OnlineLearner::footprint_bytes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearningMetrics {
     /// Learning rate used
     pub learning_rate: f32,
-    /// Gradient norm
-    pub gradient_norm: f32,
-    /// Loss reduction
+    /// Euclidean norm of the joint gradient of this update -- the norm of the
+    /// gradients of every learner that reports one, stacked.
+    ///
+    /// `None` when no learner updated in this round reports a gradient.
+    pub gradient_norm: Option<f32>,
+    /// Mean relative loss reduction across the learners this update touched
     pub loss_reduction: f32,
-    /// Convergence indicator
-    pub convergence_score: f32,
+    /// Share of the learners updated in this round whose measured loss impact
+    /// was positive.
+    ///
+    /// `None` when no learner was updated. This replaces a `convergence_score`
+    /// that was a per-call-site constant; the quantity is named for what it
+    /// counts rather than for the property it was claimed to indicate.
+    pub improving_learner_fraction: Option<f32>,
     /// Training time
     pub training_time: Duration,
-    /// Memory usage
-    pub memory_usage_mb: f32,
+    /// Resident size of the buffered performance points plus the storage every
+    /// learner reports, in MiB.
+    ///
+    /// Heap allocations reachable *from* the buffered points (their strings and
+    /// vectors) are not counted -- the number is the buffer's own bytes plus
+    /// each learner's reported footprint. `None` when any registered learner
+    /// cannot report its footprint, because a partial total would understate
+    /// the real one without saying so.
+    pub memory_usage_mb: Option<f32>,
 }
 
 /// Model state tracking

@@ -210,4 +210,77 @@ mod tests {
             "the refusal must say why, got: {rendered}"
         );
     }
+
+    /// A memory *percentage* must come from the device's real VRAM size. When
+    /// the sample does not carry one, the percentage is unknown -- never the
+    /// old hardcoded 24 GiB assumption.
+    #[test]
+    fn memory_percentage_uses_the_real_vram_size() {
+        use chrono::Utc;
+
+        let sample = |memory_usage_mb: u64, total_memory_mb: Option<u64>| GpuRealTimeMetrics {
+            device_id: 0,
+            timestamp: Utc::now(),
+            memory_usage_mb,
+            utilization_percent: 0.0,
+            temperature_celsius: 0.0,
+            power_consumption_watts: 0.0,
+            clock_speeds: GpuClockSpeeds {
+                core_clock_mhz: 0,
+                memory_clock_mhz: 0,
+                shader_clock_mhz: None,
+            },
+            fan_speeds: Vec::new(),
+            total_memory_mb,
+        };
+
+        // 6 GiB used on a 12 GiB card is 50%. The deleted code divided by a
+        // hardcoded 24576 and would have answered 25%.
+        let twelve_gib = sample(6144, Some(12288));
+        let percent = twelve_gib.memory_usage_percent().expect("a size was supplied");
+        assert!((percent - 50.0).abs() < 0.01, "expected 50%, got {percent}");
+
+        // The same usage on an 80 GiB card is a very different number.
+        let eighty_gib = sample(6144, Some(81920));
+        let percent = eighty_gib.memory_usage_percent().expect("a size was supplied");
+        assert!((percent - 7.5).abs() < 0.01, "expected 7.5%, got {percent}");
+
+        // No size means no percentage -- not a guess.
+        assert!(sample(6144, None).memory_usage_percent().is_none());
+        assert!(sample(6144, Some(0)).memory_usage_percent().is_none());
+    }
+
+    /// An unread sensor must be absent, not zero. A zero utilization reading is
+    /// indistinguishable from a genuinely idle GPU, and every threshold
+    /// downstream passes on it.
+    #[tokio::test]
+    async fn telemetry_reports_absent_sensors_as_absent() {
+        // Whatever this host is, the contract holds: either the driver answered
+        // (and each field is a real reading), or it did not (and the whole
+        // sample is None). Nothing may arrive as a zero standing in for
+        // "unknown".
+        let sample = GpuResourceManager::device_telemetry(0)
+            .await
+            .expect("a telemetry query must not error out");
+
+        if let Some(sample) = sample {
+            // Every Some(_) reading must be a finite number the driver gave us.
+            if let Some(utilization) = sample.utilization_percent {
+                assert!(
+                    utilization.is_finite() && (0.0..=100.0).contains(&utilization),
+                    "a reported utilization must be a real percentage, got {utilization}"
+                );
+            }
+            if let Some(temperature) = sample.temperature_celsius {
+                assert!(
+                    temperature.is_finite(),
+                    "a reported temperature must be finite"
+                );
+            }
+            if let Some(power) = sample.power_watts {
+                assert!(power.is_finite(), "a reported power draw must be finite");
+            }
+            assert_eq!(sample.device_id, 0);
+        }
+    }
 }

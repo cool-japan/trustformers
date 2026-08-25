@@ -318,6 +318,47 @@ mod tests {
             .expect("Operation should succeed");
         assert!(selected.is_some());
     }
+    /// Regression: `select_hybrid`'s `LeastLoaded` branch used to fall back to
+    /// `GpuDeviceInfo::utilization_percent` (a discovery-time constant 0.0) for
+    /// a device with no live load reading, so that device scored `1.0 - 0.0 =
+    /// 1.0` and won every hybrid selection over any genuinely measured device.
+    /// Device 0 here is never given a load reading at all (no
+    /// `update_device_load` call); device 1 is measured at 99% utilization,
+    /// about as bad as a real device gets. A correct hybrid must still prefer
+    /// the measured-but-heavily-loaded device over the unmonitored one.
+    #[tokio::test]
+    async fn test_hybrid_strategy_unmonitored_device_never_wins() {
+        let load_balancer = GpuLoadBalancer::new();
+        load_balancer
+            .set_strategy(LoadBalancingStrategy::Hybrid(vec![
+                LoadBalancingStrategy::LeastLoaded,
+            ]))
+            .await
+            .expect("Set strategy should succeed");
+        load_balancer
+            .update_device_load(1, 0.99)
+            .await
+            .expect("Update load should succeed");
+        let requirements = create_test_requirements();
+        let mut devices = HashMap::new();
+        // Both devices' *own records* carry utilization_percent 0.0 (the
+        // discovery default) and plenty of available memory, so both pass
+        // suitability filtering regardless of load; the 99% figure for
+        // device 1 comes only from the live `device_loads` reading set
+        // above, which is exactly the value the old fallback ignored in
+        // favor of this record's own (here, identically 0.0) utilization_percent.
+        devices.insert(0, create_test_device(0, 0.0, 8192));
+        devices.insert(1, create_test_device(1, 0.0, 8192));
+        let selected = load_balancer
+            .select_optimal_device(&devices, &requirements, None)
+            .await
+            .expect("Operation should succeed");
+        assert_eq!(
+            selected,
+            Some(1),
+            "an unmonitored device must not outscore a device measured at 99% utilization"
+        );
+    }
     #[tokio::test]
     async fn test_power_aware_strategy() {
         let load_balancer = GpuLoadBalancer::new();

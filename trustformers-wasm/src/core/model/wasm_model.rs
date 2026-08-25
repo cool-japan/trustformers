@@ -790,6 +790,40 @@ mod tests {
     }
 
     #[test]
+    fn test_forward_single_token_input_produces_finite_output() {
+        // Regression/contract test for `multi_model_manager::warmup_model`,
+        // which runs a real minimal forward pass — a single token id 0 in
+        // a `[1, 1]` tensor — to warm up a freshly loaded model. Token id 0
+        // is in-range for every non-empty vocabulary, so this must succeed
+        // (and produce finite output) for every supported architecture,
+        // not just the multi-token shapes the other tests above use.
+        for architecture in [
+            ModelArchitecture::Bert,
+            ModelArchitecture::GPT2,
+            ModelArchitecture::T5,
+            ModelArchitecture::Llama,
+            ModelArchitecture::Mistral,
+        ] {
+            let config = tiny_config(architecture);
+            let (use_swiglu, use_pos_emb) = match architecture {
+                ModelArchitecture::Llama | ModelArchitecture::Mistral => (true, false),
+                _ => (false, true),
+            };
+            let weights = build_weights(&config, use_swiglu, use_pos_emb, true);
+            let model = WasmModel::with_weights_for_test(config, weights);
+
+            let input = tensor(std::vec![0.0], std::vec![1, 1]);
+            let out = model.forward(&input).unwrap_or_else(|e| {
+                panic!("{architecture:?}: single-token forward must succeed, got {e:?}")
+            });
+            assert!(
+                out.data().iter().all(|v| v.is_finite()),
+                "{architecture:?}: single-token forward produced non-finite output"
+            );
+        }
+    }
+
+    #[test]
     fn test_forward_missing_required_tensor_errors_with_name() {
         let config = tiny_config(ModelArchitecture::Bert);
         // Deliberately empty: no token_embeddings.weight present.

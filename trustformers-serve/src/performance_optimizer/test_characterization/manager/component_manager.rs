@@ -2,6 +2,10 @@
 //!
 //! Manager for component lifecycle and coordination.
 
+// Imported by name rather than through the `types::*` glob below: until 0.2.1
+// a same-named shadow in `types/patterns.rs` won that resolution, and it
+// fabricated its whole analysis (see the note at that deletion site).
+use super::super::concurrency_detector::ConcurrencyRequirementsDetector;
 use super::super::pattern_engine::TestPatternRecognitionEngine;
 use super::super::real_time_profiler::RealTimeTestProfiler;
 use super::super::types::*;

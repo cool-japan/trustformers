@@ -414,12 +414,21 @@ pub struct ChunkLoader {
     loaded_chunks: std::collections::HashSet<usize>,
 }
 
+/// A byte-range plan for one chunk of a `total_size`-byte buffer.
+///
+/// This carries only the range (`offset`/`size`) [`ChunkLoader::split_into_chunks`]
+/// computed from a byte *count* — it never sees the chunk's actual bytes, so
+/// it cannot honestly carry a content checksum (a previous version set one
+/// to `format!("chunk_{i}")`, i.e. the chunk index restated as a string;
+/// nothing ever verified it, and it could not have detected any real
+/// corruption). Real per-chunk integrity checking lives in
+/// `model_splitting::ModelChunk`, which does hold the chunk's bytes at
+/// split time.
 #[derive(Debug, Clone)]
 pub struct ChunkMetadata {
     pub chunk_id: usize,
     pub offset: usize,
     pub size: usize,
-    pub checksum: String,
 }
 
 impl ChunkLoader {
@@ -445,7 +454,6 @@ impl ChunkLoader {
                 chunk_id: i,
                 offset,
                 size,
-                checksum: format!("chunk_{}", i), // Placeholder
             });
         }
 

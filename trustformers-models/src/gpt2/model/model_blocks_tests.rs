@@ -455,3 +455,78 @@ fn test_silu_activation_on_positive() {
         );
     }
 }
+
+// ── KV-cache attention-mask widening ─────────────────────────────────────────
+
+/// A mask that is already `kv_seq_len` wide is not this function's business, but the
+/// narrow one it *is* meant for must land in the trailing columns with the cached
+/// prefix left unmasked.
+#[test]
+fn widen_cached_attention_mask_places_the_block_at_the_end() {
+    // create_causal_mask(2) == [[0, -inf], [0, 0]] shaped [1, 1, 2, 2].
+    let mask = match create_causal_mask(2).expect("causal mask") {
+        Tensor::F32(arr) => arr,
+        other => panic!(
+            "create_causal_mask must return F32, got {:?}",
+            other.dtype()
+        ),
+    };
+    let widened = widen_cached_attention_mask(&mask, 2, 5).expect("widening must succeed");
+    assert_eq!(widened.shape(), &[1, 1, 2, 5]);
+
+    // Row 0 sits at absolute position 3: keys 0..=3 visible, key 4 masked.
+    for col in 0..4 {
+        assert_eq!(
+            widened[[0, 0, 0, col]],
+            0.0,
+            "row 0 col {col} must stay visible"
+        );
+    }
+    assert!(widened[[0, 0, 0, 4]].is_infinite() && widened[[0, 0, 0, 4]] < 0.0);
+    // Row 1 sits at absolute position 4: every key is visible.
+    for col in 0..5 {
+        assert_eq!(
+            widened[[0, 0, 1, col]],
+            0.0,
+            "row 1 col {col} must stay visible"
+        );
+    }
+}
+
+/// Single-token decode: the widened mask is an all-visible row, which is why the
+/// missing widening only ever surfaced on multi-token continuations.
+#[test]
+fn widen_cached_attention_mask_is_all_visible_for_one_query_row() {
+    let mask = match create_causal_mask(1).expect("causal mask") {
+        Tensor::F32(arr) => arr,
+        other => panic!(
+            "create_causal_mask must return F32, got {:?}",
+            other.dtype()
+        ),
+    };
+    let widened = widen_cached_attention_mask(&mask, 1, 6).expect("widening must succeed");
+    assert_eq!(widened.shape(), &[1, 1, 1, 6]);
+    assert!(widened.iter().all(|v| *v == 0.0));
+}
+
+/// Shapes the rule cannot interpret are refused with a structured error rather than
+/// reaching `ndarray` and aborting the process with a broadcast panic.
+#[test]
+fn widen_cached_attention_mask_refuses_uninterpretable_shapes() {
+    // Mask wider than the query block but narrower than the keys.
+    let odd = ArrayD::<f32>::zeros(IxDyn(&[1, 1, 2, 3]));
+    assert!(widen_cached_attention_mask(&odd, 2, 5).is_err());
+
+    // A genuinely per-head mask carries information the widening would discard.
+    let per_head = ArrayD::<f32>::zeros(IxDyn(&[1, 4, 2, 2]));
+    let err =
+        widen_cached_attention_mask(&per_head, 2, 5).expect_err("a per-head mask must be refused");
+    assert!(
+        format!("{err}").contains("per-batch or per-head"),
+        "error should name the reason, got: {err}"
+    );
+
+    // kv shorter than the query block is nonsense.
+    let mask = ArrayD::<f32>::zeros(IxDyn(&[1, 1, 5, 5]));
+    assert!(widen_cached_attention_mask(&mask, 5, 2).is_err());
+}

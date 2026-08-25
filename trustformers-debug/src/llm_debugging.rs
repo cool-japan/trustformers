@@ -546,8 +546,11 @@ impl LLMDebugger {
             weight_sum += 0.3;
         }
 
-        if let Some(a) = alignment {
-            total_score += a.alignment_score * 0.4;
+        // Only a real alignment score contributes; when the analyzer reports
+        // `None` the weighted mean simply drops that term rather than folding
+        // in a stand-in value.
+        if let Some(score) = alignment.as_ref().and_then(|a| a.alignment_score) {
+            total_score += score * 0.4;
             weight_sum += 0.4;
         }
 
@@ -581,8 +584,8 @@ impl LLMDebugger {
             }
         }
 
-        if let Some(a) = alignment {
-            if a.alignment_score < 0.7 {
+        if let Some(score) = alignment.as_ref().and_then(|a| a.alignment_score) {
+            if score < 0.7 {
                 recommendations.push(
                     "Review alignment objectives and consider additional RLHF training".to_string(),
                 );
@@ -593,8 +596,14 @@ impl LLMDebugger {
     }
 
     /// Compute overall health score
+    /// Unweighted mean of the three analyzer-level aggregate scores.
+    ///
+    /// Each term is the analyzer's own running average, so this is only as
+    /// meaningful as the analyzers feeding it: `overall_alignment_score` is
+    /// never updated by [`AlignmentMonitor::check_alignment`] (no alignment
+    /// scorer exists), so it contributes whatever a caller last set on
+    /// `alignment_metrics`.
     fn compute_overall_health(&self) -> f32 {
-        // Simplified implementation - would aggregate across all analyzers
         (self.safety_analyzer.safety_metrics.overall_safety_score
             + self.factuality_checker.factuality_metrics.overall_factuality_score
             + self.alignment_monitor.alignment_metrics.overall_alignment_score)
@@ -875,25 +884,55 @@ pub struct FactualityAnalysisResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlignmentAnalysisResult {
-    pub alignment_score: f32,
+    /// Overall alignment score, or `None` when no scorer is available.
+    ///
+    /// Always `None` from [`AlignmentMonitor::check_alignment`]: scoring
+    /// alignment requires a policy/preference model, and this crate ships
+    /// none. It used to be the constant `0.85`.
+    pub alignment_score: Option<f32>,
+    /// Per-objective scores; empty for the same reason as
+    /// [`Self::alignment_score`] (previously the constants 0.9/0.95/0.8/0.85).
     pub objective_scores: HashMap<AlignmentObjective, f32>,
+    /// Concrete alignment violations found. Always empty here: no violation
+    /// detector exists.
     pub violations: Vec<String>,
-    pub consistency_score: f32,
+    /// Consistency between input and response; `None` here (previously the
+    /// constant `0.9`).
+    pub consistency_score: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HallucinationAnalysisResult {
-    pub hallucination_probability: f32,
-    pub confidence_accuracy: f32,
+    /// Crude lexical hedging signal, not a calibrated probability -- see
+    /// [`HallucinationDetector::hedging_signal`].
+    pub hedging_signal: f32,
+    /// How well the response's stated confidence matches its accuracy.
+    ///
+    /// Always `None`: measuring it needs ground truth for the claims, which
+    /// this crate never receives. Previously the constant `0.7`.
+    pub confidence_accuracy: Option<f32>,
+    /// Real internal-consistency score from
+    /// [`ConsistencyChecker::check_consistency`].
     pub internal_consistency: f32,
+    /// Concrete fabricated statements found. Always empty: no fact-checking
+    /// backend exists.
     pub detected_fabrications: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiasAnalysisResult {
-    pub overall_bias_score: f32,
+    /// Overall bias score, or `None` when no scorer is available.
+    ///
+    /// Always `None` from [`BiasDetector::detect_bias`]: real bias detection
+    /// needs demographic-term and stereotype models this crate does not have.
+    /// It used to be the constant `0.1`.
+    pub overall_bias_score: Option<f32>,
+    /// Per-category bias scores; empty for the same reason (previously the
+    /// constants Gender 0.1 / Race 0.05 / Religion 0.08).
     pub bias_categories: HashMap<BiasCategory, f32>,
+    /// Concrete biased statements found. Always empty: no detector exists.
     pub detected_biases: Vec<String>,
+    /// Concrete fairness violations found. Always empty: no detector exists.
     pub fairness_violations: Vec<String>,
 }
 
@@ -908,9 +947,14 @@ pub struct PerformanceAnalysisResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationAnalysisResult {
     pub dialog_metrics: DialogMetrics,
-    pub context_consistency: f32,
-    pub turn_quality: f32,
-    pub engagement_score: f32,
+    /// Consistency of this turn with the conversation context; `None` --
+    /// dialog-quality scoring needs a trained model this crate does not have.
+    /// Previously the constant `0.85`.
+    pub context_consistency: Option<f32>,
+    /// Quality of this turn; `None` for the same reason (previously `0.9`).
+    pub turn_quality: Option<f32>,
+    /// Engagement level; `None` for the same reason (previously `0.8`).
+    pub engagement_score: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1222,44 +1266,18 @@ impl AlignmentMonitor {
         input: &str,
         response: &str,
     ) -> Result<AlignmentAnalysisResult> {
-        let alignment_score = self.compute_alignment_score(input, response);
-        let objective_scores = self.assess_objectives(input, response);
-
-        // Real running history feeds `overall_alignment_score`, which used
-        // to be frozen at its `new()` default (0.85) forever.
-        self.health.record(alignment_score);
-        self.alignment_metrics.overall_alignment_score = self.health.average_score();
-        self.alignment_metrics.alignment_trend = match self.health.trend_label().as_str() {
-            "Improving" => AlignmentTrend::Improving,
-            "Declining" => AlignmentTrend::Degrading,
-            _ => AlignmentTrend::Stable,
-        };
+        // No score is computable, so nothing is recorded into `health` and
+        // `alignment_metrics` keeps whatever a caller set. Recording a
+        // constant would have made `overall_alignment_score` converge to that
+        // constant no matter what was analysed.
+        let _ = (input, response);
 
         Ok(AlignmentAnalysisResult {
-            alignment_score,
-            objective_scores,
-            violations: vec![], // Would be populated with actual violations
-            consistency_score: 0.9,
+            alignment_score: None,
+            objective_scores: HashMap::new(),
+            violations: Vec::new(),
+            consistency_score: None,
         })
-    }
-
-    // NOTE: `compute_alignment_score`/`assess_objectives` remain fixed-value
-    // placeholders (real alignment scoring needs a policy/preference model
-    // this crate does not have) -- tracked as a follow-up distinct from the
-    // `get_health_summary` fabrication this pass fixes. `health` above is
-    // still meaningful: it turns "always reports Good/Stable no matter what"
-    // into "correctly reports whatever these placeholders currently produce".
-    fn compute_alignment_score(&self, _input: &str, _response: &str) -> f32 {
-        0.85
-    }
-
-    fn assess_objectives(&self, _input: &str, _response: &str) -> HashMap<AlignmentObjective, f32> {
-        let mut scores = HashMap::new();
-        scores.insert(AlignmentObjective::Helpfulness, 0.9);
-        scores.insert(AlignmentObjective::Harmlessness, 0.95);
-        scores.insert(AlignmentObjective::Honesty, 0.8);
-        scores.insert(AlignmentObjective::Fairness, 0.85);
-        scores
     }
 
     /// Real health summary derived from [`Self::health`]'s running
@@ -1300,30 +1318,42 @@ impl HallucinationDetector {
         response: &str,
         _context: Option<&[String]>,
     ) -> Result<HallucinationAnalysisResult> {
-        let hallucination_probability = self.compute_hallucination_probability(response);
-        let confidence_accuracy = self.assess_confidence_accuracy(response);
         let internal_consistency = self.consistency_checker.check_consistency(response);
 
         Ok(HallucinationAnalysisResult {
-            hallucination_probability,
-            confidence_accuracy,
+            hedging_signal: Self::hedging_signal(response),
+            confidence_accuracy: None,
             internal_consistency,
-            detected_fabrications: vec![], // Would be populated with actual fabrications
+            detected_fabrications: Vec::new(),
         })
     }
 
-    fn compute_hallucination_probability(&self, response: &str) -> f32 {
-        // Simplified probability computation
-        if response.contains("I'm not sure") {
-            0.2
-        } else {
-            0.1
-        }
-    }
-
-    fn assess_confidence_accuracy(&self, _response: &str) -> f32 {
-        // Simplified confidence assessment
-        0.7
+    /// Fraction of the crate's hedging phrases (`HEDGING_PHRASES`) that appear
+    /// in `response`, in `[0, 1]`.
+    ///
+    /// A lexical surface signal only: hedging correlates with a model
+    /// expressing uncertainty, but this measures the WORDS, not whether
+    /// anything is actually fabricated. It replaces
+    /// `compute_hallucination_probability`, which returned `0.2` if the
+    /// response contained the literal string `"I'm not sure"` and `0.1`
+    /// otherwise -- two constants published under the name "probability".
+    pub fn hedging_signal(response: &str) -> f32 {
+        /// Phrases a model uses when expressing uncertainty.
+        const HEDGING_PHRASES: &[&str] = &[
+            "i'm not sure",
+            "i am not sure",
+            "i think",
+            "i believe",
+            "possibly",
+            "might be",
+            "as far as i know",
+            "if i recall",
+            "i'm not certain",
+            "cannot verify",
+        ];
+        let lowered = response.to_lowercase();
+        let hits = HEDGING_PHRASES.iter().filter(|p| lowered.contains(**p)).count();
+        hits as f32 / HEDGING_PHRASES.len() as f32
     }
 }
 
@@ -1368,38 +1398,17 @@ impl BiasDetector {
     }
 
     pub async fn detect_bias(&mut self, response: &str) -> Result<BiasAnalysisResult> {
-        let overall_bias_score = self.compute_overall_bias_score(response);
-        let bias_categories = self.analyze_bias_categories(response);
-
-        // Real running history feeds the health summary, which used to be
-        // frozen at its `new()` default forever. Bias is lower-is-better,
-        // so the tracker records `1.0 - overall_bias_score`.
-        self.health.record(1.0 - overall_bias_score);
-        self.bias_metrics.overall_bias_score = 1.0 - self.health.average_score();
+        // No bias score is computable, so nothing is recorded into `health`
+        // and `bias_metrics` keeps whatever a caller set. Recording the old
+        // constant made `overall_bias_score` converge to 0.1 for every text.
+        let _ = response;
 
         Ok(BiasAnalysisResult {
-            overall_bias_score,
-            bias_categories,
-            detected_biases: vec![], // Would be populated with actual biases
-            fairness_violations: vec![], // Would be populated with violations
+            overall_bias_score: None,
+            bias_categories: HashMap::new(),
+            detected_biases: Vec::new(),
+            fairness_violations: Vec::new(),
         })
-    }
-
-    // NOTE: like `AlignmentMonitor`'s scoring, `compute_overall_bias_score`/
-    // `analyze_bias_categories` remain fixed-value placeholders (real bias
-    // detection needs demographic-term / stereotype models this crate does
-    // not have) -- a follow-up distinct from the `get_health_summary`
-    // fabrication this pass fixes.
-    fn compute_overall_bias_score(&self, _response: &str) -> f32 {
-        0.1
-    }
-
-    fn analyze_bias_categories(&self, _response: &str) -> HashMap<BiasCategory, f32> {
-        let mut scores = HashMap::new();
-        scores.insert(BiasCategory::Gender, 0.1);
-        scores.insert(BiasCategory::Race, 0.05);
-        scores.insert(BiasCategory::Religion, 0.08);
-        scores
     }
 
     /// Real health summary derived from [`Self::health`]'s running
@@ -1483,7 +1492,9 @@ impl LLMPerformanceProfiler {
             generation_metrics: gen_metrics,
             efficiency_metrics: self.efficiency_metrics.clone(),
             quality_metrics: self.quality_metrics.clone(),
-            bottlenecks: vec![], // Would be populated with identified bottlenecks
+            // No bottleneck attribution exists: the profiler records aggregate
+            // throughput, never a per-stage breakdown to rank.
+            bottlenecks: Vec::new(),
         })
     }
 
@@ -1530,37 +1541,16 @@ impl ConversationAnalyzer {
     ) -> Result<ConversationAnalysisResult> {
         self.conversation_history.push(turn.clone());
         self.context_tracking.update_from_turn(turn);
-        let turn_quality = self.assess_turn_quality(turn);
-
-        // Real running history from this turn's real quality score, feeding
-        // `get_health_summary` -- which used to read
-        // `self.dialog_metrics.conversation_coherence` directly and was
-        // therefore frozen at the `new()` default forever (`analyze_turn`
-        // never wrote back to `self.dialog_metrics`).
-        self.health.record(turn_quality);
+        // No dialog-quality score is computable, so nothing is recorded into
+        // `health`. The turn itself IS recorded above, so
+        // `conversation_history` and `context_tracking` stay real.
 
         Ok(ConversationAnalysisResult {
             dialog_metrics: self.dialog_metrics.clone(),
-            context_consistency: self.compute_context_consistency(),
-            turn_quality,
-            engagement_score: self.compute_engagement_score(),
+            context_consistency: None,
+            turn_quality: None,
+            engagement_score: None,
         })
-    }
-
-    // NOTE: like `AlignmentMonitor`/`BiasDetector`'s scoring, these remain
-    // fixed-value placeholders (real dialog-quality scoring needs a
-    // trained model this crate does not have) -- a follow-up distinct from
-    // the `get_health_summary` fabrication this pass fixes.
-    fn compute_context_consistency(&self) -> f32 {
-        0.85
-    }
-
-    fn assess_turn_quality(&self, _turn: &ConversationTurn) -> f32 {
-        0.9
-    }
-
-    fn compute_engagement_score(&self) -> f32 {
-        0.8
     }
 
     /// Real health summary derived from [`Self::health`]'s running

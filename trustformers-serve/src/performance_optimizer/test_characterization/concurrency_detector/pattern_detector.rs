@@ -7,14 +7,17 @@ use super::super::types::*;
 use anyhow::Result;
 use chrono::Utc;
 use parking_lot::Mutex;
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Instant};
 
 pub struct ConcurrencyPatternDetector {
     /// Pattern detection algorithms
     detection_algorithms: Arc<Mutex<Vec<Box<dyn PatternDetectionAlgorithm + Send + Sync>>>>,
+    /// Detection configuration.
+    ///
+    /// Until 0.2.1 `new` took this and dropped it (`_config`), so
+    /// `detection_enabled`, `min_confidence` and `max_patterns_to_detect` had
+    /// no effect on anything.
+    config: PatternDetectionConfig,
 }
 
 // `build_pattern_from_string` was deleted in 0.2.1. It turned a detector's
@@ -37,7 +40,7 @@ fn pattern_type_from_str(s: &str) -> ConcurrencyPatternType {
 
 impl ConcurrencyPatternDetector {
     /// Creates a new concurrency pattern detector
-    pub async fn new(_config: PatternDetectionConfig) -> Result<Self> {
+    pub async fn new(config: PatternDetectionConfig) -> Result<Self> {
         let mut detection_algorithms: Vec<Box<dyn PatternDetectionAlgorithm + Send + Sync>> =
             Vec::new();
 
@@ -49,6 +52,7 @@ impl ConcurrencyPatternDetector {
 
         Ok(Self {
             detection_algorithms: Arc::new(Mutex::new(detection_algorithms)),
+            config,
         })
     }
 
@@ -63,6 +67,14 @@ impl ConcurrencyPatternDetector {
         test_data: &TestExecutionData,
     ) -> Result<PatternAnalysisResult> {
         let start_time = Utc::now();
+
+        if !self.config.detection_enabled {
+            anyhow::bail!(
+                "concurrency-pattern detection is disabled by configuration; no pattern \
+                 analysis was performed for test '{}'",
+                test_data.test_id
+            );
+        }
 
         if test_data.thread_interactions.is_empty() {
             anyhow::bail!(
@@ -113,35 +125,32 @@ impl ConcurrencyPatternDetector {
             }
         }
 
-        // Deduplicate and classify patterns using structs
-        let unique_patterns = self.deduplicate_patterns(&detected_patterns_structs);
-        let classified_patterns = self.classify_patterns(&unique_patterns);
+        // Deduplicate, then drop anything below the configured confidence bar
+        // and cap the count. Until 0.2.1 the config was dropped in `new`, so
+        // neither limit did anything.
+        let mut detected_patterns = self.deduplicate_patterns(&detected_patterns_structs);
+        detected_patterns.retain(|pattern| pattern.confidence >= self.config.min_confidence);
+        detected_patterns.sort_by(|left, right| right.confidence.total_cmp(&left.confidence));
+        detected_patterns.truncate(self.config.max_patterns_to_detect);
 
-        // Analyze scalability characteristics
-        let scalability_patterns_vec = self.analyze_scalability_patterns(&classified_patterns);
-
-        // Generate pattern-based recommendations
         let pattern_recommendations =
-            self.generate_pattern_recommendations(&classified_patterns).await?;
-
-        // Convert types
-        let scalability_patterns: Vec<String> =
-            scalability_patterns_vec.iter().map(|p| format!("{:?}", p)).collect();
-
-        // Extract ConcurrencyPattern from ClassifiedConcurrencyPattern
-        let detected_patterns: Vec<ConcurrencyPattern> =
-            classified_patterns.into_iter().map(|cp| cp.pattern).collect();
+            self.generate_pattern_recommendations(&detected_patterns).await?;
 
         Ok(PatternAnalysisResult {
+            // Scalability characterization needs a scaling experiment -- the
+            // same workload run at several thread counts. This analyzer runs
+            // the test once, so it has nothing to report here. Until 0.2.1 this
+            // carried a 32-point efficiency curve computed from a lookup table
+            // keyed on the pattern's name; see the note further down.
+            scalability_patterns: Vec::new(),
+            confidence: self.calculate_overall_pattern_confidence(&detected_patterns) as f64,
             detected_patterns,
-            scalability_patterns,
             pattern_recommendations,
             algorithm_results,
             timeout_requirements: Utc::now()
                 .signed_duration_since(start_time)
                 .to_std()
                 .unwrap_or_default(),
-            confidence: self.calculate_overall_pattern_confidence(&unique_patterns) as f64,
         })
     }
 
@@ -178,410 +187,98 @@ impl ConcurrencyPatternDetector {
             && (a.confidence - b.confidence).abs() < 0.2
     }
 
-    /// Classifies patterns by type and characteristics
-    fn classify_patterns(
-        &self,
-        patterns: &[ConcurrencyPattern],
-    ) -> Vec<ClassifiedConcurrencyPattern> {
-        patterns
-            .iter()
-            .map(|pattern| ClassifiedConcurrencyPattern {
-                pattern: pattern.clone(),
-                classification: self.classify_single_pattern(pattern),
-                performance_characteristics: self.analyze_pattern_performance(pattern),
-                optimization_potential: self.assess_optimization_potential(pattern).potential_score,
-            })
-            .collect()
-    }
+    // ------------------------------------------------------------------
+    // Deleted in 0.2.1: the lookup-table classification stage
+    // ------------------------------------------------------------------
+    //
+    // Between detection and reporting sat fifteen methods that took a detected
+    // `ConcurrencyPattern`, matched on its `pattern_type` *string*, and read
+    // numbers out of a hardcoded table: `classify_patterns`,
+    // `classify_single_pattern`, `assess_pattern_complexity`,
+    // `assess_pattern_scalability`, `assess_pattern_efficiency`,
+    // `analyze_pattern_performance`, `estimate_throughput_factor`,
+    // `estimate_latency_impact`, `estimate_resource_utilization`,
+    // `analyze_scaling_behavior`, `assess_optimization_potential`,
+    // `estimate_throughput_improvement_potential`,
+    // `estimate_latency_reduction_potential`,
+    // `estimate_resource_efficiency_potential`,
+    // `estimate_optimization_complexity`, `estimate_optimal_threads`,
+    // `estimate_saturation_point`, `model_efficiency_curve` and
+    // `analyze_scalability_patterns`.
+    //
+    // Nothing in any of them looked at the test. "Pipeline" always scored
+    // throughput 0.95, latency 0.30, complexity 0.80, optimal thread count 6
+    // and saturation point 12; "MasterWorker" always 0.90/0.10/0.30/8/16. The
+    // efficiency curve was 32 points of arithmetic over those two constants,
+    // and `analyze_scalability_patterns` published it as
+    // `PatternAnalysisResult::scalability_patterns`, which
+    // `ConcurrencyAnalyzer::derive_performance_guarantees` turns into strings
+    // like "Scalability pattern: ..." -- performance guarantees derived from a
+    // table keyed on a pattern name.
+    //
+    // Measuring any of this needs a scaling experiment: run the workload at
+    // several thread counts and observe the throughput. The characterizer runs
+    // a test once. So the stage is gone rather than reimplemented, and
+    // `PatternAnalysisResult::scalability_patterns` is now always empty --
+    // honestly so. What survives is what the detectors measure: the patterns
+    // themselves, each with a confidence and thread count taken from the
+    // recorded interaction graph.
+    //
+    // `ClassifiedConcurrencyPattern`, `PatternClassification`,
+    // `ScalabilityRating`, `ScalingBehavior`, `OptimizationPotential`,
+    // `OptimizationComplexity` and `EfficiencyCurve` still exist as types --
+    // several are used elsewhere -- but this detector no longer manufactures
+    // instances of them.
 
-    /// Classifies a single pattern
-    fn classify_single_pattern(&self, pattern: &ConcurrencyPattern) -> PatternClassification {
-        let scalability = self.assess_pattern_scalability(pattern);
-        let efficiency = self.assess_pattern_efficiency(pattern);
-
-        PatternClassification {
-            classification_type: pattern.pattern_type.clone(),
-            confidence: pattern.confidence,
-            categories: vec![pattern.pattern_type.clone()],
-            primary_type: pattern.pattern_type.clone(),
-            complexity_level: self.assess_pattern_complexity(pattern),
-            scalability_rating: scalability.score,
-            efficiency_rating: match efficiency {
-                EfficiencyRating::VeryLow => 0.1,
-                EfficiencyRating::Low => 0.3,
-                EfficiencyRating::Medium => 0.6,
-                EfficiencyRating::High => 0.9,
-                EfficiencyRating::VeryHigh => 1.0,
-            },
-        }
-    }
-
-    /// Assesses pattern complexity
-    fn assess_pattern_complexity(&self, pattern: &ConcurrencyPattern) -> ComplexityLevel {
-        // Match on string pattern_type field
-        match pattern.pattern_type.as_str() {
-            "ProducerConsumer" => ComplexityLevel::Medium,
-            "MasterWorker" => ComplexityLevel::Simple,
-            "Pipeline" => ComplexityLevel::Complex,
-            "ForkJoin" => ComplexityLevel::Medium,
-            _ => ComplexityLevel::Complex, // Default for Custom and unknown patterns
-        }
-    }
-
-    /// Assesses pattern scalability
-    fn assess_pattern_scalability(&self, pattern: &ConcurrencyPattern) -> ScalabilityRating {
-        if pattern.thread_count > 8 {
-            ScalabilityRating {
-                rating: "High".to_string(),
-                score: 0.9,
-            }
-        } else if pattern.thread_count > 4 {
-            ScalabilityRating {
-                rating: "Medium".to_string(),
-                score: 0.6,
-            }
-        } else {
-            ScalabilityRating {
-                rating: "Low".to_string(),
-                score: 0.3,
-            }
-        }
-    }
-
-    /// Assesses pattern efficiency
-    fn assess_pattern_efficiency(&self, pattern: &ConcurrencyPattern) -> EfficiencyRating {
-        // Match on string pattern_type field
-        match pattern.pattern_type.as_str() {
-            "ProducerConsumer" => EfficiencyRating::High,
-            "MasterWorker" => EfficiencyRating::Medium,
-            "Pipeline" => EfficiencyRating::High,
-            "ForkJoin" => EfficiencyRating::Medium,
-            _ => EfficiencyRating::Low, // Default for Custom and unknown patterns
-        }
-    }
-
-    /// Analyzes pattern performance characteristics
-    fn analyze_pattern_performance(
-        &self,
-        pattern: &ConcurrencyPattern,
-    ) -> PatternPerformanceCharacteristics {
-        let scaling = self.analyze_scaling_behavior(pattern);
-        let throughput_factor = self.estimate_throughput_factor(pattern);
-        let latency_impact = self.estimate_latency_impact(pattern);
-        let resource_utilization = self.estimate_resource_utilization(pattern);
-
-        PatternPerformanceCharacteristics {
-            throughput: throughput_factor as f64,
-            latency: Duration::from_millis((latency_impact * 1000.0) as u64),
-            resource_efficiency: resource_utilization as f64,
-            throughput_factor: throughput_factor as f64,
-            latency_impact: latency_impact as f64,
-            resource_utilization: resource_utilization as f64,
-            scaling_behavior: scaling.scaling_type.clone(),
-        }
-    }
-
-    /// Estimates throughput factor
-    fn estimate_throughput_factor(&self, pattern: &ConcurrencyPattern) -> f32 {
-        match pattern.pattern_type.as_str() {
-            "ProducerConsumer" => 0.8,
-            "MasterWorker" => 0.9,
-            "Pipeline" => 0.95,
-            "ForkJoin" => 0.7,
-            _ => 0.6, // Custom or unknown
-        }
-    }
-
-    /// Estimates latency impact
-    fn estimate_latency_impact(&self, pattern: &ConcurrencyPattern) -> f32 {
-        match pattern.pattern_type.as_str() {
-            "ProducerConsumer" => 0.2,
-            "MasterWorker" => 0.1,
-            "Pipeline" => 0.3,
-            "ForkJoin" => 0.4,
-            _ => 0.5, // Custom or unknown
-        }
-    }
-
-    /// Estimates resource utilization
-    fn estimate_resource_utilization(&self, pattern: &ConcurrencyPattern) -> f32 {
-        let base_utilization = match pattern.pattern_type.as_str() {
-            "ProducerConsumer" => 0.75,
-            "MasterWorker" => 0.85,
-            "Pipeline" => 0.9,
-            "ForkJoin" => 0.65,
-            _ => 0.5, // Custom or unknown
-        };
-
-        // Adjust based on thread count
-        let thread_factor = (pattern.thread_count as f32).log2() / 4.0;
-        (base_utilization * (1.0 + thread_factor)).min(1.0)
-    }
-
-    /// Analyzes scaling behavior
-    fn analyze_scaling_behavior(&self, pattern: &ConcurrencyPattern) -> ScalingBehavior {
-        match pattern.pattern_type.as_str() {
-            "ProducerConsumer" => ScalingBehavior {
-                scaling_type: "Linear".to_string(),
-                scaling_efficiency: 0.9,
-                optimal_scale: 8,
-                scaling_limits: (1, 64),
-            },
-            "MasterWorker" => ScalingBehavior {
-                scaling_type: "SubLinear".to_string(),
-                scaling_efficiency: 0.7,
-                optimal_scale: 4,
-                scaling_limits: (1, 32),
-            },
-            "Pipeline" => ScalingBehavior {
-                scaling_type: "Linear".to_string(),
-                scaling_efficiency: 0.85,
-                optimal_scale: 8,
-                scaling_limits: (1, 64),
-            },
-            "ForkJoin" => ScalingBehavior {
-                scaling_type: "SubLinear".to_string(),
-                scaling_efficiency: 0.75,
-                optimal_scale: 6,
-                scaling_limits: (1, 48),
-            },
-            _ => ScalingBehavior {
-                scaling_type: "Unknown".to_string(),
-                scaling_efficiency: 0.5,
-                optimal_scale: 4,
-                scaling_limits: (1, 16),
-            },
-        }
-    }
-
-    /// Assesses optimization potential
-    fn assess_optimization_potential(&self, pattern: &ConcurrencyPattern) -> OptimizationPotential {
-        let throughput_improvement = self.estimate_throughput_improvement_potential(pattern);
-        let latency_reduction = self.estimate_latency_reduction_potential(pattern);
-        let resource_efficiency = self.estimate_resource_efficiency_potential(pattern);
-        let complexity = self.estimate_optimization_complexity(pattern);
-
-        let potential_score =
-            (throughput_improvement + latency_reduction + resource_efficiency) / 3.0;
-
-        let mut optimization_areas = Vec::new();
-        if throughput_improvement > 0.3 {
-            optimization_areas.push("Throughput".to_string());
-        }
-        if latency_reduction > 0.3 {
-            optimization_areas.push("Latency".to_string());
-        }
-        if resource_efficiency > 0.3 {
-            optimization_areas.push("ResourceEfficiency".to_string());
-        }
-
-        let feasibility = match complexity.complexity_level {
-            ComplexityLevel::VerySimple | ComplexityLevel::Simple => 0.9,
-            ComplexityLevel::Medium => 0.6,
-            ComplexityLevel::Complex | ComplexityLevel::VeryComplex => 0.3,
-            ComplexityLevel::HighlyComplex => 0.2,
-            ComplexityLevel::ExtremelyComplex => 0.1,
-        };
-
-        OptimizationPotential {
-            potential_score: potential_score as f64,
-            optimization_areas,
-            expected_improvement: ((throughput_improvement + latency_reduction) / 2.0) as f64,
-            feasibility,
-        }
-    }
-
-    /// Estimates throughput improvement potential
-    fn estimate_throughput_improvement_potential(&self, pattern: &ConcurrencyPattern) -> f32 {
-        match pattern.pattern_type.as_str() {
-            "ProducerConsumer" => 0.3,
-            "MasterWorker" => 0.2,
-            "Pipeline" => 0.4,
-            "ForkJoin" => 0.5,
-            _ => 0.6, // Custom or other patterns
-        }
-    }
-
-    /// Estimates latency reduction potential
-    fn estimate_latency_reduction_potential(&self, pattern: &ConcurrencyPattern) -> f32 {
-        match pattern.pattern_type.as_str() {
-            "ProducerConsumer" => 0.2,
-            "MasterWorker" => 0.1,
-            "Pipeline" => 0.3,
-            "ForkJoin" => 0.4,
-            _ => 0.5, // Custom or other patterns
-        }
-    }
-
-    /// Estimates resource efficiency potential
-    fn estimate_resource_efficiency_potential(&self, pattern: &ConcurrencyPattern) -> f32 {
-        let current_efficiency = self.estimate_resource_utilization(pattern);
-        1.0 - current_efficiency
-    }
-
-    /// Estimates optimization complexity
-    fn estimate_optimization_complexity(
-        &self,
-        pattern: &ConcurrencyPattern,
-    ) -> OptimizationComplexity {
-        match pattern.pattern_type.as_str() {
-            "ProducerConsumer" => OptimizationComplexity {
-                complexity_level: ComplexityLevel::Medium,
-                complexity_score: 0.5,
-                complexity_factors: vec!["Coordination overhead".to_string()],
-            },
-            "MasterWorker" => OptimizationComplexity {
-                complexity_level: ComplexityLevel::Simple,
-                complexity_score: 0.3,
-                complexity_factors: vec!["Simple distribution".to_string()],
-            },
-            "Pipeline" => OptimizationComplexity {
-                complexity_level: ComplexityLevel::Complex,
-                complexity_score: 0.8,
-                complexity_factors: vec!["Stage synchronization".to_string()],
-            },
-            "ForkJoin" => OptimizationComplexity {
-                complexity_level: ComplexityLevel::Medium,
-                complexity_score: 0.6,
-                complexity_factors: vec!["Join coordination".to_string()],
-            },
-            _ => OptimizationComplexity {
-                complexity_level: ComplexityLevel::Complex,
-                complexity_score: 0.9,
-                complexity_factors: vec!["Unknown pattern".to_string()],
-            },
-        }
-    }
-
-    /// Analyzes scalability patterns
-    fn analyze_scalability_patterns(
-        &self,
-        patterns: &[ClassifiedConcurrencyPattern],
-    ) -> Vec<ScalabilityPattern> {
-        let mut scalability_patterns = Vec::new();
-
-        for pattern in patterns {
-            let pattern_type_str = format!("{:?}", pattern.pattern.pattern_type);
-            let efficiency_curve_data = self.model_efficiency_curve(&pattern.pattern);
-            let scalability_pattern = ScalabilityPattern {
-                pattern_type: pattern_type_str,
-                efficiency_curve: efficiency_curve_data
-                    .data_points
-                    .iter()
-                    .map(|(_, y)| *y)
-                    .collect(),
-            };
-
-            scalability_patterns.push(scalability_pattern);
-        }
-
-        scalability_patterns
-    }
-
-    /// Estimates optimal thread count
-    fn estimate_optimal_threads(&self, pattern: &ConcurrencyPattern) -> usize {
-        match pattern.pattern_type.as_str() {
-            "ProducerConsumer" => 4,
-            "MasterWorker" => 8,
-            "Pipeline" => 6,
-            "ForkJoin" => 4,
-            _ => 2, // Custom or unknown
-        }
-    }
-
-    /// Estimates saturation point
-    fn estimate_saturation_point(&self, pattern: &ConcurrencyPattern) -> usize {
-        match pattern.pattern_type.as_str() {
-            "ProducerConsumer" => 8,
-            "MasterWorker" => 16,
-            "Pipeline" => 12,
-            "ForkJoin" => 8,
-            _ => 4, // Custom or unknown
-        }
-    }
-
-    /// Models efficiency curve
-    fn model_efficiency_curve(&self, pattern: &ConcurrencyPattern) -> EfficiencyCurve {
-        let optimal_threads = self.estimate_optimal_threads(pattern) as f64;
-        let saturation_point = self.estimate_saturation_point(pattern) as f64;
-
-        // Generate data points for the efficiency curve
-        let mut data_points = Vec::new();
-        for i in 1..=32 {
-            let threads = i as f64;
-            let efficiency = if threads <= optimal_threads {
-                threads / optimal_threads // Linear growth in optimal region
-            } else if threads <= saturation_point {
-                1.0 - (threads - optimal_threads) / (saturation_point - optimal_threads) * 0.2
-            // Slight degradation
-            } else {
-                0.8 - (threads - saturation_point) / 32.0 * 0.3 // Further degradation
-            };
-            data_points.push((threads, efficiency));
-        }
-
-        EfficiencyCurve {
-            data_points,
-            curve_type: "Logarithmic".to_string(),
-            peak_efficiency: 1.0,
-            optimal_point: (optimal_threads, 1.0),
-        }
-    }
-
-    /// Generates pattern-based recommendations
+    /// Playbook entries for the patterns that were detected.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// This used to gate on `pattern.optimization_potential > 0.2` / `> 0.3`
+    /// and publish that same number as `expected_improvement` -- a figure that
+    /// came from the deleted lookup table above, not from the test, and was
+    /// presented as an expected percentage gain. The advice itself is a static
+    /// playbook keyed on the pattern kind, which is legitimate as advice; the
+    /// numeric prediction attached to it was not, and `expected_improvement` is
+    /// now `None`.
     pub(crate) async fn generate_pattern_recommendations(
         &self,
-        patterns: &[ClassifiedConcurrencyPattern],
+        patterns: &[ConcurrencyPattern],
     ) -> Result<Vec<PatternOptimizationRecommendation>> {
         let mut recommendations = Vec::new();
 
         for pattern in patterns {
-            // optimization_potential is f64, use it directly for threshold comparison
-            if pattern.optimization_potential > 0.2 {
-                let effort = self.convert_complexity_to_effort(0.5);
-                recommendations.push(PatternOptimizationRecommendation {
-                    pattern_type: pattern.pattern.pattern_type.clone(),
-                    optimization_type: "ThroughputOptimization".to_string(),
-                    description: "Significant throughput improvement potential detected"
-                        .to_string(),
-                    expected_improvement: pattern.optimization_potential,
-                    implementation_effort: format!("{:?}", effort),
-                    recommendations: {
-                        let pattern_type = pattern_type_from_str(&pattern.pattern.pattern_type);
-                        self.generate_throughput_recommendations(&pattern_type)
-                    },
-                });
-            }
-
-            if pattern.optimization_potential > 0.3 {
-                let effort = self.convert_complexity_to_effort(0.5);
-                recommendations.push(PatternOptimizationRecommendation {
-                    pattern_type: pattern.pattern.pattern_type.clone(),
-                    optimization_type: "LatencyOptimization".to_string(),
-                    description: "Significant latency reduction potential detected".to_string(),
-                    expected_improvement: pattern.optimization_potential,
-                    implementation_effort: format!("{:?}", effort),
-                    recommendations: {
-                        let pattern_type = pattern_type_from_str(&pattern.pattern.pattern_type);
-                        self.generate_latency_recommendations(&pattern_type)
-                    },
-                });
-            }
+            let pattern_type = pattern_type_from_str(&pattern.pattern_type);
+            recommendations.push(PatternOptimizationRecommendation {
+                pattern_type: pattern.pattern_type.clone(),
+                optimization_type: "ThroughputOptimization".to_string(),
+                description: format!(
+                    "Throughput playbook for the detected {} pattern",
+                    pattern.pattern_type
+                ),
+                expected_improvement: None,
+                implementation_effort: None,
+                recommendations: self.generate_throughput_recommendations(&pattern_type),
+            });
+            recommendations.push(PatternOptimizationRecommendation {
+                pattern_type: pattern.pattern_type.clone(),
+                optimization_type: "LatencyOptimization".to_string(),
+                description: format!(
+                    "Latency playbook for the detected {} pattern",
+                    pattern.pattern_type
+                ),
+                expected_improvement: None,
+                implementation_effort: None,
+                recommendations: self.generate_latency_recommendations(&pattern_type),
+            });
         }
 
         Ok(recommendations)
     }
 
-    /// Converts optimization complexity to effort
-    fn convert_complexity_to_effort(&self, complexity: f64) -> OptimizationEffort {
-        if complexity < 0.3 {
-            OptimizationEffort::Low
-        } else if complexity < 0.6 {
-            OptimizationEffort::Medium
-        } else {
-            OptimizationEffort::High
-        }
-    }
+    // `convert_complexity_to_effort` was deleted with its only caller: it
+    // bucketed the constant 0.5 that `generate_pattern_recommendations` passed
+    // it, so every recommendation ever produced reported effort "Medium".
 
     /// Generates throughput recommendations
     fn generate_throughput_recommendations(
@@ -679,7 +376,7 @@ mod tests {
             target_thread,
             interaction_type: InteractionType::DataExchange,
             frequency: 4.0,
-            analysis_duration: Duration::from_millis(1),
+            analysis_duration: std::time::Duration::from_millis(1),
             data_patterns: Vec::new(),
             sync_requirements: Vec::new(),
             performance_impact: 0.0,
@@ -732,6 +429,109 @@ mod tests {
         );
     }
 
+    /// Regression: `new` took a `PatternDetectionConfig` and dropped it
+    /// (`_config`), so `detection_enabled` had no effect and a detector
+    /// configured off still analysed and reported.
+    #[tokio::test]
+    async fn detection_can_actually_be_switched_off() {
+        let detector = ConcurrencyPatternDetector::new(PatternDetectionConfig {
+            detection_enabled: false,
+            min_confidence: 0.5,
+            max_patterns_to_detect: 10,
+        })
+        .await
+        .expect("detector constructs");
+        let data = TestExecutionData {
+            test_id: "disabled".to_string(),
+            thread_interactions: vec![flow(1, 2), flow(1, 3), flow(2, 4), flow(3, 4)],
+            ..TestExecutionData::default()
+        };
+        let error = detector
+            .detect_concurrency_patterns(&data)
+            .await
+            .expect_err("a disabled detector must not report an analysis");
+        assert!(
+            error.to_string().contains("disabled by configuration"),
+            "{error}"
+        );
+    }
+
+    /// Regression: `min_confidence` was dropped along with the rest of the
+    /// config, so low-confidence findings were reported unfiltered.
+    #[tokio::test]
+    async fn the_configured_confidence_bar_is_applied() {
+        let data = TestExecutionData {
+            test_id: "crosstalk".to_string(),
+            // A star with one worker-to-worker edge: the master/worker finding
+            // scores 3/4 = 0.75.
+            thread_interactions: vec![flow(1, 2), flow(1, 3), flow(1, 4), flow(2, 3)],
+            ..TestExecutionData::default()
+        };
+
+        let permissive = ConcurrencyPatternDetector::new(PatternDetectionConfig {
+            detection_enabled: true,
+            min_confidence: 0.5,
+            max_patterns_to_detect: 10,
+        })
+        .await
+        .expect("detector constructs");
+        let found = permissive
+            .detect_concurrency_patterns(&data)
+            .await
+            .expect("analysis runs")
+            .detected_patterns;
+        assert!(
+            found.iter().any(|pattern| pattern.pattern_type == "MasterWorker"),
+            "{found:?}"
+        );
+
+        let strict = ConcurrencyPatternDetector::new(PatternDetectionConfig {
+            detection_enabled: true,
+            min_confidence: 0.9,
+            max_patterns_to_detect: 10,
+        })
+        .await
+        .expect("detector constructs");
+        let filtered = strict
+            .detect_concurrency_patterns(&data)
+            .await
+            .expect("analysis runs")
+            .detected_patterns;
+        assert!(
+            !filtered.iter().any(|pattern| pattern.pattern_type == "MasterWorker"),
+            "a 0.75-confidence finding is below a 0.9 bar: {filtered:?}"
+        );
+    }
+
+    /// Regression: `scalability_patterns` used to carry a 32-point efficiency
+    /// curve computed from a lookup table keyed on the pattern's name, which
+    /// `ConcurrencyAnalyzer` then published as a "performance guarantee".
+    #[tokio::test]
+    async fn no_scalability_curve_is_invented_from_a_single_run() {
+        let detector = ConcurrencyPatternDetector::new(PatternDetectionConfig {
+            detection_enabled: true,
+            min_confidence: 0.5,
+            max_patterns_to_detect: 10,
+        })
+        .await
+        .expect("detector constructs");
+        let data = TestExecutionData {
+            test_id: "scalability".to_string(),
+            thread_interactions: vec![flow(1, 2), flow(1, 3), flow(2, 4), flow(3, 4)],
+            ..TestExecutionData::default()
+        };
+        let result = detector.detect_concurrency_patterns(&data).await.expect("analysis runs");
+        assert!(
+            result.scalability_patterns.is_empty(),
+            "one run cannot characterize scaling: {:?}",
+            result.scalability_patterns
+        );
+        assert!(
+            !result.detected_patterns.is_empty(),
+            "the patterns themselves are still measured and reported"
+        );
+    }
+
     /// Regression: the detected patterns' thread counts came from a lookup
     /// table (4/8/6/4), not from the test. A four-thread scatter/gather must
     /// report four threads.
@@ -766,30 +566,12 @@ mod tests {
             min_confidence: 0.5,
             max_patterns_to_detect: 10,
         };
-        let detector = ConcurrencyPatternDetector::new(config).await.unwrap();
-        let patterns = vec![ClassifiedConcurrencyPattern {
-            pattern: fixture_pattern(),
-            optimization_potential: 0.8,
-            classification: PatternClassification {
-                classification_type: "ProducerConsumer".to_string(),
-                confidence: 0.8,
-                categories: vec!["ProducerConsumer".to_string()],
-                primary_type: "ProducerConsumer".to_string(),
-                complexity_level: ComplexityLevel::Medium,
-                scalability_rating: 0.7,
-                efficiency_rating: 0.8,
-            },
-            performance_characteristics: PatternPerformanceCharacteristics {
-                throughput: 0.8,
-                latency: std::time::Duration::from_millis(100),
-                resource_efficiency: 0.75,
-                throughput_factor: 0.8,
-                latency_impact: 0.2,
-                resource_utilization: 0.75,
-                scaling_behavior: "Linear".to_string(),
-            },
-        }];
-        let recs = detector.generate_pattern_recommendations(&patterns).await.unwrap();
+        let detector = ConcurrencyPatternDetector::new(config).await.expect("detector constructs");
+        let patterns = vec![fixture_pattern()];
+        let recs = detector
+            .generate_pattern_recommendations(&patterns)
+            .await
+            .expect("playbook lookup never fails");
         assert!(!recs.is_empty());
         let throughput_recs: Vec<_> = recs
             .iter()
@@ -801,5 +583,12 @@ mod tests {
             rec.recommendations.len() > 1,
             "should have multiple specific recommendations, not just one generic"
         );
+        // Regression: `expected_improvement` used to carry a number from a
+        // lookup table keyed on the pattern name, presented as a predicted gain.
+        assert!(
+            rec.expected_improvement.is_none(),
+            "nothing here measures an improvement, so none is predicted"
+        );
+        assert!(rec.implementation_effort.is_none());
     }
 }

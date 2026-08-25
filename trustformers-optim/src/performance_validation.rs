@@ -339,6 +339,13 @@ impl PerformanceValidator {
         let mut monotonic_improvement = true;
         let max_iterations = 1000;
 
+        // Update norms produced on exactly-zero-gradient steps, in the
+        // order they occur. Used by `MathematicalProperty::SparsityHandling`
+        // below: a zero gradient carries no new signal, so a well-behaved
+        // optimizer's update on such a step comes only from decaying
+        // momentum/decoupled decay and must not grow step over step.
+        let mut zero_gradient_update_norms: Vec<f32> = Vec::new();
+
         for iteration in 0..max_iterations {
             // Compute gradients for current parameters
             let gradients = self.compute_test_gradients(&parameters, test_case, iteration)?;
@@ -346,9 +353,16 @@ impl PerformanceValidator {
             // Apply optimizer step
             for (param_name, gradient) in &gradients {
                 if let Some(param) = parameters.get_mut(param_name) {
+                    let is_zero_gradient = gradient.norm()? == 0.0;
+                    let before = if is_zero_gradient { Some(param.clone()) } else { None };
+
                     optimizer.zero_grad();
                     optimizer.update(param, gradient)?;
                     optimizer.step();
+
+                    if let Some(before) = before {
+                        zero_gradient_update_norms.push(param.sub(&before)?.norm()?);
+                    }
                 }
             }
 
@@ -396,11 +410,26 @@ impl PerformanceValidator {
                     }
                 },
                 MathematicalProperty::SparsityHandling => {
-                    // Check that optimizer handles sparse gradients correctly
-                    // (Implementation would check internal state consistency)
-                    // For now, assume true if convergence is achieved
-                    if !convergence_achieved {
+                    // A zero gradient carries no new signal, so the update
+                    // it produces (from decaying momentum / decoupled
+                    // weight decay only) must be finite and must not grow
+                    // from one zero-gradient step to the next -- nothing is
+                    // renewing it. This is independent of whether the
+                    // overall run converged.
+                    if zero_gradient_update_norms.is_empty() {
+                        // No zero-gradient step ever occurred, so there is
+                        // nothing to evaluate: do not claim the property
+                        // holds without evidence.
                         all_properties_satisfied = false;
+                    } else if !zero_gradient_update_norms.iter().all(|n| n.is_finite()) {
+                        all_properties_satisfied = false;
+                    } else {
+                        let non_increasing = zero_gradient_update_norms
+                            .windows(2)
+                            .all(|pair| pair[1] <= pair[0] + test_case.tolerance as f32);
+                        if !non_increasing {
+                            all_properties_satisfied = false;
+                        }
                     }
                 },
                 MathematicalProperty::StableConvergence => {
@@ -614,9 +643,22 @@ impl PerformanceValidator {
         let total_params: usize = scenario.parameter_sizes.iter().product();
         let throughput = total_params as f64 / avg_step_time.as_secs_f64();
 
-        // Perform statistical analysis if enabled
+        // Perform statistical analysis if enabled. When a baseline was set
+        // for this optimizer (`set_baseline`), its avg_step_time is a real,
+        // caller-provided null hypothesis for `analyze`'s t-test; with no
+        // baseline there is nothing to test against and `analyze` reports
+        // `p_value: None` honestly rather than a fabricated constant.
+        let baseline_step_time = self
+            .baseline_results
+            .as_ref()
+            .and_then(|baselines| baselines.get(name))
+            .map(|baseline| baseline.avg_step_time);
         let statistical_metrics = if self.config.statistical_significance {
-            Some(self.statistical_analyzer.analyze(&step_times, self.config.confidence_level)?)
+            Some(self.statistical_analyzer.analyze(
+                &step_times,
+                self.config.confidence_level,
+                baseline_step_time,
+            )?)
         } else {
             None
         };
@@ -1404,7 +1446,19 @@ pub struct StatisticalMetrics {
     pub std_dev: Duration,
     pub confidence_interval_lower: Duration,
     pub confidence_interval_upper: Duration,
-    pub p_value: f64,
+    /// Two-sided p-value of a one-sample Student-t test of `step_times`
+    /// against a null hypothesis mean, computed by
+    /// [`StatisticalAnalyzer::analyze`].
+    ///
+    /// A p-value needs a null hypothesis to test against. `benchmark_optimizer`
+    /// passes the matching optimizer's [`BenchmarkResult::avg_step_time`] from
+    /// `PerformanceValidator::baseline_results` as that hypothesis when one has
+    /// been set via [`PerformanceValidator::set_baseline`]; a low p-value then
+    /// means this run's step times are statistically distinguishable from the
+    /// baseline's average, in either direction. `None` when no baseline is set
+    /// for the optimizer being benchmarked (nothing to test against) -- left
+    /// absent rather than fabricated as a constant.
+    pub p_value: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1572,17 +1626,32 @@ impl StatisticalAnalyzer {
         Self
     }
 
+    /// Computes mean/std-dev/confidence-interval from `step_times`, plus a
+    /// two-sided one-sample Student-t p-value against `target_step_time`
+    /// when the caller supplies one -- see [`StatisticalMetrics::p_value`]'s
+    /// doc comment for what the null hypothesis means and why it is
+    /// sometimes absent. Uses the real Student-t distribution (via
+    /// [`trustformers_core::statistics`]), not a normal approximation, so it
+    /// stays accurate at the small sample sizes benchmarks typically use.
     pub fn analyze(
         &self,
         step_times: &[Duration],
         confidence_level: f64,
+        target_step_time: Option<Duration>,
     ) -> Result<StatisticalMetrics> {
         let times_f64: Vec<f64> = step_times.iter().map(|d| d.as_secs_f64()).collect();
 
-        let mean_f64 = times_f64.iter().sum::<f64>() / times_f64.len() as f64;
-        let variance =
-            times_f64.iter().map(|x| (x - mean_f64).powi(2)).sum::<f64>() / times_f64.len() as f64;
-        let std_dev_f64 = variance.sqrt();
+        let mean_f64 = trustformers_core::statistics::mean(&times_f64).ok_or_else(|| {
+            TrustformersError::invalid_state(
+                "StatisticalAnalyzer::analyze requires at least one step time".to_string(),
+            )
+        })?;
+        // `None` for fewer than two samples: there is no sample variance --
+        // and therefore no t-test -- with a single observation. The reported
+        // std-dev/CI fall back to 0.0 in that case, which is exactly correct
+        // for a single-point sample (no spread was observed).
+        let sample_std_f64 = trustformers_core::statistics::sample_std_dev(&times_f64);
+        let std_dev_f64 = sample_std_f64.unwrap_or(0.0);
 
         // Simple confidence interval calculation (assuming normal distribution)
         let z_score = if confidence_level >= 0.99 {
@@ -1594,12 +1663,33 @@ impl StatisticalAnalyzer {
         };
         let margin_of_error = z_score * std_dev_f64 / (times_f64.len() as f64).sqrt();
 
+        // One-sample Student-t test of `step_times` against `target_step_time`:
+        // needs both a real target and a real sample standard deviation
+        // (n >= 2), or there is no test to run. `student_t_two_sided_p_value`
+        // already resolves the `standard_error == 0.0` (zero-variance) case
+        // correctly (an infinite or NaN t statistic), so no special-casing is
+        // needed here.
+        let p_value = match (target_step_time, sample_std_f64) {
+            (Some(target), Some(sample_std)) => {
+                let standard_error = sample_std / (times_f64.len() as f64).sqrt();
+                let t_statistic = (mean_f64 - target.as_secs_f64()) / standard_error;
+                let degrees_of_freedom = times_f64.len() as f64 - 1.0;
+                trustformers_core::statistics::student_t_two_sided_p_value(
+                    t_statistic,
+                    degrees_of_freedom,
+                )
+            },
+            _ => None,
+        };
+
         Ok(StatisticalMetrics {
             mean: Duration::from_secs_f64(mean_f64),
             std_dev: Duration::from_secs_f64(std_dev_f64),
-            confidence_interval_lower: Duration::from_secs_f64(mean_f64 - margin_of_error),
+            confidence_interval_lower: Duration::from_secs_f64(
+                (mean_f64 - margin_of_error).max(0.0),
+            ),
             confidence_interval_upper: Duration::from_secs_f64(mean_f64 + margin_of_error),
-            p_value: 0.05, // Simplified
+            p_value,
         })
     }
 }

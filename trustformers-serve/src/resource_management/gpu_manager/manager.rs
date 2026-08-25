@@ -658,19 +658,39 @@ impl GpuResourceManager {
             return Ok(None);
         };
 
+        // `GpuRealTimeMetrics` has no `Option` for these, so a sample missing
+        // the memory or utilization reading cannot be represented on it
+        // honestly -- and publishing it with a zero would put an "idle, empty"
+        // GPU into the monitoring stream. Skip the sample instead.
+        let (Some(memory_usage_mb), Some(utilization_percent)) =
+            (sample.memory_used_mb, sample.utilization_percent)
+        else {
+            debug!(
+                "GPU {} reported no memory/utilization reading; skipping this sample",
+                device.device_id
+            );
+            return Ok(None);
+        };
+
         Ok(Some(GpuRealTimeMetrics {
             device_id: device.device_id,
             timestamp: Utc::now(),
-            memory_usage_mb: sample.memory_used_mb,
-            utilization_percent: sample.utilization_percent,
-            temperature_celsius: sample.temperature_celsius,
-            power_consumption_watts: sample.power_watts,
+            memory_usage_mb,
+            utilization_percent,
+            // NaN, not zero: no comparison against a threshold passes on NaN,
+            // so an unread thermal/power sensor cannot read as "cool and idle".
+            temperature_celsius: sample.temperature_celsius.unwrap_or(f32::NAN),
+            power_consumption_watts: sample.power_watts.unwrap_or(f32::NAN),
             clock_speeds: ResourceGpuClockSpeeds {
-                core_clock_mhz: sample.sm_clock_mhz,
-                memory_clock_mhz: sample.memory_clock_mhz,
+                core_clock_mhz: sample.sm_clock_mhz.unwrap_or(0),
+                memory_clock_mhz: sample.memory_clock_mhz.unwrap_or(0),
                 shader_clock_mhz: None,
             },
             fan_speeds: sample.fan_percent.map(|f| vec![f]).unwrap_or_default(),
+            // The size the driver reported for this device at discovery, so
+            // consumers can compute a real memory percentage. Zero means
+            // discovery could not read it, which is an absence, not a size.
+            total_memory_mb: (device.total_memory_mb > 0).then_some(device.total_memory_mb),
         }))
     }
 
@@ -734,14 +754,18 @@ impl GpuResourceManager {
             value.parse::<u32>().ok()
         }
 
+        // Every field is `None` when the driver would not report it. 0.2.1:
+        // utilization, the clocks and memory-used fell back to `0` here, so an
+        // unreadable utilization sensor reported an *idle* GPU and every
+        // threshold downstream passed.
         Ok(Some(GpuTelemetrySample {
             device_id,
-            utilization_percent: parse_f32(fields[0]).unwrap_or(0.0),
-            temperature_celsius: parse_f32(fields[1]).unwrap_or(f32::NAN),
-            power_watts: parse_f32(fields[2]).unwrap_or(f32::NAN),
-            sm_clock_mhz: parse_u32(fields[3]).unwrap_or(0),
-            memory_clock_mhz: parse_u32(fields[4]).unwrap_or(0),
-            memory_used_mb: fields[5].parse::<u64>().unwrap_or(0),
+            utilization_percent: parse_f32(fields[0]),
+            temperature_celsius: parse_f32(fields[1]),
+            power_watts: parse_f32(fields[2]),
+            sm_clock_mhz: parse_u32(fields[3]),
+            memory_clock_mhz: parse_u32(fields[4]),
+            memory_used_mb: fields[5].parse::<u64>().ok(),
             fan_percent: parse_f32(fields[6]),
         }))
     }
@@ -796,6 +820,21 @@ impl GpuResourceManager {
             test_id
         );
 
+        // Read live utilization for every candidate BEFORE taking the locks:
+        // `device_telemetry` is async, and these are `parking_lot` guards.
+        let mut utilizations: HashMap<usize, Option<f32>> = HashMap::new();
+        {
+            let candidate_ids: Vec<usize> = self.available_devices.read().keys().copied().collect();
+            for device_id in candidate_ids {
+                let measured = Self::device_telemetry(device_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|sample| sample.utilization_percent);
+                utilizations.insert(device_id, measured);
+            }
+        }
+
         let mut available_devices = self.available_devices.write();
         let mut allocated_resources = self.allocated_resources.write();
         let mut usage_stats = self.usage_stats.write();
@@ -815,8 +854,14 @@ impl GpuResourceManager {
                 .get_mut(&device_id)
                 .ok_or_else(|| GpuManagerError::DeviceNotFound { device_id })?;
 
-            // Verify device meets requirements
-            self.verify_device_requirements(device, req)?;
+            // Verify device meets requirements. Utilization is read live from
+            // the driver: the device record's own figure is a discovery-time
+            // constant (see `GpuDeviceInfo::utilization_percent`).
+            self.verify_device_requirements(
+                device,
+                req,
+                utilizations.get(&device_id).copied().flatten(),
+            )?;
 
             // Check device health
             let health_status = self.health_monitor.get_health_status().await;
@@ -873,11 +918,17 @@ impl GpuResourceManager {
         Ok(allocated_device_ids)
     }
 
-    /// Verify device meets performance requirements
+    /// Verify device meets performance requirements.
+    ///
+    /// `measured_utilization` is the live driver reading for this device, or
+    /// `None` when the driver would not give one. It is passed in rather than
+    /// fetched here because both call sites hold a lock guard across the check;
+    /// see [`Self::device_telemetry`].
     fn verify_device_requirements(
         &self,
         device: &GpuDeviceInfo,
         requirements: &GpuPerformanceRequirements,
+        measured_utilization: Option<f32>,
     ) -> GpuResult<()> {
         // Check memory requirements
         if device.available_memory_mb < requirements.min_memory_mb {
@@ -916,17 +967,21 @@ impl GpuResourceManager {
 
         // Check constraints
         for constraint in &requirements.constraints {
-            self.verify_constraint(device, constraint)?;
+            self.verify_constraint(device, constraint, measured_utilization)?;
         }
 
         Ok(())
     }
 
-    /// Verify individual constraint
+    /// Verify individual constraint.
+    ///
+    /// `measured_utilization` is the live driver reading, threaded down from
+    /// [`Self::verify_device_requirements`]; see that function's doc.
     fn verify_constraint(
         &self,
         device: &GpuDeviceInfo,
         constraint: &GpuConstraint,
+        measured_utilization: Option<f32>,
     ) -> GpuResult<()> {
         match &constraint.constraint_type {
             GpuConstraintType::MaxMemoryUsage => {
@@ -944,18 +999,38 @@ impl GpuResourceManager {
                 }
             },
             GpuConstraintType::MaxUtilization => {
-                if device.utilization_percent as f64 > constraint.value {
-                    return Err(GpuManagerError::ConstraintViolated {
-                        constraint: format!(
-                            "Utilization {:.1}% exceeds limit {:.1}%",
-                            device.utilization_percent, constraint.value
-                        ),
-                    });
+                // Read live from the driver. 0.2.1: this compared
+                // `GpuDeviceInfo::utilization_percent`, which discovery fixes at
+                // 0.0 and never updates, so a MaxUtilization constraint was
+                // satisfied by every device unconditionally. A device whose
+                // driver will not report utilization now fails the constraint
+                // rather than passing it: an unverifiable limit is not a met one.
+                match measured_utilization {
+                    Some(utilization) if (utilization as f64) <= constraint.value => {},
+                    Some(utilization) => {
+                        return Err(GpuManagerError::ConstraintViolated {
+                            constraint: format!(
+                                "Utilization {:.1}% exceeds limit {:.1}%",
+                                utilization, constraint.value
+                            ),
+                        });
+                    },
+                    None => {
+                        return Err(GpuManagerError::ConstraintViolated {
+                            constraint: format!(
+                                "Utilization limit {:.1}% cannot be verified: device {} reports \
+                                 no utilization",
+                                constraint.value, device.device_id
+                            ),
+                        });
+                    },
                 }
             },
             GpuConstraintType::MinPerformance => {
-                // In a real implementation, this would check against benchmark scores
-                // For now, assume all devices meet minimum performance
+                // Not enforced: a performance floor needs a benchmark score, and
+                // `GpuPerformanceTracker::run_benchmark` correctly refuses to
+                // produce one in a build with no GPU compute backend. Passing
+                // here means "not checked", not "meets the minimum".
             },
             GpuConstraintType::PowerLimit => {
                 // Would check current power consumption
@@ -1080,6 +1155,21 @@ impl GpuResourceManager {
         &self,
         requirements: &[GpuPerformanceRequirements],
     ) -> GpuResult<bool> {
+        // Same ordering constraint as `allocate_gpu_devices`: telemetry is
+        // async, the device map is behind a `parking_lot` guard.
+        let mut utilizations: HashMap<usize, Option<f32>> = HashMap::new();
+        {
+            let candidate_ids: Vec<usize> = self.available_devices.read().keys().copied().collect();
+            for device_id in candidate_ids {
+                let measured = Self::device_telemetry(device_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|sample| sample.utilization_percent);
+                utilizations.insert(device_id, measured);
+            }
+        }
+
         let available_devices = self.available_devices.read();
         let health_status = self.health_monitor.get_health_status().await;
 
@@ -1103,7 +1193,12 @@ impl GpuResourceManager {
                 }
 
                 // Check other requirements
-                self.verify_device_requirements(device, req).is_ok()
+                self.verify_device_requirements(
+                    device,
+                    req,
+                    utilizations.get(&device.device_id).copied().flatten(),
+                )
+                .is_ok()
             });
 
             if !has_suitable_device {

@@ -759,6 +759,92 @@ impl MetalBackend {
                 }
             }
 
+            // Fused scaled matmul + softmax with an OFFSET causal mask (chunked generation)
+            // Q: [num_heads, q_seq_len, head_dim], K^T: [num_heads, head_dim, kv_seq_len]
+            // Output: [num_heads, q_seq_len, kv_seq_len] attention weights
+            //
+            // This is the masked sibling of `batched_scaled_matmul_softmax_gen`. That
+            // kernel lets every query row see every key column, which is only correct
+            // when the query block is a single token sitting at the end of the key
+            // sequence. Feed it a CHUNK of new tokens against a warm KV cache
+            // (1 < q_seq_len < kv_seq_len) and each row of the chunk also attends to the
+            // later rows of its own chunk - measured on (q_seq 3, kv_seq 5) as an exact
+            // match to a NON-causal reference and a 0.29 miss (on |signal| 0.9) against
+            // the causal one.
+            //
+            // Here query row i is the absolute key position `q_offset + i`, so it may
+            // attend to kv columns 0..=(q_offset + i) and nothing beyond. `q_offset` is
+            // the length of the cached prefix (kv_seq_len - q_seq_len) for a chunked
+            // continuation and 0 for a full prefill, but it is passed explicitly rather
+            // than derived so the primitive is usable for any block alignment.
+            //
+            // Same two-pass online-softmax structure as its siblings, so it is unbounded
+            // in kv_seq_len: pass 1 parks raw scores in the (already allocated) output
+            // row while maintaining a rescaled running max/sum, pass 2 normalises and
+            // zeroes the masked tail.
+            kernel void batched_scaled_matmul_softmax_gen_causal(
+                device const float* Q [[buffer(0)]],         // [num_heads, q_seq_len, head_dim]
+                device const float* K_T [[buffer(1)]],       // [num_heads, head_dim, kv_seq_len]
+                device float* output [[buffer(2)]],          // [num_heads, q_seq_len, kv_seq_len]
+                constant uint& num_heads [[buffer(3)]],
+                constant uint& q_seq_len [[buffer(4)]],
+                constant uint& kv_seq_len [[buffer(5)]],
+                constant uint& head_dim [[buffer(6)]],
+                constant float& alpha [[buffer(7)]],         // Scaling factor (1/sqrt(head_dim))
+                constant uint& q_offset [[buffer(8)]],       // Absolute key position of query row 0
+                uint2 gid [[thread_position_in_grid]]
+            ) {
+                uint h = gid.y;        // head index
+                uint q_row = gid.x;    // query sequence position within the chunk
+
+                if (h >= num_heads || q_row >= q_seq_len) return;
+
+                uint q_base = h * (q_seq_len * head_dim) + q_row * head_dim;
+                uint k_base = h * (head_dim * kv_seq_len);
+                uint out_base = h * (q_seq_len * kv_seq_len) + q_row * kv_seq_len;
+
+                // Last key column this query row may see. Clamped so that a caller who
+                // declared an offset running past the end of the key sequence gets a
+                // fully-visible row instead of an out-of-bounds read.
+                uint last = q_offset + q_row;
+                if (last >= kv_seq_len) {
+                    last = kv_seq_len - 1;
+                }
+
+                // Pass 1: stream the scaled dot products for the visible prefix.
+                float max_score = -3.402823466e+38f;  // -FLT_MAX
+                float sum = 0.0f;
+
+                for (uint kv_col = 0; kv_col <= last; ++kv_col) {
+                    float dot = 0.0f;
+
+                    for (uint k = 0; k < head_dim; ++k) {
+                        dot += Q[q_base + k] * K_T[k_base + k * kv_seq_len + kv_col];
+                    }
+
+                    float score = alpha * dot;
+                    output[out_base + kv_col] = score;  // Park raw score in global memory
+
+                    float new_max = max(max_score, score);
+                    sum = sum * exp(max_score - new_max) + exp(score - new_max);
+                    max_score = new_max;
+                }
+
+                // Column 0 is always visible, so a fully masked row cannot happen; guard
+                // the division anyway so a degenerate dispatch cannot emit NaN.
+                float inv_sum = (sum > 0.0f) ? (1.0f / sum) : 0.0f;
+
+                // Pass 2: normalise in place and zero the masked tail.
+                for (uint kv_col = 0; kv_col < kv_seq_len; ++kv_col) {
+                    if (kv_col <= last) {
+                        output[out_base + kv_col] =
+                            exp(output[out_base + kv_col] - max_score) * inv_sum;
+                    } else {
+                        output[out_base + kv_col] = 0.0f;  // Masked: strictly future key
+                    }
+                }
+            }
+
             // Concatenate two tensors along sequence dimension for KV-cache
             // Input 1: [batch, num_heads, seq_len1, head_dim] (cached K or V)
             // Input 2: [batch, num_heads, seq_len2, head_dim] (new K or V)
@@ -919,6 +1005,13 @@ impl MetalBackend {
                 // loads and the final stores.
                 const bool active = q_idx < params.q_seq_len;
 
+                // Absolute position of query row 0 in the key sequence. A query block
+                // longer than the key sequence is a caller error rather than a shape the
+                // mask can express; treat it as offset 0 instead of underflowing `uint`.
+                const uint kv_offset = (params.kv_seq_len > params.q_seq_len)
+                    ? (params.kv_seq_len - params.q_seq_len)
+                    : 0u;
+
                 // Load Q block into shared memory (load_q_block zero-fills out-of-range
                 // rows, so inactive lanes still contribute a well-defined tile entry).
                 threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -951,8 +1044,15 @@ impl MetalBackend {
                     for (uint kv_idx_in_block = 0; kv_idx_in_block < kv_block_size; ++kv_idx_in_block) {
                         const uint kv_idx = kv_block_start + kv_idx_in_block;
 
-                        // Apply causal mask: only attend to past tokens
-                        if (params.use_causal_mask && kv_idx > q_idx) {
+                        // Apply causal mask: only attend to keys at or before this
+                        // query's ABSOLUTE position. The query block covers the LAST
+                        // q_seq_len positions of the key sequence, so with a warm KV
+                        // cache (q_seq_len < kv_seq_len) query row `q_idx` lives at
+                        // absolute position `q_idx + kv_offset`. Comparing against the
+                        // block-relative `q_idx` instead - which is what this kernel did
+                        // - masked away the whole cached prefix: a single-token decode
+                        // against a 100-token cache saw only key position 0.
+                        if (params.use_causal_mask && kv_idx > q_idx + kv_offset) {
                             continue;
                         }
 
@@ -1329,6 +1429,32 @@ impl MetalBackend {
                     "MetalBackend::new",
                 )
             })?;
+        let batched_scaled_matmul_softmax_gen_causal_kernel = library
+            .get_function("batched_scaled_matmul_softmax_gen_causal", None)
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!(
+                        "Failed to get batched_scaled_matmul_softmax_gen_causal kernel \
+                         function: {}",
+                        e
+                    ),
+                    "MetalBackend::new",
+                )
+            })?;
+        let batched_scaled_matmul_softmax_gen_causal_pipeline = device
+            .new_compute_pipeline_state_with_function(
+                &batched_scaled_matmul_softmax_gen_causal_kernel,
+            )
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!(
+                        "Failed to create batched_scaled_matmul_softmax_gen_causal \
+                         pipeline: {}",
+                        e
+                    ),
+                    "MetalBackend::new",
+                )
+            })?;
         let concat_seq_dim_kernel = library.get_function("concat_seq_dim", None).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to get concat_seq_dim kernel function: {}", e),
@@ -1392,6 +1518,9 @@ impl MetalBackend {
             ),
             batched_scaled_matmul_softmax_gen_pipeline: Arc::new(
                 batched_scaled_matmul_softmax_gen_pipeline,
+            ),
+            batched_scaled_matmul_softmax_gen_causal_pipeline: Arc::new(
+                batched_scaled_matmul_softmax_gen_causal_pipeline,
             ),
             concat_seq_dim_pipeline: Arc::new(concat_seq_dim_pipeline),
             flash_attention_pipeline: Arc::new(flash_attention_pipeline),

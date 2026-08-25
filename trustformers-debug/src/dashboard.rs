@@ -472,13 +472,43 @@ impl ModelComparator {
         (time_diff + size_diff) / 2.0
     }
 
+    /// Extract the recorded per-step samples of `comparison_config.primary_metric`
+    /// ("loss" or "accuracy") from a model's real `metrics_history`, dropping
+    /// steps where that metric was not recorded. An unrecognised
+    /// `primary_metric` yields no samples (matching
+    /// [`Self::calculate_performance_difference`]'s own `_ => 0.0` fallback),
+    /// never a fabricated series.
+    fn metric_samples(&self, model: &ModelMetrics) -> Vec<f64> {
+        match self.comparison_config.primary_metric.as_str() {
+            "loss" => model.metrics_history.iter().filter_map(|m| m.loss).collect(),
+            "accuracy" => model.metrics_history.iter().filter_map(|m| m.accuracy).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Real two-sample Welch's t-test (unequal variances, unequal sample
+    /// sizes) between `model_a` and `model_b`'s recorded per-step
+    /// `primary_metric` samples, reusing the same
+    /// [`crate::differential_debugging::welch_t_test`] machinery that
+    /// backs `DifferentialDebugger::perform_ab_statistical_tests`. Returns
+    /// `None` --
+    /// never a fabricated `true`/`false` -- when either model has fewer than
+    /// 2 recorded samples of the metric, or when the underlying test itself
+    /// has no meaningful result (both samples degenerate constants; see
+    /// `welch_t_test`'s own doc comment).
     fn test_statistical_significance(
         &self,
-        _model_a: &ModelMetrics,
-        _model_b: &ModelMetrics,
-    ) -> bool {
-        // Simplified statistical test - in practice would use proper statistical methods
-        true // Placeholder
+        model_a: &ModelMetrics,
+        model_b: &ModelMetrics,
+    ) -> Option<bool> {
+        let samples_a = self.metric_samples(model_a);
+        let samples_b = self.metric_samples(model_b);
+        crate::differential_debugging::welch_t_test(
+            &samples_a,
+            &samples_b,
+            self.comparison_config.significance_threshold,
+        )
+        .map(|result| result.is_significant)
     }
 
     fn generate_recommendation(
@@ -872,7 +902,12 @@ pub struct ModelComparison {
     pub model_b_id: String,
     pub performance_difference: f64,
     pub efficiency_difference: f64,
-    pub statistical_significance: bool,
+    /// `Some(true)`/`Some(false)` from a real Welch's t-test over both
+    /// models' recorded `primary_metric` samples (see
+    /// [`ModelComparator::test_statistical_significance`]), or `None` when
+    /// there was not enough recorded history to run the test -- never a
+    /// fabricated constant.
+    pub statistical_significance: Option<bool>,
     pub recommendation: String,
 }
 
@@ -1348,6 +1383,82 @@ mod tests {
         };
         let rec = comparator.generate_recommendation(&ma, &ma, 0.0);
         assert!(rec.contains("similarly"));
+    }
+
+    fn model_with_loss_history(model_id: &str, losses: &[f64]) -> ModelMetrics {
+        ModelMetrics {
+            model_id: model_id.to_string(),
+            model_name: model_id.to_string(),
+            metrics_history: losses
+                .iter()
+                .map(|&l| make_metrics_with(Some(l), None, 1024.0))
+                .collect(),
+            final_loss: losses.last().copied(),
+            final_accuracy: None,
+            training_time: Duration::from_secs(100),
+            parameter_count: 1000,
+            model_size_mb: 10.0,
+        }
+    }
+
+    #[test]
+    fn test_statistical_significance_none_with_empty_history() {
+        // No recorded `loss` samples on either side -- an honest `None`,
+        // never a fabricated `true`.
+        let comparator = ModelComparator::new();
+        let ma = model_with_loss_history("a", &[]);
+        let mb = model_with_loss_history("b", &[]);
+        assert_eq!(comparator.test_statistical_significance(&ma, &mb), None);
+    }
+
+    #[test]
+    fn test_statistical_significance_none_with_single_sample() {
+        // A single recorded sample per model is not enough for a real
+        // two-sample t-test.
+        let comparator = ModelComparator::new();
+        let ma = model_with_loss_history("a", &[0.5]);
+        let mb = model_with_loss_history("b", &[0.2]);
+        assert_eq!(comparator.test_statistical_significance(&ma, &mb), None);
+    }
+
+    #[test]
+    fn test_statistical_significance_true_for_clearly_separated_models() {
+        // Two tight, well-separated loss distributions: a real Welch's
+        // t-test must find this significant.
+        let comparator = ModelComparator::new();
+        let ma = model_with_loss_history("a", &[0.50, 0.51, 0.49, 0.50, 0.52, 0.48, 0.50, 0.51]);
+        let mb = model_with_loss_history("b", &[0.20, 0.21, 0.19, 0.20, 0.22, 0.18, 0.20, 0.21]);
+        assert_eq!(
+            comparator.test_statistical_significance(&ma, &mb),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_statistical_significance_false_for_overlapping_models() {
+        // Two noisy loss distributions with (almost) the same mean and
+        // overlapping spread: a real Welch's t-test must NOT find this
+        // significant -- this is exactly the case the old `true //
+        // Placeholder` got wrong for every pair.
+        let comparator = ModelComparator::new();
+        let ma = model_with_loss_history("a", &[0.50, 0.55, 0.45, 0.52, 0.48, 0.51, 0.49, 0.53]);
+        let mb = model_with_loss_history("b", &[0.51, 0.46, 0.54, 0.49, 0.52, 0.47, 0.53, 0.50]);
+        assert_eq!(
+            comparator.test_statistical_significance(&ma, &mb),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_compare_two_models_publishes_option_significance() {
+        // End-to-end: `compare_two_models` (called from `compare_models`,
+        // in turn from `get_dashboard_snapshot`) must publish the same
+        // real `Option<bool>`, not a constant.
+        let comparator = ModelComparator::new();
+        let ma = model_with_loss_history("a", &[0.50, 0.51, 0.49, 0.50, 0.52, 0.48, 0.50, 0.51]);
+        let mb = model_with_loss_history("b", &[0.20, 0.21, 0.19, 0.20, 0.22, 0.18, 0.20, 0.21]);
+        let comparison = comparator.compare_two_models(&ma, &mb);
+        assert_eq!(comparison.statistical_significance, Some(true));
     }
 
     // --- HyperparameterExplorer tests ---

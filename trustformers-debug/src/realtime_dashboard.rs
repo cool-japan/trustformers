@@ -787,7 +787,9 @@ impl RealtimeDashboard {
                 if i == j {
                     row.push(1.0); // Perfect correlation with itself
                 } else {
-                    // Calculate correlation coefficient (simplified)
+                    // Real Pearson correlation over the aligned recent
+                    // samples; see `calculate_correlation_coefficient` for the
+                    // pairing rule it assumes.
                     let corr = self.calculate_correlation_coefficient(cat1, cat2);
                     row.push(corr);
                 }
@@ -841,11 +843,17 @@ impl RealtimeDashboard {
         let prediction_time = current_time + (hours_ahead * 3600);
         let predicted_value = slope * prediction_time as f64 + intercept;
 
-        // Calculate confidence intervals (simplified)
+        // 95% interval around the fitted line from the standard error of the
+        // MEAN (`sigma / sqrt(n)`) times the normal 1.96 quantile.
+        //
+        // Explicitly NOT a prediction interval: a real one would add the
+        // residual variance and the leverage term for a point `hours_ahead`
+        // outside the observed range, and would therefore be wider -- see
+        // `PerformancePrediction::confidence_interval`.
         let mean = sum_y / n;
         let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
         let std_error = (variance / n).sqrt();
-        let confidence_interval = std_error * 1.96; // 95% confidence
+        let confidence_interval = std_error * 1.96;
 
         // Analyze trend direction and strength
         let trend_strength = slope.abs() / mean.abs();
@@ -972,6 +980,17 @@ impl RealtimeDashboard {
         }
     }
 
+    /// Pearson correlation between the most recent samples of two metric
+    /// categories.
+    ///
+    /// The two series are paired by RECENCY RANK (newest with newest, and so
+    /// on) over at most 50 points, not by timestamp. That is exact while both
+    /// categories are sampled on the dashboard's single refresh tick -- the
+    /// only way [`ingest_metrics`] feeds them -- and would misalign if a caller
+    /// ever ingested two categories at different cadences.
+    ///
+    /// Returns `0.0` when either category has fewer than two samples or has
+    /// zero variance, i.e. when the coefficient is undefined.
     fn calculate_correlation_coefficient(
         &self,
         cat1: &MetricCategory,

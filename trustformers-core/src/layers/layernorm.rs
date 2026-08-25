@@ -6,8 +6,9 @@ use crate::device::Device;
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use crate::traits::Layer;
-use scirs2_core::ndarray::{Array2, ArrayD, ArrayView1, ArrayView2, Axis, IxDyn};
-use scirs2_core::simd::normalization::simd_layer_norm_f32;
+use scirs2_core::ndarray::{Array2, ArrayD, ArrayView1, Axis, IxDyn};
+use scirs2_core::simd::reductions::{simd_mean_f32, simd_variance_f32};
+use scirs2_core::simd_ops::SimdUnifiedOps;
 
 /// Layer Normalization
 ///
@@ -246,10 +247,10 @@ impl Layer for LayerNorm {
                     // Get weight and bias buffer IDs
                     match (&self.weight, &self.bias) {
                         (Tensor::Metal(w_data), Tensor::Metal(b_data)) => {
-                            // eprintln!(
-                            //     "✅ LayerNorm: GPU-to-GPU path (Metal→Metal, shape: {:?})",
-                            //     metal_data.shape
-                            // );
+                            tracing::trace!(
+                                shape = ?metal_data.shape,
+                                "LayerNorm: GPU-to-GPU path (Metal input, Metal parameters)"
+                            );
 
                             if metal_data.shape.len() == 2 {
                                 // 2D case: (seq_len, hidden_size)
@@ -277,10 +278,12 @@ impl Layer for LayerNorm {
                                 let seq_len = metal_data.shape[1];
                                 let flattened_seq_len = batch * seq_len;
 
-                                // eprintln!(
-                                //     "   Reshaping 3D→2D: {:?} → [{}, {}]",
-                                //     metal_data.shape, flattened_seq_len, hidden_size
-                                // );
+                                tracing::trace!(
+                                    from = ?metal_data.shape,
+                                    rows = flattened_seq_len,
+                                    hidden_size,
+                                    "LayerNorm: flattening 3-D input to 2-D for the GPU kernel"
+                                );
 
                                 // Run GPU kernel on flattened 2D tensor
                                 let output_buffer_id = backend.layernorm_gpu_to_gpu(
@@ -292,11 +295,6 @@ impl Layer for LayerNorm {
                                     self.eps,
                                 )?;
 
-                                // eprintln!(
-                                //     "   Reshaping 2D→3D: [{}, {}] → {:?}",
-                                //     flattened_seq_len, hidden_size, metal_data.shape
-                                // );
-
                                 // Return with original 3D shape
                                 return Ok(Tensor::Metal(MetalTensorData::new(
                                     &backend,
@@ -307,14 +305,18 @@ impl Layer for LayerNorm {
                             }
                         },
                         _ => {
-                            // eprintln!("⚠️  LayerNorm: Weight/bias not on GPU, falling back to CPU");
+                            tracing::trace!(
+                                "LayerNorm: parameters are not GPU-resident, \
+                                 falling back to the CPU kernel"
+                            );
                         },
                     }
                 } else {
-                    // eprintln!(
-                    //     "⚠️  LayerNorm: Unsupported shape {:?}, falling back to CPU",
-                    //     metal_data.shape
-                    // );
+                    tracing::trace!(
+                        shape = ?metal_data.shape,
+                        normalized_shape = ?self.normalized_shape,
+                        "LayerNorm: shape has no GPU kernel, falling back to the CPU kernel"
+                    );
                 }
 
                 // Fallback: convert to CPU and process (avoid recursion)
@@ -557,73 +559,17 @@ impl Layer for LayerNorm {
                     }
                 }
 
-                // SIMD-accelerated CPU path for 2D and 3D tensors
-                let ndim = arr.ndim();
-                let norm_ndim = self.normalized_shape.len();
-
-                // Minimum size threshold for SIMD (avoid overhead on small tensors)
-                const MIN_SIZE_FOR_SIMD_LAYER_NORM: usize = 64;
-
-                // Fast path: Use scirs2-core SIMD layer norm for 2D/3D tensors with 1D normalized_shape
-                if norm_ndim == 1 && (ndim == 2 || ndim == 3) {
-                    let hidden_size = self.normalized_shape[0];
-                    let last_dim = arr.shape()[ndim - 1];
-
-                    if last_dim == hidden_size && arr.len() >= MIN_SIZE_FOR_SIMD_LAYER_NORM {
-                        // Extract weight and bias as 1D arrays (owned copies for proper lifetime)
-                        let weight_1d = match &self.weight {
-                            Tensor::F32(w) => {
-                                use scirs2_core::ndarray::Array1;
-                                let data: Vec<f32> = w.iter().copied().collect();
-                                Array1::from_vec(data).into_shape_with_order(hidden_size).ok()
-                            },
-                            _ => None,
-                        };
-                        let bias_1d = match &self.bias {
-                            Tensor::F32(b) => {
-                                use scirs2_core::ndarray::Array1;
-                                let data: Vec<f32> = b.iter().copied().collect();
-                                Array1::from_vec(data).into_shape_with_order(hidden_size).ok()
-                            },
-                            _ => None,
-                        };
-
-                        if let (Some(w), Some(b)) = (weight_1d, bias_1d) {
-                            // Reshape input to 2D: (batch_size, hidden_size)
-                            let original_shape = arr.shape().to_vec();
-                            let batch_size = arr.len() / hidden_size;
-
-                            if let Ok(input_2d) = arr
-                                .as_standard_layout()
-                                .view()
-                                .into_shape_with_order((batch_size, hidden_size))
-                            {
-                                // Call scirs2-core SIMD layer norm
-                                let input_view: ArrayView2<f32> = input_2d;
-                                let weight_view: ArrayView1<f32> = w.view();
-                                let bias_view: ArrayView1<f32> = b.view();
-
-                                let (output_2d, _means, _vars) = simd_layer_norm_f32(
-                                    &input_view,
-                                    &weight_view,
-                                    &bias_view,
-                                    self.eps,
-                                );
-
-                                // Reshape back to original shape
-                                if let Ok(output) =
-                                    output_2d.into_shape_with_order(IxDyn(&original_shape))
-                                {
-                                    return Ok(Tensor::F32(output));
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Fallback to standard CPU implementation for other cases:
-                // `layer_norm_f32_cpu` derives the normalized axes from
-                // `self.normalized_shape` itself.
+                // Every CPU shape is normalised by `layer_norm_f32_cpu`, which
+                // derives the normalised axes from `self.normalized_shape` itself
+                // and vectorises its own reductions. There is deliberately no
+                // separate "SIMD fast path" here any more: the one that used to
+                // live at this spot called `scirs2_core::simd::normalization::
+                // simd_layer_norm_f32`, whose variance is the *sample* (n-1)
+                // estimator, while this function - and the Metal kernels - use the
+                // *population* (n) estimator that `torch.nn.LayerNorm` defines. A
+                // tensor therefore normalised differently depending on its element
+                // count (>= 64 took the SIMD branch) and, on `metal` builds, on its
+                // rank (2-D was diverted to the GPU above, 3-D was not).
 
                 // Convert weight/bias to F32 if needed
                 let weight_f32 = match &self.weight {
@@ -716,6 +662,18 @@ impl Layer for LayerNorm {
     }
 }
 
+/// Reduction length at which the vectorised mean/variance start paying for
+/// their call overhead.
+///
+/// The threshold is on the length of **one normalised group**
+/// (`normalized_shape.iter().product()`), not on the whole tensor: only the
+/// per-group reduction is vectorised, so a `[32, 8]` tensor (256 elements, but
+/// groups of 8) has nothing to gain. The predecessor of this code gated on the
+/// total element count instead, which is how `[32, 8]` ended up on a different
+/// code path - and, back when the two paths disagreed about the estimator, a
+/// different answer - from `[2, 8]`.
+const MIN_NORM_LEN_FOR_SIMD: usize = 64;
+
 /// Fused CPU LayerNorm over the trailing `normalized_shape` axes.
 ///
 /// Computes `y = gamma * (x - mean) / sqrt(var + eps) + beta` in a **single**
@@ -727,6 +685,16 @@ impl Layer for LayerNorm {
 /// `(&diff * &diff).to_owned()` (an extra copy of an already-owned product),
 /// `&diff / (var + eps).sqrt()`, and finally the broadcast scale/shift. For a
 /// `[1, 2048, 4096]` hidden state that is ~160 MiB of temporaries per call.
+///
+/// # Variance estimator
+///
+/// `var` is the **population** variance - the sum of squared deviations divided
+/// by `n`, not by `n - 1`. That is what `torch.nn.LayerNorm` (and therefore every
+/// HuggingFace checkpoint) is trained against, and what the Metal `layernorm`
+/// kernel computes, so it is the single estimator used on every device and every
+/// shape. Reductions are vectorised through `scirs2-core` once a normalised group
+/// is long enough to pay for the call (see [`MIN_NORM_LEN_FOR_SIMD`]); the
+/// estimator does not change with that choice.
 fn layer_norm_f32_cpu(
     input: &ArrayD<f32>,
     weight: &ArrayD<f32>,
@@ -787,10 +755,30 @@ fn layer_norm_f32_cpu(
         })?;
 
         let inverse_count = 1.0f32 / norm_len as f32;
+        // `simd_variance_f32` is Bessel-corrected (divides by n-1); the population
+        // variance this layer must use is that value scaled by (n-1)/n. Hoisted out
+        // of the loop because it depends only on `norm_len`.
+        let sample_to_population = (norm_len as f32 - 1.0) * inverse_count;
+        let vectorise = norm_len >= MIN_NORM_LEN_FOR_SIMD;
+
         for group in values.chunks_mut(norm_len) {
-            let mean = group.iter().sum::<f32>() * inverse_count;
-            let variance =
-                group.iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>() * inverse_count;
+            let (mean, variance) = if vectorise {
+                // Borrowed immutably only for the two reductions; the view is dead
+                // before `group` is written below.
+                let view = ArrayView1::from(&group[..]);
+                let mean = simd_mean_f32(&view);
+                // `simd_variance_f32` re-derives its centre with the very same
+                // `simd_mean_f32` call, so `mean` here *is* the point the squared
+                // deviations were taken about - the two stay consistent.
+                // `norm_len >= MIN_NORM_LEN_FOR_SIMD >= 2`, so its `len < 2 => NaN`
+                // branch is unreachable.
+                (mean, simd_variance_f32(&view) * sample_to_population)
+            } else {
+                let mean = group.iter().sum::<f32>() * inverse_count;
+                let variance =
+                    group.iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>() * inverse_count;
+                (mean, variance)
+            };
             let inverse_std = 1.0 / (variance + eps).sqrt();
 
             for ((value, &gamma), &beta) in
@@ -957,12 +945,12 @@ impl Layer for RMSNorm {
                             for i in 0..batch_size {
                                 let row = input_2d.row(i);
 
-                                // Compute mean(x^2) using SIMD
-                                // Note: We compute squares inline to avoid allocation
-                                let mut squares_sum = 0.0f32;
-                                for &x in row.iter() {
-                                    squares_sum += x * x;
-                                }
+                                // Sum of squares, vectorised through scirs2-core
+                                // (`simd_dot` of the row with itself) so the claim
+                                // this comment makes is the code that runs: the
+                                // predecessor here was a plain scalar accumulation
+                                // labelled "using SIMD".
+                                let squares_sum = f32::simd_dot(&row, &row);
                                 let mean_sq = squares_sum / (hidden_size as f32);
                                 let inv_rms = 1.0 / (mean_sq + self.eps).sqrt();
 
@@ -1251,6 +1239,403 @@ mod tests {
              entries_before + 1: the input upload was never released)"
         );
 
+        Ok(())
+    }
+    /// Textbook LayerNorm over the trailing axis using the **population**
+    /// (divide-by-`n`) variance, accumulated in `f64` so it is an independent
+    /// answer rather than a re-run of the code under test.
+    ///
+    /// This is what `torch.nn.LayerNorm` computes, and therefore what every
+    /// HuggingFace checkpoint was trained against.
+    fn population_layer_norm_reference(
+        input: &[f32],
+        width: usize,
+        gamma: &[f32],
+        beta: &[f32],
+        eps: f32,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; input.len()];
+        for (row_in, row_out) in input.chunks_exact(width).zip(out.chunks_exact_mut(width)) {
+            let mean = row_in.iter().map(|&v| f64::from(v)).sum::<f64>() / width as f64;
+            let variance = row_in
+                .iter()
+                .map(|&v| {
+                    let d = f64::from(v) - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / width as f64;
+            let inverse_std = 1.0 / (variance + f64::from(eps)).sqrt();
+            for ((o, &v), (&g, &b)) in
+                row_out.iter_mut().zip(row_in.iter()).zip(gamma.iter().zip(beta.iter()))
+            {
+                *o = (((f64::from(v) - mean) * inverse_std) * f64::from(g) + f64::from(b)) as f32;
+            }
+        }
+        out
+    }
+
+    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(a.len(), b.len(), "compared buffers must have equal length");
+        a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+    }
+
+    /// Deterministic, non-symmetric sample data. A pure `sin` sweep has a mean
+    /// near zero, which makes an estimator bug smaller than it really is, so the
+    /// series is offset and mildly skewed.
+    fn sample_values(count: usize) -> Vec<f32> {
+        (0..count)
+            .map(|i| {
+                let t = i as f32 * 0.137;
+                t.sin() * 1.7 + (t * 0.31).cos() * 0.6 + 0.45
+            })
+            .collect()
+    }
+
+    fn ramp_gamma_beta(width: usize) -> (Vec<f32>, Vec<f32>) {
+        let gamma = (0..width).map(|j| 0.8 + j as f32 * 0.003).collect();
+        let beta = (0..width).map(|j| -0.2 + j as f32 * 0.001).collect();
+        (gamma, beta)
+    }
+
+    fn layer_norm_with_params(width: usize, gamma: &[f32], beta: &[f32]) -> Result<LayerNorm> {
+        let mut ln = LayerNorm::new(vec![width], 1e-5)?;
+        ln.set_weight(Tensor::from_data(gamma.to_vec(), &[width])?)?;
+        ln.set_bias(Tensor::from_data(beta.to_vec(), &[width])?)?;
+        Ok(ln)
+    }
+
+    /// Every (size, rank) combination must produce the population-variance
+    /// answer.
+    ///
+    /// Regression for a split estimator: 2-D/3-D tensors of 64 elements or more
+    /// used to be routed to `scirs2_core::simd::normalization::
+    /// simd_layer_norm_f32`, whose variance divides by `n - 1`, while everything
+    /// else divided by `n`. The same layer therefore answered differently
+    /// depending on how many elements its input happened to contain - by a factor
+    /// of `1/sqrt(1 - 1/n)`, i.e. 1.6% at `n = 32` and still 0.07% at `n = 768`,
+    /// on top of every checkpoint being normalised wrong.
+    #[test]
+    fn test_layer_norm_matches_population_reference_across_sizes_and_ranks() -> Result<()> {
+        for &width in &[8usize, 32, 64, 256, 768] {
+            let (gamma, beta) = ramp_gamma_beta(width);
+            let ln = layer_norm_with_params(width, &gamma, &beta)?;
+
+            // Rank 2 with a single row is the "one 1-D vector" case; rank 2 with
+            // several rows and rank 3 exercise the multi-group loop. `[1, w]` and
+            // `[3, w]` also straddle the vectorisation threshold for w = 8 and
+            // w = 32 in opposite directions of total element count, which is what
+            // the old code keyed off.
+            let shapes: [Vec<usize>; 3] = [vec![1, width], vec![3, width], vec![2, 3, width]];
+
+            for shape in shapes {
+                let total: usize = shape.iter().product();
+                let values = sample_values(total);
+                let expected = population_layer_norm_reference(&values, width, &gamma, &beta, 1e-5);
+
+                let output = ln.forward(Tensor::from_data(values, &shape)?)?;
+                assert_eq!(output.shape(), shape, "shape must be preserved");
+                let actual = output.to_vec_f32()?;
+
+                let diff = max_abs_diff(&actual, &expected);
+                assert!(
+                    diff < 1e-5,
+                    "width={width} shape={shape:?}: max|actual - population_reference| = \
+                     {diff:e} (>= 1e-5). A divide-by-(n-1) variance shows up here as a \
+                     uniform 1/sqrt(1 - 1/n) scale error."
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The estimator itself, pinned on the **scalar** reduction branch.
+    ///
+    /// For `[1.0, 3.0]` the mean is 2 and the two estimators are maximally far
+    /// apart: population variance 1 (output `±1`), sample variance 2 (output
+    /// `±1/sqrt(2)` = `±0.7071`). Exactly a factor of `sqrt(2)`.
+    #[test]
+    fn test_layer_norm_variance_divisor_is_n_scalar_branch() -> Result<()> {
+        let ln = LayerNorm::new(vec![2], 0.0)?;
+        let output = ln.forward(Tensor::from_data(vec![1.0, 3.0], &[1, 2])?)?;
+        let actual = output.to_vec_f32()?;
+
+        assert!(
+            (actual[0] + 1.0).abs() < 1e-4 && (actual[1] - 1.0).abs() < 1e-4,
+            "expected the population (divide-by-n) answer [-1, 1], got {actual:?}; \
+             [-0.7071, 0.7071] would mean the sample (divide-by-n-1) variance"
+        );
+        Ok(())
+    }
+
+    /// The same estimator pin on the **vectorised** reduction branch, which is
+    /// the one that actually carried the bug.
+    ///
+    /// The `const` assertion below is the guard that keeps it that way: if
+    /// [`MIN_NORM_LEN_FOR_SIMD`] ever rises above `WIDTH`, this test stops
+    /// compiling rather than silently pinning the scalar branch twice.
+    ///
+    /// A row of 32 `-1`s followed by 32 `+1`s has mean 0 and population variance
+    /// exactly 1, so the answer is `±1`. The sample variance is `64/63`, which
+    /// would give `±sqrt(63/64)` = `±0.99216` - 7.8e-3 away, three orders of
+    /// magnitude outside the tolerance below.
+    #[test]
+    fn test_layer_norm_variance_divisor_is_n_simd_branch() -> Result<()> {
+        const WIDTH: usize = 64;
+        const { assert!(WIDTH >= MIN_NORM_LEN_FOR_SIMD) };
+
+        let values: Vec<f32> = (0..WIDTH).map(|i| if i < WIDTH / 2 { -1.0 } else { 1.0 }).collect();
+        let ln = LayerNorm::new(vec![WIDTH], 0.0)?;
+        let actual = ln.forward(Tensor::from_data(values, &[1, WIDTH])?)?.to_vec_f32()?;
+
+        for (i, &v) in actual.iter().enumerate() {
+            let expected = if i < WIDTH / 2 { -1.0f32 } else { 1.0f32 };
+            assert!(
+                (v - expected).abs() < 1e-4,
+                "element {i}: expected {expected} (population variance 1.0), got {v}; \
+                 ±0.99216 would mean the sample variance 64/63"
+            );
+        }
+        Ok(())
+    }
+
+    /// One layer, one set of values: the answer must not depend on how the
+    /// values are shaped, nor on which side of [`MIN_NORM_LEN_FOR_SIMD`] the
+    /// reduction lands.
+    ///
+    /// Both were false before: `[3, 32]` (96 elements) took the SIMD branch while
+    /// `[1, 32]` (32 elements) did not, and 3-D inputs stayed on the SIMD branch
+    /// while 2-D inputs were diverted to the Metal kernel on `metal` builds -
+    /// `probe_ln3d` measured 0.032129 between `[1, 3, 32]` and `[3, 32]` on
+    /// identical data.
+    #[test]
+    fn test_layer_norm_answer_is_invariant_to_rank_and_reduction_length() -> Result<()> {
+        for &width in &[8usize, 32, 96] {
+            let (gamma, beta) = ramp_gamma_beta(width);
+            let ln = layer_norm_with_params(width, &gamma, &beta)?;
+            let values = sample_values(6 * width);
+
+            let flat = ln.forward(Tensor::from_data(values.clone(), &[6, width])?)?.to_vec_f32()?;
+            let cubed =
+                ln.forward(Tensor::from_data(values.clone(), &[2, 3, width])?)?.to_vec_f32()?;
+            let single_rows: Vec<f32> = values
+                .chunks_exact(width)
+                .map(|row| ln.forward(Tensor::from_data(row.to_vec(), &[1, width])?))
+                .collect::<Result<Vec<_>>>()?
+                .iter()
+                .map(|t| t.to_vec_f32())
+                .collect::<Result<Vec<_>>>()?
+                .concat();
+
+            assert!(
+                max_abs_diff(&flat, &cubed) < 1e-5,
+                "width={width}: 2-D and 3-D disagree by {:e}",
+                max_abs_diff(&flat, &cubed)
+            );
+            assert!(
+                max_abs_diff(&flat, &single_rows) < 1e-5,
+                "width={width}: batched and row-at-a-time disagree by {:e} (the row-at-a-time \
+                 tensors are 6x smaller, so this is the element-count dependence)",
+                max_abs_diff(&flat, &single_rows)
+            );
+        }
+        Ok(())
+    }
+
+    /// A `[32, 8]` tensor has 256 elements but reduces over groups of 8. The
+    /// predecessor gated vectorisation on the total (256 >= 64 -> SIMD), so this
+    /// shape answered differently from `[2, 8]`; the gate is now on the reduction
+    /// length, which is 8 for both.
+    #[test]
+    fn test_layer_norm_wide_batch_narrow_groups_matches_reference() -> Result<()> {
+        let width = 8usize;
+        let (gamma, beta) = ramp_gamma_beta(width);
+        let ln = layer_norm_with_params(width, &gamma, &beta)?;
+        let values = sample_values(32 * width);
+        let expected = population_layer_norm_reference(&values, width, &gamma, &beta, 1e-5);
+
+        let wide = ln.forward(Tensor::from_data(values.clone(), &[32, width])?)?.to_vec_f32()?;
+        assert!(max_abs_diff(&wide, &expected) < 1e-5);
+
+        let narrow = ln
+            .forward(Tensor::from_data(
+                values[..2 * width].to_vec(),
+                &[2, width],
+            )?)?
+            .to_vec_f32()?;
+        assert!(
+            max_abs_diff(&narrow, &expected[..2 * width]) < 1e-5,
+            "the 16-element tensor must agree with the first two rows of the 256-element one"
+        );
+        Ok(())
+    }
+
+    /// The Metal `layernorm` kernel, the CPU kernel and the reference must all
+    /// agree, for 2-D **and** 3-D inputs.
+    ///
+    /// Rank used to decide the estimator on `metal` builds: 2-D inputs were
+    /// diverted to the GPU (population variance) while 3-D inputs stayed on the
+    /// SIMD CPU branch (sample variance).
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn test_metal_layer_norm_matches_cpu_and_reference_2d_and_3d() -> Result<()> {
+        use crate::gpu_ops::metal::get_metal_backend;
+
+        if get_metal_backend().is_err() {
+            eprintln!("no Metal device; skipping");
+            return Ok(());
+        }
+        let metal = Device::Metal(0);
+
+        for &width in &[32usize, 64, 768] {
+            let (gamma, beta) = ramp_gamma_beta(width);
+            let cpu_ln = layer_norm_with_params(width, &gamma, &beta)?;
+            let mut gpu_ln = layer_norm_with_params(width, &gamma, &beta)?;
+            gpu_ln.weights_to_gpu(&metal)?;
+
+            for shape in [vec![4usize, width], vec![2, 2, width]] {
+                let total: usize = shape.iter().product();
+                let values = sample_values(total);
+                let expected = population_layer_norm_reference(&values, width, &gamma, &beta, 1e-5);
+
+                let cpu =
+                    cpu_ln.forward(Tensor::from_data(values.clone(), &shape)?)?.to_vec_f32()?;
+                let gpu_input = Tensor::from_data(values, &shape)?.to_device_enum(&metal)?;
+                let gpu_output = gpu_ln.forward(gpu_input)?;
+                assert!(
+                    matches!(gpu_output, Tensor::Metal(_)),
+                    "width={width} shape={shape:?}: GPU-resident input with GPU-resident \
+                     parameters must stay on the GPU"
+                );
+                let gpu = gpu_output.to_vec_f32()?;
+
+                assert!(
+                    max_abs_diff(&gpu, &expected) < 1e-4,
+                    "width={width} shape={shape:?}: GPU vs population reference = {:e}",
+                    max_abs_diff(&gpu, &expected)
+                );
+                assert!(
+                    max_abs_diff(&cpu, &expected) < 1e-5,
+                    "width={width} shape={shape:?}: CPU vs population reference = {:e}",
+                    max_abs_diff(&cpu, &expected)
+                );
+                assert!(
+                    max_abs_diff(&gpu, &cpu) < 1e-4,
+                    "width={width} shape={shape:?}: GPU vs CPU = {:e}",
+                    max_abs_diff(&gpu, &cpu)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// `Tensor::to_device_enum(Metal -> CPU)` must observe the output of the
+    /// kernel that produced the buffer.
+    ///
+    /// `layernorm_gpu_to_gpu` (like every `*_gpu_to_gpu` wrapper) commits its
+    /// command buffer asynchronously and returns immediately, and its output is a
+    /// freshly allocated `StorageModeShared` buffer, which reads as zeroes until
+    /// the dispatch lands. `to_device_enum` used to read `buffer.contents()`
+    /// directly with no flush, so it raced the very kernel whose result it was
+    /// asked for - `probe_flush.rs` measured 0 of 150 values non-zero through this
+    /// path against 150 of 150 through the flushing `download_buffer_to_vec`.
+    ///
+    /// The forward pass below is deliberately large (512 rows x 1024 features,
+    /// one thread per row making three passes) so the dispatch is still in flight
+    /// when the read happens.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn test_metal_to_device_enum_observes_the_kernel_that_wrote_the_buffer() -> Result<()> {
+        use crate::gpu_ops::metal::get_metal_backend;
+
+        if get_metal_backend().is_err() {
+            eprintln!("no Metal device; skipping");
+            return Ok(());
+        }
+        let metal = Device::Metal(0);
+
+        const ROWS: usize = 512;
+        const WIDTH: usize = 1024;
+        let (gamma, beta) = ramp_gamma_beta(WIDTH);
+        let mut ln = layer_norm_with_params(WIDTH, &gamma, &beta)?;
+        ln.weights_to_gpu(&metal)?;
+
+        let values = sample_values(ROWS * WIDTH);
+        let expected = population_layer_norm_reference(&values, WIDTH, &gamma, &beta, 1e-5);
+
+        // Several trials: a racing read is a race, and one lucky trial proves
+        // nothing.
+        for trial in 0..4 {
+            let input =
+                Tensor::from_data(values.clone(), &[ROWS, WIDTH])?.to_device_enum(&metal)?;
+            let output = ln.forward(input)?;
+            assert!(
+                matches!(output, Tensor::Metal(_)),
+                "trial {trial}: expected a GPU result"
+            );
+
+            // The read under test. Nothing flushes between the async dispatch
+            // above and this call.
+            let host = output.to_device_enum(&Device::CPU)?;
+            let host = match host {
+                Tensor::F32(arr) => arr,
+                other => panic!(
+                    "trial {trial}: expected Tensor::F32, got {:?}",
+                    other.dtype()
+                ),
+            };
+            assert_eq!(host.shape(), [ROWS, WIDTH]);
+            let host = host.iter().copied().collect::<Vec<f32>>();
+
+            let zeros = host.iter().filter(|v| **v == 0.0).count();
+            assert!(
+                zeros * 100 < host.len(),
+                "trial {trial}: {zeros}/{} values read back as exactly zero - that is the \
+                 unflushed read seeing a freshly zeroed buffer, not a LayerNorm result",
+                host.len()
+            );
+            let diff = max_abs_diff(&host, &expected);
+            assert!(
+                diff < 1e-4,
+                "trial {trial}: max|host - population_reference| = {diff:e}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A shape that over-states its buffer must be refused, not read out of
+    /// bounds.
+    ///
+    /// `to_device_enum` used to size an unchecked `slice::from_raw_parts` from
+    /// `shape.iter().product()` without ever consulting `buffer.length()`.
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn test_metal_to_device_enum_rejects_a_shape_larger_than_its_buffer() -> Result<()> {
+        use crate::gpu_ops::metal::get_metal_backend;
+        use crate::tensor::MetalTensorData;
+
+        let backend = match get_metal_backend() {
+            Ok(backend) => backend,
+            Err(_) => {
+                eprintln!("no Metal device; skipping");
+                return Ok(());
+            },
+        };
+
+        let buffer_id = backend.create_persistent_buffer(&[1.0f32, 2.0, 3.0, 4.0])?;
+        let overstated = Tensor::Metal(MetalTensorData::new(
+            &backend,
+            buffer_id,
+            vec![4096],
+            crate::tensor::DType::F32,
+        )?);
+
+        let result = overstated.to_device_enum(&Device::CPU);
+        assert!(
+            result.is_err(),
+            "a 4-element buffer described as 4096 elements must be refused"
+        );
+        backend.release_buffers(&[buffer_id])?;
         Ok(())
     }
 }

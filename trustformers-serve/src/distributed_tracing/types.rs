@@ -17,6 +17,10 @@ use std::{
 };
 use tokio::sync::broadcast;
 
+// Reused for its already-audited Jaeger tag shape (`{key, type, value}`,
+// matching Jaeger's real `model.KeyValue`) rather than re-deriving it here.
+use crate::tracing::legacy::export::JaegerTag;
+
 /// Span kind for categorizing operations
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SpanKind {
@@ -135,15 +139,47 @@ pub struct TracingManager {
     pub(super) last_sample_time: Arc<Mutex<Instant>>,
     /// Event sender for real-time updates
     pub(super) event_sender: Arc<broadcast::Sender<TracingEvent>>,
+    /// Cached system CPU reading backing `SamplingStrategy::Adaptive`. See
+    /// [`CpuLoadMonitor`].
+    pub(super) cpu_load_monitor: Arc<Mutex<CpuLoadMonitor>>,
+}
+/// Minimum interval between `sysinfo` CPU refreshes for adaptive sampling.
+///
+/// `should_sample` runs synchronously on every span start; refreshing
+/// `sysinfo::System`'s CPU usage that often would both cost far more than it
+/// is worth on a hot path and, per `sysinfo`'s own documentation, make
+/// consecutive readings less accurate (CPU usage is a delta over the time
+/// since the last refresh).
+const CPU_LOAD_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+/// Backing store for [`SamplingStrategy::Adaptive`]'s system-load reading.
+///
+/// 0.2.1: `should_sample`'s `Adaptive` branch used to read `let current_load
+/// = 0.5;` -- a constant, so the branch was in fact always exactly `min_rate`
+/// or always exactly `max_rate` for any given config, never actually
+/// adapting to load the way the variant's name and doc promise. `sysinfo` is
+/// already a workspace dependency (see
+/// `resource_management::manager::ResourceManagementSystem::get_performance_snapshot`
+/// for the same CPU-usage pattern); this caches one `System` instance so
+/// paying its refresh cost is bounded by [`CPU_LOAD_REFRESH_INTERVAL`]
+/// rather than incurred on every call.
+pub(super) struct CpuLoadMonitor {
+    system: sysinfo::System,
+    last_refresh: Instant,
 }
 impl TracingManager {
     /// Create new tracing manager
     pub async fn new(config: TracingConfig) -> Result<Arc<Self>> {
         let (event_sender, _) = broadcast::channel(1000);
+        let mut cpu_system = sysinfo::System::new();
+        cpu_system.refresh_cpu_usage();
         let manager = Arc::new(Self {
             config,
             active_spans: Arc::new(RwLock::new(HashMap::new())),
             export_queue: Arc::new(Mutex::new(Vec::new())),
+            cpu_load_monitor: Arc::new(Mutex::new(CpuLoadMonitor {
+                system: cpu_system,
+                last_refresh: Instant::now(),
+            })),
             stats: Arc::new(Mutex::new(TracingStats {
                 spans_created: 0,
                 spans_exported: 0,
@@ -241,7 +277,20 @@ impl TracingManager {
         stats.queue_size = self.export_queue.lock().len();
         stats
     }
-    /// Force export pending spans
+    /// Force export pending spans.
+    ///
+    /// 0.2.1: this used to clear the queue and *then* export, so a failed
+    /// export lost the spans for good -- the same fire-and-forget loss
+    /// `export_loop` was fixed for (see its comment above). A failed flush
+    /// now puts the spans back at the front of the queue (bounded by
+    /// `max_span_queue_size`, like any other queued span) before propagating
+    /// the error, so a caller that retries, or the background export loop's
+    /// next tick, can still recover them. `shutdown()` calls this, so this
+    /// also means a failure right at shutdown no longer silently discards
+    /// whatever was still queued. A successful flush now also counts toward
+    /// `TracingStats::spans_exported`, which previously only `export_loop`
+    /// updated -- a caller relying on `flush()` (as `shutdown()` does) saw an
+    /// undercount of what was actually delivered.
     pub async fn flush(&self) -> Result<()> {
         let spans = {
             let mut queue = self.export_queue.lock();
@@ -249,9 +298,23 @@ impl TracingManager {
             queue.clear();
             spans
         };
-        if !spans.is_empty() {
-            self.export_spans(spans).await?;
+        if spans.is_empty() {
+            return Ok(());
         }
+        if let Err(error) = self.export_spans(spans.clone()).await {
+            let mut queue = self.export_queue.lock();
+            let room = self.config.max_span_queue_size.saturating_sub(queue.len());
+            let requeued = spans.len().min(room);
+            if requeued > 0 {
+                let mut retry_batch = spans;
+                retry_batch.truncate(requeued);
+                retry_batch.extend(std::mem::take(&mut *queue));
+                *queue = retry_batch;
+            }
+            return Err(error);
+        }
+        let mut stats = self.stats.lock();
+        stats.spans_exported += spans.len() as u64;
         Ok(())
     }
     /// Shutdown tracing manager
@@ -338,13 +401,24 @@ impl TracingManager {
                 max_rate,
                 target_cpu,
             } => {
-                let current_load = 0.5;
+                let current_load = self.current_cpu_load_fraction();
                 let rate = if current_load > *target_cpu { *min_rate } else { *max_rate };
                 use scirs2_core::random::*;
                 let mut rng = thread_rng();
                 rng.random::<f64>() < rate
             },
         }
+    }
+    /// Current system-wide CPU load as a `0.0..=1.0`-ish fraction (matching
+    /// `SamplingStrategy::Adaptive::target_cpu`'s scale), refreshed at most
+    /// once per [`CPU_LOAD_REFRESH_INTERVAL`]. See [`CpuLoadMonitor`].
+    pub(crate) fn current_cpu_load_fraction(&self) -> f64 {
+        let mut monitor = self.cpu_load_monitor.lock();
+        if monitor.last_refresh.elapsed() >= CPU_LOAD_REFRESH_INTERVAL {
+            monitor.system.refresh_cpu_usage();
+            monitor.last_refresh = Instant::now();
+        }
+        monitor.system.global_cpu_usage() as f64 / 100.0
     }
     fn create_noop_span(&self) -> ActiveSpan {
         let span = DistributedSpan {
@@ -432,8 +506,34 @@ impl TracingManager {
                     let _ = self.event_sender.send(TracingEvent::ExportFailed {
                         error: e.to_string(),
                     });
-                    let mut stats = self.stats.lock();
-                    stats.export_failures += 1;
+                    {
+                        let mut stats = self.stats.lock();
+                        stats.export_failures += 1;
+                    }
+                    // 0.2.1: a failed batch used to be dropped outright here --
+                    // logged and counted, but the spans themselves were gone
+                    // for good. Put them back at the front of the queue so the
+                    // next tick retries them (a bounded, best-effort retry,
+                    // not an indefinite one: a batch that keeps failing stays
+                    // capped at `max_span_queue_size` like any other queued
+                    // span, and is not separately backed off).
+                    let mut queue = self.export_queue.lock();
+                    let room = self.config.max_span_queue_size.saturating_sub(queue.len());
+                    let requeued = spans.len().min(room);
+                    if requeued < spans.len() {
+                        warn!(
+                            "Export queue full: retrying {} of {} failed span(s), dropping {}",
+                            requeued,
+                            spans.len(),
+                            spans.len() - requeued
+                        );
+                    }
+                    if requeued > 0 {
+                        let mut retry_batch = spans;
+                        retry_batch.truncate(requeued);
+                        retry_batch.extend(std::mem::take(&mut *queue));
+                        *queue = retry_batch;
+                    }
                 } else {
                     let _ = self.event_sender.send(TracingEvent::ExportCompleted {
                         span_count: spans.len(),
@@ -475,18 +575,25 @@ impl TracingManager {
         &self,
         spans: Vec<DistributedSpan>,
         endpoint: &str,
-        _username: Option<&str>,
-        _password: Option<&str>,
+        username: Option<&str>,
+        password: Option<&str>,
     ) -> Result<()> {
         let jaeger_spans = self.convert_to_jaeger_format(spans)?;
         let client = reqwest::Client::new();
-        let response = client
-            .post(endpoint)
-            .json(&jaeger_spans)
-            .timeout(self.config.export_timeout)
-            .send()
-            .await
-            .context("Failed to send spans to Jaeger")?;
+        let mut request =
+            client.post(endpoint).json(&jaeger_spans).timeout(self.config.export_timeout);
+        // 0.2.1: `username`/`password` used to be accepted onto
+        // `TracingBackend::Jaeger` and threaded all the way down to here,
+        // then silently discarded (`_username`, `_password`): a caller who
+        // configured credentials for an authenticated collector got
+        // unauthenticated requests, which any collector actually enforcing
+        // auth would reject with 401 -- reported to the caller as a generic
+        // Jaeger export failure with no indication the credentials were
+        // never sent.
+        if let Some(username) = username {
+            request = request.basic_auth(username, password);
+        }
+        let response = request.send().await.context("Failed to send spans to Jaeger")?;
         if !response.status().is_success() {
             return Err(anyhow::anyhow!(
                 "Jaeger export failed with status: {}",
@@ -568,30 +675,74 @@ impl TracingManager {
         }
         Ok(())
     }
-    fn convert_to_jaeger_format(
+    /// Converts spans to the `jaeger-query` `/api/traces` JSON document shape
+    /// (the same target `tracing::legacy::export`'s `JaegerExport` documents,
+    /// for the same "Load JSON File" UI use case) -- not the collector's own
+    /// wire protocol, which is Thrift, not JSON.
+    ///
+    /// 0.2.1: `tags` and `process.tags` used to serialize `span.attributes`
+    /// (a `HashMap<String, String>`) directly, producing a flat JSON object.
+    /// Jaeger's real `model.KeyValue` tag is `{key, type, value}` -- an
+    /// object keyed by attribute name is not a list of those, and a reader
+    /// expecting the documented shape would fail to parse it as tags at all.
+    /// This now builds the same [`JaegerTag`] type `tracing::legacy::export`
+    /// already uses, rather than a second, differently-wrong shape.
+    /// `parentSpanID` used to default to `""` for a root span via
+    /// `unwrap_or_default()`; it is now `null` when absent, like every other
+    /// converter in this file already represents "no parent".
+    pub(crate) fn convert_to_jaeger_format(
         &self,
         spans: Vec<DistributedSpan>,
     ) -> Result<Vec<serde_json::Value>> {
+        fn tags_from_attributes(attributes: HashMap<String, String>) -> Vec<JaegerTag> {
+            let mut pairs: Vec<(String, String)> = attributes.into_iter().collect();
+            pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+            pairs
+                .into_iter()
+                .map(|(key, value)| JaegerTag {
+                    key,
+                    value_type: "string".to_string(),
+                    value: serde_json::Value::String(value),
+                })
+                .collect()
+        }
         let jaeger_spans = spans
             .into_iter()
             .map(|span| {
-                serde_json::json!(
-                    { "traceID" : span.trace_id, "spanID" : span.span_id, "parentSpanID"
-                    : span.parent_span_id.unwrap_or_default(), "operationName" : span
-                    .operation_name, "startTime" : span.start_time.timestamp_micros(),
-                    "duration" : span.end_time.map(| end | end.signed_duration_since(span
-                    .start_time).num_microseconds().unwrap_or(0)).unwrap_or(0), "tags" :
-                    span.attributes, "logs" : span.events.into_iter().map(| event | {
-                    serde_json::json!({ "timestamp" : event.timestamp.timestamp_micros(),
-                    "fields" : event.attributes }) }).collect::< Vec < _ >> (), "process"
-                    : { "serviceName" : span.service_name, "tags" : span
-                    .resource_attributes } }
-                )
+                let tags = tags_from_attributes(span.attributes);
+                let process_tags = tags_from_attributes(span.resource_attributes);
+                let logs: Vec<serde_json::Value> = span
+                    .events
+                    .into_iter()
+                    .map(|event| {
+                        serde_json::json!({
+                            "timestamp": event.timestamp.timestamp_micros(),
+                            "fields": tags_from_attributes(event.attributes),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "traceID": span.trace_id,
+                    "spanID": span.span_id,
+                    "parentSpanID": span.parent_span_id,
+                    "operationName": span.operation_name,
+                    "startTime": span.start_time.timestamp_micros(),
+                    "duration": span
+                        .end_time
+                        .map(|end| end.signed_duration_since(span.start_time).num_microseconds().unwrap_or(0))
+                        .unwrap_or(0),
+                    "tags": tags,
+                    "logs": logs,
+                    "process": {
+                        "serviceName": span.service_name,
+                        "tags": process_tags,
+                    },
+                })
             })
             .collect();
         Ok(jaeger_spans)
     }
-    fn convert_to_zipkin_format(
+    pub(crate) fn convert_to_zipkin_format(
         &self,
         spans: Vec<DistributedSpan>,
     ) -> Result<Vec<serde_json::Value>> {
@@ -616,34 +767,70 @@ impl TracingManager {
             .collect();
         Ok(zipkin_spans)
     }
-    fn convert_to_otlp_format(&self, spans: Vec<DistributedSpan>) -> Result<serde_json::Value> {
+    /// Converts spans to OTLP/JSON (`resourceSpans[].scopeSpans[].spans[]`).
+    ///
+    /// 0.2.1: this nested `instrumentationLibrarySpans`/`instrumentationLibrary`
+    /// -- the pre-1.0 OTLP field names, renamed to `scopeSpans`/`scope` when
+    /// OTLP went stable and no longer recognized by a current collector (see
+    /// `tracing::legacy::export`'s own `OtlpScopeSpans`/`OtlpScope`, which
+    /// already use the current names). `startTimeUnixNano`/`endTimeUnixNano`
+    /// are now JSON strings: OTLP/JSON represents protobuf `fixed64` fields
+    /// as strings precisely so a 64-bit nanosecond timestamp survives a
+    /// JSON-number round-trip through a language whose numbers are
+    /// `f64`-precision, which every one of these values otherwise would.
+    /// `parentSpanId` used to default to `""` via `unwrap_or_default()`; it
+    /// is now `null` when absent, matching every other converter here.
+    ///
+    /// 0.2.1: `resourceSpans[].resource.attributes` never carried
+    /// `service.name`, the one resource attribute OTLP semantic conventions
+    /// require to identify which service emitted a trace (see
+    /// `tracing::legacy::export::OpenTelemetryExport::from_spans`, which
+    /// already sets it correctly) -- every export from this function reported
+    /// spans with no identifiable service. It is now always the first
+    /// resource attribute; a `TracingConfig::resource_attributes` entry
+    /// literally keyed `"service.name"` (a caller could set one, since the
+    /// field is a free-form `HashMap`) is skipped rather than emitted a
+    /// second time.
+    pub(crate) fn convert_to_otlp_format(
+        &self,
+        spans: Vec<DistributedSpan>,
+    ) -> Result<serde_json::Value> {
         let otlp_spans = spans
             .into_iter()
             .map(|span| {
                 serde_json::json!(
                     { "traceId" : span.trace_id, "spanId" : span.span_id, "parentSpanId"
-                    : span.parent_span_id.unwrap_or_default(), "name" : span
+                    : span.parent_span_id, "name" : span
                     .operation_name, "kind" : match span.kind { SpanKind::Internal => 1,
                     SpanKind::Server => 2, SpanKind::Client => 3, SpanKind::Producer =>
                     4, SpanKind::Consumer => 5, }, "startTimeUnixNano" : span.start_time
-                    .timestamp_nanos_opt().unwrap_or(0), "endTimeUnixNano" : span
+                    .timestamp_nanos_opt().unwrap_or(0).to_string(), "endTimeUnixNano" : span
                     .end_time.map(| end | end.timestamp_nanos_opt().unwrap_or(0))
-                    .unwrap_or(0), "attributes" : span.attributes.into_iter().map(| (k,
+                    .unwrap_or(0).to_string(), "attributes" : span.attributes.into_iter().map(| (k,
                     v) | { serde_json::json!({ "key" : k, "value" : { "stringValue" : v }
                     }) }).collect::< Vec < _ >> (), "events" : span.events.into_iter()
                     .map(| event | { serde_json::json!({ "timeUnixNano" : event.timestamp
-                    .timestamp_nanos_opt().unwrap_or(0), "name" : event.name,
+                    .timestamp_nanos_opt().unwrap_or(0).to_string(), "name" : event.name,
                     "attributes" : event.attributes.into_iter().map(| (k, v) | {
                     serde_json::json!({ "key" : k, "value" : { "stringValue" : v } }) })
                     .collect::< Vec < _ >> () }) }).collect::< Vec < _ >> () }
                 )
             })
             .collect::<Vec<_>>();
+        let mut resource_attributes = vec![serde_json::json!({
+            "key": "service.name",
+            "value": { "stringValue": self.config.service_name },
+        })];
+        resource_attributes.extend(
+            self.config
+                .resource_attributes
+                .iter()
+                .filter(|(k, _)| k.as_str() != "service.name")
+                .map(|(k, v)| serde_json::json!({ "key": k, "value": { "stringValue": v } })),
+        );
         Ok(serde_json::json!(
-            { "resourceSpans" : [{ "resource" : { "attributes" : self.config
-            .resource_attributes.iter().map(| (k, v) | { serde_json::json!({ "key" :
-            k, "value" : { "stringValue" : v } }) }).collect::< Vec < _ >> () },
-            "instrumentationLibrarySpans" : [{ "instrumentationLibrary" : { "name" :
+            { "resourceSpans" : [{ "resource" : { "attributes" : resource_attributes },
+            "scopeSpans" : [{ "scope" : { "name" :
             "trustformers-serve", "version" : self.config.service_version }, "spans"
             : otlp_spans }] }] }
         ))

@@ -156,7 +156,26 @@ trustformers-optim `pytorch_compat.rs`).
   `HardwareConstraints`/`ModelConstraints`/`NetworkTopology` (`auto_parallelism/`, split from a single `auto_parallelism.rs` this wave) — note this is strategy
   *selection*, not general hyperparameter tuning from hardware
 - [x] Elastic training coordinator: worker heartbeats, scaling decisions, mid-training checkpoints
-  (`elastic_training.rs`)
+  (`elastic_training.rs`) — **honesty-audited 2026-08-25.** Before this pass, `scale_up`/
+  `rebalance_workers`/`recover_from_checkpoint` were log-and-`Ok(())` no-ops that still recorded
+  `ScalingEvent { success: true }`, `create_checkpoint` hardcoded `step: 0` instead of the caller's real
+  step, and `ResourceMonitor`/`FaultDetector`/`LoadBalancer` were one-bool no-op lifecycle types nothing
+  ever read. Fixed honestly rather than left fabricated: added a `WorkerProvisioner` trait (the
+  cluster-provisioning callback this workspace has no real substrate for); `scale_up`/`rebalance_workers`/
+  `recover_from_checkpoint` now return a structured `ElasticTrainingError::NoProvisioner` (naming exactly
+  what's missing) unless one is attached via `with_provisioner`, and `scale_up` also errors
+  (`PartialProvisioning`) if the provisioner starts fewer workers than requested rather than reporting the
+  full target reached; `execute_scaling` records `ScalingEvent::success` from the real operation result,
+  never unconditionally; `create_checkpoint` takes the caller's real `step: usize`; the three no-op
+  lifecycle types are deleted (dead weight, zero callers, converting them to "real" would still need the
+  cluster substrate that doesn't exist). `scale_down`'s local worker deregistration and the scaling
+  *decision* heuristics (`evaluate_scaling_decision`/`should_rebalance`) were already real, local bookkeeping
+  and are unchanged in kind, only in ordering (`scale_down` now confirms real termination via the
+  provisioner, when one is attached, before forgetting a worker locally — previously it could have forgotten
+  a worker whose real process termination failed). `WorkerPerformanceMetrics` gained a `workload` field so
+  `update_heartbeat` actually feeds `should_rebalance`'s imbalance check, which used to be structurally
+  always-false (workload was set to 0.0 at registration and never updated again). 11 new tests cover the
+  honest contract (`cargo nextest run -p trustformers-training elastic_training`).
 - [x] Multi-cloud orchestration: `MultiCloudOrchestrator`, `CloudScheduler`, cost-aware scheduling
   (`multicloud.rs`)
 - [x] Resource scheduling: `ResourceScheduler`, `ResourcePool` (`resource_scheduling.rs`)
@@ -164,8 +183,13 @@ trustformers-optim `pytorch_compat.rs`).
   `resource_scheduling.rs` model spot-instance and preemption concepts at the config/cost level, but an
   end-to-end "detect preemption signal → auto-checkpoint" pipeline is not confirmed
 - [~] Worker-failure recovery without a full restart: `elastic_training::ElasticTrainingCoordinator` has
-  real worker-monitoring/scaling-decision/checkpoint logic, but true zero-downtime replacement of a failed
-  worker is not independently verified
+  real worker-monitoring/scaling-decision/checkpoint logic. As of the 2026-08-25 honesty pass,
+  `recover_from_checkpoint` honestly requires a caller-supplied `WorkerProvisioner` (it returns
+  `ElasticTrainingError::NoProvisioner` without one, instead of the previous log-and-`Ok(())` that reported
+  a worker "recovered" with no state restored); `handle_worker_failure` still deregisters a confirmed-dead
+  worker locally even when recovery isn't possible, so the failure path itself cannot get stuck, but true
+  zero-downtime replacement is only as real as whatever `WorkerProvisioner` a caller supplies — this crate
+  ships no such implementation itself (there is no cluster substrate in this workspace)
 
 ### Mixed Precision & Quantization
 - [x] AMP: `AMPManager`, `MixedPrecisionConfig`, `LossScaler`, `DynamicBatchingManager` (`mixed_precision.rs`)
@@ -241,7 +265,18 @@ trustformers-optim `pytorch_compat.rs`).
 - [x] Model registry/versioning: `ModelRegistry`, `ModelVersion` (`model_versioning.rs`)
 - [x] Online learning with concept-drift detection (`online_learning.rs`)
 - [x] Cost tracking / budgeting / forecasting: `CostTracker`, `Budget`, `CostForecastingModel`
-  (`cost_tracking.rs`)
+  (`cost_tracking.rs`) — **honesty-audited 2026-08-25.** `EfficiencyMetrics::resource_utilization` and
+  `idle_cost_percentage` were previously hardcoded to `0.75`/`15.0`, pinning `efficiency_score` at exactly
+  `0.60` and making the resource-rightsizing recommendation (gated on `resource_utilization < 0.6`)
+  unreachable. `resource_utilization` is now real: the fraction of the report's time range covered by
+  billed entry durations (clamped to `[0, 1]`) — a genuine *temporal* utilization signal computed from data
+  the tracker already records, not per-machine hardware utilization (CPU/GPU busy %), which this tracker
+  has no way to observe. `idle_cost_percentage` is now `Option<f32>` and stays `None`: this tracker has no
+  signal distinguishing busy-vs-idle time *within* a billed entry, so it is left honestly absent rather than
+  invented; `efficiency_score` is now `Option<f64>`, `Some` only when `idle_cost_percentage` is `Some`. The
+  idle-resource-elimination recommendation is now `Some`-gated and will not fire until a real idle signal
+  exists. 4 new tests cover the honest contract, including one proving the previously-unreachable
+  rightsizing branch now fires (`cargo nextest run -p trustformers-training cost_tracking`).
 - [x] Neural Architecture Search: `NASController`, `NASAlgorithm`, `SearchSpaceConfig`
   (`nas_integration.rs`)
 
@@ -316,6 +351,14 @@ cargo check -p trustformers-training --all-features
 **Last Updated:** 2026-07-09 — version bumped to 0.2.1; `hpo` module wiring and `src/mod.rs` deletion
 confirmed done and checked off; orphaned-code inventory and file/SLoC/test counts refreshed via `tokei`
 and source inspection
+
+**2026-08-25 addendum (production-hardening honesty pass, `elastic_training.rs` + `cost_tracking.rs`
+only):** see the updated bullets above for `Elastic training coordinator` and `Cost tracking / budgeting /
+forecasting`. Baselines before and after this pass: `cargo check -p trustformers-training --all-targets`
+and `cargo clippy -p trustformers-training --all-targets -- -D warnings` both `EXIT=0` throughout;
+`cargo nextest run -p trustformers-training --no-fail-fast` went from 2100 passed / 2 skipped / 0 failed to
+2115 passed / 2 skipped / 0 failed (+15 new tests, 0 regressions). Nothing else in this crate was in scope
+for this pass and nothing else was touched.
 **Version:** 0.2.1
 **Status:** Alpha — ~1,010 tests passing, 1,673 reachable public API items, 0 stubs, but see "Known Issues"
 for the distributed-training and orphaned-module caveats that keep this crate from being labeled Stable.

@@ -26,10 +26,17 @@ pub struct VisualizationConfig {
 }
 
 impl Default for VisualizationConfig {
+    /// Defaults to [`ImageFormat::SVG`].
+    ///
+    /// SVG is the only plot format `trustformers-debug` can actually encode in
+    /// its default (Pure-Rust) feature set — the raster encoders live behind the
+    /// optional `visual` / `image` / `gif` features. Defaulting to `PNG` would
+    /// make every out-of-the-box `DebugVisualizer` call fail, so the default is
+    /// the format that really works.
     fn default() -> Self {
         Self {
             output_directory: "./debug_plots".to_string(),
-            image_format: ImageFormat::PNG,
+            image_format: ImageFormat::SVG,
             plot_width: 800,
             plot_height: 600,
             font_size: 12,

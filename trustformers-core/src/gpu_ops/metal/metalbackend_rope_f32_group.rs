@@ -149,6 +149,13 @@ impl MetalBackend {
         // CRITICAL: the readback below dereferences the output buffer directly,
         // so the kernel must have finished writing it first. See the
         // "Synchronisation" note on this method.
+        //
+        // Committing here rather than through `commit_async` deliberately keeps
+        // this buffer out of `pending_command_buffers`: that list exists so
+        // `flush()` can wait on work that is still in flight, and this command
+        // buffer is already complete by the time the next line runs. Recording
+        // it would only leave a finished entry for the next `commit_async` to
+        // retain-scan away.
         command_buffer.wait_until_completed();
 
         let result_ptr = output_buffer.contents();

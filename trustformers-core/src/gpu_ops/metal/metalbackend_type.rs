@@ -41,6 +41,7 @@ pub struct MetalBackend {
     pub(super) batched_matmul_scaled_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) batched_scaled_matmul_softmax_causal_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) batched_scaled_matmul_softmax_gen_pipeline: Arc<metal::ComputePipelineState>,
+    pub(super) batched_scaled_matmul_softmax_gen_causal_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) concat_seq_dim_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) flash_attention_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) mps_ops: Arc<Option<oxicuda_metal::MetalBackend>>,

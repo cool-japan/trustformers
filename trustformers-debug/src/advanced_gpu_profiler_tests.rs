@@ -245,11 +245,23 @@ fn test_kernel_optimization_summary_report() {
         high_impact_optimizations: Vec::new(),
         fusion_opportunities: 2,
         regression_alerts: 0,
-        overall_optimization_score: 0.75,
+        overall_optimization_score: Some(0.75),
         top_recommendations: vec!["Use tensor cores".to_string()],
     };
     assert_eq!(report.total_kernels_analyzed, 10);
-    assert!(report.overall_optimization_score > 0.0);
+    assert_eq!(report.overall_optimization_score, Some(0.75));
+
+    // A report over zero kernels carries no score at all.
+    let empty = KernelOptimizationSummaryReport {
+        total_kernels_analyzed: 0,
+        optimization_opportunities_found: 0,
+        high_impact_optimizations: Vec::new(),
+        fusion_opportunities: 0,
+        regression_alerts: 0,
+        overall_optimization_score: None,
+        top_recommendations: Vec::new(),
+    };
+    assert_eq!(empty.overall_optimization_score, None);
 }
 
 // ── HighImpactOptimization ────────────────────────────────────────────────────
@@ -286,18 +298,47 @@ fn test_allocation_context_construction() {
 
 #[test]
 fn test_memory_fragmentation_snapshot_fields() {
+    // Block-placement fields (`largest_free_block`, `fragmentation_ratio`,
+    // `free_block_distribution`, `external_fragmentation`,
+    // `internal_fragmentation`) are `Option` because this crate has no
+    // real memory-allocator/placement model to measure them from -- see
+    // the type's own doc comments. A caller that DOES have real
+    // measurements (e.g. from a future real allocator integration) can
+    // still populate `Some(..)`, which this test also exercises.
     let snapshot = MemoryFragmentationSnapshot {
         timestamp: chrono::Utc::now(),
         device_id: 0,
         total_memory: 8 * 1024 * 1024 * 1024,
         free_memory: 4 * 1024 * 1024 * 1024,
-        largest_free_block: 1024 * 1024 * 1024,
-        fragmentation_ratio: 0.15,
-        free_block_distribution: vec![1024, 2048, 4096],
-        external_fragmentation: 0.10,
-        internal_fragmentation: 0.05,
+        largest_free_block: Some(1024 * 1024 * 1024),
+        fragmentation_ratio: Some(0.15),
+        free_block_distribution: Some(vec![1024, 2048, 4096]),
+        external_fragmentation: Some(0.10),
+        internal_fragmentation: Some(0.05),
     };
     assert_eq!(snapshot.device_id, 0);
-    assert!(snapshot.fragmentation_ratio >= 0.0 && snapshot.fragmentation_ratio <= 1.0);
-    assert!(!snapshot.free_block_distribution.is_empty());
+    let ratio = snapshot.fragmentation_ratio.expect("populated in this test");
+    assert!((0.0..=1.0).contains(&ratio));
+    assert!(!snapshot.free_block_distribution.expect("populated in this test").is_empty());
+}
+
+#[test]
+fn test_memory_fragmentation_snapshot_honestly_none_when_unmeasured() {
+    // The shape produced today by `GpuMemoryPool::get_fragmentation_snapshot`:
+    // total/free are real counted bytes, everything about block PLACEMENT
+    // is an honest `None`, never a fabricated guess.
+    let snapshot = MemoryFragmentationSnapshot {
+        timestamp: chrono::Utc::now(),
+        device_id: 0,
+        total_memory: 8 * 1024 * 1024 * 1024,
+        free_memory: 4 * 1024 * 1024 * 1024,
+        largest_free_block: None,
+        fragmentation_ratio: None,
+        free_block_distribution: None,
+        external_fragmentation: None,
+        internal_fragmentation: None,
+    };
+    assert_eq!(snapshot.fragmentation_ratio, None);
+    assert_eq!(snapshot.largest_free_block, None);
+    assert_eq!(snapshot.free_block_distribution, None);
 }

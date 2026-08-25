@@ -952,11 +952,16 @@ impl ReportGenerator {
         Ok(())
     }
 
-    /// Export to PDF format (placeholder implementation)
+    /// PDF export: **not implemented**, returns a structured error.
+    ///
+    /// No PDF writer is linked into `trustformers-debug`. Use
+    /// [`ReportFormat::Html`] or [`ReportFormat::LaTeX`] and convert
+    /// externally.
     fn export_pdf(&self, _report: &Report) -> Result<(), ReportError> {
-        // In a real implementation, this would use a PDF generation library
         Err(ReportError::UnsupportedFormat(
-            "PDF export not implemented".to_string(),
+            "PDF export not implemented: trustformers-debug links no PDF writer. Export HTML \
+             or LaTeX and convert externally."
+                .to_string(),
         ))
     }
 
@@ -1018,13 +1023,7 @@ impl ReportGenerator {
         latex.push_str("\\maketitle\n\n");
 
         for section in &report.sections {
-            // Convert markdown to LaTeX (simplified)
-            let latex_content = section
-                .content
-                .replace("##", "\\section{")
-                .replace("###", "\\subsection{")
-                .replace("#", "\\section{");
-            latex.push_str(&latex_content);
+            latex.push_str(&markdown_headings_to_latex(&section.content));
         }
 
         latex.push_str("\\end{document}\n");
@@ -1035,19 +1034,81 @@ impl ReportGenerator {
         Ok(())
     }
 
-    /// Export to Excel format (placeholder)
+    /// Excel export: **not implemented**, returns a structured error.
+    ///
+    /// (`crate::data_export` does emit a real `.xlsx` for tabular exports; a
+    /// narrative `Report` has no single sheet shape to map onto.)
     fn export_excel(&self, _report: &Report) -> Result<(), ReportError> {
         Err(ReportError::UnsupportedFormat(
-            "Excel export not implemented".to_string(),
+            "Excel export not implemented for narrative reports; see crate::data_export for \
+             real .xlsx output of tabular data."
+                .to_string(),
         ))
     }
 
-    /// Export to PowerPoint format (placeholder)
+    /// PowerPoint export: **not implemented**, returns a structured error.
     fn export_powerpoint(&self, _report: &Report) -> Result<(), ReportError> {
         Err(ReportError::UnsupportedFormat(
-            "PowerPoint export not implemented".to_string(),
+            "PowerPoint export not implemented: trustformers-debug links no OOXML presentation \
+             writer."
+                .to_string(),
         ))
     }
+}
+
+/// Convert the ATX-style markdown headings in `content` into LaTeX sectioning
+/// commands, escaping the LaTeX specials in the rest of the text.
+///
+/// Handles `#`, `##` and `###` as `\section`, `\subsection` and
+/// `\subsubsection`, each with a CLOSED brace.
+///
+/// The previous version chained
+/// `.replace("##", "\\section{").replace("###", ...).replace("#", ...)`, which
+/// (a) never emitted a closing `}` so every document failed to compile,
+/// (b) could not reach the `###` arm at all because the `##` replacement had
+/// already consumed the first two hashes, turning `### Title` into
+/// `\section{\section{ Title`, and (c) rewrote `#` anywhere in the body, not
+/// just at the start of a line.
+fn markdown_headings_to_latex(content: &str) -> String {
+    let mut out = String::with_capacity(content.len() + 32);
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let level = trimmed.chars().take_while(|&c| c == '#').count();
+        if (1..=3).contains(&level) && trimmed.chars().nth(level) == Some(' ') {
+            let command = match level {
+                1 => "section",
+                2 => "subsection",
+                _ => "subsubsection",
+            };
+            let title = escape_latex(trimmed[level + 1..].trim());
+            out.push_str(&format!("\\{}{{{}}}\n", command, title));
+        } else {
+            out.push_str(&escape_latex(line));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Escape the characters LaTeX treats specially so report prose cannot break
+/// (or inject into) the generated document.
+fn escape_latex(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\textbackslash{}"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '$' | '&' | '%' | '#' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            },
+            '~' => out.push_str("\\textasciitilde{}"),
+            '^' => out.push_str("\\textasciicircum{}"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Report generation errors
@@ -1082,6 +1143,60 @@ impl std::error::Error for ReportError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_headings_become_closed_latex_sections() {
+        let latex = markdown_headings_to_latex("# One\n## Two\n### Three\nbody\n");
+        assert!(latex.contains("\\section{One}"), "{latex}");
+        assert!(latex.contains("\\subsection{Two}"), "{latex}");
+        assert!(latex.contains("\\subsubsection{Three}"), "{latex}");
+        // The old chained-replace produced `\section{\section{ Three` and never
+        // closed a single brace.
+        assert_eq!(
+            latex.matches('{').count(),
+            latex.matches('}').count(),
+            "every brace must be closed:\n{latex}"
+        );
+        assert!(latex.contains("body"));
+    }
+
+    #[test]
+    fn latex_specials_in_body_text_are_escaped() {
+        let latex = markdown_headings_to_latex("100% of $x_1 & y#2");
+        assert!(latex.contains("100\\%"), "{latex}");
+        assert!(latex.contains("\\$x\\_1"), "{latex}");
+        assert!(latex.contains("\\&"), "{latex}");
+        assert!(latex.contains("y\\#2"), "{latex}");
+        // A lone '#' inside a line must NOT be turned into a section command.
+        assert!(!latex.contains("\\section"), "{latex}");
+    }
+
+    #[test]
+    fn unimplemented_exports_name_what_is_missing() {
+        let generator =
+            ReportGenerator::new(ReportConfig::default()).expect("generator construction");
+        let report = Report {
+            metadata: ReportMetadata {
+                title: "t".to_string(),
+                subtitle: None,
+                author: "a".to_string(),
+                organization: None,
+                version: "1".to_string(),
+                generation_time_ms: 0.0,
+                additional_metadata: HashMap::new(),
+            },
+            sections: Vec::new(),
+            visualizations: HashMap::new(),
+            raw_data: HashMap::new(),
+            generated_at: chrono::Utc::now(),
+        };
+        let pdf = generator.export_pdf(&report).expect_err("pdf must be refused");
+        assert!(format!("{pdf:?}").contains("PDF writer"), "{pdf:?}");
+        let xls = generator.export_excel(&report).expect_err("excel must be refused");
+        assert!(format!("{xls:?}").contains("data_export"), "{xls:?}");
+        let ppt = generator.export_powerpoint(&report).expect_err("pptx must be refused");
+        assert!(format!("{ppt:?}").contains("OOXML"), "{ppt:?}");
+    }
     use crate::DebugConfig;
 
     #[test]

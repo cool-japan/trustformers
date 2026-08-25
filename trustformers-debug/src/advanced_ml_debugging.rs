@@ -82,8 +82,14 @@ pub struct LayerLRRecommendation {
     pub current_lr: f64,
     /// Recommended learning rate
     pub recommended_lr: f64,
-    /// Recommendation confidence
-    pub confidence: f64,
+    /// Statistical confidence in the recommendation.
+    ///
+    /// `None` from [`AdvancedMLDebugger::analyze_layer_wise_learning_rates`]:
+    /// that path sees a single gradient/weight snapshot per layer, with no
+    /// repeated trials or held-out evaluation, so there is no sampling
+    /// distribution to derive a confidence from. It used to be a hardcoded
+    /// `0.8`.
+    pub confidence: Option<f64>,
     /// Reasoning for recommendation
     pub reasoning: String,
     /// Layer-specific metrics
@@ -738,7 +744,26 @@ impl AdvancedMLDebugger {
         Ok(result)
     }
 
-    /// Perform comprehensive model sensitivity analysis
+    /// Perform comprehensive model sensitivity analysis.
+    ///
+    /// **Always returns a structured error.** A sensitivity analysis measures
+    /// how performance responds when a factor is *varied*, which requires
+    /// re-evaluating the model at perturbed hyperparameters, architectures,
+    /// dataset sizes and seeds. This method receives only the CURRENT parameter
+    /// values plus a flat `&[f64]` of already-observed metrics -- one point per
+    /// factor -- so no response curve, optimal range, stability region or
+    /// robustness score is derivable from its inputs.
+    ///
+    /// It used to return a fully populated [`ModelSensitivityAnalysisResult`]
+    /// assembled from hardcoded constants: `sensitivity_score: 0.8`,
+    /// `optimal_range: (0.0001, 0.01)`, `current_size: 10000`,
+    /// `most_important_features: ["feature_1", "feature_2"]`, and a
+    /// `surprising_findings` string, none of which looked at `model_params`,
+    /// `performance_metrics` or `architecture_config`. The five helpers that
+    /// produced those constants have been deleted.
+    ///
+    /// The result types remain public so a caller that really does run a
+    /// parameter sweep can construct and share one.
     pub async fn analyze_model_sensitivity(
         &mut self,
         model_params: &HashMap<String, f64>,
@@ -748,41 +773,15 @@ impl AdvancedMLDebugger {
         if !self.config.enable_model_sensitivity_analysis {
             return Err(anyhow::anyhow!("Model sensitivity analysis is disabled"));
         }
-
-        // Analyze hyperparameter sensitivity
-        let hyperparameter_sensitivity =
-            self.analyze_hyperparameter_sensitivity(model_params, performance_metrics);
-
-        // Analyze architecture sensitivity
-        let architecture_sensitivity =
-            self.analyze_architecture_sensitivity(architecture_config, performance_metrics);
-
-        // Analyze data sensitivity (simulated)
-        let data_sensitivity = self.analyze_data_sensitivity(performance_metrics);
-
-        // Analyze training sensitivity
-        let training_sensitivity =
-            self.analyze_training_sensitivity(model_params, performance_metrics);
-
-        // Generate overall insights
-        let sensitivity_insights = self.generate_sensitivity_insights(
-            &hyperparameter_sensitivity,
-            &architecture_sensitivity,
-            &data_sensitivity,
-            &training_sensitivity,
-        );
-
-        let result = ModelSensitivityAnalysisResult {
-            timestamp: Utc::now(),
-            hyperparameter_sensitivity,
-            architecture_sensitivity,
-            data_sensitivity,
-            training_sensitivity,
-            sensitivity_insights,
-        };
-
-        self.sensitivity_analysis_results.push(result.clone());
-        Ok(result)
+        Err(anyhow::anyhow!(
+            "model sensitivity analysis is not implemented: it needs the model re-evaluated at \
+             perturbed settings, but this call receives only {} current parameter values, {} \
+             architecture values and {} already-observed metric samples -- no perturbation \
+             response is derivable from a single operating point",
+            model_params.len(),
+            architecture_config.len(),
+            performance_metrics.len(),
+        ))
     }
 
     /// Generate comprehensive advanced ML debugging report
@@ -873,7 +872,11 @@ impl AdvancedMLDebugger {
             layer_type: self.infer_layer_type(layer_id),
             current_lr,
             recommended_lr,
-            confidence: 0.8, // Would be calculated based on statistical confidence
+            // No statistical confidence is derivable here: the recommendation
+            // comes from one gradient/weight snapshot of one layer, with no
+            // repeated trials and no held-out evaluation to estimate a
+            // sampling distribution from. Previously a hardcoded `0.8`.
+            confidence: None,
             reasoning,
             layer_metrics,
             lr_sensitivity: lr_ratio.abs(),
@@ -989,186 +992,6 @@ impl AdvancedMLDebugger {
     }
 
     // Helper methods for sensitivity analysis
-
-    fn analyze_hyperparameter_sensitivity(
-        &self,
-        params: &HashMap<String, f64>,
-        _metrics: &[f64],
-    ) -> HyperparameterSensitivity {
-        let learning_rate_sensitivity = ParameterSensitivity {
-            parameter_name: "learning_rate".to_string(),
-            current_value: params.get("learning_rate").copied().unwrap_or(0.001),
-            sensitivity_score: 0.8,
-            optimal_range: (0.0001, 0.01),
-            impact_curve: vec![(0.0001, 0.7), (0.001, 0.9), (0.01, 0.85)],
-            stability_region: (0.0005, 0.005),
-            critical_thresholds: vec![0.0001, 0.1],
-        };
-
-        let batch_size_sensitivity = ParameterSensitivity {
-            parameter_name: "batch_size".to_string(),
-            current_value: params.get("batch_size").copied().unwrap_or(32.0),
-            sensitivity_score: 0.6,
-            optimal_range: (16.0, 128.0),
-            impact_curve: vec![(16.0, 0.85), (32.0, 0.9), (64.0, 0.88), (128.0, 0.82)],
-            stability_region: (16.0, 64.0),
-            critical_thresholds: vec![8.0, 256.0],
-        };
-
-        let regularization_sensitivity = ParameterSensitivity {
-            parameter_name: "weight_decay".to_string(),
-            current_value: params.get("weight_decay").copied().unwrap_or(0.01),
-            sensitivity_score: 0.4,
-            optimal_range: (0.001, 0.1),
-            impact_curve: vec![(0.001, 0.88), (0.01, 0.9), (0.1, 0.87)],
-            stability_region: (0.005, 0.05),
-            critical_thresholds: vec![0.0001, 1.0],
-        };
-
-        HyperparameterSensitivity {
-            learning_rate_sensitivity,
-            batch_size_sensitivity,
-            regularization_sensitivity,
-            architecture_param_sensitivity: HashMap::new(),
-            most_sensitive_params: vec!["learning_rate".to_string(), "batch_size".to_string()],
-            least_sensitive_params: vec!["weight_decay".to_string()],
-            interaction_effects: vec![],
-        }
-    }
-
-    fn analyze_architecture_sensitivity(
-        &self,
-        _config: &HashMap<String, f64>,
-        _metrics: &[f64],
-    ) -> ArchitectureSensitivity {
-        ArchitectureSensitivity {
-            depth_sensitivity: ArchitecturalSensitivity {
-                component_name: "model_depth".to_string(),
-                change_sensitivity: 0.7,
-                degradation_curve: vec![(6.0, 0.85), (12.0, 0.9), (24.0, 0.88)],
-                min_viable_config: 6.0,
-                optimal_config: 12.0,
-                diminishing_returns_threshold: 18.0,
-            },
-            width_sensitivity: ArchitecturalSensitivity {
-                component_name: "hidden_size".to_string(),
-                change_sensitivity: 0.6,
-                degradation_curve: vec![(256.0, 0.82), (512.0, 0.9), (1024.0, 0.91)],
-                min_viable_config: 256.0,
-                optimal_config: 512.0,
-                diminishing_returns_threshold: 768.0,
-            },
-            attention_head_sensitivity: ArchitecturalSensitivity {
-                component_name: "num_attention_heads".to_string(),
-                change_sensitivity: 0.5,
-                degradation_curve: vec![(4.0, 0.87), (8.0, 0.9), (16.0, 0.89)],
-                min_viable_config: 4.0,
-                optimal_config: 8.0,
-                diminishing_returns_threshold: 12.0,
-            },
-            skip_connection_sensitivity: ArchitecturalSensitivity {
-                component_name: "skip_connections".to_string(),
-                change_sensitivity: 0.8,
-                degradation_curve: vec![(0.0, 0.75), (1.0, 0.9)],
-                min_viable_config: 1.0,
-                optimal_config: 1.0,
-                diminishing_returns_threshold: 1.0,
-            },
-            component_importance: HashMap::new(),
-            bottlenecks: vec![],
-        }
-    }
-
-    fn analyze_data_sensitivity(&self, _metrics: &[f64]) -> DataSensitivity {
-        DataSensitivity {
-            data_size_sensitivity: DataSizeSensitivity {
-                current_size: 10000,
-                minimum_effective_size: 1000,
-                performance_curve: vec![(1000, 0.7), (5000, 0.85), (10000, 0.9), (20000, 0.92)],
-                data_efficiency: 0.85,
-                diminishing_returns_point: 15000,
-            },
-            data_quality_sensitivity: DataQualitySensitivity {
-                noise_tolerance: 0.1,
-                label_quality_importance: 0.9,
-                feature_quality_importance: 0.7,
-                quality_impact_curve: vec![(0.9, 0.9), (0.8, 0.85), (0.7, 0.75)],
-            },
-            distribution_sensitivity: DistributionSensitivity {
-                shift_sensitivity: 0.6,
-                imbalance_sensitivity: 0.5,
-                domain_adaptation_requirements: vec!["Gradual domain adaptation".to_string()],
-                distribution_robustness: 0.7,
-            },
-            feature_sensitivity: FeatureSensitivityAnalysis {
-                most_important_features: vec!["feature_1".to_string(), "feature_2".to_string()],
-                least_important_features: vec!["feature_10".to_string()],
-                feature_interactions: HashMap::new(),
-                feature_stability: HashMap::new(),
-            },
-        }
-    }
-
-    fn analyze_training_sensitivity(
-        &self,
-        _params: &HashMap<String, f64>,
-        _metrics: &[f64],
-    ) -> TrainingSensitivity {
-        TrainingSensitivity {
-            initialization_sensitivity: InitializationSensitivity {
-                weight_init_sensitivity: 0.6,
-                bias_init_sensitivity: 0.3,
-                seed_sensitivity: 0.2,
-                scheme_importance: HashMap::new(),
-            },
-            optimization_sensitivity: OptimizationSensitivity {
-                optimizer_sensitivity: 0.7,
-                momentum_sensitivity: 0.5,
-                second_moment_sensitivity: 0.4,
-                optimizer_comparison: HashMap::new(),
-            },
-            schedule_sensitivity: ScheduleSensitivity {
-                lr_schedule_sensitivity: 0.8,
-                duration_sensitivity: 0.6,
-                warmup_sensitivity: 0.4,
-                schedule_param_importance: HashMap::new(),
-            },
-            regularization_sensitivity: RegularizationSensitivity {
-                dropout_sensitivity: 0.5,
-                weight_decay_sensitivity: 0.4,
-                batch_norm_sensitivity: 0.6,
-                method_comparison: HashMap::new(),
-            },
-        }
-    }
-
-    fn generate_sensitivity_insights(
-        &self,
-        _hyper_sens: &HyperparameterSensitivity,
-        _arch_sens: &ArchitectureSensitivity,
-        _data_sens: &DataSensitivity,
-        _training_sens: &TrainingSensitivity,
-    ) -> SensitivityInsights {
-        SensitivityInsights {
-            most_critical_factors: vec![
-                "learning_rate".to_string(),
-                "model_depth".to_string(),
-                "skip_connections".to_string(),
-            ],
-            least_critical_factors: vec!["bias_initialization".to_string()],
-            surprising_findings: vec!["Batch size has higher than expected impact".to_string()],
-            robustness_assessment: RobustnessAssessment {
-                overall_robustness: 0.7,
-                category_robustness: HashMap::new(),
-                vulnerabilities: vec![],
-                strengths: vec!["Good hyperparameter stability".to_string()],
-            },
-            optimization_recommendations: vec![
-                "Focus on learning rate tuning first".to_string(),
-                "Consider architectural modifications second".to_string(),
-            ],
-        }
-    }
 
     // Additional helper methods
 
@@ -1337,6 +1160,65 @@ pub struct AdvancedMLDebuggingReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Wave 6c debug-sweep2 honesty regressions ------------------------
+
+    #[tokio::test]
+    async fn model_sensitivity_analysis_refuses_instead_of_inventing_curves() {
+        let config = AdvancedMLDebuggingConfig::default();
+        let mut debugger = AdvancedMLDebugger::new(config);
+        let mut params = HashMap::new();
+        params.insert("learning_rate".to_string(), 0.001);
+        let err = debugger
+            .analyze_model_sensitivity(&params, &[0.9, 0.91, 0.92], &HashMap::new())
+            .await
+            .expect_err("a single operating point cannot yield a sensitivity analysis");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not implemented"),
+            "must name what is missing: {msg}"
+        );
+        assert!(
+            msg.contains("perturbation response"),
+            "must explain why it is unmeasurable: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn layer_lr_recommendation_confidence_is_absent_not_a_constant() {
+        let config = AdvancedMLDebuggingConfig::default();
+        let mut debugger = AdvancedMLDebugger::new(config);
+        let mut layer_gradients = HashMap::new();
+        let mut layer_weights = HashMap::new();
+        let gradients = ArrayD::from_shape_vec(
+            scirs2_core::ndarray::IxDyn(&[4]),
+            vec![0.1f32, -0.2, 0.3, -0.4],
+        )
+        .expect("gradient tensor");
+        let weights = ArrayD::from_shape_vec(
+            scirs2_core::ndarray::IxDyn(&[4]),
+            vec![1.0f32, 2.0, 3.0, 4.0],
+        )
+        .expect("weight tensor");
+        layer_gradients.insert("layer0".to_string(), gradients);
+        layer_weights.insert("layer0".to_string(), weights);
+
+        let result = debugger
+            .analyze_layer_wise_learning_rates(
+                &layer_gradients,
+                &layer_weights,
+                0.001,
+                &[1.0, 0.9, 0.8],
+            )
+            .await
+            .expect("analysis should run");
+        for rec in result.layer_lr_recommendations.values() {
+            assert_eq!(
+                rec.confidence, None,
+                "a one-snapshot recommendation has no statistical confidence (was 0.8)"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_advanced_ml_debugger_creation() {

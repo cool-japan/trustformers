@@ -1,9 +1,12 @@
 //! Advanced performance profiler for ML inference optimization
 //!
 //! This module provides comprehensive performance profiling capabilities including:
-//! - Detailed ML operation profiling
+//! - Detailed ML operation timing (wall-clock and real WASM memory growth)
 //! - Bottleneck detection and analysis
-//! - Resource usage monitoring (CPU, GPU, Memory)
+//! - Resource usage monitoring (real WASM memory; real battery level when
+//!   the browser's Battery Status API is present - no browser API exposes
+//!   CPU/GPU utilization, GPU memory, or device temperature to a web page,
+//!   so this module does not report those)
 //! - Performance visualization data
 //! - Optimization recommendations
 //! - Comparative performance analysis
@@ -14,6 +17,8 @@ use js_sys::{Array, Date, Object};
 use std::string::{String, ToString};
 use std::vec::Vec;
 use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
 
 /// Advanced performance profiler with real-time analytics
 #[wasm_bindgen]
@@ -26,9 +31,15 @@ pub struct PerformanceProfiler {
     current_baselines: Vec<PerformanceBaseline>,
     operation_profiles: Vec<OperationProfile>,
     resource_samples: Vec<ResourceSample>,
-    active_operations: Vec<(String, OperationType, f64)>, // (name, type, start_time)
+    // (name, type, start_time, wasm_memory_at_start) - the memory reading
+    // lets `end_operation` report real linear-memory growth.
+    active_operations: Vec<(String, OperationType, f64, usize)>,
     baseline_metrics: Option<PerformanceSummary>,
     debug_logger: Option<DebugLogger>,
+    /// Cached real battery level, refreshed by
+    /// [`Self::refresh_battery_status`]. `None` until that has been
+    /// called (successfully) at least once.
+    cached_battery_level: Option<f32>,
 }
 
 #[wasm_bindgen]
@@ -63,6 +74,7 @@ impl PerformanceProfiler {
             active_operations: Vec::new(),
             baseline_metrics: None,
             debug_logger: None,
+            cached_battery_level: None,
         }
     }
 
@@ -78,7 +90,13 @@ impl PerformanceProfiler {
         }
 
         let start_time = Date::now();
-        self.active_operations.push((name.to_string(), operation_type, start_time));
+        let wasm_memory_at_start = crate::get_wasm_memory_usage();
+        self.active_operations.push((
+            name.to_string(),
+            operation_type,
+            start_time,
+            wasm_memory_at_start,
+        ));
 
         if self.config.detailed_timing() {
             web_sys::console::time_with_label(&format!("🔍 {name}"));
@@ -99,29 +117,29 @@ impl PerformanceProfiler {
         let end_time = Date::now();
 
         // Find and remove the operation
-        if let Some(pos) = self.active_operations.iter().position(|(op_name, _, _)| op_name == name)
+        if let Some(pos) =
+            self.active_operations.iter().position(|(op_name, _, _, _)| op_name == name)
         {
-            let (_, operation_type, start_time) = self.active_operations.remove(pos);
+            let (_, operation_type, start_time, wasm_memory_at_start) =
+                self.active_operations.remove(pos);
             let duration_ms = end_time - start_time;
+            let memory_peak = crate::get_wasm_memory_usage();
 
-            // Create detailed profile
+            // Create detailed profile. Only fields genuinely derivable
+            // from what this method receives (name/type/timestamps) plus
+            // real WASM memory readings - see `OperationProfile`'s doc
+            // comment for what was removed and why.
             let profile = OperationProfile {
                 operation_type,
                 operation_name: name.to_string(),
                 start_time,
                 end_time,
                 duration_ms,
-                cpu_time_ms: duration_ms * 0.8, // Approximate CPU time
-                gpu_time_ms: duration_ms * 0.2, // Approximate GPU time
-                memory_allocated: self.estimate_memory_usage(operation_type),
-                memory_peak: crate::get_wasm_memory_usage(),
-                gpu_memory_used: self.estimate_gpu_memory_usage(operation_type),
-                flops: self.estimate_flops(operation_type, duration_ms),
-                memory_bandwidth_gb_s: self.estimate_memory_bandwidth(operation_type),
-                cache_hits: self.estimate_cache_hits(operation_type),
-                cache_misses: self.estimate_cache_misses(operation_type),
-                input_shape: self.estimate_input_shape(operation_type),
-                output_shape: self.estimate_output_shape(operation_type),
+                memory_peak,
+                wasm_memory_growth_bytes: Self::wasm_memory_growth(
+                    wasm_memory_at_start,
+                    memory_peak,
+                ),
             };
 
             self.operation_profiles.push(profile);
@@ -149,86 +167,102 @@ impl PerformanceProfiler {
         }
     }
 
-    /// Sample current resource usage with enhanced thermal and power monitoring
+    /// Real WASM linear-memory growth (bytes) between two
+    /// [`crate::get_wasm_memory_usage`] readings. Saturating: readings
+    /// are monotonic in practice (the allocator only grows pages), but
+    /// this must never underflow-panic even if a pair were ever taken
+    /// out of order.
+    fn wasm_memory_growth(before: usize, after: usize) -> usize {
+        after.saturating_sub(before)
+    }
+
+    /// Refresh the cached real battery level via the browser's Battery
+    /// Status API (`navigator.getBattery()`), read through
+    /// `js_sys::Reflect`/`js_sys::Function` the same way as
+    /// `device_capability::DeviceCapabilityDetector::get_battery_info` -
+    /// so this doesn't need a typed `web_sys::BatteryManager` binding
+    /// either. Updates [`Self::cached_battery_level`]'s backing field on
+    /// success; leaves it untouched (never fabricates a reading) when the
+    /// window/navigator/API is unavailable, which is always the case off
+    /// the wasm32 target. A previous version of the removed
+    /// `get_battery_level` checked for the API's presence and then
+    /// returned a hardcoded `0.8` regardless of what it found.
+    pub async fn refresh_battery_status(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let Some(window) = web_sys::window() else {
+                return;
+            };
+            let navigator = window.navigator();
+            let Ok(get_battery) = js_sys::Reflect::get(&navigator, &"getBattery".into()) else {
+                return;
+            };
+            let Some(get_battery_fn) = get_battery.dyn_ref::<js_sys::Function>() else {
+                return;
+            };
+            let Ok(promise) = get_battery_fn.call0(&navigator) else {
+                return;
+            };
+            let Ok(promise) = promise.dyn_into::<js_sys::Promise>() else {
+                return;
+            };
+            let Ok(battery_manager) = wasm_bindgen_futures::JsFuture::from(promise).await else {
+                return;
+            };
+            if let Some(level) = js_sys::Reflect::get(&battery_manager, &"level".into())
+                .ok()
+                .and_then(|v| v.as_f64())
+            {
+                self.cached_battery_level = Some(level as f32);
+            }
+        }
+    }
+
+    /// Sample current resource usage.
+    ///
+    /// Only records what is genuinely measured: real WASM linear memory,
+    /// plus a real battery sample whenever
+    /// [`Self::refresh_battery_status`] has previously cached one. A
+    /// previous version also sampled CPU/GPU usage, GPU memory, cache hit
+    /// rate, power consumption, and thermal/CPU/GPU temperature here -
+    /// all fabricated (see `ResourceSample`'s doc comment) - and used
+    /// those fabricated readings to drive a fake thermal-throttling
+    /// detector (`check_thermal_throttling`, removed).
     pub fn sample_resources(&mut self) {
         if !self.config.enabled() || !self.config.resource_monitoring() {
             return;
         }
 
         let timestamp = Date::now();
-        let cpu_usage = self.estimate_cpu_usage();
-        let gpu_usage = self.estimate_gpu_usage();
         let wasm_memory = crate::get_wasm_memory_usage();
-        let gpu_memory = self.estimate_gpu_memory_usage(OperationType::FullInference);
-        let battery_level = self.get_battery_level();
-        let power_consumption = self.estimate_power_consumption();
-        let thermal_state = self.get_thermal_state();
-        let cpu_temp = self.estimate_cpu_temperature();
-        let gpu_temp = self.estimate_gpu_temperature();
 
-        // Create comprehensive resource samples for different metrics
-        let samples = vec![
-            ResourceSample {
-                timestamp,
-                resource_type: ResourceType::CPU,
-                value: cpu_usage,
-                cpu_usage,
-                gpu_usage,
-                wasm_memory,
-                gpu_memory,
-                network_bytes: 0,
-                cache_hit_rate: 0.85,
-                battery_level,
-                power_consumption,
-                thermal_state,
-                cpu_temperature: cpu_temp,
-                gpu_temperature: gpu_temp,
-            },
-            ResourceSample {
+        self.resource_samples.push(ResourceSample {
+            timestamp,
+            resource_type: ResourceType::WAMSMemory,
+            // In MB, not raw bytes: `f32` only holds integers exactly up
+            // to ~16.7 million, so a `wasm_memory as f32` byte count
+            // silently rounds for any heap above ~16MB (a very ordinary
+            // size for a loaded model). `wasm_memory` below is the exact
+            // `usize` reading for any consumer that needs it.
+            value: wasm_memory as f32 / 1_048_576.0,
+            wasm_memory,
+            battery_level: self.cached_battery_level,
+        });
+
+        if let Some(battery_level) = self.cached_battery_level {
+            self.resource_samples.push(ResourceSample {
                 timestamp,
                 resource_type: ResourceType::Battery,
                 value: battery_level,
-                cpu_usage,
-                gpu_usage,
                 wasm_memory,
-                gpu_memory,
-                network_bytes: 0,
-                cache_hit_rate: 0.85,
-                battery_level,
-                power_consumption,
-                thermal_state,
-                cpu_temperature: cpu_temp,
-                gpu_temperature: gpu_temp,
-            },
-            ResourceSample {
-                timestamp,
-                resource_type: ResourceType::Thermal,
-                value: thermal_state,
-                cpu_usage,
-                gpu_usage,
-                wasm_memory,
-                gpu_memory,
-                network_bytes: 0,
-                cache_hit_rate: 0.85,
-                battery_level,
-                power_consumption,
-                thermal_state,
-                cpu_temperature: cpu_temp,
-                gpu_temperature: gpu_temp,
-            },
-        ];
-
-        for sample in samples {
-            self.resource_samples.push(sample);
+                battery_level: self.cached_battery_level,
+            });
         }
 
         // Maintain maximum samples limit
         while self.resource_samples.len() > self.config.max_samples() {
             self.resource_samples.remove(0);
         }
-
-        // Check for thermal throttling and adaptive optimization
-        self.check_thermal_throttling(thermal_state, cpu_temp, gpu_temp);
     }
 
     /// Analyze performance and detect bottlenecks
@@ -253,7 +287,6 @@ impl PerformanceProfiler {
         };
 
         let top_operations = self.get_top_operations(10);
-        let resource_efficiency = self.calculate_resource_efficiency();
         let recommendations = self.generate_recommendations(&bottlenecks);
 
         PerformanceSummary {
@@ -262,7 +295,6 @@ impl PerformanceProfiler {
             average_fps: average_fps as f32,
             bottlenecks,
             top_operations,
-            resource_efficiency,
             recommendations,
         }
     }
@@ -288,9 +320,11 @@ impl PerformanceProfiler {
             );
             let _ = js_sys::Reflect::set(&obj, &"duration".into(), &profile.duration_ms.into());
             let _ = js_sys::Reflect::set(&obj, &"start_time".into(), &profile.start_time.into());
-            let _ = js_sys::Reflect::set(&obj, &"cpu_time".into(), &profile.cpu_time_ms.into());
-            let _ = js_sys::Reflect::set(&obj, &"gpu_time".into(), &profile.gpu_time_ms.into());
-            let _ = js_sys::Reflect::set(&obj, &"memory".into(), &profile.memory_allocated.into());
+            let _ = js_sys::Reflect::set(
+                &obj,
+                &"wasm_memory_growth_bytes".into(),
+                &profile.wasm_memory_growth_bytes.into(),
+            );
             array.push(&obj);
         }
 
@@ -304,10 +338,15 @@ impl PerformanceProfiler {
         for sample in &self.resource_samples {
             let obj = Object::new();
             let _ = js_sys::Reflect::set(&obj, &"timestamp".into(), &sample.timestamp.into());
-            let _ = js_sys::Reflect::set(&obj, &"cpu".into(), &sample.cpu_usage.into());
-            let _ = js_sys::Reflect::set(&obj, &"gpu".into(), &sample.gpu_usage.into());
+            let _ = js_sys::Reflect::set(
+                &obj,
+                &"type".into(),
+                &format!("{resource_type:?}", resource_type = sample.resource_type).into(),
+            );
             let _ = js_sys::Reflect::set(&obj, &"memory".into(), &sample.wasm_memory.into());
-            let _ = js_sys::Reflect::set(&obj, &"gpu_memory".into(), &sample.gpu_memory.into());
+            let battery_js: JsValue =
+                sample.battery_level.map_or(JsValue::NULL, |level| level.into());
+            let _ = js_sys::Reflect::set(&obj, &"battery_level".into(), &battery_js);
             array.push(&obj);
         }
 
@@ -329,18 +368,14 @@ impl PerformanceProfiler {
             let fps_change = ((current.average_fps as f64 - baseline.average_fps as f64)
                 / baseline.average_fps as f64)
                 * 100.0;
-            let efficiency_change =
-                (current.resource_efficiency as f64 - baseline.resource_efficiency as f64) * 100.0;
 
             Some(format!(
                 "Performance Comparison:\n\
                  Total Time: {:.1}% change\n\
                  Average FPS: {:.1}% change\n\
-                 Resource Efficiency: {:.1}% change\n\
                  Bottlenecks: {} current vs {} baseline",
                 time_change,
                 fps_change,
-                efficiency_change,
                 current.bottlenecks.len(),
                 baseline.bottlenecks.len()
             ))
@@ -391,7 +426,14 @@ impl PerformanceProfiler {
             let time_percentage = (profile.duration_ms / total_time) * 100.0;
 
             if time_percentage > 20.0 {
-                let bottleneck_type = if profile.gpu_time_ms > profile.cpu_time_ms {
+                // Classified from `operation_type`, which the caller
+                // genuinely supplies at `start_operation` time - a
+                // previous version compared the fabricated
+                // `gpu_time_ms`/`cpu_time_ms` split (a fixed 20/80 of
+                // `duration_ms` for every operation), so `gpu_time_ms >
+                // cpu_time_ms` was always false and this branch could
+                // never actually classify anything as `GPUCompute`.
+                let bottleneck_type = if profile.operation_type == OperationType::GPUKernel {
                     BottleneckType::GPUCompute
                 } else {
                     BottleneckType::CPUCompute
@@ -443,23 +485,6 @@ impl PerformanceProfiler {
         operations
     }
 
-    fn calculate_resource_efficiency(&self) -> f32 {
-        if self.resource_samples.is_empty() {
-            return 0.5;
-        }
-
-        let avg_cpu = self.resource_samples.iter().map(|s| s.cpu_usage).sum::<f32>()
-            / self.resource_samples.len() as f32;
-        let avg_gpu = self.resource_samples.iter().map(|s| s.gpu_usage).sum::<f32>()
-            / self.resource_samples.len() as f32;
-
-        // Efficiency is based on balanced usage without waste
-        let cpu_efficiency = (avg_cpu / 100.0).min(1.0);
-        let gpu_efficiency = (avg_gpu / 100.0).min(1.0);
-
-        (cpu_efficiency + gpu_efficiency) / 2.0
-    }
-
     fn generate_recommendations(&self, bottlenecks: &[Bottleneck]) -> Vec<String> {
         let mut recommendations = Vec::new();
 
@@ -503,90 +528,6 @@ impl PerformanceProfiler {
             BottleneckType::Serialization => "Consider binary formats or streaming".to_string(),
             BottleneckType::JSInterop => "Consider reducing WASM/JS boundary crossings".to_string(),
         }
-    }
-
-    // Estimation methods (in a real implementation, these would use actual measurements)
-
-    fn estimate_memory_usage(&self, op_type: OperationType) -> usize {
-        match op_type {
-            OperationType::ModelLoading => 50 * 1024 * 1024,
-            OperationType::TransformerLayer => 10 * 1024 * 1024,
-            OperationType::Attention => 5 * 1024 * 1024,
-            OperationType::MatMul => 2 * 1024 * 1024,
-            _ => 1024 * 1024,
-        }
-    }
-
-    fn estimate_gpu_memory_usage(&self, op_type: OperationType) -> usize {
-        match op_type {
-            OperationType::ModelLoading => 100 * 1024 * 1024,
-            OperationType::TransformerLayer => 20 * 1024 * 1024,
-            OperationType::Attention => 10 * 1024 * 1024,
-            OperationType::MatMul => 5 * 1024 * 1024,
-            _ => 1024 * 1024,
-        }
-    }
-
-    fn estimate_flops(&self, op_type: OperationType, duration_ms: f64) -> u64 {
-        let base_flops = match op_type {
-            OperationType::MatMul => 1_000_000_000,
-            OperationType::Attention => 500_000_000,
-            OperationType::TransformerLayer => 2_000_000_000,
-            _ => 100_000_000,
-        };
-        (base_flops as f64 * (duration_ms / 1000.0)) as u64
-    }
-
-    fn estimate_memory_bandwidth(&self, op_type: OperationType) -> f32 {
-        match op_type {
-            OperationType::MatMul => 100.0,
-            OperationType::MemoryTransfer => 50.0,
-            _ => 20.0,
-        }
-    }
-
-    fn estimate_cache_hits(&self, op_type: OperationType) -> u32 {
-        match op_type {
-            OperationType::Embedding => 1000,
-            OperationType::Attention => 500,
-            _ => 100,
-        }
-    }
-
-    fn estimate_cache_misses(&self, op_type: OperationType) -> u32 {
-        match op_type {
-            OperationType::ModelLoading => 500,
-            OperationType::MemoryTransfer => 200,
-            _ => 20,
-        }
-    }
-
-    fn estimate_input_shape(&self, op_type: OperationType) -> Vec<usize> {
-        match op_type {
-            OperationType::TransformerLayer => vec![1, 512, 768],
-            OperationType::Attention => vec![1, 12, 512, 64],
-            OperationType::MatMul => vec![512, 768],
-            _ => vec![1, 512],
-        }
-    }
-
-    fn estimate_output_shape(&self, op_type: OperationType) -> Vec<usize> {
-        match op_type {
-            OperationType::TransformerLayer => vec![1, 512, 768],
-            OperationType::Attention => vec![1, 512, 768],
-            OperationType::MatMul => vec![512, 3072],
-            _ => vec![1, 512],
-        }
-    }
-
-    fn estimate_cpu_usage(&self) -> f32 {
-        // Simulate CPU usage
-        50.0 + ((Date::now() % 100.0) / 2.0) as f32
-    }
-
-    fn estimate_gpu_usage(&self) -> f32 {
-        // Simulate GPU usage
-        30.0 + ((Date::now() % 100.0) / 3.0) as f32
     }
 
     // Real-time analytics and adaptive optimization methods
@@ -801,10 +742,13 @@ impl PerformanceProfiler {
 
         let avg_latency = self.operation_profiles.iter().map(|p| p.duration_ms).sum::<f64>()
             / self.operation_profiles.len() as f64;
-        let avg_memory =
-            self.operation_profiles.iter().map(|p| p.memory_allocated as f64).sum::<f64>()
-                / self.operation_profiles.len() as f64
-                / 1_048_576.0; // Convert to MB
+        // Real per-operation peak WASM memory, averaged - `memory_peak` is
+        // the one memory reading `OperationProfile` still carries (see its
+        // doc comment); the removed `memory_allocated` was a constant
+        // lookup keyed only by operation type.
+        let avg_memory = self.operation_profiles.iter().map(|p| p.memory_peak as f64).sum::<f64>()
+            / self.operation_profiles.len() as f64
+            / 1_048_576.0; // Convert to MB
 
         let baseline = PerformanceBaseline {
             name: name.to_string(),
@@ -812,7 +756,7 @@ impl PerformanceProfiler {
             avg_latency_ms: avg_latency,
             avg_throughput: if avg_latency > 0.0 { 1000.0 / avg_latency as f32 } else { 0.0 },
             avg_memory_mb: avg_memory as f32,
-            avg_accuracy: 0.95, // Default accuracy estimate
+            avg_accuracy: None, // not measurable - see `PerformanceBaseline`'s doc comment
         };
 
         self.current_baselines.push(baseline);
@@ -1079,6 +1023,11 @@ impl PerformanceProfiler {
         }
     }
 
+    /// Apply an adaptive-optimization strategy switch, triggered by
+    /// `trigger_metric` crossing a real threshold in
+    /// `check_and_trigger_adaptation` (real: it acts on the caller-supplied
+    /// `latency_ms`/`throughput`/`memory_mb`/`accuracy` from
+    /// `update_real_time_metrics`).
     fn apply_adaptive_optimization(
         &mut self,
         timestamp: f64,
@@ -1099,15 +1048,20 @@ impl PerformanceProfiler {
         };
 
         if new_strategy != old_strategy {
-            let improvement_ratio = self.estimate_strategy_improvement(old_strategy, new_strategy);
-
+            // `improvement_ratio`/`confidence_score` are `None` - see
+            // `AdaptationRecord`'s doc comment for why: this profiler
+            // never measures the same workload under two strategies, so
+            // it has no real basis for a numeric estimate here. A
+            // previous version computed one anyway from a hardcoded
+            // per-transition-pair table multiplied by factors derived
+            // from fabricated CPU/GPU usage telemetry.
             let adaptation = AdaptationRecord {
                 timestamp,
                 old_strategy,
                 new_strategy,
                 trigger_metric: trigger_metric.to_string(),
-                improvement_ratio,
-                confidence_score: 0.8, // Default confidence
+                improvement_ratio: None,
+                confidence_score: None,
             };
 
             self.adaptive_optimizer.current_strategy = new_strategy;
@@ -1120,337 +1074,38 @@ impl PerformanceProfiler {
 
             web_sys::console::log_1(
                 &format!(
-                    "🤖 Adaptive optimization: {:?} -> {:?} (trigger: {}, improvement: {:.1}%)",
-                    old_strategy,
-                    new_strategy,
-                    trigger_metric,
-                    improvement_ratio * 100.0
+                    "🤖 Adaptive optimization: {old_strategy:?} -> {new_strategy:?} (trigger: {trigger_metric})"
                 )
                 .into(),
             );
         }
     }
 
-    fn estimate_strategy_improvement(
-        &self,
-        old: OptimizationStrategy,
-        new: OptimizationStrategy,
-    ) -> f32 {
-        // Advanced ML-powered estimation based on historical performance patterns
-        let historical_improvement = self.calculate_historical_improvement(old, new);
-        let device_factor = self.get_device_performance_factor();
-        let workload_factor = self.get_workload_complexity_factor();
-
-        // Weighted combination of factors for more accurate estimation
-        let base_improvement = match (old, new) {
-            (OptimizationStrategy::CPUPreferred, OptimizationStrategy::GPUPreferred) => 2.5,
-            (OptimizationStrategy::Hybrid, OptimizationStrategy::MemoryOptimized) => 1.8,
-            (OptimizationStrategy::MemoryOptimized, OptimizationStrategy::Hybrid) => 1.4,
-            (OptimizationStrategy::CPUPreferred, OptimizationStrategy::MemoryOptimized) => 3.2,
-            (OptimizationStrategy::GPUPreferred, OptimizationStrategy::MemoryOptimized) => 1.2,
-            _ => 1.15, // Default 15% improvement
-        };
-
-        (base_improvement * historical_improvement * device_factor * workload_factor).min(5.0)
-    }
-
-    fn calculate_historical_improvement(
-        &self,
-        old: OptimizationStrategy,
-        new: OptimizationStrategy,
-    ) -> f32 {
-        // Analyze historical performance data for strategy transitions
-        if self.performance_trends.len() < 10 {
-            return 1.0; // Not enough data, use base estimate
-        }
-
-        let mut strategy_transitions = Vec::new();
-        for i in 1..self.performance_trends.len() {
-            let prev_trend = &self.performance_trends[i - 1];
-            let curr_trend = &self.performance_trends[i];
-
-            // Simplified strategy detection based on performance characteristics
-            let prev_strategy = self.infer_strategy_from_trend(prev_trend);
-            let curr_strategy = self.infer_strategy_from_trend(curr_trend);
-
-            if prev_strategy == old && curr_strategy == new {
-                let improvement = (curr_trend.trend_strength + 1.0) / 2.0; // Normalize based on trend strength
-                strategy_transitions.push(improvement);
-            }
-        }
-
-        if strategy_transitions.is_empty() {
-            1.0
-        } else {
-            let avg_improvement: f32 =
-                strategy_transitions.iter().sum::<f32>() / strategy_transitions.len() as f32;
-            0.5 + avg_improvement // Scale to reasonable range
-        }
-    }
-
-    fn get_device_performance_factor(&self) -> f32 {
-        // Estimate device performance based on recent resource utilization
-        let recent_samples: Vec<_> = self.resource_samples.iter().rev().take(50).collect();
-        if recent_samples.is_empty() {
-            return 1.0;
-        }
-
-        let avg_cpu_usage: f32 = recent_samples
-            .iter()
-            .filter(|s| s.resource_type == ResourceType::CPU)
-            .map(|s| s.value)
-            .sum::<f32>()
-            / recent_samples.len() as f32;
-
-        let avg_memory_usage: f32 = recent_samples
-            .iter()
-            .filter(|s| s.resource_type == ResourceType::WAMSMemory)
-            .map(|s| s.value)
-            .sum::<f32>()
-            / recent_samples.len() as f32;
-
-        // Higher resource availability = higher performance factor
-        let cpu_factor = (100.0 - avg_cpu_usage) / 100.0;
-        let memory_factor = (100.0 - avg_memory_usage) / 100.0;
-
-        (cpu_factor + memory_factor) / 2.0
-    }
-
-    fn get_workload_complexity_factor(&self) -> f32 {
-        // Analyze workload complexity based on operation profiles
-        if self.operation_profiles.is_empty() {
-            return 1.0;
-        }
-
-        let avg_duration: f64 = self.operation_profiles.iter().map(|p| p.duration_ms).sum::<f64>()
-            / self.operation_profiles.len() as f64;
-
-        let memory_intensity: u64 =
-            self.operation_profiles.iter().map(|p| p.memory_peak).max().unwrap_or(0) as u64;
-
-        // Complex workloads (longer duration, more memory) benefit more from optimization
-        let duration_factor = (avg_duration / 1000.0).min(2.0); // Cap at 2x
-        let memory_factor = (memory_intensity as f64 / (100.0 * 1024.0 * 1024.0)).min(2.0); // 100MB baseline
-
-        (1.0 + duration_factor + memory_factor) as f32 / 3.0
-    }
-
-    fn infer_strategy_from_trend(&self, trend: &PerformanceTrend) -> OptimizationStrategy {
-        // Infer strategy based on performance characteristics
-        if trend.trend_strength > 0.8 {
-            OptimizationStrategy::MemoryOptimized
-        } else if trend.trend_strength > 0.6 {
-            OptimizationStrategy::GPUPreferred
-        } else {
-            OptimizationStrategy::Hybrid
-        }
-    }
-
-    /// Get current battery level (0.0 to 1.0)
-    fn get_battery_level(&self) -> f32 {
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Some(window) = web_sys::window() {
-                if let Ok(navigator) = js_sys::Reflect::get(&window, &"navigator".into()) {
-                    if let Ok(_get_battery) = js_sys::Reflect::get(&navigator, &"getBattery".into())
-                    {
-                        // Battery API is async, so we use cached value or estimate
-                        // In a real implementation, you would cache the battery object
-                        return 0.8; // Placeholder - would use cached battery level
-                    }
-                }
-            }
-        }
-        1.0 // Default to full battery for non-web environments
-    }
-
-    /// Estimate current power consumption (watts)
-    fn estimate_power_consumption(&self) -> f32 {
-        #[cfg(target_arch = "wasm32")]
-        {
-            // Estimate based on CPU/GPU usage and device characteristics
-            let recent_samples: Vec<_> = self.resource_samples.iter().rev().take(10).collect();
-            if recent_samples.is_empty() {
-                return 5.0; // Default 5W
-            }
-
-            let avg_cpu: f32 = recent_samples.iter().map(|s| s.cpu_usage).sum::<f32>()
-                / recent_samples.len() as f32;
-
-            let avg_gpu: f32 = recent_samples.iter().map(|s| s.gpu_usage).sum::<f32>()
-                / recent_samples.len() as f32;
-
-            // Estimate power consumption based on usage
-            let base_power = 2.0; // Base system power
-            let cpu_power = (avg_cpu / 100.0) * 8.0; // Up to 8W for CPU
-            let gpu_power = (avg_gpu / 100.0) * 15.0; // Up to 15W for GPU
-
-            base_power + cpu_power + gpu_power
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        5.0 // Default for non-web environments
-    }
-
-    /// Get current thermal state (0.0 = cool, 1.0 = hot)
-    fn get_thermal_state(&self) -> f32 {
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Some(window) = web_sys::window() {
-                if let Ok(navigator) = js_sys::Reflect::get(&window, &"navigator".into()) {
-                    if let Ok(thermal_state) =
-                        js_sys::Reflect::get(&navigator, &"thermalState".into())
-                    {
-                        if let Some(state_str) = thermal_state.as_string() {
-                            return match state_str.as_str() {
-                                "nominal" => 0.2,
-                                "fair" => 0.4,
-                                "serious" => 0.6,
-                                "critical" => 0.9,
-                                _ => 0.3,
-                            };
-                        }
-                    }
-                }
-            }
-
-            // Estimate thermal state based on recent performance
-            let recent_samples: Vec<_> = self.resource_samples.iter().rev().take(20).collect();
-            if recent_samples.len() < 5 {
-                return 0.3; // Default moderate thermal state
-            }
-
-            let avg_usage: f32 =
-                recent_samples.iter().map(|s| (s.cpu_usage + s.gpu_usage) / 2.0).sum::<f32>()
-                    / recent_samples.len() as f32;
-
-            // High sustained usage indicates higher thermal state
-            (avg_usage / 100.0).min(1.0)
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        0.3 // Default moderate thermal state
-    }
-
-    /// Estimate CPU temperature (Celsius)
-    fn estimate_cpu_temperature(&self) -> f32 {
-        #[cfg(target_arch = "wasm32")]
-        {
-            // Estimate based on CPU usage and thermal state
-            let thermal_state = self.get_thermal_state();
-            let recent_cpu_usage =
-                self.resource_samples.iter().rev().take(10).map(|s| s.cpu_usage).sum::<f32>()
-                    / 10.0_f32.max(self.resource_samples.len() as f32);
-
-            let base_temp = 35.0; // Base temperature
-            let usage_temp = (recent_cpu_usage / 100.0) * 30.0; // Up to 30°C from usage
-            let thermal_temp = thermal_state * 20.0; // Up to 20°C from thermal state
-
-            base_temp + usage_temp + thermal_temp
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        45.0 // Default CPU temperature
-    }
-
-    /// Estimate GPU temperature (Celsius)
-    fn estimate_gpu_temperature(&self) -> f32 {
-        #[cfg(target_arch = "wasm32")]
-        {
-            // Estimate based on GPU usage and thermal state
-            let thermal_state = self.get_thermal_state();
-            let recent_gpu_usage =
-                self.resource_samples.iter().rev().take(10).map(|s| s.gpu_usage).sum::<f32>()
-                    / 10.0_f32.max(self.resource_samples.len() as f32);
-
-            let base_temp = 40.0; // Base GPU temperature (typically higher than CPU)
-            let usage_temp = (recent_gpu_usage / 100.0) * 40.0; // Up to 40°C from usage
-            let thermal_temp = thermal_state * 25.0; // Up to 25°C from thermal state
-
-            base_temp + usage_temp + thermal_temp
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        55.0 // Default GPU temperature
-    }
-
-    /// Check for thermal throttling and trigger adaptive optimization
-    fn check_thermal_throttling(&mut self, thermal_state: f32, cpu_temp: f32, gpu_temp: f32) {
-        let should_throttle = thermal_state > 0.7 || cpu_temp > 75.0 || gpu_temp > 80.0;
-
-        if should_throttle {
-            // Log thermal event
-            if let Some(ref mut logger) = self.debug_logger {
-                logger.info(&format!(
-                    "Thermal throttling detected: thermal_state={:.2}, cpu_temp={:.1}°C, gpu_temp={:.1}°C",
-                    thermal_state, cpu_temp, gpu_temp
-                ), "thermal");
-            }
-
-            // Trigger adaptive optimization toward more conservative strategy
-            let current_strategy = self.adaptive_optimizer.current_strategy;
-            let target_strategy = match current_strategy {
-                OptimizationStrategy::GPUPreferred => OptimizationStrategy::Hybrid,
-                OptimizationStrategy::Hybrid => OptimizationStrategy::MemoryOptimized,
-                _ => OptimizationStrategy::MemoryOptimized,
-            };
-
-            if current_strategy != target_strategy {
-                let estimated_improvement =
-                    self.estimate_strategy_improvement(current_strategy, target_strategy);
-                if estimated_improvement > 1.1 {
-                    // At least 10% improvement
-                    self.adaptive_optimizer.current_strategy = target_strategy;
-
-                    if let Some(ref mut logger) = self.debug_logger {
-                        logger.info(&format!(
-                            "Thermal adaptive optimization: switched from {current_strategy:?} to {target_strategy:?} (estimated {:.1}% improvement)",
-                            (estimated_improvement - 1.0) * 100.0
-                        ), "thermal");
-                    }
-                }
-            }
-        }
-    }
-
-    /// Get thermal-aware performance recommendations
-    pub fn get_thermal_recommendations(&self) -> Vec<String> {
+    /// Get power-aware performance recommendations from the real cached
+    /// battery level.
+    ///
+    /// A previous version (`get_thermal_recommendations`) also emitted
+    /// "High thermal state detected" / "Combined thermal and battery
+    /// stress" recommendations driven by `ResourceType::Thermal` samples
+    /// - which were themselves built from `estimate_cpu_temperature`/
+    /// `estimate_gpu_temperature`/`get_thermal_state`, all fabricated (no
+    /// standard browser API exposes device temperature or thermal
+    /// throttling state to a web page; the one check that looked
+    /// real - `navigator.thermalState` - is not a real API either).
+    /// `sample_resources` no longer produces `Thermal`-typed samples at
+    /// all, so that branch is removed along with the sampling rather
+    /// than kept alive on data that can never arrive. The same
+    /// fabricated temperatures also fed a `check_thermal_throttling`
+    /// detector that switched optimization strategy and logged "Thermal
+    /// throttling detected" - removed entirely, per the same reasoning.
+    pub fn get_power_recommendations(&self) -> Vec<String> {
         let mut recommendations = Vec::new();
 
-        let recent_thermal = self
-            .resource_samples
-            .iter()
-            .rev()
-            .take(10)
-            .filter(|s| s.resource_type == ResourceType::Thermal)
-            .map(|s| s.value)
-            .sum::<f32>()
-            / 10.0;
-
-        let recent_battery = self
-            .resource_samples
-            .iter()
-            .rev()
-            .take(10)
-            .filter(|s| s.resource_type == ResourceType::Battery)
-            .map(|s| s.value)
-            .sum::<f32>()
-            / 10.0;
-
-        if recent_thermal > 0.7 {
-            recommendations.push(
-                "High thermal state detected - consider reducing model complexity".to_string(),
-            );
-            recommendations
-                .push("Switch to CPU-based inference to reduce GPU heat generation".to_string());
-        }
-
-        if recent_battery < 0.2 {
-            recommendations.push("Low battery level - enable power saving mode".to_string());
-            recommendations.push("Reduce inference frequency to conserve battery".to_string());
-        }
-
-        if recent_thermal > 0.5 && recent_battery < 0.3 {
-            recommendations.push(
-                "Combined thermal and battery stress - enable aggressive power management"
-                    .to_string(),
-            );
+        if let Some(battery_level) = self.cached_battery_level {
+            if battery_level < 0.2 {
+                recommendations.push("Low battery level - enable power saving mode".to_string());
+                recommendations.push("Reduce inference frequency to conserve battery".to_string());
+            }
         }
 
         recommendations
@@ -1518,5 +1173,122 @@ mod tests {
         let profiler = PerformanceProfiler::new(config);
         assert!(profiler.operation_profiles.is_empty());
         assert!(profiler.performance_trends.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Honesty regression tests. `start_operation`/`end_operation`/
+    // `sample_resources`/`create_baseline` all call `js_sys::Date::now()`
+    // internally and so panic off the wasm32 target (there is no JS
+    // runtime backing it) - this predates this change and is why the two
+    // `#[cfg(target_arch = "wasm32")]` tests above already existed. The
+    // tests below exercise the same fixes through paths that take a
+    // timestamp as a plain parameter or touch no timestamp at all, so
+    // they can run natively.
+    // -----------------------------------------------------------------
+
+    fn profile_with(operation_type: OperationType, duration_ms: f64) -> OperationProfile {
+        OperationProfile {
+            operation_type,
+            operation_name: "op".to_string(),
+            start_time: 0.0,
+            end_time: duration_ms,
+            duration_ms,
+            memory_peak: 0,
+            wasm_memory_growth_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn test_wasm_memory_growth_is_saturating_and_correct() {
+        assert_eq!(PerformanceProfiler::wasm_memory_growth(100, 150), 50);
+        assert_eq!(PerformanceProfiler::wasm_memory_growth(100, 100), 0);
+        // Must never underflow-panic even if readings were ever inverted.
+        assert_eq!(PerformanceProfiler::wasm_memory_growth(150, 100), 0);
+    }
+
+    #[test]
+    fn test_detect_bottlenecks_classifies_gpu_kernel_operation_as_gpu_compute() {
+        // Regression test: a previous version classified bottleneck_type
+        // by comparing the fabricated `gpu_time_ms > cpu_time_ms` (always
+        // false, since `gpu_time_ms` was a fixed 20% of `duration_ms` and
+        // `cpu_time_ms` the other 80%), so `GPUCompute` could never be
+        // produced no matter what actually ran. The real signal is the
+        // caller-supplied `operation_type`.
+        let config = ProfilerConfig::development();
+        let mut profiler = PerformanceProfiler::new(config);
+        profiler.operation_profiles.push(profile_with(OperationType::GPUKernel, 1000.0));
+
+        let bottlenecks = profiler.detect_bottlenecks();
+
+        assert_eq!(bottlenecks.len(), 1);
+        assert_eq!(bottlenecks[0].bottleneck_type, BottleneckType::GPUCompute);
+    }
+
+    #[test]
+    fn test_detect_bottlenecks_classifies_non_gpu_operation_as_cpu_compute() {
+        let config = ProfilerConfig::development();
+        let mut profiler = PerformanceProfiler::new(config);
+        profiler.operation_profiles.push(profile_with(OperationType::MatMul, 1000.0));
+
+        let bottlenecks = profiler.detect_bottlenecks();
+
+        assert_eq!(bottlenecks.len(), 1);
+        assert_eq!(bottlenecks[0].bottleneck_type, BottleneckType::CPUCompute);
+    }
+
+    #[test]
+    fn test_refresh_battery_status_leaves_cache_none_off_web() {
+        // No Battery API (or any browser API at all) exists off the web
+        // platform; the cache must stay `None` rather than the previous
+        // `get_battery_level`'s hardcoded fallback.
+        let config = ProfilerConfig::development();
+        let mut profiler = PerformanceProfiler::new(config);
+
+        futures::executor::block_on(profiler.refresh_battery_status());
+
+        assert_eq!(profiler.cached_battery_level, None);
+    }
+
+    #[test]
+    fn test_apply_adaptive_optimization_records_no_fabricated_improvement() {
+        // A previous version computed `improvement_ratio` from a
+        // hardcoded per-transition table multiplied by factors derived
+        // from fabricated CPU/GPU telemetry, and set `confidence_score`
+        // to a flat 0.8. Neither is measurable, so both must be `None`.
+        let config = ProfilerConfig::development();
+        let mut profiler = PerformanceProfiler::new(config);
+        // The profiler starts in `Hybrid`; "memory" maps to
+        // `MemoryOptimized`, so this genuinely triggers a switch (and
+        // therefore a pushed `AdaptationRecord`) rather than the
+        // early-return no-op path for "already on this strategy".
+        profiler.apply_adaptive_optimization(0.0, "memory", 0.0, 0.0, 0.0, 0.0);
+
+        assert_eq!(profiler.adaptive_optimizer.adaptation_history.len(), 1);
+        let record = &profiler.adaptive_optimizer.adaptation_history[0];
+        assert_eq!(record.improvement_ratio, None);
+        assert_eq!(record.confidence_score, None);
+        assert_eq!(record.new_strategy, OptimizationStrategy::MemoryOptimized);
+    }
+
+    #[test]
+    fn test_get_power_recommendations_empty_without_battery_data() {
+        // Honest absence: no cached battery reading must never be
+        // silently treated as "battery is fine", only as "nothing to
+        // recommend".
+        let config = ProfilerConfig::development();
+        let profiler = PerformanceProfiler::new(config);
+        assert!(profiler.get_power_recommendations().is_empty());
+    }
+
+    #[test]
+    fn test_get_power_recommendations_flags_low_real_battery() {
+        let config = ProfilerConfig::development();
+        let mut profiler = PerformanceProfiler::new(config);
+        profiler.cached_battery_level = Some(0.1);
+
+        let recommendations = profiler.get_power_recommendations();
+
+        assert!(!recommendations.is_empty());
+        assert!(recommendations.iter().any(|r| r.contains("battery")));
     }
 }

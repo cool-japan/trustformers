@@ -516,17 +516,51 @@ impl WeightAnalyzer {
         // Excess kurtosis
     }
 
-    /// Compute entropy of data (simplified)
-    fn compute_entropy(data: &[f32]) -> f32 {
-        // Simplified entropy computation
-        // In practice, this would discretize the data and compute proper entropy
-        let std_dev = {
-            let mean = data.iter().sum::<f32>() / data.len() as f32;
-            let variance = data.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / data.len() as f32;
-            variance.sqrt()
-        };
+    /// Number of equal-width buckets used to discretise weights before
+    /// computing their entropy.
+    const ENTROPY_BINS: usize = 64;
 
-        // Higher std_dev implies higher entropy (roughly)
-        std_dev.log2().max(0.0)
+    /// Shannon entropy, in bits, of the weight distribution discretised into
+    /// [`Self::ENTROPY_BINS`] equal-width buckets over the data's finite range.
+    ///
+    /// Bounded by `log2(ENTROPY_BINS)` = 6 bits: `0` when every weight lands in
+    /// one bucket (a constant or degenerate layer), maximal when the weights
+    /// spread uniformly across the range.
+    ///
+    /// This previously returned `log2(std_dev)`, which is not an entropy: it is
+    /// unbounded above, goes negative for any `std_dev < 1` (and was then
+    /// clamped to `0`, so every layer with sub-unit weight spread -- i.e. almost
+    /// every trained layer -- reported exactly zero entropy), and is invariant
+    /// to the SHAPE of the distribution, which is the only thing entropy
+    /// measures.
+    fn compute_entropy(data: &[f32]) -> f32 {
+        let finite: Vec<f32> = data.iter().copied().filter(|x| x.is_finite()).collect();
+        if finite.is_empty() {
+            return 0.0;
+        }
+        let min = finite.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = finite.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        if (max - min).abs() < f32::EPSILON {
+            // All weights identical: one occupied bucket, zero entropy.
+            return 0.0;
+        }
+
+        let bins = Self::ENTROPY_BINS;
+        let width = (max - min) / bins as f32;
+        let mut counts = vec![0usize; bins];
+        for &value in &finite {
+            let idx = (((value - min) / width).floor() as isize).clamp(0, bins as isize - 1);
+            counts[idx as usize] += 1;
+        }
+
+        let total = finite.len() as f32;
+        counts
+            .iter()
+            .filter(|&&c| c > 0)
+            .map(|&c| {
+                let p = c as f32 / total;
+                -p * p.log2()
+            })
+            .sum()
     }
 }

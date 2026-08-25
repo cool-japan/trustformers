@@ -49,7 +49,145 @@ pub(crate) fn transpose_tensor(tensor: Tensor) -> Result<Tensor> {
 /// # Errors
 ///
 /// Fails for non-F32 tensors and for ranks other than 2 or 3.
+/// Bring a GPU-resident tensor to the host, or `None` when it already is there.
+///
+/// `Tensor::to_device_enum(&Device::CPU)` is the flushed download path: it waits for
+/// the outstanding GPU work before mapping the buffer and length-checks the mapping
+/// against the tensor shape. Reading `MTLBuffer::contents()` directly instead returns
+/// whatever happened to be in the (freshly zeroed) allocation at the moment of the
+/// call.
+fn download_if_device_resident(tensor: &Tensor) -> Result<Option<Tensor>> {
+    match tensor {
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        Tensor::Metal(_) => Ok(Some(tensor.to_device_enum(&Device::CPU)?)),
+        #[cfg(feature = "cuda")]
+        Tensor::CUDA(_) => Ok(Some(tensor.to_device_enum(&Device::CPU)?)),
+        _ => Ok(None),
+    }
+}
+
+/// Logits of the last sequence position, as a host `Vec<f32>`.
+///
+/// Single decoding entry point for every GPT-2 generator, on every device. It exists
+/// because the crate previously carried five near-copies of this match: the two in
+/// [`Gpt2LMHeadModel::generate_greedy`] and
+/// [`Gpt2LMHeadModel::generate_greedy_with_cache`] had a `Tensor::Metal` arm, while
+/// the ones in [`Gpt2LMHeadModel::generate`], `generate_beam_search` and
+/// `GenerativeModel::get_next_token_logits` did not - so the same GPU-resident model
+/// generated text through one API and failed with "Unsupported tensor type for
+/// logits" through another.
+///
+/// Accepts `[batch, seq_len, vocab]` (only the first batch element is read, which is
+/// what the single-sequence generators need) and `[seq_len, vocab]`. Anything else is
+/// a structured error rather than a guess.
+pub(crate) fn last_token_logits(logits: &Tensor) -> Result<Vec<f32>> {
+    const OP: &str = "gpt2::last_token_logits";
+
+    let host_backing = download_if_device_resident(logits)?;
+    let logits = host_backing.as_ref().unwrap_or(logits);
+
+    let Tensor::F32(arr) = logits else {
+        // `Tensor::dtype()` names the *element* type, so it reports "F32" for a
+        // GPU-resident f32 tensor as well; name the variant, and fall back to the
+        // element type for the dense host variants where that is the distinction.
+        let kind = match logits {
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(_) => "Metal (GPU-resident, and this build could not \
+                                 download it)"
+                .to_string(),
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(_) => "CUDA (GPU-resident, and this build could not \
+                                download it)"
+                .to_string(),
+            Tensor::Sparse(_) => "Sparse".to_string(),
+            dense => format!("dense {:?}", dense.dtype()),
+        };
+        return Err(tensor_op_error(
+            OP,
+            format!("logits must be a dense host F32 tensor; got a {kind} tensor"),
+        ));
+    };
+
+    let shape = arr.shape();
+    let (seq_len, vocab_size) = match shape.len() {
+        2 => (shape[0], shape[1]),
+        3 => (shape[1], shape[2]),
+        other => {
+            return Err(TrustformersError::shape_error(format!(
+                "expected 2-D [seq, vocab] or 3-D [batch, seq, vocab] logits, got \
+                 {other} dimensions ({shape:?})"
+            )))
+        },
+    };
+    if seq_len == 0 || vocab_size == 0 {
+        return Err(TrustformersError::shape_error(format!(
+            "logits tensor is empty ({shape:?}); there is no last token to decode"
+        )));
+    }
+
+    let row: Vec<f32> = if shape.len() == 3 {
+        arr.slice(s![0, seq_len - 1, ..]).iter().copied().collect()
+    } else {
+        arr.slice(s![seq_len - 1, ..]).iter().copied().collect()
+    };
+    if row.len() != vocab_size {
+        return Err(TrustformersError::shape_error(format!(
+            "last-token logits row has {} entries but the tensor declares a vocabulary \
+             of {vocab_size}",
+            row.len()
+        )));
+    }
+    Ok(row)
+}
+
+/// Index of the largest logit - the greedy decoding step.
+///
+/// Ties go to the lowest index (the behaviour of the hand-written `val > max_val`
+/// loops this replaces). `NaN` entries are skipped rather than silently losing every
+/// comparison; a row that is *entirely* `NaN`, or empty, is a structured error instead
+/// of the token id `0` the old loops returned in that case.
+pub(crate) fn argmax_token(logits: &[f32]) -> Result<u32> {
+    let mut best: Option<(usize, f32)> = None;
+    for (idx, &val) in logits.iter().enumerate() {
+        if val.is_nan() {
+            continue;
+        }
+        match best {
+            Some((_, best_val)) if best_val >= val => {},
+            _ => best = Some((idx, val)),
+        }
+    }
+    match best {
+        Some((idx, _)) => Ok(idx as u32),
+        None => Err(tensor_op_error(
+            "gpt2::argmax_token",
+            if logits.is_empty() {
+                "the logits row is empty; there is no token to pick".to_string()
+            } else {
+                format!(
+                    "all {} logits are NaN; greedy decoding has no defensible answer",
+                    logits.len()
+                )
+            },
+        )),
+    }
+}
+
+/// [`last_token_logits`] as a 1-D `ArrayD`, for the samplers that operate on arrays.
+pub(crate) fn last_token_logits_array(logits: &Tensor) -> Result<ArrayD<f32>> {
+    let row = last_token_logits(logits)?;
+    let vocab_size = row.len();
+    ArrayD::from_shape_vec(IxDyn(&[vocab_size]), row).map_err(|e| {
+        tensor_op_error(
+            "gpt2::last_token_logits_array",
+            format!("failed to build the last-token logits array: {e}"),
+        )
+    })
+}
+
 fn rows_of_first_batch(tensor: &Tensor, label: &str) -> Result<Vec<Vec<f32>>> {
+    let host_backing = download_if_device_resident(tensor)?;
+    let tensor = host_backing.as_ref().unwrap_or(tensor);
     let Tensor::F32(arr) = tensor else {
         return Err(TrustformersError::tensor_op_error(
             "only CPU F32 tensors can be read row-wise",
@@ -214,6 +352,58 @@ impl Gpt2Model {
         Ok(())
     }
 
+    /// Number of positions already held by a layer's key cache.
+    ///
+    /// `None` (empty slot) is 0. Every populated slot is read on the axis its own
+    /// writer used, and any other rank is refused with a structured error rather
+    /// than silently producing a wrong positional offset:
+    ///
+    /// | cache tensor    | written by                                    | layout                                    | seq axis |
+    /// |-----------------|-----------------------------------------------|-------------------------------------------|----------|
+    /// | `Tensor::F32`   | host fallback in `Gpt2Attention::forward_with_cache` | `[batch, kv_seq_len, hidden_size]`  | 1        |
+    /// | `Tensor::Metal` | Metal fast path in the same function           | `[batch, n_head, kv_seq_len, head_dim]`  | 2        |
+    /// | `Tensor::CUDA`  | `Gpt2Attention::cuda_resident_attention`       | `[1, n_head, kv_seq_len, head_dim]`      | 2        |
+    fn cached_seq_len(key: &Option<Tensor>) -> Result<u32> {
+        let describe = |what: &str, shape: &[usize]| {
+            TrustformersError::shape_error(format!(
+                "KV cache key tensor has an unexpected layout: {what} cache with shape \
+                 {shape:?}; cannot derive the past sequence length"
+            ))
+        };
+        match key {
+            None => Ok(0),
+            Some(Tensor::F32(past_k)) => {
+                let shape = past_k.shape();
+                // [batch, kv_seq_len, hidden_size]
+                if shape.len() != 3 {
+                    return Err(describe("host F32", shape));
+                }
+                Ok(shape[1] as u32)
+            },
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Some(Tensor::Metal(metal_data)) => {
+                // [batch, n_head, kv_seq_len, head_dim] - heads-major, seq on axis 2.
+                if metal_data.shape.len() != 4 {
+                    return Err(describe("Metal", &metal_data.shape));
+                }
+                Ok(metal_data.shape[2] as u32)
+            },
+            #[cfg(feature = "cuda")]
+            Some(Tensor::CUDA(cuda_data)) => {
+                // [1, n_head, kv_seq_len, head_dim] - heads-major, seq on axis 2.
+                if cuda_data.shape.len() != 4 {
+                    return Err(describe("CUDA", &cuda_data.shape));
+                }
+                Ok(cuda_data.shape[2] as u32)
+            },
+            Some(other) => Err(TrustformersError::shape_error(format!(
+                "KV cache key tensor has an unsupported dtype/device ({:?}); \
+                 cannot derive the past sequence length",
+                other.dtype()
+            ))),
+        }
+    }
+
     fn forward_internal(
         &self,
         input_ids: &[Vec<u32>],
@@ -241,26 +431,26 @@ impl Gpt2Model {
             }
         }
 
-        // Determine starting position based on cache state
-        let position_offset = if let Some(ref cache) = past_key_values {
-            // If cache exists and has keys, start from past sequence length
-            if let Some(first_layer_cache) = cache.layers.first() {
-                match &first_layer_cache.key {
-                    Some(Tensor::F32(ref past_k)) => {
-                        past_k.shape()[1] as u32 // past_seq_len
-                    },
-                    #[cfg(all(target_os = "macos", feature = "metal"))]
-                    Some(Tensor::Metal(ref metal_data)) => {
-                        metal_data.shape[1] as u32 // past_seq_len from Metal tensor
-                    },
-                    None => 0,
-                    _ => 0,
-                }
-            } else {
-                0
-            }
-        } else {
-            0
+        // Determine starting position based on cache state.
+        //
+        // The three cache layouts do NOT agree on which axis carries the sequence
+        // length, so each has to be read on its own terms:
+        //
+        // * host fallback (`Tensor::F32`, model_blocks.rs `k_for_cache`):
+        //   `[batch, kv_seq_len, hidden_size]`      -> axis 1
+        // * Metal fast path (model_blocks.rs, `MetalTensorData::new(..., vec![batch,
+        //   n_head, total_seq_len, d_head])`):
+        //   `[batch, n_head, kv_seq_len, head_dim]` -> axis 2
+        // * CUDA resident path (`cuda_resident_attention`, same heads-major
+        //   convention): `[1, n_head, kv_seq_len, head_dim]` -> axis 2
+        //
+        // Reading axis 1 of the heads-major layouts yields `n_head`, not the past
+        // sequence length: every decode step after the first then re-uses the same
+        // positional embedding, and generation degenerates into a repeated token
+        // (it only looked right while `n_head` happened to equal the prompt length).
+        let position_offset = match past_key_values.as_ref().and_then(|c| c.layers.first()) {
+            Some(first_layer_cache) => Self::cached_seq_len(&first_layer_cache.key)?,
+            None => 0,
         };
 
         // Process embeddings for entire batch
@@ -690,40 +880,7 @@ impl Gpt2LMHeadModel {
 
             // Get logits for the last token
             let logits = output.logits;
-            let last_logits = match &logits {
-                Tensor::F32(arr) => {
-                    // Get the last token's logits (shape: [batch, seq_len, vocab_size])
-                    let shape = arr.shape();
-                    if shape.len() != 3 {
-                        return Err(tensor_op_error(
-                            "tensor_operation",
-                            "Unsupported tensor type".to_string(),
-                        ));
-                    }
-                    let seq_len = shape[1];
-                    {
-                        let shape = arr.shape();
-                        let vocab_size = shape[2];
-                        let slice = arr.slice(s![0, seq_len - 1, ..]);
-                        ArrayD::from_shape_vec(
-                            IxDyn(&[vocab_size]),
-                            slice.iter().cloned().collect(),
-                        )
-                        .map_err(|e| {
-                            tensor_op_error(
-                                "from_shape_vec",
-                                format!("Failed to create array from shape: {}", e),
-                            )
-                        })?
-                    }
-                },
-                _ => {
-                    return Err(tensor_op_error(
-                        "tensor_operation",
-                        "Unsupported tensor type".to_string(),
-                    ))
-                },
-            };
+            let last_logits = last_token_logits_array(&logits)?;
 
             // Apply temperature
             let scaled_logits = if temperature != 1.0 {
@@ -779,71 +936,7 @@ impl Gpt2LMHeadModel {
 
             // Get logits for the last token
             let logits = output.logits;
-            let next_token = match &logits {
-                Tensor::F32(arr) => {
-                    // Get the last token's logits
-                    let shape = arr.shape();
-                    if shape.len() != 3 {
-                        return Err(tensor_op_error(
-                            "tensor_operation",
-                            "Unsupported tensor type".to_string(),
-                        ));
-                    }
-                    let seq_len = shape[1];
-                    let last_logits = arr.slice(s![0, seq_len - 1, ..]);
-
-                    // Find argmax
-                    let mut max_idx = 0;
-                    let mut max_val = f32::NEG_INFINITY;
-                    for (idx, &val) in last_logits.iter().enumerate() {
-                        if val > max_val {
-                            max_val = val;
-                            max_idx = idx;
-                        }
-                    }
-                    max_idx as u32
-                },
-                #[cfg(all(target_os = "macos", feature = "metal"))]
-                Tensor::Metal(metal_data) => {
-                    use trustformers_core::gpu_ops::metal::get_metal_backend;
-
-                    // Download logits from GPU to CPU
-                    let backend = get_metal_backend()?;
-                    let data = backend.download_buffer_to_vec(&metal_data.buffer_id())?;
-
-                    // Shape should be [batch, seq_len, vocab_size]
-                    if metal_data.shape.len() != 3 {
-                        return Err(tensor_op_error(
-                            "tensor_operation",
-                            format!("Expected 3D logits, got shape: {:?}", metal_data.shape),
-                        ));
-                    }
-
-                    let seq_len = metal_data.shape[1];
-                    let vocab_size = metal_data.shape[2];
-
-                    // Get logits for last token: offset = (batch=0, seq_len-1, vocab=0)
-                    let offset = (seq_len - 1) * vocab_size;
-                    let last_logits = &data[offset..offset + vocab_size];
-
-                    // Find argmax
-                    let mut max_idx = 0;
-                    let mut max_val = f32::NEG_INFINITY;
-                    for (idx, &val) in last_logits.iter().enumerate() {
-                        if val > max_val {
-                            max_val = val;
-                            max_idx = idx;
-                        }
-                    }
-                    max_idx as u32
-                },
-                _ => {
-                    return Err(tensor_op_error(
-                        "tensor_operation",
-                        "Unsupported tensor type".to_string(),
-                    ))
-                },
-            };
+            let next_token = argmax_token(&last_token_logits(&logits)?)?;
 
             generated.push(next_token);
 
@@ -886,82 +979,10 @@ impl Gpt2LMHeadModel {
             // Apply LM head
             let logits = self.lm_head.forward(hidden_states)?;
 
-            // Debug: Check which match arm will be taken
-            match &logits {
-                Tensor::F32(_) => {},
-                #[cfg(all(target_os = "macos", feature = "metal"))]
-                Tensor::Metal(_) => {},
-                _ => {},
-            }
-
             is_first_iteration = false;
 
             // Get logits for the last token
-            let next_token = match &logits {
-                Tensor::F32(arr) => {
-                    let shape = arr.shape();
-                    if shape.len() != 3 {
-                        return Err(tensor_op_error(
-                            "tensor_operation",
-                            "Unsupported tensor type".to_string(),
-                        ));
-                    }
-                    let seq_len = shape[1];
-                    let last_logits = arr.slice(s![0, seq_len - 1, ..]);
-
-                    // Find argmax
-                    let mut max_idx = 0;
-                    let mut max_val = f32::NEG_INFINITY;
-                    for (idx, &val) in last_logits.iter().enumerate() {
-                        if val > max_val {
-                            max_val = val;
-                            max_idx = idx;
-                        }
-                    }
-                    max_idx as u32
-                },
-                #[cfg(all(target_os = "macos", feature = "metal"))]
-                Tensor::Metal(metal_data) => {
-                    use trustformers_core::gpu_ops::metal::get_metal_backend;
-
-                    // Download logits from GPU to CPU
-                    let backend = get_metal_backend()?;
-                    let data = backend.download_buffer_to_vec(&metal_data.buffer_id())?;
-
-                    // Shape should be [batch, seq_len, vocab_size]
-                    if metal_data.shape.len() != 3 {
-                        return Err(tensor_op_error(
-                            "tensor_operation",
-                            format!("Expected 3D logits, got shape: {:?}", metal_data.shape),
-                        ));
-                    }
-
-                    let _batch_size = metal_data.shape[0];
-                    let seq_len = metal_data.shape[1];
-                    let vocab_size = metal_data.shape[2];
-
-                    // Get logits for last token: offset = (batch=0, seq_len-1, vocab=0)
-                    let offset = (seq_len - 1) * vocab_size;
-                    let last_logits = &data[offset..offset + vocab_size];
-
-                    // Find argmax
-                    let mut max_idx = 0;
-                    let mut max_val = f32::NEG_INFINITY;
-                    for (idx, &val) in last_logits.iter().enumerate() {
-                        if val > max_val {
-                            max_val = val;
-                            max_idx = idx;
-                        }
-                    }
-                    max_idx as u32
-                },
-                _ => {
-                    return Err(tensor_op_error(
-                        "tensor_operation",
-                        "Unsupported tensor type".to_string(),
-                    ))
-                },
-            };
+            let next_token = argmax_token(&last_token_logits(&logits)?)?;
 
             generated.push(next_token);
 
@@ -1007,39 +1028,7 @@ impl Gpt2LMHeadModel {
 
                 // Get logits for the last token
                 let logits = output.logits;
-                let last_logits = match &logits {
-                    Tensor::F32(arr) => {
-                        let shape = arr.shape();
-                        if shape.len() != 3 {
-                            return Err(tensor_op_error(
-                                "tensor_operation",
-                                "Expected 3D logits tensor",
-                            ));
-                        }
-                        let seq_len = shape[1];
-                        {
-                            let shape = arr.shape();
-                            let vocab_size = shape[2];
-                            let slice = arr.slice(s![0, seq_len - 1, ..]);
-                            ArrayD::from_shape_vec(
-                                IxDyn(&[vocab_size]),
-                                slice.iter().cloned().collect(),
-                            )
-                            .map_err(|e| {
-                                tensor_op_error(
-                                    "from_shape_vec",
-                                    format!("Failed to create array from shape: {}", e),
-                                )
-                            })?
-                        }
-                    },
-                    _ => {
-                        return Err(tensor_op_error(
-                            "tensor_operation",
-                            "Unsupported tensor type".to_string(),
-                        ))
-                    },
-                };
+                let last_logits = last_token_logits_array(&logits)?;
 
                 // Convert to log probabilities
                 let log_probs = log_softmax(last_logits)?;
@@ -1395,5 +1384,72 @@ mod tests {
         let input = TokenizedInput::new(vec![1, 2, 3], vec![1, 1, 1]);
         let result = model.forward(input);
         assert!(result.is_ok());
+    }
+
+    /// An empty cache slot contributes no positions.
+    #[test]
+    fn cached_seq_len_of_an_empty_slot_is_zero() {
+        assert_eq!(Gpt2Model::cached_seq_len(&None).expect("empty slot"), 0);
+    }
+
+    /// The host cache is `[batch, kv_seq_len, hidden_size]`, so the sequence length is
+    /// axis 1 - and it must be read as the sequence length, not as anything else that
+    /// happens to sit on a neighbouring axis.
+    #[test]
+    fn cached_seq_len_reads_axis_one_of_a_host_cache() {
+        let key = Tensor::F32(ArrayD::zeros(IxDyn(&[1, 5, 32])));
+        assert_eq!(
+            Gpt2Model::cached_seq_len(&Some(key)).expect("host cache"),
+            5
+        );
+    }
+
+    /// A cache tensor whose rank does not match any layout this model writes is a
+    /// structured error, not a guess: silently picking an axis is how the Metal path
+    /// ended up using `n_head` as its positional offset.
+    #[test]
+    fn cached_seq_len_refuses_an_unknown_host_layout() {
+        for shape in [vec![5usize, 32], vec![1, 4, 5, 8]] {
+            let key = Tensor::F32(ArrayD::zeros(IxDyn(&shape)));
+            let err = Gpt2Model::cached_seq_len(&Some(key))
+                .expect_err("a non-3-D host cache must be refused");
+            let message = err.to_string();
+            assert!(
+                message.contains("unexpected layout"),
+                "error should name the layout problem, got: {message}"
+            );
+        }
+    }
+
+    /// The Metal cache is heads-major `[batch, n_head, kv_seq_len, head_dim]`, so the
+    /// sequence length is axis 2. Choosing axis 1 there yields `n_head`, which made
+    /// every decode step after the first re-use one positional embedding.
+    #[test]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    fn cached_seq_len_reads_axis_two_of_a_metal_cache() {
+        use trustformers_core::device::Device;
+        use trustformers_core::gpu_ops::metal::get_metal_backend;
+
+        if !matches!(Device::metal_if_available(0), Device::Metal(_))
+            || get_metal_backend().is_err()
+        {
+            eprintln!("cached_seq_len_reads_axis_two_of_a_metal_cache: no Metal device, skipping");
+            return;
+        }
+        // n_head (3) and kv_seq_len (7) deliberately differ, so reading the wrong axis
+        // cannot accidentally give the right answer.
+        let (n_head, kv_seq_len, head_dim) = (3usize, 7usize, 4usize);
+        let host = Tensor::F32(ArrayD::zeros(IxDyn(&[1, n_head, kv_seq_len, head_dim])));
+        let resident = host
+            .to_device_enum(&Device::Metal(0))
+            .expect("upload a heads-major cache tensor");
+        assert!(
+            matches!(resident, Tensor::Metal(_)),
+            "the tensor must be GPU-resident"
+        );
+        assert_eq!(
+            Gpt2Model::cached_seq_len(&Some(resident)).expect("metal cache"),
+            kv_seq_len as u32
+        );
     }
 }

@@ -76,8 +76,8 @@ mod tests {
     }
 
     #[test]
-    fn test_analyzer_new_stub() {
-        let analyzer = KernelOptimizationAnalyzer::new_stub();
+    fn test_analyzer_new_empty() {
+        let analyzer = KernelOptimizationAnalyzer::new_empty();
         let dbg = format!("{:?}", analyzer);
         assert!(!dbg.is_empty());
     }

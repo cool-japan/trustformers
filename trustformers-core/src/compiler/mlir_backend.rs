@@ -1,19 +1,34 @@
 /*!
 # MLIR Backend Module
 
-This module provides MLIR (Multi-Level Intermediate Representation) backend support for
-advanced compiler optimizations including:
+This module drives the external [`mlir-opt`](https://mlir.llvm.org/) command-line tool
+as a subprocess to apply MLIR (Multi-Level Intermediate Representation) optimizations:
 
-- **MLIR Integration**: Interface with MLIR for advanced optimizations
-- **Dialect Support**: Support for Tensor, Standard, and custom dialects
-- **Pass Pipeline**: Configurable optimization pass pipeline
-- **Target Lowering**: Lowering to different hardware targets
+- **MLIR Integration**: Shells out to a real `mlir-opt` binary for optimization/lowering/
+  validation/version queries. No MLIR toolchain is vendored or linked into this crate —
+  `mlir-opt` is a separate C++ program this crate never builds.
+- **Dialect Support**: Emits Tensor/Linalg/Arith/TOSA and a custom `ml.*` dialect as MLIR
+  text; [`DialectRegistry`] documents which operations this crate knows how to emit.
+- **Pass Pipeline**: Configurable optimization pass pipeline ([`MlirPassPipeline`]).
+- **Target Lowering**: Lowering to different hardware targets via `mlir-opt` passes.
 
-MLIR enables advanced optimizations like:
-- Loop transformations and tiling
-- Data layout optimization
-- Hardware-specific optimizations
-- Automatic parallelization
+## Honesty contract
+`mlir-opt` is usually **not installed** — this backend is opt-in
+(`CompilerConfig::enable_mlir`, default `false`) and experimental. [`MlirBackend::new`]
+therefore does not silently pretend to compile anything when no binary can be found: it
+returns a structured [`TrustformersError`] naming `mlir-opt`, the paths that were searched,
+and how to point at a custom build (the `TRUSTFORMERS_MLIR_OPT_PATH` environment variable).
+A caller who wants to exercise the pass-pipeline/cache-key plumbing without an MLIR
+toolchain installed must explicitly opt into [`MlirBackend::new_simulated`], whose output is
+a labeled, non-functional passthrough — never a value returned by `new`. [`MlirBackend::is_real`]
+tells a caller which mode a given instance is in. [`MlirBackend::validate_mlir`] and
+[`MlirBackend::get_mlir_version`] likewise never fabricate a semantic-validation result or a
+tool version; see their doc comments. [`MlirBackend::generate_stats`] only reports quantities
+this backend actually measures (pass names, wall-clock time, before/after byte counts);
+op/loop/memory-access counts are not computed by anything in this module and are `None`.
+
+Invoking `mlir-opt` when it is present is ordinary subprocess use (`std::process::Command`),
+not FFI — it does not link against MLIR/LLVM.
 */
 
 use crate::compiler::{CompilerConfig, IntermediateRepresentation};
@@ -24,29 +39,87 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tempfile::NamedTempFile;
 
-/// MLIR backend for advanced optimizations
+/// MLIR backend for advanced optimizations.
+///
+/// `mlir_opt_path` is `Some(path)` when a real `mlir-opt` binary was located and responds
+/// successfully to `--version` (a "real" backend, [`MlirBackend::is_real`] returns `true`);
+/// it is `None` only for an instance built via [`MlirBackend::new_simulated`], which is the
+/// sole, explicitly-named way to get a non-functional backend — [`MlirBackend::new`] never
+/// produces one silently.
 pub struct MlirBackend {
     config: CompilerConfig,
     cache: HashMap<String, Vec<u8>>,
-    mlir_opt_path: String,
+    mlir_opt_path: Option<String>,
     dialect_support: DialectSupport,
 }
 
 impl MlirBackend {
-    /// Create a new MLIR backend
+    /// Create a new MLIR backend backed by a real `mlir-opt` binary.
+    ///
+    /// Returns a structured error naming `mlir-opt` and the searched locations when no
+    /// working binary can be found, rather than silently falling back to a mock. See
+    /// [`MlirBackend::new_simulated`] for an explicit, labeled non-functional alternative.
     pub fn new(config: &CompilerConfig) -> Result<Self, TrustformersError> {
-        // Check if mlir-opt is available
-        let mlir_opt_path = Self::find_mlir_opt()?;
+        let mlir_opt_path = Self::find_mlir_opt().ok_or_else(Self::missing_binary_error)?;
 
         Ok(Self {
             config: config.clone(),
             cache: HashMap::new(),
-            mlir_opt_path,
+            mlir_opt_path: Some(mlir_opt_path),
             dialect_support: DialectSupport::default(),
         })
     }
 
-    /// Create MLIR backend with advanced features
+    /// Create an MLIR backend in explicit simulation mode: no `mlir-opt` binary is invoked,
+    /// and every "compiled"/"optimized" output is a clearly labeled passthrough of the input
+    /// MLIR text, never real machine code. Intended for exercising the pass-pipeline and
+    /// cache-key plumbing in this module without an MLIR toolchain installed (e.g. this
+    /// crate's own tests). `is_real()` returns `false` on the result. This constructor is the
+    /// *only* way to obtain a non-real `MlirBackend` — [`MlirBackend::new`] errors instead of
+    /// reaching this state on its own.
+    pub fn new_simulated(config: &CompilerConfig) -> Self {
+        Self {
+            config: config.clone(),
+            cache: HashMap::new(),
+            mlir_opt_path: None,
+            dialect_support: DialectSupport::default(),
+        }
+    }
+
+    /// `true` if this backend is driving a real `mlir-opt` binary; `false` if it was built via
+    /// [`MlirBackend::new_simulated`] and every compile/optimize/validate call below returns
+    /// clearly-labeled placeholder output instead of real results.
+    pub fn is_real(&self) -> bool {
+        self.mlir_opt_path.is_some()
+    }
+
+    /// Build the structured error `new()` returns when no `mlir-opt` binary is available.
+    fn missing_binary_error() -> TrustformersError {
+        let searched = Self::search_paths().join(", ");
+        let mut error = runtime_error(format!(
+            "MlirBackend requires the external `mlir-opt` binary, but none was found. \
+             Searched (in order): {searched}{}.",
+            match std::env::var("TRUSTFORMERS_MLIR_OPT_PATH") {
+                Ok(custom) => format!(
+                    ", and TRUSTFORMERS_MLIR_OPT_PATH={custom:?} (did not respond successfully to `--version`)"
+                ),
+                Err(_) => String::new(),
+            }
+        ))
+        .with_suggestion("Install an MLIR toolchain that provides `mlir-opt` and put it on PATH")
+        .with_suggestion(
+            "Or set the TRUSTFORMERS_MLIR_OPT_PATH environment variable to a working mlir-opt binary",
+        );
+        error = error.with_suggestion(
+            "Or call MlirBackend::new_simulated(&config) to exercise the pass-pipeline/cache-key \
+             logic without a real MLIR toolchain (its output is a labeled non-functional \
+             placeholder; MlirBackend::is_real() reports false)",
+        );
+        error
+    }
+
+    /// Create MLIR backend with advanced features, backed by a real `mlir-opt` binary. See
+    /// [`MlirBackend::new`] for the honesty contract this delegates to.
     pub fn new_with_features(
         config: &CompilerConfig,
         features: MlirAdvancedFeatures,
@@ -61,7 +134,11 @@ impl MlirBackend {
         Ok(backend)
     }
 
-    /// Compile with custom pass pipeline
+    /// Compile with custom pass pipeline.
+    ///
+    /// If this backend is in explicit simulation mode ([`Self::is_real`] is `false`), the
+    /// returned bytes are a labeled non-functional passthrough of the generated MLIR text, not
+    /// a real compiled artifact — check `is_real()` before treating the result as executable.
     pub fn compile_with_pipeline(
         &mut self,
         ir: IntermediateRepresentation,
@@ -199,14 +276,17 @@ impl MlirBackend {
         mlir_code: &str,
         pipeline: &MlirPassPipeline,
     ) -> Result<String, TrustformersError> {
-        if self.mlir_opt_path == "mock-mlir-opt" {
-            // Mock implementation
+        let Some(mlir_opt_path) = &self.mlir_opt_path else {
+            // Explicit simulation mode (MlirBackend::new_simulated): no mlir-opt was invoked,
+            // and this text is not actually optimized. The banner makes that unmistakable to
+            // anything printing or logging the result.
             return Ok(format!(
-                "// Optimized with custom pipeline: {}\n{}",
+                "// [trustformers simulated MLIR backend -- no mlir-opt binary; text \
+                 passthrough only, NOT optimized] pipeline: {}\n{}",
                 pipeline.to_pass_string(),
                 mlir_code
             ));
-        }
+        };
 
         // Create temporary file for MLIR code
         let mut temp_file = NamedTempFile::new()
@@ -217,7 +297,7 @@ impl MlirBackend {
             .map_err(|e| runtime_error(format!("Failed to write MLIR code: {}", e)))?;
 
         // Build command with custom pipeline
-        let mut cmd = Command::new(&self.mlir_opt_path);
+        let mut cmd = Command::new(mlir_opt_path);
         cmd.arg(temp_file.path());
 
         // Add pipeline passes
@@ -252,29 +332,52 @@ impl MlirBackend {
         Ok(())
     }
 
-    /// Find mlir-opt binary
-    fn find_mlir_opt() -> Result<String, TrustformersError> {
-        // Try common locations for mlir-opt
-        let possible_paths = [
+    /// Fixed candidate locations searched for `mlir-opt`, in order. Does not include the
+    /// `TRUSTFORMERS_MLIR_OPT_PATH` override, which is checked first by [`Self::find_mlir_opt`].
+    fn search_paths() -> Vec<&'static str> {
+        vec![
             "mlir-opt",
             "/usr/local/bin/mlir-opt",
             "/opt/mlir/bin/mlir-opt",
             "/usr/bin/mlir-opt",
-        ];
+        ]
+    }
 
-        for path in &possible_paths {
-            if let Ok(output) = Command::new(path).arg("--version").output() {
-                if output.status.success() {
-                    return Ok(path.to_string());
-                }
+    /// `true` if `path` runs and exits successfully on `--version`. This is a liveness probe,
+    /// not proof the binary is actually `mlir-opt` — same contract as the pre-existing check.
+    fn probe_binary(path: &str) -> bool {
+        Command::new(path)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Locate a working `mlir-opt` binary: the `TRUSTFORMERS_MLIR_OPT_PATH` environment
+    /// variable is tried first (letting a caller point at a non-standard build), then the
+    /// fixed candidate locations. Returns `None` — never a sentinel string — when nothing
+    /// responds successfully to `--version`.
+    fn find_mlir_opt() -> Option<String> {
+        if let Ok(custom) = std::env::var("TRUSTFORMERS_MLIR_OPT_PATH") {
+            if Self::probe_binary(&custom) {
+                return Some(custom);
             }
         }
 
-        // If not found, use a mock implementation
-        Ok("mock-mlir-opt".to_string())
+        for path in Self::search_paths() {
+            if Self::probe_binary(path) {
+                return Some(path.to_string());
+            }
+        }
+
+        None
     }
 
-    /// Compile IR using MLIR
+    /// Compile IR using MLIR.
+    ///
+    /// If this backend is in explicit simulation mode ([`Self::is_real`] is `false`), the
+    /// returned bytes are a labeled non-functional passthrough of the generated MLIR text, not
+    /// a real compiled artifact — check `is_real()` before treating the result as executable.
     pub fn compile_ir(
         &mut self,
         ir: IntermediateRepresentation,
@@ -384,10 +487,14 @@ impl MlirBackend {
 
     /// Apply MLIR optimization passes
     fn apply_mlir_passes(&self, mlir_code: &str) -> Result<String, TrustformersError> {
-        if self.mlir_opt_path == "mock-mlir-opt" {
-            // Mock implementation for testing
-            return Ok(format!("// Optimized with mock MLIR\n{}", mlir_code));
-        }
+        let Some(mlir_opt_path) = &self.mlir_opt_path else {
+            // Explicit simulation mode (MlirBackend::new_simulated) -- see apply_custom_pipeline.
+            return Ok(format!(
+                "// [trustformers simulated MLIR backend -- no mlir-opt binary; text \
+                 passthrough only, NOT optimized]\n{}",
+                mlir_code
+            ));
+        };
 
         // Create temporary file for MLIR code
         let mut temp_file = NamedTempFile::new()
@@ -401,7 +508,7 @@ impl MlirBackend {
         let passes = self.build_optimization_passes();
 
         // Run mlir-opt with passes
-        let mut cmd = Command::new(&self.mlir_opt_path);
+        let mut cmd = Command::new(mlir_opt_path);
         cmd.arg(temp_file.path());
 
         for pass in passes {
@@ -489,10 +596,13 @@ impl MlirBackend {
 
     /// Lower optimized MLIR to target code
     fn lower_to_target(&self, mlir_code: &str) -> Result<Vec<u8>, TrustformersError> {
-        if self.mlir_opt_path == "mock-mlir-opt" {
-            // Mock implementation - return serialized MLIR
+        let Some(mlir_opt_path) = &self.mlir_opt_path else {
+            // Explicit simulation mode (MlirBackend::new_simulated): there is no lowering to
+            // perform, so the "compiled artifact" is just the input MLIR text re-encoded as
+            // bytes -- not machine code. Callers must check is_real() before treating this as
+            // a real compilation result.
             return Ok(mlir_code.as_bytes().to_vec());
-        }
+        };
 
         // Create temporary file for optimized MLIR
         let mut temp_file = NamedTempFile::new()
@@ -503,7 +613,7 @@ impl MlirBackend {
             .map_err(|e| runtime_error(format!("Failed to write MLIR code: {}", e)))?;
 
         // Convert to LLVM IR
-        let mut cmd = Command::new(&self.mlir_opt_path);
+        let mut cmd = Command::new(mlir_opt_path);
         cmd.arg(temp_file.path())
             .arg("--convert-to-llvm")
             .stdout(Stdio::piped())
@@ -560,31 +670,54 @@ impl MlirBackend {
         &self.dialect_support
     }
 
-    /// Generate optimization statistics
+    /// Generate optimization statistics from a completed compilation.
+    ///
+    /// Only quantities this backend actually measures are populated: the pass names the
+    /// caller applied, elapsed wall-clock time, and the byte length of the MLIR text before
+    /// and after optimization (`code_before`/`code_after` are the actual strings/bytes that
+    /// went into and came out of [`Self::apply_mlir_passes`] or [`Self::apply_custom_pipeline`]
+    /// -- pass the real values, not placeholders). Fused-operation, loop, and
+    /// memory-access-optimization counts would require parsing and diffing MLIR IR structure,
+    /// which this module does not implement; those fields are `None` rather than a fabricated
+    /// number.
     pub fn generate_stats(
         &self,
         passes_applied: Vec<String>,
         start_time: std::time::Instant,
+        code_before: &str,
+        code_after: &[u8],
     ) -> MlirStats {
         let optimization_time_ms = start_time.elapsed().as_millis() as u64;
 
         MlirStats {
             passes_applied,
             optimization_time_ms,
-            code_size_before: 0, // Would be filled during actual compilation
-            code_size_after: 0,  // Would be filled during actual compilation
-            operations_fused: 0, // Would be extracted from MLIR analysis
-            loops_optimized: 0,  // Would be extracted from MLIR analysis
-            memory_accesses_optimized: 0, // Would be extracted from MLIR analysis
+            code_size_before: code_before.len(),
+            code_size_after: code_after.len(),
+            // Not computed: would need structural MLIR analysis this module does not
+            // implement. `None` means "not measured", never a fabricated value.
+            operations_fused: None,
+            loops_optimized: None,
+            memory_accesses_optimized: None,
         }
     }
 
-    /// Validate MLIR code
-    pub fn validate_mlir(&self, mlir_code: &str) -> Result<bool, TrustformersError> {
-        if self.mlir_opt_path == "mock-mlir-opt" {
-            // Mock validation - check basic syntax
-            return Ok(mlir_code.contains("module") && mlir_code.contains("}"));
-        }
+    /// Validate MLIR code.
+    ///
+    /// When `is_real()` is `true`, this runs `mlir-opt --verify-diagnostics` and reports full
+    /// semantic validation. When the backend is in explicit simulation mode
+    /// ([`Self::new_simulated`]), there is no semantic validator to call, so this performs a
+    /// real (not fabricated) structural sanity check instead -- non-empty, contains the
+    /// `module` keyword, and balanced `{}` -- and labels the result as
+    /// [`MlirValidationKind::Structural`] so a caller cannot mistake it for semantic
+    /// validation. Never silently returns one kind while claiming the other.
+    pub fn validate_mlir(&self, mlir_code: &str) -> Result<MlirValidation, TrustformersError> {
+        let Some(mlir_opt_path) = &self.mlir_opt_path else {
+            return Ok(MlirValidation {
+                valid: Self::structural_check(mlir_code),
+                kind: MlirValidationKind::Structural,
+            });
+        };
 
         // Use mlir-opt to validate
         let mut temp_file = NamedTempFile::new()
@@ -594,22 +727,60 @@ impl MlirBackend {
             .write_all(mlir_code.as_bytes())
             .map_err(|e| runtime_error(format!("Failed to write MLIR code: {}", e)))?;
 
-        let output = Command::new(&self.mlir_opt_path)
+        let output = Command::new(mlir_opt_path)
             .arg(temp_file.path())
             .arg("--verify-diagnostics")
             .output()
             .map_err(|e| runtime_error(format!("Failed to validate MLIR: {}", e)))?;
 
-        Ok(output.status.success())
+        Ok(MlirValidation {
+            valid: output.status.success(),
+            kind: MlirValidationKind::Semantic,
+        })
     }
 
-    /// Get MLIR version information
-    pub fn get_mlir_version(&self) -> Result<String, TrustformersError> {
-        if self.mlir_opt_path == "mock-mlir-opt" {
-            return Ok("mock-1.0.0".to_string());
+    /// Real structural sanity check used only when no `mlir-opt` binary is available: the text
+    /// is non-empty, mentions the `module` keyword, and has balanced `{`/`}`. This is a
+    /// genuine (if shallow) check on the actual text -- not a fabricated constant -- but it
+    /// cannot catch type errors, dialect misuse, or malformed operations the way
+    /// `mlir-opt --verify-diagnostics` does.
+    fn structural_check(mlir_code: &str) -> bool {
+        if mlir_code.trim().is_empty() || !mlir_code.contains("module") {
+            return false;
         }
 
-        let output = Command::new(&self.mlir_opt_path)
+        let mut depth: i64 = 0;
+        for ch in mlir_code.chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return false;
+                    }
+                },
+                _ => {},
+            }
+        }
+
+        depth == 0
+    }
+
+    /// Get MLIR toolchain version information.
+    ///
+    /// Requires a real `mlir-opt` binary: there is no meaningful version to report for the
+    /// explicit simulation backend ([`Self::new_simulated`]), so this returns a structured
+    /// error there instead of a fabricated version string.
+    pub fn get_mlir_version(&self) -> Result<String, TrustformersError> {
+        let Some(mlir_opt_path) = &self.mlir_opt_path else {
+            return Err(runtime_error(
+                "MlirBackend is in explicit simulation mode (MlirBackend::new_simulated): there \
+                 is no real mlir-opt toolchain to report a version for. Use MlirBackend::new() \
+                 with a real mlir-opt binary on PATH or TRUSTFORMERS_MLIR_OPT_PATH instead.",
+            ));
+        };
+
+        let output = Command::new(mlir_opt_path)
             .arg("--version")
             .output()
             .map_err(|e| runtime_error(format!("Failed to get MLIR version: {}", e)))?;
@@ -652,16 +823,42 @@ impl Default for DialectSupport {
     }
 }
 
-/// MLIR optimization statistics
+/// MLIR optimization statistics. See [`MlirBackend::generate_stats`] for which fields are
+/// genuinely measured versus `None` because this module does not compute them.
 #[derive(Debug, Clone)]
 pub struct MlirStats {
     pub passes_applied: Vec<String>,
     pub optimization_time_ms: u64,
+    /// Byte length of the MLIR text before optimization.
     pub code_size_before: usize,
+    /// Byte length of the (real or simulated) optimized artifact.
     pub code_size_after: usize,
-    pub operations_fused: usize,
-    pub loops_optimized: usize,
-    pub memory_accesses_optimized: usize,
+    /// Not computed by this backend (would require MLIR IR structural analysis).
+    pub operations_fused: Option<usize>,
+    /// Not computed by this backend (would require MLIR IR structural analysis).
+    pub loops_optimized: Option<usize>,
+    /// Not computed by this backend (would require MLIR IR structural analysis).
+    pub memory_accesses_optimized: Option<usize>,
+}
+
+/// Which kind of check produced an [`MlirValidation`] result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MlirValidationKind {
+    /// Full semantic validation performed by the real `mlir-opt --verify-diagnostics`.
+    Semantic,
+    /// Structural-only sanity check (non-empty, `module` keyword present, balanced braces).
+    /// This is NOT semantic validation: it cannot catch type errors, dialect misuse, or
+    /// malformed operations. Only produced when no `mlir-opt` binary is available
+    /// (`MlirBackend::is_real() == false`).
+    Structural,
+}
+
+/// Outcome of [`MlirBackend::validate_mlir`], labeled with which kind of check ran so a
+/// caller can never mistake a structural sanity check for full semantic validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MlirValidation {
+    pub valid: bool,
+    pub kind: MlirValidationKind,
 }
 
 /// Advanced MLIR features for ML workloads
@@ -1040,11 +1237,135 @@ mod tests {
     use super::*;
     use crate::compiler::CompilerConfig;
 
+    /// `MlirBackend::new` must be honest about a missing `mlir-opt`, not silently mock it: on
+    /// a machine without a real binary it returns a structured error naming `mlir-opt` and how
+    /// to point at one; on a machine that happens to have one, it must genuinely be "real".
+    /// Written to pass either way so it tests the actual contract instead of assuming this
+    /// machine's toolchain state.
     #[test]
-    fn test_mlir_backend_creation() {
+    fn test_mlir_backend_creation_is_honest_about_missing_binary() {
+        std::env::remove_var("TRUSTFORMERS_MLIR_OPT_PATH");
+        let config = CompilerConfig::default();
+        match MlirBackend::new(&config) {
+            Ok(backend) => assert!(backend.is_real(), "a constructed backend must be real"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("mlir-opt"),
+                    "error must name the missing binary: {msg}"
+                );
+                assert!(
+                    msg.contains("TRUSTFORMERS_MLIR_OPT_PATH"),
+                    "error must say how to point at a custom binary: {msg}"
+                );
+            },
+        }
+    }
+
+    #[test]
+    fn test_new_simulated_is_explicit_and_labeled_not_real() {
+        let config = CompilerConfig::default();
+        let backend = MlirBackend::new_simulated(&config);
+        assert!(!backend.is_real());
+    }
+
+    /// Point the override env var at a program that always exits 0 on `--version` (a
+    /// stand-in for a real mlir-opt build in a non-standard location) and verify
+    /// `MlirBackend::new` actually uses it rather than falling back silently.
+    #[test]
+    fn test_mlir_opt_path_env_override_is_used() {
+        std::env::set_var("TRUSTFORMERS_MLIR_OPT_PATH", "echo");
         let config = CompilerConfig::default();
         let result = MlirBackend::new(&config);
-        assert!(result.is_ok());
+        std::env::remove_var("TRUSTFORMERS_MLIR_OPT_PATH");
+        let backend = result.expect("echo always exits 0, so --version probing must succeed");
+        assert!(backend.is_real());
+    }
+
+    /// Simulated-mode `apply_mlir_passes`/`apply_custom_pipeline`/`lower_to_target` must be
+    /// unmistakably labeled as non-functional output, never presented as real compilation.
+    #[test]
+    fn test_simulated_backend_output_is_labeled() {
+        let config = CompilerConfig::default();
+        let backend = MlirBackend::new_simulated(&config);
+        let mlir_code = "module {\n  %0 = arith.addf %input0, %input1 : tensor<*xf32>\n}\n";
+
+        let optimized = backend.apply_mlir_passes(mlir_code).expect("simulated apply_mlir_passes");
+        assert!(optimized.contains("simulated"));
+        assert!(optimized.contains(mlir_code));
+
+        let target = backend.lower_to_target(&optimized).expect("simulated lower_to_target");
+        assert_eq!(target, optimized.as_bytes());
+    }
+
+    /// In simulated mode, `validate_mlir` performs a real structural check (not a fabricated
+    /// constant) and labels it as `Structural` rather than pretending to be semantic.
+    #[test]
+    fn test_simulated_validate_mlir_is_real_structural_check() {
+        let config = CompilerConfig::default();
+        let backend = MlirBackend::new_simulated(&config);
+
+        let balanced = backend
+            .validate_mlir("module {\n  %0 = arith.addf %a, %b : f32\n}\n")
+            .expect("validate_mlir");
+        assert!(balanced.valid);
+        assert_eq!(balanced.kind, MlirValidationKind::Structural);
+
+        let unbalanced = backend
+            .validate_mlir("module { %0 = arith.addf %a, %b : f32")
+            .expect("validate_mlir");
+        assert!(
+            !unbalanced.valid,
+            "unbalanced braces must fail the structural check"
+        );
+        assert_eq!(unbalanced.kind, MlirValidationKind::Structural);
+
+        let no_module_keyword = backend.validate_mlir("{ }").expect("validate_mlir");
+        assert!(
+            !no_module_keyword.valid,
+            "missing `module` keyword must fail"
+        );
+
+        let empty = backend.validate_mlir("").expect("validate_mlir");
+        assert!(!empty.valid);
+    }
+
+    /// There is no real MLIR toolchain behind a simulated backend, so `get_mlir_version` must
+    /// error rather than fabricate a version string.
+    #[test]
+    fn test_simulated_get_mlir_version_errors_instead_of_fabricating() {
+        let config = CompilerConfig::default();
+        let backend = MlirBackend::new_simulated(&config);
+        let error = backend.get_mlir_version().expect_err("simulated backend has no real version");
+        assert!(error.to_string().contains("simulation"));
+    }
+
+    /// `generate_stats` must report the real byte sizes of what was actually passed in/out,
+    /// and must not fabricate the fields it cannot compute.
+    #[test]
+    fn test_generate_stats_reports_real_byte_sizes_and_options_the_rest() {
+        let config = CompilerConfig::default();
+        let backend = MlirBackend::new_simulated(&config);
+        let before = "module {\n  %0 = arith.addf %a, %b : f32\n}\n";
+        let after = backend.apply_mlir_passes(before).expect("simulated apply_mlir_passes");
+        let start = std::time::Instant::now();
+
+        let stats = backend.generate_stats(
+            vec!["canonicalize".to_string()],
+            start,
+            before,
+            after.as_bytes(),
+        );
+
+        assert_eq!(stats.code_size_before, before.len());
+        assert_eq!(stats.code_size_after, after.len());
+        assert_ne!(
+            stats.code_size_before, stats.code_size_after,
+            "the simulated banner changes the byte size, so these must differ for this input"
+        );
+        assert_eq!(stats.operations_fused, None);
+        assert_eq!(stats.loops_optimized, None);
+        assert_eq!(stats.memory_accesses_optimized, None);
     }
 
     #[test]
@@ -1058,8 +1379,11 @@ mod tests {
 
     #[test]
     fn test_pass_building() {
+        // build_optimization_passes only reads config, not the mlir-opt binary; use the
+        // always-available simulated constructor so this test does not depend on whether
+        // this machine has a real MLIR toolchain installed.
         let config = CompilerConfig::default();
-        let backend = MlirBackend::new(&config).expect("operation failed in test");
+        let backend = MlirBackend::new_simulated(&config);
         let passes = backend.build_optimization_passes();
         assert!(!passes.is_empty());
         assert!(passes.contains(&"canonicalize".to_string()));
@@ -1068,7 +1392,7 @@ mod tests {
     #[test]
     fn test_cache_key_generation() {
         let config = CompilerConfig::default();
-        let backend = MlirBackend::new(&config).expect("operation failed in test");
+        let backend = MlirBackend::new_simulated(&config);
         let ir = IntermediateRepresentation::new();
         let key = backend.generate_cache_key(&ir);
         assert!(key.is_ok());
@@ -1249,21 +1573,24 @@ mod tests {
 
     #[test]
     fn test_mlir_stats() {
+        // operations_fused/loops_optimized/memory_accesses_optimized are Option<usize>
+        // because this backend does not compute them (see MlirBackend::generate_stats) --
+        // None here represents "not measured", not zero.
         let stats = MlirStats {
             passes_applied: vec!["canonicalize".to_string(), "cse".to_string()],
             optimization_time_ms: 150,
             code_size_before: 1000,
             code_size_after: 800,
-            operations_fused: 5,
-            loops_optimized: 3,
-            memory_accesses_optimized: 12,
+            operations_fused: None,
+            loops_optimized: None,
+            memory_accesses_optimized: None,
         };
 
         assert_eq!(stats.passes_applied.len(), 2);
         assert_eq!(stats.optimization_time_ms, 150);
-        assert_eq!(stats.operations_fused, 5);
-        assert_eq!(stats.loops_optimized, 3);
-        assert_eq!(stats.memory_accesses_optimized, 12);
+        assert_eq!(stats.operations_fused, None);
+        assert_eq!(stats.loops_optimized, None);
+        assert_eq!(stats.memory_accesses_optimized, None);
 
         // Test compression ratio
         let compression_ratio = stats.code_size_after as f32 / stats.code_size_before as f32;

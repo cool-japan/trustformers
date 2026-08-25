@@ -134,6 +134,7 @@ fn test_gpt2_beam_search() {
 #[cfg(all(target_os = "macos", feature = "metal"))]
 fn test_gpt2_metal_sampling() {
     use crate::gpt2::generation::GenerativeModel;
+    use crate::gpt2::model::metal_attention_call_count;
     use std::time::Instant;
     use trustformers_core::Device;
 
@@ -149,16 +150,21 @@ fn test_gpt2_metal_sampling() {
 
     // Test Metal device availability
     let device = Device::metal_if_available(0);
-    println!("Using device: {:?}", device);
 
     // Skip test if Metal is not available
     if !matches!(device, Device::Metal(_)) {
-        println!("Metal not available, skipping test");
+        eprintln!("test_gpt2_metal_sampling: no Metal device on this machine, skipping");
         return;
     }
 
-    // Create model with device
-    let model = Gpt2LMHeadModel::new_with_device(config.clone(), device).expect("operation failed");
+    // Build on the CPU and then MOVE THE WEIGHTS. `new_with_device(_, Metal)` alone
+    // leaves every weight in host memory and computes the whole forward pass in
+    // ndarray, so a test written that way is a CPU test wearing a Metal name - which
+    // is exactly what this one used to be.
+    let mut model =
+        Gpt2LMHeadModel::new_with_device(config.clone(), Device::CPU).expect("operation failed");
+    let calls_before = metal_attention_call_count();
+    model.weights_to_gpu(&device).expect("weights_to_gpu");
 
     // Test input - use smaller values
     let input_ids = vec![1, 2];
@@ -173,20 +179,28 @@ fn test_gpt2_metal_sampling() {
         .expect("operation failed");
     let elapsed = start.elapsed();
 
+    let gpu_attention_calls = metal_attention_call_count() - calls_before;
     println!(
-        "Generated {} tokens in {:?}",
+        "Generated {} tokens in {:?} ({} GPU attention dispatches)",
         generated.len() - input_ids.len(),
-        elapsed
+        elapsed,
+        gpu_attention_calls
     );
-    println!(
-        "Tokens/sec: {:.2}",
-        (generated.len() - input_ids.len()) as f64 / elapsed.as_secs_f64()
+
+    // The point of the test: the GPU really ran.
+    assert!(
+        gpu_attention_calls > 0,
+        "no Metal attention dispatch happened - this test would be measuring CPU math"
     );
 
     // Verify output
     assert!(generated.len() >= input_ids.len());
     assert!(generated.len() <= max_length);
     assert_eq!(&generated[..2], &input_ids[..]);
+    assert!(
+        generated.iter().all(|t| (*t as usize) < config.vocab_size),
+        "sampling produced an out-of-vocabulary token"
+    );
 
     // Explicit cleanup
     drop(generated);
@@ -194,10 +208,19 @@ fn test_gpt2_metal_sampling() {
     std::hint::black_box(());
 }
 
+/// CPU vs GPU on identical weights: same tokens, and both sides really ran where they
+/// claim to.
+///
+/// This used to be `test_gpt2_metal_vs_cpu_performance` and compared a CPU model
+/// against a second model that had merely been *constructed* with `Device::Metal(0)`,
+/// so both halves executed the same ndarray kernels and the reported "speedup" was
+/// CPU-vs-CPU timing noise. Wall-clock numbers are printed for information but are
+/// not asserted on: a 1-layer, 32-wide model is dominated by dispatch overhead, and a
+/// timing assertion there would be a coin flip, not a measurement.
 #[test]
 #[cfg(all(target_os = "macos", feature = "metal"))]
-fn test_gpt2_metal_vs_cpu_performance() {
-    use crate::gpt2::generation::GenerativeModel;
+fn test_gpt2_metal_matches_cpu_on_identical_weights() {
+    use crate::gpt2::model::metal_attention_call_count;
     use std::time::Instant;
     use trustformers_core::Device;
 
@@ -213,66 +236,63 @@ fn test_gpt2_metal_vs_cpu_performance() {
 
     let input_ids = vec![1, 2, 3];
     let max_length = 8; // Reduce from 25
-    let k = 5; // Reduce from 20
-    let temperature = 1.0;
 
-    // CPU benchmark
-    println!("\n=== CPU Benchmark ===");
-    let cpu_model =
+    let device = Device::metal_if_available(0);
+    if !matches!(device, Device::Metal(_)) {
+        eprintln!(
+            "test_gpt2_metal_matches_cpu_on_identical_weights: no Metal device on this \
+             machine, skipping"
+        );
+        return;
+    }
+
+    // ONE model, two devices: the GPU run must reproduce the CPU run bit-for-bit in
+    // token space (greedy decoding is deterministic), which is only a meaningful
+    // claim because the weights are literally the same tensors moved across.
+    let mut model =
         Gpt2LMHeadModel::new_with_device(config.clone(), Device::CPU).expect("operation failed");
+
     let cpu_start = Instant::now();
-    let cpu_generated = cpu_model
-        .generate_top_k(input_ids.clone(), max_length, k, temperature)
-        .expect("operation failed");
+    let cpu_generated =
+        model.generate_greedy(input_ids.clone(), max_length).expect("operation failed");
     let cpu_elapsed = cpu_start.elapsed();
     let cpu_tokens = cpu_generated.len() - input_ids.len();
-    let cpu_tok_per_sec = cpu_tokens as f64 / cpu_elapsed.as_secs_f64();
+    println!("CPU: generated {} tokens in {:?}", cpu_tokens, cpu_elapsed);
 
-    println!("CPU: Generated {} tokens in {:?}", cpu_tokens, cpu_elapsed);
-    println!("CPU: {:.2} tokens/sec", cpu_tok_per_sec);
+    let calls_before = metal_attention_call_count();
+    model.weights_to_gpu(&device).expect("weights_to_gpu");
 
-    // Explicit cleanup for CPU model
+    let metal_start = Instant::now();
+    let metal_generated =
+        model.generate_greedy(input_ids.clone(), max_length).expect("operation failed");
+    let metal_elapsed = metal_start.elapsed();
+    let metal_tokens = metal_generated.len() - input_ids.len();
+    let gpu_attention_calls = metal_attention_call_count() - calls_before;
+    println!(
+        "Metal: generated {} tokens in {:?} ({} GPU attention dispatches)",
+        metal_tokens, metal_elapsed, gpu_attention_calls
+    );
+
+    assert!(
+        gpu_attention_calls > 0,
+        "no Metal attention dispatch happened - the 'Metal' half ran on the CPU"
+    );
+    assert!(metal_tokens > 0);
+    assert_eq!(
+        metal_tokens, cpu_tokens,
+        "the two devices generated different lengths"
+    );
+    assert_eq!(
+        metal_generated, cpu_generated,
+        "greedy decoding is deterministic, so identical weights must give identical \
+         tokens on both devices"
+    );
+
+    // Explicit cleanup
+    drop(metal_generated);
     drop(cpu_generated);
-    drop(cpu_model);
+    drop(model);
     std::hint::black_box(());
-
-    // Metal benchmark (if available)
-    let device = Device::metal_if_available(0);
-    if matches!(device, Device::Metal(_)) {
-        println!("\n=== Metal GPU Benchmark ===");
-        let metal_model =
-            Gpt2LMHeadModel::new_with_device(config.clone(), device).expect("operation failed");
-        let metal_start = Instant::now();
-        let metal_generated = metal_model
-            .generate_top_k(input_ids.clone(), max_length, k, temperature)
-            .expect("operation failed");
-        let metal_elapsed = metal_start.elapsed();
-        let metal_tokens = metal_generated.len() - input_ids.len();
-        let metal_tok_per_sec = metal_tokens as f64 / metal_elapsed.as_secs_f64();
-
-        println!(
-            "Metal: Generated {} tokens in {:?}",
-            metal_tokens, metal_elapsed
-        );
-        println!("Metal: {:.2} tokens/sec", metal_tok_per_sec);
-
-        // Calculate speedup
-        let speedup = metal_tok_per_sec / cpu_tok_per_sec;
-        println!("\n=== Results ===");
-        println!("Speedup: {:.2}x", speedup);
-
-        // Metal should be at least as fast as CPU (in practice, much faster)
-        // Note: For small models, overhead may dominate, so we just check it runs
-        assert!(metal_tokens > 0);
-        assert_eq!(metal_tokens, cpu_tokens); // Should generate same number of tokens
-
-        // Explicit cleanup for Metal model
-        drop(metal_generated);
-        drop(metal_model);
-        std::hint::black_box(());
-    } else {
-        println!("\nMetal not available, skipping Metal benchmark");
-    }
 }
 
 // ── Contrastive search ───────────────────────────────────────────────────────
@@ -655,4 +675,124 @@ mod weight_loading {
             "unexpected error: {err}"
         );
     }
+}
+
+// ── KV-cache continuation with more than one new token ───────────────────────
+
+/// Feeding a *chunk* of new tokens to a warm KV cache must give the same answer as
+/// one uncached forward over the whole sequence.
+///
+/// This used to abort the process: `Gpt2Attention::forward_with_cache` added the
+/// caller's `create_causal_mask(seq_len)` (shaped `[1, 1, new, new]`) straight into a
+/// `[batch, heads, new, cached + new]` score matrix, and `ndarray` panicked with
+/// "could not broadcast array from shape [1, 1, 2, 2] to [1, 2, 2, 5]". No test
+/// covered a multi-token continuation, because the greedy generators only ever feed
+/// one token at a time after the prompt.
+#[test]
+fn gpt2_multi_token_cache_continuation_matches_uncached_forward() {
+    use crate::gpt2::model::KVCache;
+
+    let config = Gpt2Config {
+        vocab_size: 50,
+        n_positions: 32,
+        n_embd: 32,
+        n_layer: 2,
+        n_head: 2,
+        ..Default::default()
+    };
+    let model = Gpt2LMHeadModel::new(config.clone()).expect("model creation should succeed");
+
+    let prompt = vec![1u32, 2, 3];
+    let continuation = vec![4u32, 5];
+    let whole: Vec<u32> = prompt.iter().chain(continuation.iter()).copied().collect();
+
+    let mut cache = Some(KVCache::new(config.n_layer));
+    model
+        .forward_with_cache(tokenized_input(prompt.clone()), &mut cache)
+        .expect("prefill through the cache");
+    let chunked = model
+        .forward_with_cache(tokenized_input(continuation), &mut cache)
+        .expect("multi-token continuation through the cache");
+
+    let reference = model.forward(tokenized_input(whole)).expect("uncached forward");
+
+    // Compare EVERY row of the chunk: the last query row of a chunk sits at the end of
+    // the key sequence, so causal and non-causal attention agree there and it cannot
+    // see a within-chunk masking bug at all.
+    let chunked_rows = logits_rows(&chunked.logits);
+    let reference_rows = logits_rows(&reference.logits);
+    assert_eq!(
+        chunked_rows.len(),
+        2,
+        "the continuation must return one row per new token"
+    );
+    assert_eq!(chunked_rows[0].len(), config.vocab_size);
+    let magnitude = reference_rows.iter().flatten().map(|v| v.abs()).fold(0.0_f32, f32::max);
+    assert!(
+        magnitude > 0.0,
+        "reference logits are all zero; nothing was computed"
+    );
+    for (offset, chunk_row) in chunked_rows.iter().enumerate() {
+        let reference_row = &reference_rows[reference_rows.len() - chunked_rows.len() + offset];
+        let deviation = chunk_row
+            .iter()
+            .zip(reference_row.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            deviation / magnitude < 1e-4,
+            "cached chunk row {offset} diverged from the uncached forward by {deviation} \
+             (max|reference| = {magnitude})"
+        );
+    }
+
+    // Weight-independent causality check: row 0 of the chunk is at absolute position 3,
+    // so the token at position 4 is strictly in its future and replacing it must leave
+    // that row bit-identical.
+    let causal_row = |last_token: u32| -> Vec<f32> {
+        let mut probe_cache = Some(KVCache::new(config.n_layer));
+        model
+            .forward_with_cache(tokenized_input(vec![1, 2, 3]), &mut probe_cache)
+            .expect("prefill through the cache");
+        let out = model
+            .forward_with_cache(tokenized_input(vec![4, last_token]), &mut probe_cache)
+            .expect("continuation through the cache");
+        logits_rows(&out.logits).swap_remove(0)
+    };
+    assert_eq!(
+        causal_row(5),
+        causal_row(9),
+        "row 0 of the chunk changed when a strictly later token changed: the chunk is \
+         attending to its own future"
+    );
+}
+
+fn tokenized_input(ids: Vec<u32>) -> TokenizedInput {
+    let len = ids.len();
+    TokenizedInput {
+        input_ids: ids,
+        attention_mask: vec![1u8; len],
+        token_type_ids: None,
+        special_tokens_mask: None,
+        offset_mapping: None,
+        overflowing_tokens: None,
+    }
+}
+
+/// Rows of a `[batch, seq, vocab]` logits tensor (first batch element), as host floats.
+fn logits_rows(logits: &Tensor) -> Vec<Vec<f32>> {
+    let host = logits
+        .to_device_enum(&trustformers_core::device::Device::CPU)
+        .expect("logits must be readable on the host");
+    let shape = host.shape().to_vec();
+    assert_eq!(
+        shape.len(),
+        3,
+        "expected [batch, seq, vocab] logits, got {shape:?}"
+    );
+    let (seq_len, vocab_size) = (shape[1], shape[2]);
+    let values = host.to_vec_f32().expect("logits must be f32");
+    (0..seq_len)
+        .map(|row| values[row * vocab_size..(row + 1) * vocab_size].to_vec())
+        .collect()
 }

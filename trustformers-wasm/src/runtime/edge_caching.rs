@@ -10,7 +10,6 @@ use std::format;
 use std::string::String;
 use std::vec::Vec;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
 use web_sys::js_sys;
 
 /// Cache entry types for different kinds of data
@@ -839,20 +838,39 @@ impl EdgeCacheManager {
         Ok(())
     }
 
-    /// Prefetch entries based on access patterns
+    /// Drain the prefetch queue built up by access-pattern heuristics.
+    ///
+    /// `EdgeCacheManager` has no origin-fetch machinery of its own: it only
+    /// knows opaque `key`s, not URLs or a registered fetch callback, and
+    /// its entries span several unrelated kinds of data
+    /// (`CacheEntryType::Model`, `InferenceResult`, `AttentionPatterns`,
+    /// ...) that cannot share one generic "fetch from origin"
+    /// implementation. A previous version papered over that gap by writing
+    /// a 1KB block of zero bytes under each queued key after a fake 50-150
+    /// ms delay — so a subsequent `get()` for that key returned fabricated
+    /// data as a genuine cache hit, and the hit-rate statistics counted it.
+    ///
+    /// Rather than fabricate data, this drains the queue without touching
+    /// the cache or its statistics. Real prefetching requires an actual
+    /// data source; callers that have one should fetch the data themselves
+    /// and hand it to [`Self::put`] — this method only reports how many
+    /// entries were queued and were left un-prefetched.
     pub async fn prefetch(&mut self) -> Result<(), JsValue> {
         if !self.config.prefetch_enabled || self.prefetch_queue.is_empty() {
             return Ok(());
         }
 
-        // Process prefetch queue
-        while let Some(key) = self.prefetch_queue.pop() {
-            if !self.entries.contains_key(&key) {
-                // In a real implementation, this would fetch from origin
-                // For now, we'll simulate prefetching
-                self.simulate_prefetch(&key).await?;
-            }
-        }
+        let pending_count = std::mem::take(&mut self.prefetch_queue).len();
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(
+            &format!(
+                "{pending_count} entries queued for prefetch have no configured origin-fetch \
+                 source; skipping rather than inserting fabricated data"
+            )
+            .into(),
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = pending_count;
 
         Ok(())
     }
@@ -1158,28 +1176,6 @@ impl EdgeCacheManager {
         hit_rate > self.config.prefetch_threshold && !self.prefetch_queue.contains(&key.to_string())
     }
 
-    /// Simulate prefetching (in real implementation, fetch from origin)
-    async fn simulate_prefetch(&mut self, key: &str) -> Result<(), JsValue> {
-        // Simulate network delay
-        let delay = 50.0 + js_sys::Math::random() * 100.0;
-
-        let promise = js_sys::Promise::resolve(&JsValue::from(delay));
-        JsFuture::from(promise).await?;
-
-        // Simulate prefetched data
-        let prefetched_data = vec![0u8; 1024]; // 1KB of dummy data
-
-        self.put(
-            key,
-            CacheEntryType::PreprocessedInput,
-            prefetched_data,
-            self.config.default_ttl_ms,
-            0.5, // Medium priority for prefetched data
-        )?;
-
-        Ok(())
-    }
-
     /// Schedule replication to peers
     fn schedule_replication(&self, key: &str) -> Result<(), JsValue> {
         // In a real implementation, this would trigger replication
@@ -1399,5 +1395,69 @@ mod tests {
             !entry.verify_integrity(),
             "corrupting compressed bytes must be detected, not silently accepted"
         );
+    }
+
+    /// Build an `EdgeCacheManager` directly (bypassing `EdgeCacheManager::new`,
+    /// which unconditionally calls `js_sys::Date::now()` and so panics on
+    /// non-wasm32 targets — see `entry_for_test`'s doc comment above) so
+    /// `prefetch` can be exercised by a native test.
+    fn manager_for_test(prefetch_queue: Vec<String>) -> EdgeCacheManager {
+        EdgeCacheManager {
+            config: CacheConfig::new(),
+            entries: BTreeMap::new(),
+            statistics: CacheStatistics {
+                total_entries: 0,
+                total_size_bytes: 0,
+                hit_count: 0,
+                miss_count: 0,
+                eviction_count: 0,
+                compression_ratio: 1.0,
+                average_age_ms: 0,
+                memory_usage_bytes: 0,
+                network_bytes_saved: 0,
+                latency_improvement_ms: 0.0,
+            },
+            region: GeoRegion::NorthAmerica,
+            last_cleanup: 0,
+            prefetch_queue,
+            replication_peers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_prefetch_drains_queue_without_fabricating_cache_entries() {
+        // Regression test for the old `simulate_prefetch`: it inserted a
+        // 1KB block of zero bytes under the queued key after a fake delay,
+        // so a subsequent `get()` returned fabricated data as a genuine
+        // cache hit and the hit-rate statistics counted it. `prefetch` has
+        // no real origin-fetch source to use instead, so it must drain the
+        // queue and leave the cache and its statistics untouched.
+        let mut manager = manager_for_test(std::vec![
+            "missing-key".to_string(),
+            "other-key".to_string()
+        ]);
+
+        futures::executor::block_on(manager.prefetch()).expect("prefetch must not error");
+
+        assert!(
+            manager.prefetch_queue.is_empty(),
+            "the prefetch queue must be drained"
+        );
+        assert!(
+            manager.entries.is_empty(),
+            "prefetch must not insert any cache entry when it has no real data source"
+        );
+        assert_eq!(
+            manager.statistics.hit_count, 0,
+            "prefetch must not touch hit statistics"
+        );
+        assert_eq!(manager.statistics.total_entries, 0);
+    }
+
+    #[test]
+    fn test_prefetch_is_a_true_no_op_when_queue_is_empty() {
+        let mut manager = manager_for_test(Vec::new());
+        futures::executor::block_on(manager.prefetch()).expect("prefetch must not error");
+        assert!(manager.entries.is_empty());
     }
 }

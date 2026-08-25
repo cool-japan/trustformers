@@ -387,20 +387,51 @@ impl Tensor {
             },
 
             // Metal → F32
+            //
+            // This is the primary public GPU→CPU path (`LayerNorm`'s Metal
+            // fallback and the GPT-2 model core both reach the host through it),
+            // so it must not read the buffer by hand. It used to do exactly that:
+            // `buffer.contents() as *const f32` followed by an unchecked
+            // `from_raw_parts(ptr, shape.iter().product())`, with
+            //
+            //   * **no flush** - kernel wrappers commit asynchronously, so the
+            //     producing dispatch was routinely still in flight. Freshly
+            //     allocated `StorageModeShared` buffers read as zeroes, so a
+            //     forward pass read back all-zero logits instead of its result;
+            //   * **no null check** - `contents()` is null for
+            //     `StorageModePrivate`;
+            //   * **no bounds check** - `size` came from the tensor's shape and was
+            //     never compared against `buffer.length()`, so a shape that
+            //     over-stated the buffer read out of bounds (undefined behaviour).
+            //
+            // `download_buffer_to_vec` does all three: it flushes, refuses
+            // storage modes that have no CPU mapping, rejects a null mapping, and
+            // sizes the slice from `buffer.length()` itself.
             #[cfg(all(target_os = "macos", feature = "metal"))]
             (Tensor::Metal(metal_data), crate::device::Device::CPU) => {
                 use crate::gpu_ops::metal::get_metal_backend;
                 let backend = get_metal_backend()?;
-                let buffer = backend.get_persistent_buffer(&metal_data.buffer_id())?;
-
-                // Download from GPU
-                let size: usize = metal_data.shape.iter().product();
 
                 // Handle different dtypes
                 match metal_data.dtype {
                     DType::F32 => {
-                        let ptr = buffer.contents() as *const f32;
-                        let data_vec = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+                        let size: usize = metal_data.shape.iter().product();
+                        let mut data_vec =
+                            backend.download_buffer_to_vec(&metal_data.buffer_id())?;
+                        if data_vec.len() < size {
+                            return Err(TrustformersError::shape_error(format!(
+                                "Metal tensor claims shape {:?} ({} elements) but its buffer \
+                                 {:?} only holds {} f32 values",
+                                metal_data.shape,
+                                size,
+                                metal_data.buffer_id(),
+                                data_vec.len()
+                            )));
+                        }
+                        // Buffers may be allocated larger than the tensor that
+                        // occupies them (pool reuse rounds sizes up), so keep only
+                        // the elements the shape actually covers.
+                        data_vec.truncate(size);
 
                         // Convert to ArrayD
                         use scirs2_core::ndarray::ArrayD;

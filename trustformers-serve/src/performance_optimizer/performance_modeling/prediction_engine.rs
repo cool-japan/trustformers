@@ -197,13 +197,22 @@ impl PredictionEngine {
         );
 
         let mut predictions = Vec::with_capacity(requests.len());
+        // The parallelism level each prediction was made for, kept alongside it
+        // because a `PerformancePrediction` does not carry one.
+        let mut prediction_levels: Vec<usize> = Vec::with_capacity(requests.len());
         let mut cache_hits = 0;
         let mut cache_misses = 0;
 
-        // Process requests in parallel (simplified - in practice would use actual parallelization)
+        // Requests are predicted one after another: each `predict` call is
+        // cheap and the models behind it are shared behind locks, so there is
+        // nothing here to overlap.
         for request in requests {
             match self.predict(request).await {
                 Ok(prediction) => {
+                    // `predict` uses the first level of the request; recording
+                    // the same one keeps the pair consistent.
+                    prediction_levels
+                        .push(request.parallelism_levels.first().copied().unwrap_or(1));
                     predictions.push(prediction);
 
                     // Check if this was a cache hit
@@ -224,7 +233,7 @@ impl PredictionEngine {
         }
 
         // Calculate batch statistics
-        let batch_statistics = self.calculate_batch_statistics(&predictions);
+        let batch_statistics = self.calculate_batch_statistics(&predictions, &prediction_levels);
 
         // Get ensemble info if applicable
         let ensemble_info =
@@ -321,33 +330,99 @@ impl PredictionEngine {
         Ok(prediction)
     }
 
-    /// Generate cache key for prediction request
+    /// Key under which a prediction for `request` is cached.
+    ///
+    /// Every input the models read must take part in the key: two requests that
+    /// hash alike share a cached prediction, and a prediction served for a
+    /// request it was not computed for is a fabricated answer.
+    ///
+    /// ## Changed in 0.2.1
+    ///
+    /// The key covered the parallelism levels, three system-state fields and
+    /// two test characteristics. `memory_intensity`, `io_intensity`,
+    /// `network_intensity`, `gpu_intensity`, `dependency_complexity`,
+    /// `active_processes` and the concurrency requirements were left out while
+    /// [`LinearRegressionModel`] and [`ExponentialModel`] both read several of
+    /// them, so two requests differing only in, say, I/O intensity collided and
+    /// the second was answered with the first's prediction.
+    ///
+    /// [`LinearRegressionModel`]: super::model_implementations::LinearRegressionModel
+    /// [`ExponentialModel`]: super::model_implementations::ExponentialModel
+    #[cfg(test)]
+    pub(crate) fn cache_key_for_test(&self, request: &PredictionRequest) -> String {
+        self.generate_cache_key(request)
+    }
+
     fn generate_cache_key(&self, request: &PredictionRequest) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
+        /// Hash a float by its bits at a fixed resolution: `f32` is not `Hash`,
+        /// and quantising keeps keys stable across the last bit of rounding.
+        fn hash_scaled(value: f32, hasher: &mut DefaultHasher) {
+            ((value as f64 * 1_000.0).round() as i64).hash(hasher);
+        }
+
         let mut hasher = DefaultHasher::new();
 
-        // Hash parallelism levels
         for &level in &request.parallelism_levels {
             level.hash(&mut hasher);
         }
 
-        // Hash system state (simplified)
-        request.system_state.available_cores.hash(&mut hasher);
-        request.system_state.available_memory_mb.hash(&mut hasher);
-        ((request.system_state.load_average * 1000.0) as u32).hash(&mut hasher);
+        let system = &request.system_state;
+        system.available_cores.hash(&mut hasher);
+        system.available_memory_mb.hash(&mut hasher);
+        system.active_processes.hash(&mut hasher);
+        hash_scaled(system.load_average, &mut hasher);
 
-        // Hash test characteristics (simplified)
-        (request.test_characteristics.average_duration.as_millis() as u64).hash(&mut hasher);
-        ((request.test_characteristics.resource_intensity.cpu_intensity * 1000.0) as u32)
-            .hash(&mut hasher);
+        let characteristics = &request.test_characteristics;
+        (characteristics.average_duration.as_nanos() as u64).hash(&mut hasher);
+        hash_scaled(characteristics.dependency_complexity, &mut hasher);
+
+        let intensity = &characteristics.resource_intensity;
+        hash_scaled(intensity.cpu_intensity, &mut hasher);
+        hash_scaled(intensity.memory_intensity, &mut hasher);
+        hash_scaled(intensity.io_intensity, &mut hasher);
+        hash_scaled(intensity.network_intensity, &mut hasher);
+        match intensity.gpu_intensity {
+            Some(gpu) => {
+                1u8.hash(&mut hasher);
+                hash_scaled(gpu, &mut hasher);
+            },
+            None => 0u8.hash(&mut hasher),
+        }
+
+        // The two concurrency fields the models read.
+        let concurrency = &characteristics.concurrency_requirements;
+        concurrency.max_safe_concurrency.hash(&mut hasher);
+        concurrency.parallel_capable.hash(&mut hasher);
 
         format!("pred_{:x}", hasher.finish())
     }
 
-    /// Calculate batch prediction statistics
-    fn calculate_batch_statistics(&self, predictions: &[PerformancePrediction]) -> BatchStatistics {
+    /// Test access to [`Self::calculate_batch_statistics`].
+    #[cfg(test)]
+    pub(crate) fn batch_statistics_for_test(
+        &self,
+        predictions: &[PerformancePrediction],
+        parallelism_levels: &[usize],
+    ) -> BatchStatistics {
+        self.calculate_batch_statistics(predictions, parallelism_levels)
+    }
+
+    /// Calculate batch prediction statistics.
+    ///
+    /// `parallelism_levels[i]` is the level `predictions[i]` was made for.
+    ///
+    /// 0.2.1: `optimal_parallelism` found the highest-throughput prediction,
+    /// discarded it (`.map(|_| 4)`) and reported the constant `4` for every
+    /// batch. The levels are carried alongside the predictions now, so the
+    /// reported optimum is the level that actually predicted best.
+    fn calculate_batch_statistics(
+        &self,
+        predictions: &[PerformancePrediction],
+        parallelism_levels: &[usize],
+    ) -> BatchStatistics {
         if predictions.is_empty() {
             return BatchStatistics {
                 average_confidence: 0.0,
@@ -367,10 +442,14 @@ impl PredictionEngine {
             throughputs.iter().map(|&t| (t - mean_throughput).powi(2)).sum::<f64>()
                 / throughputs.len() as f64;
 
-        // Find optimal parallelism (simplified)
-        let optimal_parallelism = predictions.iter()
-            .max_by(|a, b| a.throughput.partial_cmp(&b.throughput).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|_| 4) // Simplified
+        // The level whose prediction was highest.
+        let optimal_parallelism = predictions
+            .iter()
+            .zip(parallelism_levels.iter())
+            .max_by(|(a, _), (b, _)| {
+                a.throughput.partial_cmp(&b.throughput).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(_, level)| *level)
             .unwrap_or(1);
 
         let max_throughput = throughputs.iter().fold(0.0f64, |a, &b| a.max(b));
@@ -416,7 +495,10 @@ impl PredictionEngine {
         let ensemble_method = match &self.config.read().ensemble_strategy {
             EnsembleStrategy::SimpleAverage => EnsembleMethod::SimpleAverage,
             EnsembleStrategy::WeightedAverage => EnsembleMethod::WeightedAverage,
-            EnsembleStrategy::Stacking => EnsembleMethod::Stacking,
+            // `stacking_ensemble` runs adaptive weighting, not a meta-learner;
+            // reporting `Stacking` here named a method the engine does not
+            // implement.
+            EnsembleStrategy::Stacking => EnsembleMethod::WeightedAverage,
             EnsembleStrategy::BestModel => EnsembleMethod::WeightedAverage, // Map BestModel to WeightedAverage
             EnsembleStrategy::Voting => EnsembleMethod::WeightedAverage, // Map Voting to WeightedAverage
             EnsembleStrategy::AdaptiveWeighting => EnsembleMethod::WeightedAverage, // Map AdaptiveWeighting to WeightedAverage
@@ -436,7 +518,8 @@ impl PredictionEngine {
             return 0.0;
         }
 
-        // Simplified diversity calculation based on weight distribution
+        // Spread of the ensemble's weights: a set of near-equal weights is a
+        // less diverse ensemble than one where a few models dominate.
         let weights: Vec<f32> = model_weights.values().cloned().collect();
         let mean_weight = weights.iter().sum::<f32>() / weights.len() as f32;
         let variance =
@@ -451,7 +534,8 @@ impl PredictionEngine {
             return 0.0;
         }
 
-        // Simplified consensus calculation
+        // One minus the largest weight: the more the heaviest model dominates,
+        // the less the ensemble agrees.
         let max_weight = model_weights.values().fold(0.0f32, |a, &b| a.max(b));
         1.0 - max_weight // Lower max weight indicates higher consensus
     }
@@ -835,7 +919,7 @@ impl EnsembleCoordinator {
             predictions.iter().map(|p| p.prediction.latency.as_millis() as f64).sum::<f64>()
                 / count;
 
-        // Combine feature importance (simplified)
+        // Mean importance per feature across the averaged predictions.
         let mut combined_importance = HashMap::new();
         for pred in &predictions {
             for (feature, importance) in &pred.prediction.feature_importance {
@@ -912,13 +996,17 @@ impl EnsembleCoordinator {
         Ok(best_prediction.prediction)
     }
 
-    /// Voting ensemble (simplified)
+    /// Voting over continuous predictions, which is their weighted average.
+    ///
+    /// Voting proper needs discrete classes to count; over a real-valued
+    /// throughput the weighted mean is the corresponding operation, and it is
+    /// what this returns -- under the `WeightedAverage` name the combined
+    /// prediction carries, so nothing downstream reads a vote that never
+    /// happened.
     fn voting_ensemble(
         &self,
         predictions: Vec<WeightedPrediction>,
     ) -> Result<PerformancePrediction> {
-        // For regression, voting is similar to averaging
-        // In practice, this might involve discretizing predictions and voting
         self.weighted_average(predictions)
     }
 
@@ -940,13 +1028,17 @@ impl EnsembleCoordinator {
         self.weighted_average(predictions)
     }
 
-    /// Stacking ensemble (simplified)
+    /// The `Stacking` strategy, which runs adaptive weighting.
+    ///
+    /// Stacking proper fits a meta-learner on the base models' out-of-fold
+    /// predictions; this engine trains no meta-learner and holds no out-of-fold
+    /// predictions to train one on, so selecting `Stacking` weights the base
+    /// models by confidence instead. [`Self::get_ensemble_info`] reports
+    /// `WeightedAverage` for this strategy for the same reason.
     fn stacking_ensemble(
         &self,
         predictions: Vec<WeightedPrediction>,
     ) -> Result<PerformancePrediction> {
-        // Simplified stacking - in practice would use a meta-learner
-        // For now, use adaptive weighting as a proxy
         self.adaptive_weighting(predictions)
     }
 
@@ -983,16 +1075,24 @@ pub struct UncertaintyEstimator {
     methods: Vec<UncertaintyMethod>,
 }
 
+/// A way of turning one prediction into an uncertainty figure.
+///
+/// ## Changed in 0.2.1
+///
+/// Two variants were removed. `Bootstrap` returned the constant `0.1`
+/// ("Simplified bootstrap uncertainty - would require actual resampling") and
+/// was never enabled by [`UncertaintyEstimator::new`], so it was unreachable
+/// fabrication. `ModelDisagreement` returned `1 - confidence` -- byte for byte
+/// what `ConfidenceIntervals` returns -- so the estimator counted the same
+/// number twice under two names and reported it as two independent methods in
+/// `method_contributions`. Measuring disagreement needs the individual models'
+/// predictions, which this estimator is not given.
 #[derive(Debug, Clone)]
 pub enum UncertaintyMethod {
-    /// Variance-based uncertainty
+    /// Width of the prediction's own interval, relative to its point estimate
     Variance,
-    /// Model disagreement
-    ModelDisagreement,
-    /// Confidence intervals
+    /// One minus the prediction's stated confidence
     ConfidenceIntervals,
-    /// Bootstrap sampling
-    Bootstrap,
 }
 
 #[derive(Debug, Clone)]
@@ -1017,7 +1117,6 @@ impl UncertaintyEstimator {
         Self {
             methods: vec![
                 UncertaintyMethod::Variance,
-                UncertaintyMethod::ModelDisagreement,
                 UncertaintyMethod::ConfidenceIntervals,
             ],
         }
@@ -1035,13 +1134,9 @@ impl UncertaintyEstimator {
         for method in &self.methods {
             let uncertainty = match method {
                 UncertaintyMethod::Variance => self.estimate_variance_uncertainty(prediction),
-                UncertaintyMethod::ModelDisagreement => {
-                    self.estimate_disagreement_uncertainty(prediction)
-                },
                 UncertaintyMethod::ConfidenceIntervals => {
                     self.estimate_confidence_interval_uncertainty(prediction)
                 },
-                UncertaintyMethod::Bootstrap => self.estimate_bootstrap_uncertainty(prediction),
             };
 
             let method_name = format!("{:?}", method);
@@ -1074,23 +1169,11 @@ impl UncertaintyEstimator {
         (relative_width as f32).min(1.0)
     }
 
-    /// Estimate model disagreement uncertainty
-    fn estimate_disagreement_uncertainty(&self, prediction: &PerformancePrediction) -> f32 {
-        // For single predictions, use confidence as proxy for agreement
-        (1.0 - prediction.confidence).clamp(0.0, 1.0)
-    }
-
     /// Estimate confidence interval uncertainty
     fn estimate_confidence_interval_uncertainty(&self, prediction: &PerformancePrediction) -> f32 {
         // Use inverse of confidence as uncertainty measure
         let uncertainty = 1.0 - prediction.confidence;
         uncertainty.clamp(0.0, 1.0)
-    }
-
-    /// Estimate bootstrap uncertainty
-    fn estimate_bootstrap_uncertainty(&self, _prediction: &PerformancePrediction) -> f32 {
-        // Simplified bootstrap uncertainty - would require actual resampling
-        0.1 // Default uncertainty
     }
 }
 

@@ -317,7 +317,12 @@ async fn main() -> Result<()> {
     );
 
     if let Some(alignment) = &contextual_analysis.alignment_analysis {
-        println!("   Alignment Score: {:.2}", alignment.alignment_score);
+        match alignment.alignment_score {
+            Some(score) => println!("   Alignment Score: {:.2}", score),
+            // No alignment scorer exists in this crate; the analyzer reports
+            // an honest absence rather than a stand-in number.
+            None => println!("   Alignment Score: not available (no alignment scoring model)"),
+        }
         println!("   Objective Scores:");
         for (objective, score) in &alignment.objective_scores {
             println!("     {:?}: {:.2}", objective, score);
@@ -370,7 +375,10 @@ fn print_analysis_summary(analysis: &LLMAnalysisReport, title: &str) {
     }
 
     if let Some(alignment) = &analysis.alignment_analysis {
-        println!("Alignment: {:.2}", alignment.alignment_score);
+        match alignment.alignment_score {
+            Some(score) => println!("Alignment: {:.2}", score),
+            None => println!("Alignment: not available (no alignment scoring model)"),
+        }
     }
 
     if !analysis.recommendations.is_empty() {

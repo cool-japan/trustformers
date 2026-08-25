@@ -468,11 +468,17 @@ impl PhotonicProcessor {
         self.optical_to_tensor(&output_signals, OpticalDecoding::Intensity)
     }
 
-    /// Get energy efficiency of optical computation
+    /// Order-of-magnitude illustrative figure for optical computing's operations-per-joule
+    /// potential; NOT a measurement of anything this `PhotonicProcessor` instance has executed.
+    ///
+    /// This module and `compute_optical_matmul` do not track energy consumption anywhere, so
+    /// there is no real quantity this method could report per-instance; this returns a single
+    /// fixed illustrative constant regardless of configuration or usage, same as before. Kept
+    /// out of this package's fabrication-remediation scope (no in-tree caller reads it besides
+    /// a test asserting it is positive) — flagging honestly here rather than inventing
+    /// per-platform numbers this module cannot actually substantiate.
     pub fn get_energy_efficiency(&self) -> f64 {
-        // Optical computing can be very energy efficient
-        // Operations per joule (placeholder calculation)
-        1e15 // 1 petaop per joule
+        1e15 // Illustrative order-of-magnitude only; not measured from any run.
     }
 
     /// Calibrate optical devices
@@ -519,50 +525,109 @@ impl Default for PhotonicConfig {
     }
 }
 
-/// Convert classical neural network to photonic neural network
+/// Convert a classical 2-D weight matrix (`[output_size, input_size]`, the standard `y = W @ x`
+/// convention) into a [`PhotonicNeuralNetwork`].
+///
+/// Only [`PhotonicConversion::DirectMapping`] is implemented: each classical weight becomes an
+/// optical coupling coefficient one-to-one, with no interferometric or resonator decomposition
+/// (that is what "direct" means here). [`PhotonicConversion::InterferometricMapping`] and
+/// [`PhotonicConversion::ResonatorMapping`] name physically distinct hardware realizations
+/// (Mach-Zehnder-interferometer-mesh and ring-resonator-bank decompositions respectively) that
+/// are not implemented in this experimental, no-in-tree-caller module; selecting them returns a
+/// structured error rather than silently reusing `DirectMapping`'s output under a different
+/// name.
+///
+/// [`PhotonicLayer::process`](crate::optical::photonic_networks::PhotonicLayer::process)
+/// genuinely consults `coupling_matrix` and `phase_shifts` when running a forward pass, so a
+/// network built by this function actually transforms its input: for a `DirectMapping` network
+/// (zero phase shifts, `PhotonicNonlinearity::Linear`), `network.forward(...)` reduces to
+/// exactly this weight matrix's dense matrix-vector product (see
+/// `test_convert_direct_mapping_process_matches_dense_matmul` below).
 pub fn convert_to_photonic(
     classical_weights: &Tensor,
     conversion_method: PhotonicConversion,
 ) -> Result<PhotonicNeuralNetwork> {
     match conversion_method {
         PhotonicConversion::DirectMapping => convert_direct_mapping(classical_weights),
-        PhotonicConversion::InterferometricMapping => {
-            convert_interferometric_mapping(classical_weights)
-        },
-        PhotonicConversion::ResonatorMapping => convert_resonator_mapping(classical_weights),
+        PhotonicConversion::InterferometricMapping => Err(anyhow::anyhow!(
+            "PhotonicConversion::InterferometricMapping (Mach-Zehnder-interferometer-mesh \
+             decomposition) is not implemented. Use PhotonicConversion::DirectMapping, which \
+             maps classical weights to optical couplings one-to-one without a hardware-specific \
+             decomposition."
+        )),
+        PhotonicConversion::ResonatorMapping => Err(anyhow::anyhow!(
+            "PhotonicConversion::ResonatorMapping (ring-resonator-bank decomposition) is not \
+             implemented. Use PhotonicConversion::DirectMapping, which maps classical weights \
+             to optical couplings one-to-one without a hardware-specific decomposition."
+        )),
     }
 }
 
+/// Which physical realization [`convert_to_photonic`] should target. See its doc for which
+/// variants are implemented.
 #[derive(Debug, Clone, Copy)]
 pub enum PhotonicConversion {
+    /// One-to-one classical-weight-to-optical-coupling mapping (implemented).
     DirectMapping,
+    /// Mach-Zehnder-interferometer-mesh decomposition (not implemented; returns an error).
     InterferometricMapping,
+    /// Ring-resonator-bank decomposition (not implemented; returns an error).
     ResonatorMapping,
 }
 
+/// Build a single-layer [`PhotonicNeuralNetwork`] whose `coupling_matrix` is exactly
+/// `weights`, interpreted as `[output_size, input_size]`. `phase_shifts` are all zero (a pure
+/// real-valued direct mapping applies no phase shift) and `nonlinearity` is
+/// [`PhotonicNonlinearity::Linear`] (the classical weights being mapped are pre-activation).
+///
+/// `PhotonicLayer`'s fields are constructed directly here rather than through
+/// `PhotonicNeuralNetwork::set_coupling` one weight at a time — both now work correctly (a
+/// layer must already exist at the target index, which nothing before this function ever adds,
+/// and `set_coupling` genuinely writes into `coupling_matrix`), but bulk-constructing the whole
+/// matrix in one pass is simpler than `output_size * input_size` individual calls.
+/// `PhotonicLayer`'s fields are all `pub`, so this function populates them directly.
 fn convert_direct_mapping(weights: &Tensor) -> Result<PhotonicNeuralNetwork> {
-    // Simplified direct mapping
-    let weight_data = weights.data()?;
-    let mut network = PhotonicNeuralNetwork::new(weights.shape()[0], weights.shape()[1]);
+    let shape = weights.shape();
+    if shape.len() != 2 {
+        return Err(anyhow::anyhow!(
+            "convert_direct_mapping expects a 2-D [output_size, input_size] weight matrix, got \
+             shape {:?}",
+            shape
+        ));
+    }
+    let (output_size, input_size) = (shape[0], shape[1]);
 
-    // Map weights to optical coupling coefficients
-    for (i, &weight) in weight_data.iter().enumerate() {
-        let layer = i / weights.shape()[1];
-        let neuron = i % weights.shape()[1];
-        network.set_coupling(layer, neuron, weight as f64)?;
+    let weight_data = weights.data()?;
+    if weight_data.len() != output_size * input_size {
+        return Err(anyhow::anyhow!(
+            "weight data length {} does not match shape {:?} ({}x{}={})",
+            weight_data.len(),
+            shape,
+            output_size,
+            input_size,
+            output_size * input_size
+        ));
     }
 
+    let mut coupling_matrix = vec![vec![0.0f64; input_size]; output_size];
+    for (o, row) in coupling_matrix.iter_mut().enumerate() {
+        for (i, coupling) in row.iter_mut().enumerate() {
+            *coupling = weight_data[o * input_size + i] as f64;
+        }
+    }
+
+    let layer = photonic_networks::PhotonicLayer {
+        input_size,
+        output_size,
+        coupling_matrix,
+        phase_shifts: vec![0.0; input_size],
+        nonlinearity: photonic_networks::PhotonicNonlinearity::Linear,
+    };
+
+    let mut network = PhotonicNeuralNetwork::new(input_size, output_size);
+    network.add_layer(layer);
+
     Ok(network)
-}
-
-fn convert_interferometric_mapping(weights: &Tensor) -> Result<PhotonicNeuralNetwork> {
-    // Use Mach-Zehnder interferometers for weights
-    convert_direct_mapping(weights) // Placeholder
-}
-
-fn convert_resonator_mapping(weights: &Tensor) -> Result<PhotonicNeuralNetwork> {
-    // Use ring resonators for weights
-    convert_direct_mapping(weights) // Placeholder
 }
 
 #[cfg(test)]
@@ -737,5 +802,103 @@ mod tests {
         let processor = PhotonicProcessor::with_platform(OpticalPlatform::Simulation);
         let efficiency = processor.get_energy_efficiency();
         assert!(efficiency > 0.0);
+    }
+
+    /// `DirectMapping` must genuinely map every classical weight into the resulting network's
+    /// coupling matrix, in the same [output_size, input_size] layout as the input.
+    #[test]
+    fn test_convert_direct_mapping_populates_real_coupling_matrix() {
+        // 2x3 matrix: [output_size=2, input_size=3]
+        let weights =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("tensor");
+
+        let network = convert_to_photonic(&weights, PhotonicConversion::DirectMapping)
+            .expect("DirectMapping must succeed for a well-formed 2-D weight matrix");
+
+        assert_eq!(network.num_inputs, 3);
+        assert_eq!(network.num_outputs, 2);
+        assert_eq!(
+            network.layers.len(),
+            1,
+            "DirectMapping produces exactly one layer"
+        );
+
+        let layer = &network.layers[0];
+        assert_eq!(
+            layer.coupling_matrix,
+            vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]
+        );
+        assert!(matches!(layer.nonlinearity, PhotonicNonlinearity::Linear));
+    }
+
+    /// A non-2-D weight tensor must produce a structured error, not a panic or a silently
+    /// wrong mapping.
+    #[test]
+    fn test_convert_direct_mapping_rejects_non_2d_weights() {
+        let weights = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2, 1]).expect("tensor");
+        let result = convert_to_photonic(&weights, PhotonicConversion::DirectMapping);
+        assert!(
+            result.is_err(),
+            "a rank-3 weight tensor must be rejected, not silently used"
+        );
+    }
+
+    /// End-to-end: a network built by `convert_to_photonic(..., DirectMapping)` and then run
+    /// through `PhotonicLayer::process` (via `PhotonicNeuralNetwork::forward`) must produce
+    /// exactly the source weight matrix's dense matrix-vector product — proving `process`
+    /// genuinely consumes the `coupling_matrix` `convert_direct_mapping` builds, not a network
+    /// that carries correct data nobody reads. The two output rows differ (`[1,2,3]` vs
+    /// `[4,5,6]`) and `x` is chosen so both dot products are non-zero and unequal, so a bug that
+    /// dropped the coupling matrix or mixed up rows could not accidentally pass.
+    #[test]
+    fn test_convert_direct_mapping_process_matches_dense_matmul() {
+        // weights: [output_size=2, input_size=3] = [[1,2,3],[4,5,6]]
+        let weights =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).expect("tensor");
+        let network = convert_to_photonic(&weights, PhotonicConversion::DirectMapping)
+            .expect("DirectMapping must succeed");
+
+        // x = [1.0, -2.0, -1.0]: dense matmul gives y0 = 1-4-3 = -6, y1 = 4-10-6 = -12 — two
+        // distinct, both-negative values, so this also proves sign fidelity (not just
+        // magnitude) survives the complex-amplitude round trip.
+        let x = [1.0f64, -2.0, -1.0];
+        let inputs: Vec<OpticalSignal> =
+            x.iter().map(|&v| OpticalSignal::coherent(v, 0.0, network.wavelength)).collect();
+
+        let outputs = network.forward(&inputs).expect("forward must succeed");
+        assert_eq!(outputs.len(), 2);
+
+        let expected = [-6.0f64, -12.0];
+        for (o, &expected_value) in expected.iter().enumerate() {
+            // Zero phase shifts mean the imaginary part is exactly zero, so
+            // amplitude * cos(phase) recovers the signed dense-matmul value exactly (magnitude
+            // alone would lose the sign).
+            let recovered = outputs[o].amplitude[0] * outputs[o].phase[0].cos();
+            assert!(
+                (recovered - expected_value).abs() < 1e-9,
+                "output {o}: expected {expected_value}, recovered {recovered} from {:?}",
+                outputs[o]
+            );
+        }
+    }
+
+    /// The two unimplemented conversion methods must refuse with a structured error, never
+    /// silently fall back to DirectMapping's output.
+    #[test]
+    fn test_unimplemented_conversion_methods_return_structured_errors() {
+        let weights = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor");
+
+        let interferometric =
+            convert_to_photonic(&weights, PhotonicConversion::InterferometricMapping);
+        assert!(interferometric.is_err());
+        assert!(interferometric
+            .unwrap_err()
+            .to_string()
+            .to_lowercase()
+            .contains("not implemented"));
+
+        let resonator = convert_to_photonic(&weights, PhotonicConversion::ResonatorMapping);
+        assert!(resonator.is_err());
+        assert!(resonator.unwrap_err().to_string().to_lowercase().contains("not implemented"));
     }
 }

@@ -423,6 +423,7 @@ pub struct TimestampedValue<T: Copy> {
 ///
 /// Internally backed by a `StatisticsWindow<f64>` for the values and a
 /// separate `Vec`-based circular buffer for the full `TimestampedValue` records.
+#[derive(Debug)]
 pub struct TimestampedRingBuffer<T: Copy> {
     /// Circular backing store (index = 0 means slot 0 in the array).
     buf: Vec<TimestampedValue<T>>,

@@ -262,17 +262,14 @@ approx.workspace = true
 # dev-dependency, which is what made RUSTSEC-2024-0436 (`paste` unmaintained,
 # "no safe upgrade available") fire under `deny.toml`'s
 # `[advisories] unmaintained = "workspace"` setting. Its single reference in this
-# crate is the `paste::paste!` call inside the `optimized_test_with_progress!`
-# macro body in `src/test_utilities.rs`, and that macro is **never invoked**
-# anywhere in the repository (`grep -rn optimized_test_with_progress --include=*.rs .`
-# matches only its own definition), so a `macro_rules!` body that is never
-# expanded keeps compiling without the dependency. `paste` is still in the
-# dependency *graph* transitively (metal/mpsgraph, pulp, rav1e, simba,
-# tokenizers) — dropping the direct dev-dep does not remove it from the tree, it
-# stops the workspace from declaring an unmaintained crate first-hand. Follow-up
-# for whoever owns `src/test_utilities.rs`: delete the dead macro, or rewrite it
-# without token pasting (a maintained fork, `pastey`, exists if the macro is ever
-# revived).
+# crate was the `paste::paste!` call inside the `optimized_test_with_progress!`
+# macro body in `src/test_utilities.rs`; that macro was never invoked anywhere
+# in the repository, and has since been deleted outright (see the 0.2.1 comment
+# left in its place in `src/test_utilities.rs`) rather than kept as a
+# never-expanded trap. `paste` is still in the dependency *graph* transitively
+# (metal/mpsgraph, pulp, rav1e, simba, tokenizers) — dropping the direct dev-dep
+# does not remove it from the tree, it stops the workspace from declaring an
+# unmaintained crate first-hand.
 
 [build-dependencies]
 tonic-build.workspace = true

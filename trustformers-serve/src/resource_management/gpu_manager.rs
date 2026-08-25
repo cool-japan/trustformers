@@ -643,18 +643,35 @@ mod tests {
 
 /// Live telemetry sample read from the GPU driver.
 ///
-/// Every field is a value the driver reported. Sensors the driver marks as
-/// unavailable are represented as `None` (fan) or `NaN` (temperature, power)
-/// rather than as a plausible number.
+/// Every field is a value the driver reported. A sensor the driver marks
+/// unavailable (`[N/A]`, `[Not Supported]`) is `None` -- never a plausible
+/// number.
+///
+/// 0.2.1: only `fan_percent` was `Option`. Everything else fell back to a
+/// literal on a parse failure: `utilization_percent` and `memory_used_mb` to
+/// `0`, and the clocks to `0`. An unreadable utilization sensor therefore
+/// reported an idle GPU, which is exactly the direction that hides a problem --
+/// `gpu_scheduler`'s memory monitor wrote that `0` straight into its status
+/// table, and the health check compared it against `utilization_threshold` and
+/// passed. Temperature and power were already `NaN` on failure, which no
+/// comparison passes, so those two were safe; they are `Option` now for
+/// uniformity and so a consumer cannot forget the `is_finite` guard.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct GpuTelemetrySample {
     pub device_id: usize,
-    pub utilization_percent: f32,
-    pub temperature_celsius: f32,
-    pub power_watts: f32,
-    pub sm_clock_mhz: u32,
-    pub memory_clock_mhz: u32,
-    pub memory_used_mb: u64,
+    /// GPU utilization percentage, or `None` when the driver would not report it.
+    pub utilization_percent: Option<f32>,
+    /// Core temperature in Celsius, or `None` when the sensor is unavailable.
+    pub temperature_celsius: Option<f32>,
+    /// Board power draw in watts, or `None` when the sensor is unavailable.
+    pub power_watts: Option<f32>,
+    /// SM clock in MHz, or `None` when not reported.
+    pub sm_clock_mhz: Option<u32>,
+    /// Memory clock in MHz, or `None` when not reported.
+    pub memory_clock_mhz: Option<u32>,
+    /// VRAM in use, in MB, or `None` when not reported.
+    pub memory_used_mb: Option<u64>,
+    /// Fan speed percentage, or `None` when the device has no reported fan.
     pub fan_percent: Option<f32>,
 }
 

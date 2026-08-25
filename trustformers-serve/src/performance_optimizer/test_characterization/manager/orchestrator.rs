@@ -369,7 +369,10 @@ impl AnalysisOrchestrator {
             },
             AnalysisPhase::ConcurrencyDetection => {
                 let detector = component_manager.get_concurrency_detector();
-                let requirements = detector.detect_concurrency_requirements(test_data).await?;
+                // `analyze_concurrency` is the real detector's entry point; the
+                // `detect_concurrency_requirements` this used to call belonged
+                // to a shadow type that invented its answer.
+                let requirements = detector.analyze_concurrency(test_data).await?.requirements;
                 Ok(PhaseResult::ConcurrencyDetection(Box::new(requirements)))
             },
             AnalysisPhase::SynchronizationAnalysis => {

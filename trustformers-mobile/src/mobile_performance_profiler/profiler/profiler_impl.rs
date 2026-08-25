@@ -846,17 +846,28 @@ impl MobilePerformanceProfiler {
             fold(100.0 - gpu.usage_percent, 0.2);
         }
         if let Some(thermal) = latest_metrics.thermal.as_ref() {
-            fold(
-                match thermal.thermal_state {
-                    ThermalState::Nominal => 100.0,
-                    ThermalState::Fair => 80.0,
-                    ThermalState::Serious => 60.0,
-                    ThermalState::Critical => 20.0,
-                    ThermalState::Emergency => 5.0,
-                    ThermalState::Shutdown => 0.0,
-                },
-                0.2,
-            );
+            let thermal_score = match thermal.thermal_state {
+                ThermalState::Nominal => Some(100.0),
+                ThermalState::Fair => Some(80.0),
+                ThermalState::Serious => Some(60.0),
+                ThermalState::Critical => Some(20.0),
+                ThermalState::Emergency => Some(5.0),
+                ThermalState::Shutdown => Some(0.0),
+                // `ThermalMetrics.thermal_state` is only ever populated (see
+                // `SystemMetricsCollector::collect_thermal_metrics`,
+                // collector.rs:404-407) from a genuinely measured
+                // `hottest_component_celsius()` reading bucketed by
+                // `thermal_state_for`, which never produces `Unknown` -- this
+                // arm exists only to satisfy the shared enum's
+                // exhaustiveness. Scored `None`, excluding it from the
+                // weighted average for the same reason an absent
+                // `metrics.thermal` already does per this function's own doc
+                // above, rather than contributing a fabricated number.
+                ThermalState::Unknown => None,
+            };
+            if let Some(thermal_score) = thermal_score {
+                fold(thermal_score, 0.2);
+            }
         }
 
         if total_weight <= 0.0 {

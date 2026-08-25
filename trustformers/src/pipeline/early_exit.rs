@@ -24,8 +24,69 @@ pub enum ExitStrategy {
     Patience(u32),
     /// Combination of multiple strategies
     Combined(Vec<ExitStrategy>),
-    /// Machine learning-based exit predictor
-    LearnedExit,
+    /// A fixed linear combination of exit-point features, weighted by
+    /// hand-chosen (but caller-configurable) coefficients -- see
+    /// [`HeuristicExitWeights`]. This is *not* a trained/learned model:
+    /// the weights never change based on data. It replaces what this enum
+    /// previously called `LearnedExit` with hardcoded, undocumented
+    /// weights baked into the match arm; see [`ExitStrategy::LearnedExit`]
+    /// for the variant reserved for an actually-trained model.
+    HeuristicWeighted(HeuristicExitWeights),
+    /// Exit decision from parameters an actually-trained model produced,
+    /// supplied by the caller (e.g. loaded from a file this crate did not
+    /// write). `None` means the caller selected the learned strategy
+    /// without installing any trained parameters: evaluating it then
+    /// returns a structured error rather than silently falling back to a
+    /// fabricated score -- this crate ships no early-exit training
+    /// pipeline of its own. Use [`ExitStrategy::HeuristicWeighted`] for
+    /// the always-available, hand-chosen alternative.
+    LearnedExit(Option<LearnedExitParams>),
+}
+
+/// Coefficients for [`ExitStrategy::HeuristicWeighted`]'s fixed linear
+/// combination of six exit-point features:
+/// `confidence, entropy, consistency, relative_layer, input_complexity,
+/// memory_pressure`, in that order, each in `[0, 1]`. The default weights
+/// (`[0.3, 0.2, 0.2, 0.1, 0.1, 0.1]`, `threshold = 0.7`) are exactly the
+/// values this strategy used before it had a name of its own or a way to
+/// reconfigure them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HeuristicExitWeights {
+    pub confidence: f32,
+    pub entropy: f32,
+    pub consistency: f32,
+    pub relative_layer: f32,
+    pub input_complexity: f32,
+    pub memory_pressure: f32,
+    /// Exit once the weighted sum reaches this value.
+    pub threshold: f32,
+}
+
+impl Default for HeuristicExitWeights {
+    fn default() -> Self {
+        Self {
+            confidence: 0.3,
+            entropy: 0.2,
+            consistency: 0.2,
+            relative_layer: 0.1,
+            input_complexity: 0.1,
+            memory_pressure: 0.1,
+            threshold: 0.7,
+        }
+    }
+}
+
+/// Weights and a decision threshold for an *actually-trained* linear
+/// early-exit classifier, over the same six features as
+/// [`HeuristicExitWeights`] and in the same order. There is no training
+/// pipeline in this crate that produces one of these; a caller who trained
+/// one externally (offline) supplies it via
+/// [`ExitStrategy::LearnedExit`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LearnedExitParams {
+    pub feature_weights: [f32; 6],
+    pub bias: f32,
+    pub decision_threshold: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -399,7 +460,12 @@ impl EarlyExitPredictor {
             ExitStrategy::Combined(strategies) => {
                 self.evaluate_combined_strategies(strategies, exit_point, layer_output)
             },
-            ExitStrategy::LearnedExit => self.evaluate_learned_exit(exit_point, layer_output),
+            ExitStrategy::HeuristicWeighted(weights) => {
+                Ok(self.evaluate_heuristic_weighted(weights, exit_point))
+            },
+            ExitStrategy::LearnedExit(params) => {
+                self.evaluate_learned_exit(params.as_ref(), exit_point)
+            },
         }
     }
 
@@ -510,27 +576,74 @@ impl EarlyExitPredictor {
         Ok(exit_votes > total_strategies / 2)
     }
 
-    fn evaluate_learned_exit(
-        &self,
-        exit_point: &ExitPoint,
-        _layer_output: &LayerOutput,
-    ) -> Result<bool> {
-        // Simplified learned exit predictor
-        // In a real implementation, this would use a trained model
-        let features = [
+    /// The six standard exit-point features, in the fixed order
+    /// [`HeuristicExitWeights`] and [`LearnedExitParams`] both weight:
+    /// confidence, entropy, consistency, relative layer depth, input
+    /// complexity, memory pressure.
+    fn exit_features(&self, exit_point: &ExitPoint) -> [f32; 6] {
+        [
             exit_point.confidence_score,
             exit_point.entropy_score,
             exit_point.consistency_score,
             exit_point.layer_index as f32 / self.config.max_layers as f32,
             self.context_analyzer.input_complexity_score,
             self.memory_tracker.memory_pressure_level,
+        ]
+    }
+
+    /// `ExitStrategy::HeuristicWeighted`: a fixed linear combination of
+    /// [`Self::exit_features`], weighted by caller-supplied (or default)
+    /// coefficients. Real, input-dependent arithmetic -- just not a
+    /// trained model; see [`Self::evaluate_learned_exit`] for that.
+    fn evaluate_heuristic_weighted(
+        &self,
+        weights: &HeuristicExitWeights,
+        exit_point: &ExitPoint,
+    ) -> bool {
+        let features = self.exit_features(exit_point);
+        let coefficients = [
+            weights.confidence,
+            weights.entropy,
+            weights.consistency,
+            weights.relative_layer,
+            weights.input_complexity,
+            weights.memory_pressure,
         ];
+        let score: f32 = features.iter().zip(coefficients.iter()).map(|(f, w)| f * w).sum();
+        score >= weights.threshold
+    }
 
-        // Simple linear combination (placeholder for actual ML model)
-        let weights = [0.3, 0.2, 0.2, 0.1, 0.1, 0.1];
-        let score: f32 = features.iter().zip(weights.iter()).map(|(f, w)| f * w).sum();
-
-        Ok(score >= 0.7)
+    /// `ExitStrategy::LearnedExit`: scores [`Self::exit_features`] with an
+    /// *actually-trained* model's weights, supplied by the caller. Refuses
+    /// with a structured error when `params` is `None` -- this crate ships
+    /// no early-exit training pipeline, so silently falling back to
+    /// invented parameters (as the previous, differently-named
+    /// implementation effectively did by hardcoding them) is not an
+    /// option. See [`ExitStrategy::HeuristicWeighted`] for the
+    /// always-available fixed-weight alternative.
+    fn evaluate_learned_exit(
+        &self,
+        params: Option<&LearnedExitParams>,
+        exit_point: &ExitPoint,
+    ) -> Result<bool> {
+        let params = params.ok_or_else(|| {
+            crate::error::TrustformersError::invalid_input_simple(
+                "ExitStrategy::LearnedExit was selected without LearnedExitParams: this crate \
+                 has no early-exit training pipeline and ships no trained model, so there are \
+                 no real parameters to score with. Either supply trained parameters via \
+                 ExitStrategy::LearnedExit(Some(params)), or use \
+                 ExitStrategy::HeuristicWeighted for the always-available fixed-weight \
+                 heuristic instead.",
+            )
+        })?;
+        let features = self.exit_features(exit_point);
+        let score: f32 = features
+            .iter()
+            .zip(params.feature_weights.iter())
+            .map(|(f, w)| f * w)
+            .sum::<f32>()
+            + params.bias;
+        Ok(score >= params.decision_threshold)
     }
 
     fn calculate_historical_threshold(&self) -> f32 {
@@ -1045,6 +1158,168 @@ mod tests {
         let output = make_layer_output(config.max_layers, Some(vec![0.1; 10]), vec![0.0; 10]);
         let ep = predictor.should_exit(&output).expect("should_exit should succeed");
         assert!(ep.should_exit, "must exit when max_layers reached");
+    }
+
+    // ── HeuristicWeighted / LearnedExit honesty ───────────────────────────────
+    //
+    // `HeuristicWeighted` replaces what this crate used to call `LearnedExit`:
+    // a fixed linear combination with hand-chosen (now configurable) weights,
+    // never a trained model. `LearnedExit` is reserved for real, caller-
+    // supplied trained parameters and refuses when none are given.
+
+    fn exit_point_with(
+        confidence: f32,
+        entropy: f32,
+        consistency: f32,
+        layer_index: usize,
+    ) -> ExitPoint {
+        ExitPoint {
+            layer_index,
+            confidence_score: confidence,
+            entropy_score: entropy,
+            variance_score: 0.0,
+            consistency_score: consistency,
+            computation_time_ms: 0,
+            energy_consumed: 0.0,
+            memory_used_mb: 0.0,
+            should_exit: false,
+            exit_reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn heuristic_weighted_default_matches_the_formula_this_strategy_always_used() {
+        // Fresh predictor: context_analyzer.input_complexity_score = 0.5 and
+        // memory_tracker.memory_pressure_level = 0.0 (their `new()` defaults),
+        // called directly so `should_exit`'s tracking updates never run --
+        // every input to the formula is pinned and hand-checkable.
+        let predictor = EarlyExitPredictor::new(EarlyExitConfig {
+            max_layers: 12,
+            ..Default::default()
+        });
+        let weights = HeuristicExitWeights::default();
+
+        // features = [1.0, 1.0, 1.0, 12/12=1.0, 0.5, 0.0]
+        // score = 0.3 + 0.2 + 0.2 + 0.1 + 0.05 + 0.0 = 0.85 >= 0.7
+        let high = exit_point_with(1.0, 1.0, 1.0, 12);
+        assert!(predictor.evaluate_heuristic_weighted(&weights, &high));
+
+        // features = [0.9, 0.5, 0.5, 6/12=0.5, 0.5, 0.0]
+        // score = 0.27 + 0.10 + 0.10 + 0.05 + 0.05 + 0.0 = 0.57 < 0.7
+        let low = exit_point_with(0.9, 0.5, 0.5, 6);
+        assert!(!predictor.evaluate_heuristic_weighted(&weights, &low));
+    }
+
+    #[test]
+    fn heuristic_weighted_custom_weights_change_the_decision() {
+        let predictor = EarlyExitPredictor::new(EarlyExitConfig::default());
+        let confidence_only = HeuristicExitWeights {
+            confidence: 1.0,
+            entropy: 0.0,
+            consistency: 0.0,
+            relative_layer: 0.0,
+            input_complexity: 0.0,
+            memory_pressure: 0.0,
+            threshold: 0.5,
+        };
+
+        assert!(
+            predictor
+                .evaluate_heuristic_weighted(&confidence_only, &exit_point_with(0.6, 0.0, 0.0, 0)),
+            "confidence 0.6 alone must clear a 0.5 threshold when weighted 1.0"
+        );
+        assert!(
+            !predictor
+                .evaluate_heuristic_weighted(&confidence_only, &exit_point_with(0.4, 1.0, 1.0, 12)),
+            "with all weight on confidence, high entropy/consistency/layer must not matter"
+        );
+    }
+
+    #[test]
+    fn learned_exit_without_params_is_a_structured_error_not_a_fabricated_score() {
+        let mut predictor = EarlyExitPredictor::new(EarlyExitConfig {
+            strategy: ExitStrategy::LearnedExit(None),
+            min_layers: 0,
+            ..Default::default()
+        });
+        let output = make_layer_output(3, Some(vec![5.0, 0.5]), vec![0.1, 0.2, 0.3]);
+        let result = predictor.should_exit(&output);
+        assert!(
+            result.is_err(),
+            "selecting LearnedExit without params must refuse, not guess"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("LearnedExitParams"),
+            "error must name exactly what is missing: {message}"
+        );
+    }
+
+    #[test]
+    fn learned_exit_with_real_params_scores_for_real() {
+        let predictor = EarlyExitPredictor::new(EarlyExitConfig::default());
+        let params = LearnedExitParams {
+            feature_weights: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            bias: 0.0,
+            decision_threshold: 0.5,
+        };
+
+        assert!(predictor
+            .evaluate_learned_exit(Some(&params), &exit_point_with(0.6, 0.0, 0.0, 0))
+            .expect("real params must not error"));
+        assert!(!predictor
+            .evaluate_learned_exit(Some(&params), &exit_point_with(0.4, 0.0, 0.0, 0))
+            .expect("real params must not error"));
+    }
+
+    #[test]
+    fn combined_strategy_propagates_learned_exit_params_to_the_temporary_predictor() {
+        // Regression guard: `evaluate_combined_strategies` builds a *fresh*
+        // `EarlyExitPredictor` per sub-strategy from a cloned `EarlyExitConfig`.
+        // If a strategy's parameters lived in predictor-level state instead of
+        // inside the `ExitStrategy` value itself, this fresh predictor would
+        // never see them and every `Combined([.., LearnedExit(Some(_)), ..])`
+        // would spuriously error. Parameters live in the enum payload
+        // precisely so `strategy.clone()` carries them through.
+        let params = LearnedExitParams {
+            feature_weights: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            bias: 0.0,
+            decision_threshold: 0.0, // trivially met: 0.0 >= 0.0
+        };
+        let mut predictor = EarlyExitPredictor::new(EarlyExitConfig {
+            strategy: ExitStrategy::Combined(vec![
+                ExitStrategy::LearnedExit(Some(params)),
+                ExitStrategy::ConfidenceThreshold(0.0), // also trivially met
+            ]),
+            min_layers: 0,
+            ..Default::default()
+        });
+        let output = make_layer_output(0, Some(vec![1.0, 1.0]), vec![0.0]);
+        let ep = predictor
+            .should_exit(&output)
+            .expect("real LearnedExitParams inside Combined must not error");
+        assert!(
+            ep.should_exit,
+            "both trivially-met sub-strategies should form a majority"
+        );
+    }
+
+    #[test]
+    fn combined_strategy_still_surfaces_a_missing_learned_exit_error() {
+        let mut predictor = EarlyExitPredictor::new(EarlyExitConfig {
+            strategy: ExitStrategy::Combined(vec![
+                ExitStrategy::LearnedExit(None),
+                ExitStrategy::ConfidenceThreshold(0.0),
+            ]),
+            min_layers: 0,
+            ..Default::default()
+        });
+        let output = make_layer_output(0, Some(vec![1.0, 1.0]), vec![0.0]);
+        assert!(
+            predictor.should_exit(&output).is_err(),
+            "a missing-params LearnedExit inside Combined must still refuse, not be masked by a \
+             majority vote among the other sub-strategies"
+        );
     }
 
     // ── Layer-wise confidence scores ─────────────────────────────────────────

@@ -206,11 +206,11 @@ impl DebugSession {
                 Ok(analyzer) => analyzer,
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to initialize kernel optimizer: {}, using stub implementation",
+                        "Failed to initialize kernel optimizer sub-analyzers: {}; \
+                         continuing with an empty analyzer (fully functional, no prior history)",
                         e
                     );
-                    // Return a stub analyzer that won't crash but provides limited functionality
-                    KernelOptimizationAnalyzer::new_stub()
+                    KernelOptimizationAnalyzer::new_empty()
                 },
             },
             ai_code_analyzer,
@@ -495,8 +495,11 @@ impl DebugSession {
         let interactive_debugger_report = self.interactive_debugger.generate_report().await?;
         let anomaly_report = self.anomaly_detector.generate_report().await?;
 
-        // Get computation graph analysis results (if any graphs were analyzed)
-        let computation_graph_report = None; // Would be populated if graphs were analyzed
+        // `DebugSession` never drives `ComputationGraphAnalyzer` itself: graph
+        // analysis is an explicit, caller-initiated step
+        // (`crate::computation_graph`), so a session report has no graph to
+        // summarise. Honestly absent rather than an empty-looking report.
+        let computation_graph_report = None;
 
         // Get new analyzer reports
         let architecture_analysis_report =
@@ -570,18 +573,20 @@ impl DebugSession {
 
         let profiler_report = self.profiler.generate_report().await?;
 
-        let memory_profiler_report = if let Some(ref _memory_profiler) = self.memory_profiler {
-            // For snapshot, we don't stop the profiler, just get current state
-            None // Simplified for now
-        } else {
-            None
-        };
+        // A snapshot must not stop the profiler, and `MemoryProfiler` only
+        // produces a report at `stop()` -- there is no borrow-a-report-mid-run
+        // API -- so a snapshot carries no memory report. `generate_report`
+        // (which does stop the profiler) is the call that returns one.
+        let memory_profiler_report = None;
 
         let interactive_debugger_report = self.interactive_debugger.generate_report().await?;
         let anomaly_report = self.anomaly_detector.generate_report().await?;
 
-        // Get computation graph analysis results (if any graphs were analyzed)
-        let computation_graph_report = None; // Would be populated if graphs were analyzed
+        // `DebugSession` never drives `ComputationGraphAnalyzer` itself: graph
+        // analysis is an explicit, caller-initiated step
+        // (`crate::computation_graph`), so a session report has no graph to
+        // summarise. Honestly absent rather than an empty-looking report.
+        let computation_graph_report = None;
 
         // Get new analyzer reports
         let architecture_analysis_report =
@@ -633,25 +638,99 @@ impl DebugSession {
         self.tensor_inspector.inspect_tensor(tensor, name, None, None)
     }
 
-    /// Generate kernel optimization summary report
+    /// Summarise every kernel this session's optimizer has really analysed.
+    ///
+    /// All counts come from the analyzer's own recorded profiles and
+    /// suggestions; `overall_optimization_score` is `None` when no kernel has
+    /// been analysed yet. The previous version returned
+    /// `total_kernels_analyzed: 0` alongside `overall_optimization_score: 85.0`
+    /// -- an 85-out-of-100 verdict on zero kernels.
     async fn generate_kernel_optimization_summary_report(
         &self,
     ) -> Result<KernelOptimizationSummaryReport> {
-        // In a real implementation, this would analyze all kernel profiles
-        // and generate comprehensive optimization recommendations
+        /// A suggestion promising at least this much performance gain counts
+        /// as high impact.
+        const HIGH_IMPACT_GAIN_PERCENT: f64 = 10.0;
+
+        let kernel_names: Vec<String> = self
+            .kernel_optimizer
+            .analyzed_kernel_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let total_kernels_analyzed = kernel_names.len();
+        let suggestions = self.kernel_optimizer.optimization_suggestions();
+
+        let optimization_opportunities_found = suggestions.values().map(Vec::len).sum::<usize>();
+
+        let mut high_impact_optimizations: Vec<HighImpactOptimization> = suggestions
+            .iter()
+            .flat_map(|(kernel_name, opts)| {
+                opts.iter().filter_map(move |opt| {
+                    let gain = opt.expected_improvement.performance_gain_percentage;
+                    (gain >= HIGH_IMPACT_GAIN_PERCENT).then(|| HighImpactOptimization {
+                        kernel_name: kernel_name.clone(),
+                        optimization_type: format!("{:?}", opt.optimization_type),
+                        // Gain percentage expressed as a speedup factor.
+                        expected_speedup: 1.0 + gain / 100.0,
+                        implementation_difficulty: format!("{:?}", opt.implementation_difficulty),
+                        description: opt.explanation.clone(),
+                    })
+                })
+            })
+            .collect();
+        high_impact_optimizations.sort_by(|a, b| {
+            b.expected_speedup
+                .partial_cmp(&a.expected_speedup)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Fusion opportunities and regression alerts are surfaced per kernel by
+        // `KernelOptimizationAnalyzer::get_optimization_report`, which needs a
+        // kernel name; count them across the kernels really analysed.
+        let mut fusion_opportunities = 0usize;
+        let mut regression_alerts = 0usize;
+        for name in &kernel_names {
+            if let Ok(report) = self.kernel_optimizer.get_optimization_report(name) {
+                fusion_opportunities += report.fusion_opportunities.len();
+                if report.regression_status.as_ref().is_some_and(|status| status.has_regression) {
+                    regression_alerts += 1;
+                }
+            }
+        }
+
+        // Score: start at 100 and dock the mean promised gain still on the
+        // table, so a kernel set with nothing left to improve scores 100.
+        let overall_optimization_score = if total_kernels_analyzed == 0 {
+            None
+        } else {
+            let total_gain: f64 = suggestions
+                .values()
+                .flat_map(|opts| opts.iter())
+                .map(|opt| opt.expected_improvement.performance_gain_percentage)
+                .sum();
+            Some((100.0 - total_gain / total_kernels_analyzed as f64).clamp(0.0, 100.0))
+        };
+
+        let top_recommendations: Vec<String> = high_impact_optimizations
+            .iter()
+            .take(5)
+            .map(|opt| format!("{}: {}", opt.kernel_name, opt.description))
+            .collect();
+
         Ok(KernelOptimizationSummaryReport {
-            total_kernels_analyzed: 0,
-            optimization_opportunities_found: 0,
-            high_impact_optimizations: vec![],
-            fusion_opportunities: 0,
-            regression_alerts: 0,
-            overall_optimization_score: 85.0,
-            top_recommendations: vec!["No kernel analysis data available yet".to_string()],
+            total_kernels_analyzed,
+            optimization_opportunities_found,
+            high_impact_optimizations,
+            fusion_opportunities,
+            regression_alerts,
+            overall_optimization_score,
+            top_recommendations,
         })
     }
 
     /// Convenience method for debugging gradients (used by debug_gradient! macro)
-    pub fn debug_gradients<T>(&mut self, _layer_name: &str, gradients: &[T]) -> Result<()>
+    pub fn debug_gradients<T>(&mut self, layer_name: &str, gradients: &[T]) -> Result<()>
     where
         T: Clone + Into<f64> + fmt::Debug + 'static,
     {
@@ -659,10 +738,35 @@ impl DebugSession {
         use scirs2_core::ndarray::Array; // SciRS2 Integration Policy
         let gradient_array = Array::from_vec(gradients.to_vec()).into_dyn();
 
-        // Create a dummy tensor ID for gradients (in real usage, this would be linked to an actual tensor)
-        let tensor_id = Uuid::new_v4();
+        // Record the gradients as a real tracked tensor of their own, named
+        // after the layer, so their statistics survive the call.
+        //
+        // Previously this minted a fresh `Uuid::new_v4()` and passed it to
+        // `inspect_gradients`, which looks the id up in `tracked_tensors`. A
+        // freshly generated v4 uuid is never in that map, so the statistics
+        // were computed and then dropped on the floor while the call reported
+        // `Ok(())`, and `_layer_name` was ignored entirely.
+        let gradient_tensor_name = format!("{layer_name}.grad");
+        self.tensor_inspector.inspect_tensor(
+            &gradient_array,
+            &gradient_tensor_name,
+            Some(layer_name),
+            Some("gradient"),
+        )?;
 
-        self.tensor_inspector.inspect_gradients(tensor_id, &gradient_array)
+        // Additionally attach them as this layer's `gradient_stats` when the
+        // layer's own tensor has been inspected before.
+        if let Some(tensor_id) = self.tensor_inspector.tensor_id_for_name(layer_name) {
+            self.tensor_inspector.inspect_gradients(tensor_id, &gradient_array)?;
+        } else {
+            tracing::debug!(
+                layer = layer_name,
+                "no previously inspected tensor for this layer; gradients recorded standalone \
+                 as {gradient_tensor_name}"
+            );
+        }
+
+        Ok(())
     }
 }
 

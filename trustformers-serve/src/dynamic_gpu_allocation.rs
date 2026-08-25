@@ -900,15 +900,17 @@ impl DynamicGpuAllocator {
             .await
             .map_err(|e| AllocationError::DeviceError(e.to_string()))?;
 
+        // NaN for every reading the driver would not give, so a consumer can
+        // tell "unknown" from "cool and idle". 0.2.1: an unreadable utilization
+        // sensor arrived as `0.0` and was indistinguishable from a genuinely
+        // idle GPU; only temperature and power were NaN-guarded.
         let (utilization, temperature, power_consumption) = match telemetry {
             Some(sample) => (
-                sample.utilization_percent / 100.0,
-                sample.temperature_celsius,
-                sample.power_watts,
+                sample.utilization_percent.map(|u| u / 100.0).unwrap_or(f32::NAN),
+                sample.temperature_celsius.unwrap_or(f32::NAN),
+                sample.power_watts.unwrap_or(f32::NAN),
             ),
-            // No sensor data: report NaN so a consumer can tell "unknown" from
-            // "cool and idle".
-            None => (device.utilization_percent / 100.0, f32::NAN, f32::NAN),
+            None => (f32::NAN, f32::NAN, f32::NAN),
         };
 
         Ok(GpuResource {

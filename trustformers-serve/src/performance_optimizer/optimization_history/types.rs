@@ -932,7 +932,14 @@ pub trait PredictiveModel {
     /// Get model type
     fn model_type(&self) -> PredictionModelType;
     /// Get model performance metrics
-    fn performance_metrics(&self) -> ModelPerformanceMetrics;
+    /// Fit measured on the data this model was trained on, or `None` when it
+    /// has not been trained.
+    ///
+    /// Changed in 0.2.1: this returned a bare `ModelPerformanceMetrics`, which
+    /// left every implementation obliged to produce numbers even before it had
+    /// seen any data -- and all four in `predictive_analytics.rs` did so by
+    /// returning zeroes with a hardcoded "typical" `r_squared`.
+    fn performance_metrics(&self) -> Option<ModelPerformanceMetrics>;
 }
 
 #[cfg(test)]

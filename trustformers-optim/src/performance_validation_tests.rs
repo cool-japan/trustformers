@@ -42,6 +42,108 @@ mod tests {
         assert_eq!(test_cases[0].name, "Test Case");
     }
 
+    /// Regression: `MathematicalProperty::SparsityHandling` used to just
+    /// alias `Convergence` ("assume true if convergence is achieved" -- see
+    /// git history), so the two properties could never disagree. The real
+    /// check requires at least one genuine zero-gradient step to have
+    /// occurred before it will claim anything. `compute_test_gradients`'s
+    /// "Quadratic Function Convergence" arm always sets gradient = param,
+    /// which for a randn-initialized parameter under continuous gradient
+    /// descent is (for all practical floating-point purposes) never
+    /// *exactly* zero -- so this scenario converges for real while never
+    /// exercising a zero-gradient step at all, and `SparsityHandling` must
+    /// now honestly report `false` (no evidence) here instead of mirroring
+    /// `Convergence`'s `true`.
+    #[test]
+    fn test_sparsity_handling_is_no_longer_an_alias_for_convergence() {
+        let validator = PerformanceValidator::new();
+        let base_case = MathematicalTestCase {
+            name: "Quadratic Function Convergence".to_string(),
+            description: "gradient = param, essentially never exactly zero".to_string(),
+            parameters: create_test_parameters(vec![4]).expect("Operation failed in test"),
+            gradients: HashMap::new(),
+            expected_properties: vec![],
+            tolerance: 1e-6,
+        };
+
+        // Plain gradient descent (no momentum, no weight decay) on
+        // f(x) = 0.5 * ||x||^2 is the predictable geometric decay
+        // x_{t+1} = (1 - lr) * x_t, which comfortably converges well inside
+        // the 1000-iteration budget for lr = 0.1.
+        let convergence_case = MathematicalTestCase {
+            expected_properties: vec![MathematicalProperty::Convergence],
+            ..base_case.clone()
+        };
+        assert!(
+            validator
+                .test_optimizer_correctness(
+                    "SGD",
+                    || Box::new(SGD::new(0.1, 0.0, 0.0, false)),
+                    &convergence_case,
+                )
+                .expect("test_optimizer_correctness failed"),
+            "plain gradient descent on a quadratic must genuinely converge"
+        );
+
+        let sparsity_case = MathematicalTestCase {
+            expected_properties: vec![MathematicalProperty::SparsityHandling],
+            ..base_case
+        };
+        assert!(
+            !validator
+                .test_optimizer_correctness(
+                    "SGD",
+                    || Box::new(SGD::new(0.1, 0.0, 0.0, false)),
+                    &sparsity_case,
+                )
+                .expect("test_optimizer_correctness failed"),
+            "no zero-gradient step ever occurs in this scenario, so SparsityHandling must \
+             honestly report false (no evidence) rather than mirror Convergence's true"
+        );
+    }
+
+    /// Positive counterpart: the built-in "Sparse Gradient Handling" test
+    /// case (`create_mathematical_test_cases`) genuinely zeroes out whole
+    /// gradient tensors on 30% of iterations (`compute_test_gradients`), so
+    /// at least one real zero-gradient step is guaranteed within the first
+    /// three iterations -- `SparsityHandling`'s "was there any evidence at
+    /// all" gate must not itself reject this run.
+    #[test]
+    fn test_sparsity_handling_has_evidence_on_the_builtin_sparse_gradient_case() {
+        let validator = PerformanceValidator::new();
+        let test_cases = validator
+            .create_mathematical_test_cases()
+            .expect("create_mathematical_test_cases failed");
+        let sparse_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "Sparse Gradient Handling")
+            .expect("built-in \"Sparse Gradient Handling\" test case must exist")
+            .clone();
+        assert!(sparse_case
+            .expected_properties
+            .contains(&MathematicalProperty::SparsityHandling));
+
+        // Isolate SparsityHandling from StableConvergence (a separate,
+        // unrelated concern already covered by the built-in case) so this
+        // assertion is only about the zero-gradient-evidence check itself.
+        let isolated_case = MathematicalTestCase {
+            expected_properties: vec![MathematicalProperty::SparsityHandling],
+            ..sparse_case
+        };
+        let passed = validator
+            .test_optimizer_correctness(
+                "SGD",
+                || Box::new(SGD::new(0.001, 0.0, 0.0, false)),
+                &isolated_case,
+            )
+            .expect("test_optimizer_correctness failed");
+        assert!(
+            passed,
+            "plain, non-diverging gradient descent produces finite, non-increasing updates on \
+             real zero-gradient steps, so the real SparsityHandling check must pass"
+        );
+    }
+
     #[test]
     fn test_statistical_analyzer() {
         let analyzer = StatisticalAnalyzer::new();
@@ -53,9 +155,178 @@ mod tests {
             Duration::from_millis(13),
         ];
 
-        let metrics = analyzer.analyze(&step_times, 0.95).expect("Operation failed in test");
+        let metrics = analyzer.analyze(&step_times, 0.95, None).expect("Operation failed in test");
         assert!(metrics.mean > Duration::from_millis(9));
         assert!(metrics.mean < Duration::from_millis(14));
+        assert_eq!(
+            metrics.p_value, None,
+            "no target_step_time was given, so there is no null hypothesis to test -- \
+             p_value must stay absent, never a fabricated constant"
+        );
+    }
+
+    /// Regression: `p_value` used to be a hardcoded `0.05` regardless of the
+    /// data. A real one-sample t-test must actually respond to how far the
+    /// sample mean is from the target: identical distributions of step
+    /// times around a target close to the mean must NOT look significant.
+    #[test]
+    fn test_analyze_p_value_is_not_significant_when_target_matches_the_sample() {
+        let analyzer = StatisticalAnalyzer::new();
+        let step_times = vec![
+            Duration::from_millis(10),
+            Duration::from_millis(11),
+            Duration::from_millis(9),
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+            Duration::from_millis(11),
+        ];
+
+        let metrics = analyzer
+            .analyze(&step_times, 0.95, Some(Duration::from_millis(10)))
+            .expect("Operation failed in test");
+        let p = metrics.p_value.expect("a target was given, so a p-value must be computed");
+        assert!(
+            (0.0..=1.0).contains(&p),
+            "p-value must be a valid probability, got {p}"
+        );
+        assert!(
+            p > 0.05,
+            "the target sits right at the sample mean; this must NOT look significant, got p={p}"
+        );
+    }
+
+    /// Same regression, opposite direction: a target far outside the
+    /// sample's spread must look significant. A constant `0.05` cannot
+    /// distinguish this case from the matching-target case above.
+    #[test]
+    fn test_analyze_p_value_is_significant_when_target_is_far_from_the_sample() {
+        let analyzer = StatisticalAnalyzer::new();
+        let step_times = vec![
+            Duration::from_millis(10),
+            Duration::from_millis(11),
+            Duration::from_millis(9),
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+            Duration::from_millis(11),
+        ];
+
+        let metrics = analyzer
+            .analyze(&step_times, 0.95, Some(Duration::from_millis(1000)))
+            .expect("Operation failed in test");
+        let p = metrics.p_value.expect("a target was given, so a p-value must be computed");
+        assert!(
+            (0.0..=1.0).contains(&p),
+            "p-value must be a valid probability, got {p}"
+        );
+        assert!(
+            p < 0.001,
+            "a target 100x the sample mean, with tight spread, must look highly significant, \
+             got p={p}"
+        );
+    }
+
+    #[test]
+    fn test_analyze_single_sample_has_no_p_value_even_with_a_target() {
+        // A single observation has no sample variance to found a t-test on,
+        // even when the caller supplies a target: this must stay `None`,
+        // never a division-by-a-guessed-variance number.
+        let analyzer = StatisticalAnalyzer::new();
+        let step_times = vec![Duration::from_millis(10)];
+
+        let metrics = analyzer
+            .analyze(&step_times, 0.95, Some(Duration::from_millis(1000)))
+            .expect("Operation failed in test");
+        assert_eq!(metrics.p_value, None);
+        assert_eq!(metrics.std_dev, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_analyze_rejects_empty_step_times_instead_of_panicking() {
+        let analyzer = StatisticalAnalyzer::new();
+        assert!(analyzer.analyze(&[], 0.95, None).is_err());
+    }
+
+    /// Integration: `benchmark_optimizer` (the only real caller of
+    /// `analyze`) must thread `PerformanceValidator::baseline_results`
+    /// through as the p-value's target -- keyed by optimizer name, and only
+    /// when a baseline was actually set.
+    #[test]
+    fn test_benchmark_optimizer_uses_the_matching_baseline_as_the_p_value_target() {
+        let mut validator = PerformanceValidator::new();
+        let scenario = BenchmarkScenario {
+            name: "tiny".to_string(),
+            parameter_sizes: vec![4],
+            batch_size: 1,
+            iterations: 8,
+        };
+
+        // No baseline at all: nothing to test against.
+        let no_baseline = validator
+            .benchmark_optimizer("Adam", OptimizerType::Adam, &scenario)
+            .expect("benchmark_optimizer failed");
+        assert_eq!(
+            no_baseline
+                .statistical_metrics
+                .expect("statistical_significance defaults to true")
+                .p_value,
+            None,
+            "no baseline was ever set, so \"Adam\" has nothing to test its step times against"
+        );
+
+        // A baseline exists, but only for a DIFFERENT optimizer name: must
+        // not leak across optimizers.
+        let mut other_optimizer_baseline = HashMap::new();
+        other_optimizer_baseline.insert(
+            "SGD".to_string(),
+            BenchmarkResult {
+                avg_step_time: Duration::from_secs(1),
+                throughput: 1.0,
+                memory_usage: 1.0,
+            },
+        );
+        validator.set_baseline(other_optimizer_baseline);
+        let mismatched_name = validator
+            .benchmark_optimizer("Adam", OptimizerType::Adam, &scenario)
+            .expect("benchmark_optimizer failed");
+        assert_eq!(
+            mismatched_name
+                .statistical_metrics
+                .expect("statistical_significance defaults to true")
+                .p_value,
+            None,
+            "a baseline keyed \"SGD\" must not be used as \"Adam\"'s null hypothesis"
+        );
+
+        // A baseline for the SAME optimizer name, wildly far from real
+        // in-memory step times (seconds vs. microseconds): must feed a real,
+        // significant p-value.
+        let mut matching_baseline = HashMap::new();
+        matching_baseline.insert(
+            "Adam".to_string(),
+            BenchmarkResult {
+                avg_step_time: Duration::from_secs(1),
+                throughput: 1.0,
+                memory_usage: 1.0,
+            },
+        );
+        validator.set_baseline(matching_baseline);
+        let with_baseline = validator
+            .benchmark_optimizer("Adam", OptimizerType::Adam, &scenario)
+            .expect("benchmark_optimizer failed");
+        let p = with_baseline
+            .statistical_metrics
+            .expect("statistical_significance defaults to true")
+            .p_value
+            .expect("a baseline for \"Adam\" was set, so a p-value must be computed");
+        assert!(
+            (0.0..=1.0).contains(&p),
+            "p-value must be a valid probability, got {p}"
+        );
+        assert!(
+            p < 0.05,
+            "a 1-second baseline is wildly different from real in-memory optimizer steps; \
+             got p={p}"
+        );
     }
 
     #[test]
