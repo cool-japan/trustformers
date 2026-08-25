@@ -204,11 +204,16 @@ impl EfficiencyAnalyzer {
             efficiency_score: efficiency_ratio,
             waste_percentage: (1.0 - efficiency_ratio) * 100.0,
             optimization_opportunities: self.analyze_efficiency_opportunities().await?,
+            // No reference baselines exist to compare this session against;
+            // the crate observes one machine and holds no CPU-only,
+            // previous-generation or cloud measurement, and no population to
+            // rank within. These used to be published as 8.5x / 1.2x / 0.9x /
+            // 75th percentile.
             comparative_analysis: ComparativeEfficiency {
-                vs_cpu_only: 8.5,            // GPU is 8.5x more efficient than CPU
-                vs_previous_generation: 1.2, // 20% improvement over previous gen
-                vs_cloud_baseline: 0.9,      // 10% less efficient than cloud baseline
-                efficiency_percentile: 75.0, // 75th percentile
+                vs_cpu_only: None,
+                vs_previous_generation: None,
+                vs_cloud_baseline: None,
+                efficiency_percentile: None,
             },
         })
     }

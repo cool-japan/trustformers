@@ -602,82 +602,92 @@ impl ErrorRecoverySystem {
         // This would include more sophisticated health scoring logic
     }
 
-    // Recovery strategy implementations (simplified)
+    // Recovery strategy execution.
+    //
+    // `ErrorRecoveryManager` records and classifies errors; it holds no handle
+    // to the subsystems a recovery would have to act on (no retryable operation
+    // closure, no allocator, no component registry, no process supervisor). The
+    // strategies below therefore report `success: false` with a message naming
+    // exactly what is not wired, instead of the `success: true` +
+    // "Retry successful" / "Resource cleanup completed" they used to return
+    // having done nothing at all -- which made `record_error` mark every error
+    // recovered and inflated `recovery_success_rate` to 100%.
+    //
+    // `execute_notification_strategy` is the one that really acts (it emits a
+    // `tracing::warn!`), and it is the one that still reports success.
+
+    /// Build an "unwired" result naming the missing capability.
+    fn unwired(capability: &str) -> RecoveryResult {
+        RecoveryResult {
+            success: false,
+            strategy_used: None,
+            message: format!(
+                "recovery not performed: {capability} -- ErrorRecoveryManager has no handle to \
+                 act on"
+            ),
+            recovery_time: Duration::from_millis(0),
+        }
+    }
+
     async fn execute_retry_strategy(
         &self,
         _max_attempts: usize,
         _delay_ms: u64,
         _error: &ErrorEvent,
     ) -> Result<RecoveryResult> {
-        Ok(RecoveryResult {
-            success: true,
-            strategy_used: None,
-            message: "Retry successful".to_string(),
-            recovery_time: Duration::from_millis(0),
-        })
+        Ok(Self::unwired(
+            "no retryable operation was supplied with the error",
+        ))
     }
 
     async fn execute_fallback_strategy(
         &self,
-        _alternative: &str,
+        alternative: &str,
         _error: &ErrorEvent,
     ) -> Result<RecoveryResult> {
-        Ok(RecoveryResult {
-            success: true,
-            strategy_used: None,
-            message: "Fallback strategy executed".to_string(),
-            recovery_time: Duration::from_millis(0),
-        })
+        Ok(Self::unwired(&format!(
+            "no dispatcher exists for the alternative method {alternative:?}"
+        )))
     }
 
     async fn execute_degradation_strategy(
         &self,
-        _functionality: &str,
+        functionality: &str,
         _error: &ErrorEvent,
     ) -> Result<RecoveryResult> {
-        Ok(RecoveryResult {
-            success: true,
-            strategy_used: None,
-            message: "Graceful degradation applied".to_string(),
-            recovery_time: Duration::from_millis(0),
-        })
+        Ok(Self::unwired(&format!(
+            "no feature switch exists for {functionality:?}"
+        )))
     }
 
     async fn execute_cleanup_strategy(
         &self,
-        _cleanup_type: &str,
+        cleanup_type: &str,
         _error: &ErrorEvent,
     ) -> Result<RecoveryResult> {
-        Ok(RecoveryResult {
-            success: true,
-            strategy_used: None,
-            message: "Resource cleanup completed".to_string(),
-            recovery_time: Duration::from_millis(0),
-        })
+        Ok(Self::unwired(&format!(
+            "no allocator or cache handle for {cleanup_type:?}"
+        )))
     }
 
     async fn execute_reset_strategy(
         &self,
-        _component: &str,
+        component: &str,
         _error: &ErrorEvent,
     ) -> Result<RecoveryResult> {
-        Ok(RecoveryResult {
-            success: true,
-            strategy_used: None,
-            message: "Component reset completed".to_string(),
-            recovery_time: Duration::from_millis(0),
-        })
+        Ok(Self::unwired(&format!(
+            "no component registry entry for {component:?}"
+        )))
     }
 
     async fn execute_shutdown_strategy(&self, _error: &ErrorEvent) -> Result<RecoveryResult> {
-        Ok(RecoveryResult {
-            success: true,
-            strategy_used: None,
-            message: "Emergency shutdown initiated".to_string(),
-            recovery_time: Duration::from_millis(0),
-        })
+        Ok(Self::unwired(
+            "no process supervisor handle to initiate shutdown",
+        ))
     }
 
+    /// The one strategy that really performs its action: it emits the
+    /// notification through the `tracing` facade.
     async fn execute_notification_strategy(
         &self,
         message: &str,
@@ -687,22 +697,19 @@ impl ErrorRecoverySystem {
         Ok(RecoveryResult {
             success: true,
             strategy_used: None,
-            message: "User notified".to_string(),
+            message: "User notified via the tracing facade".to_string(),
             recovery_time: Duration::from_millis(0),
         })
     }
 
     async fn execute_repair_strategy(
         &self,
-        _repair_action: &str,
+        repair_action: &str,
         _error: &ErrorEvent,
     ) -> Result<RecoveryResult> {
-        Ok(RecoveryResult {
-            success: true,
-            strategy_used: None,
-            message: "Automatic repair completed".to_string(),
-            recovery_time: Duration::from_millis(0),
-        })
+        Ok(Self::unwired(&format!(
+            "no repair executor for the action {repair_action:?}"
+        )))
     }
 }
 
@@ -733,6 +740,71 @@ pub struct ErrorStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_error() -> ErrorEvent {
+        ErrorEvent {
+            id: Uuid::new_v4(),
+            error_type: ErrorType::TensorInspectionError,
+            error_message: "boom".to_string(),
+            component: "tensor_inspector".to_string(),
+            severity: ErrorSeverity::Medium,
+            timestamp: chrono::Utc::now(),
+            context: ErrorContext {
+                session_id: Uuid::new_v4(),
+                operation: "inspect".to_string(),
+                parameters: HashMap::new(),
+                system_state: SystemState {
+                    memory_usage_mb: 0,
+                    cpu_usage_percent: 0.0,
+                    active_tensors: 0,
+                    active_sessions: 0,
+                    uptime_seconds: 0,
+                },
+            },
+            stack_trace: None,
+        }
+    }
+
+    // ---- Wave 6c debug-sweep2: recovery strategies stop claiming success ---
+
+    #[tokio::test]
+    async fn unwired_recovery_strategies_report_failure_not_success() {
+        let manager = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        let error = sample_error();
+
+        for result in [
+            manager.execute_retry_strategy(3, 10, &error).await.expect("call"),
+            manager.execute_fallback_strategy("other", &error).await.expect("call"),
+            manager.execute_degradation_strategy("feature", &error).await.expect("call"),
+            manager.execute_cleanup_strategy("cache", &error).await.expect("call"),
+            manager.execute_reset_strategy("component", &error).await.expect("call"),
+            manager.execute_shutdown_strategy(&error).await.expect("call"),
+            manager.execute_repair_strategy("fix", &error).await.expect("call"),
+        ] {
+            assert!(
+                !result.success,
+                "an unperformed recovery must not report success: {}",
+                result.message
+            );
+            assert!(
+                result.message.contains("recovery not performed"),
+                "the message must say what did not happen: {}",
+                result.message
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_notification_strategy_really_acts_and_reports_success() {
+        let manager = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        let error = sample_error();
+        let result = manager
+            .execute_notification_strategy("check the logs", &error)
+            .await
+            .expect("call");
+        assert!(result.success, "the notification is really emitted");
+        assert!(result.message.contains("tracing"));
+    }
 
     fn make_error_event(error_type: ErrorType) -> ErrorEvent {
         ErrorEvent {

@@ -212,7 +212,8 @@ impl InterpretabilityAnalyzer {
         self.lime_results.push(result.clone());
         Ok(result)
     }
-    /// Perform attention analysis (placeholder for transformer models)
+    /// Analyse transformer attention weights: per-layer entropies plus real
+    /// diagonal / vertical / block / repetitive pattern detection.
     pub async fn analyze_attention(
         &mut self,
         attention_weights: &HashMap<String, Vec<Vec<f64>>>,

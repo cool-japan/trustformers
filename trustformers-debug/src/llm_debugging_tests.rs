@@ -427,15 +427,26 @@ fn test_critical_issue_construction() {
 #[test]
 fn test_health_summary_construction() {
     let summary = HealthSummary {
-        score: 0.88,
-        status: HealthStatus::Good,
+        score: Some(0.88),
+        status: Some(HealthStatus::Good),
         trend: "improving".to_string(),
         key_metrics: HashMap::new(),
         issues: Vec::new(),
     };
-    assert!((summary.score - 0.88).abs() < 1e-6);
-    assert!(matches!(summary.status, HealthStatus::Good));
+    assert!((summary.score.expect("score") - 0.88).abs() < 1e-6);
+    assert!(matches!(summary.status, Some(HealthStatus::Good)));
     assert!(summary.issues.is_empty());
+
+    // An analyzer that has recorded nothing reports absence, not a seed.
+    let empty = HealthSummary {
+        score: None,
+        status: None,
+        trend: "Unknown (insufficient history)".to_string(),
+        key_metrics: HashMap::new(),
+        issues: Vec::new(),
+    };
+    assert_eq!(empty.score, None);
+    assert_eq!(empty.status, None);
 }
 
 // ── FactualityMetrics ─────────────────────────────────────────────────────────

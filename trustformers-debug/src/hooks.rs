@@ -45,7 +45,8 @@ pub enum HookCondition {
     MemoryThreshold { threshold_mb: f64 },
     /// Trigger on specific training steps
     StepRange { start: usize, end: usize },
-    /// Custom condition (placeholder for extensibility)
+    /// Fires when the named key is present in
+    /// [`HookContext::metadata`] -- the caller controls the flag.
     Custom(String),
 }
 
@@ -620,8 +621,10 @@ impl HookManager {
                 context.step >= *start && context.step <= *end
             },
             HookCondition::Custom(name) => {
-                // For custom conditions, we'd need additional context
-                // This is a placeholder implementation
+                // A custom condition fires when the caller has put `name` into
+                // the hook context's metadata. That IS the contract -- the
+                // caller decides when the flag is present -- not a stand-in for
+                // some richer predicate.
                 context.metadata.contains_key(name)
             },
             HookCondition::LossThreshold {

@@ -16,6 +16,12 @@ pub struct EnergyConsumptionMonitor {
     consumption_history: Vec<EnergyMeasurement>,
     power_profiles: HashMap<String, PowerProfile>,
     efficiency_metrics: EnergyEfficiencyMetrics,
+    /// Real operation count reported by the caller via
+    /// [`Self::record_operations`]; `None` until one is.
+    reported_operations: Option<u64>,
+    /// Real sustained FLOP rate reported by the caller via
+    /// [`Self::record_flops_per_second`]; `None` until one is.
+    reported_flops_per_second: Option<f64>,
 }
 
 /// Device-specific energy monitor
@@ -46,17 +52,21 @@ impl EnergyConsumptionMonitor {
             device_monitors: HashMap::new(),
             consumption_history: Vec::new(),
             power_profiles: Self::create_default_power_profiles(),
+            reported_operations: None,
+            reported_flops_per_second: None,
             efficiency_metrics: EnergyEfficiencyMetrics {
-                operations_per_kwh: 0.0,
-                flops_per_watt: 0.0,
+                operations_per_kwh: None,
+                flops_per_watt: None,
                 model_energy_efficiency: 0.0,
                 training_energy_efficiency: 0.0,
                 inference_energy_efficiency: 0.0,
+                // No reference baselines are available; see
+                // `ComparativeEfficiency`.
                 comparative_efficiency: ComparativeEfficiency {
-                    vs_cpu_only: 0.0,
-                    vs_previous_generation: 0.0,
-                    vs_cloud_baseline: 0.0,
-                    efficiency_percentile: 0.0,
+                    vs_cpu_only: None,
+                    vs_previous_generation: None,
+                    vs_cloud_baseline: None,
+                    efficiency_percentile: None,
                 },
             },
         }
@@ -183,47 +193,38 @@ impl EnergyConsumptionMonitor {
             .take(100) // Last 100 measurements
             .collect();
 
-        // Calculate operations per kWh (simplified)
+        // Work-per-energy needs a real work count, which only the caller can
+        // supply (see `record_operations` / `record_flops`). The monitor
+        // samples power and utilization, never work done -- so nothing is
+        // derived here.
         let total_energy: f64 = recent_measurements.iter().map(|m| m.energy_kwh).sum();
-        let total_operations = recent_measurements.len() as f64 * 1000.0; // Simplified
-
         if total_energy > 0.0 {
-            self.efficiency_metrics.operations_per_kwh = total_operations / total_energy;
+            if let Some(operations) = self.reported_operations {
+                self.efficiency_metrics.operations_per_kwh = Some(operations as f64 / total_energy);
+            }
         }
 
-        // Calculate FLOPS per watt (simplified)
         let avg_power: f64 = recent_measurements.iter().map(|m| m.power_watts).sum::<f64>()
             / recent_measurements.len() as f64;
-        let avg_utilization: f64 = recent_measurements.iter().map(|m| m.utilization).sum::<f64>()
-            / recent_measurements.len() as f64;
-
         if avg_power > 0.0 {
-            // Simplified FLOPS calculation
-            let estimated_flops = avg_utilization * 1e12; // 1 TFLOP at full utilization
-            self.efficiency_metrics.flops_per_watt = estimated_flops / avg_power;
+            if let Some(flops_per_second) = self.reported_flops_per_second {
+                self.efficiency_metrics.flops_per_watt = Some(flops_per_second / avg_power);
+            }
         }
-
-        // Update comparative efficiency (simplified)
-        self.update_comparative_efficiency();
     }
 
-    /// Update comparative efficiency metrics
-    fn update_comparative_efficiency(&mut self) {
-        // Simplified comparative analysis
-        let current_efficiency = self.efficiency_metrics.flops_per_watt;
+    /// Report the real number of model operations completed since monitoring
+    /// began, so [`EnergyEfficiencyMetrics::operations_per_kwh`] can be
+    /// computed from a measured work count instead of an assumed one.
+    pub fn record_operations(&mut self, operations: u64) {
+        self.reported_operations = Some(operations);
+    }
 
-        // vs CPU only (GPUs are typically 10-50x more efficient for ML workloads)
-        self.efficiency_metrics.comparative_efficiency.vs_cpu_only = current_efficiency / 1e9;
-
-        // vs previous generation (assume 20% improvement per generation)
-        self.efficiency_metrics.comparative_efficiency.vs_previous_generation = 1.2;
-
-        // vs cloud baseline (simplified)
-        self.efficiency_metrics.comparative_efficiency.vs_cloud_baseline = 1.1;
-
-        // Efficiency percentile (simplified ranking)
-        self.efficiency_metrics.comparative_efficiency.efficiency_percentile =
-            (current_efficiency / 1e11).min(100.0);
+    /// Report the real sustained FLOP rate of the workload, so
+    /// [`EnergyEfficiencyMetrics::flops_per_watt`] can be computed against a
+    /// measured rate instead of an assumed device peak.
+    pub fn record_flops_per_second(&mut self, flops_per_second: f64) {
+        self.reported_flops_per_second = Some(flops_per_second);
     }
 
     /// Get current energy consumption for all devices

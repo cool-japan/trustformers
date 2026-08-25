@@ -26,6 +26,23 @@ pub struct FlameGraphNode {
     pub metadata: HashMap<String, String>,
 }
 
+/// Escape the XML/HTML predefined entities so frame names cannot break out of
+/// the generated markup.
+fn html_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Stack frame for flame graph construction
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StackFrame {
@@ -325,63 +342,162 @@ impl FlameGraphProfiler {
         Ok(())
     }
 
-    /// Export as interactive HTML flame graph
+    /// Export the flame graph as a self-contained HTML page.
+    ///
+    /// The page carries a REAL inline SVG flame graph -- one rectangle per
+    /// node, width proportional to that node's total value, `y` by stack depth,
+    /// with a native `<title>` tooltip -- plus the full tree as embedded JSON.
+    ///
+    /// It used to advertise "Click to zoom, double-click to reset. Hover for
+    /// details", render `Reset Zoom` / `Search` buttons wired to functions that
+    /// were never defined, and load d3 from a CDN, while the only script in the
+    /// page was a `console.log`. Nothing was drawn: `#flame-graph` stayed
+    /// empty. The page is now honest about being a static rendering.
     async fn export_interactive_html(
         &self,
         root: &FlameGraphNode,
         output_path: &Path,
     ) -> Result<()> {
         let json_data = serde_json::to_string(root)?;
+        let svg = Self::render_flame_svg(root);
 
         let html_content = format!(
             r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>{}</title>
+    <title>{title}</title>
     <meta charset="utf-8">
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; }}
-        .flame-graph {{ width: 100%; height: 600px; border: 1px solid #ccc; }}
-        .tooltip {{ position: absolute; background: rgba(0,0,0,0.8); color: white;
-                   padding: 10px; border-radius: 4px; pointer-events: none; z-index: 1000; }}
-        .controls {{ margin-bottom: 20px; }}
+        body {{ font-family: sans-serif; margin: 0; padding: 20px; }}
+        .flame-graph {{ width: 100%; overflow-x: auto; border: 1px solid #ccc; }}
         .info {{ margin-top: 20px; font-size: 14px; color: #666; }}
     </style>
-    <script src="https://d3js.org/d3.v7.min.js"></script>
 </head>
 <body>
-    <h1>{}</h1>
-    <div class="controls">
-        <button onclick="resetZoom()">Reset Zoom</button>
-        <button onclick="searchFunction()">Search</button>
-        <input type="text" id="searchInput" placeholder="Function name...">
-    </div>
-    <div id="flame-graph" class="flame-graph"></div>
+    <h1>{title}</h1>
+    <div class="flame-graph">{svg}</div>
     <div class="info">
-        <p>Samples: {} | Functions: {} | Total Time: {:.2}ms</p>
-        <p>Click to zoom, double-click to reset. Hover for details.</p>
+        <p>Samples: {samples} | Functions: {functions} | Total Time: {total_ms:.2}ms</p>
+        <p>Static rendering: hover a frame for its name and timing. There is no
+           zoom or search in this export; the complete tree is embedded below as
+           JSON for tools that want it.</p>
     </div>
-    <div id="tooltip" class="tooltip" style="display: none;"></div>
-
-    <script>
-        const data = {};
-        // Interactive flame graph implementation would go here
-        // This is a simplified version - full implementation would include D3.js visualization
-        console.log('Flame graph data loaded:', data);
-    </script>
+    <script type="application/json" id="flamegraph-data">{json_data}</script>
 </body>
 </html>"#,
-            self.config.title,
-            self.config.title,
-            self.samples.len(),
-            self.count_unique_functions(root),
-            root.total_value as f64 / 1_000_000.0, // Convert ns to ms
-            json_data
+            title = html_escape(&self.config.title),
+            svg = svg,
+            samples = self.samples.len(),
+            functions = self.count_unique_functions(root),
+            total_ms = root.total_value as f64 / 1_000_000.0,
+            json_data = json_data,
         );
 
         tokio::fs::write(output_path, html_content).await?;
-        tracing::info!("Exported interactive HTML flame graph to {:?}", output_path);
+        tracing::info!("Exported HTML flame graph to {:?}", output_path);
         Ok(())
+    }
+
+    /// Height in pixels of one stack level in the rendered SVG.
+    const FLAME_ROW_HEIGHT: f64 = 18.0;
+    /// Total width in pixels of the rendered SVG.
+    const FLAME_WIDTH: f64 = 1200.0;
+
+    /// Render `root` as a real, dependency-free SVG flame graph.
+    fn render_flame_svg(root: &FlameGraphNode) -> String {
+        use std::fmt::Write as _;
+
+        let depth = Self::tree_depth(root);
+        let height = (depth as f64 + 1.0) * Self::FLAME_ROW_HEIGHT + 4.0;
+        let mut out = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h:.0}\" \
+             viewBox=\"0 0 {w} {h:.0}\" font-family=\"sans-serif\" font-size=\"11\">",
+            w = Self::FLAME_WIDTH,
+            h = height,
+        );
+        Self::render_flame_node(&mut out, root, 0.0, 0, Self::FLAME_WIDTH, root.total_value);
+        let _ = write!(out, "</svg>");
+        out
+    }
+
+    fn tree_depth(node: &FlameGraphNode) -> usize {
+        1 + node.children.values().map(Self::tree_depth).max().unwrap_or(0)
+    }
+
+    fn render_flame_node(
+        out: &mut String,
+        node: &FlameGraphNode,
+        x: f64,
+        depth: usize,
+        width: f64,
+        root_total: u64,
+    ) {
+        use std::fmt::Write as _;
+
+        if width < 0.05 {
+            return;
+        }
+        let y = depth as f64 * Self::FLAME_ROW_HEIGHT;
+        // Classic flame-graph warm palette, keyed by the frame name so the same
+        // function keeps the same colour across renders.
+        let hue = (Self::name_hash(&node.name) % 50) as u32;
+        let percentage = if root_total > 0 {
+            node.total_value as f64 / root_total as f64 * 100.0
+        } else {
+            0.0
+        };
+        let _ = write!(
+            out,
+            "<g><rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{w:.2}\" height=\"{h:.2}\" \
+             fill=\"hsl({hue},80%,55%)\" stroke=\"#fff\" stroke-width=\"0.5\"/>\
+             <title>{name} — {ms:.3}ms ({percentage:.2}%)</title>",
+            x = x,
+            y = y,
+            w = width,
+            h = Self::FLAME_ROW_HEIGHT - 1.0,
+            hue = hue,
+            name = html_escape(&node.name),
+            ms = node.total_value as f64 / 1_000_000.0,
+            percentage = percentage,
+        );
+        // Only label frames wide enough to hold readable text.
+        if width > 40.0 {
+            let max_chars = (width / 6.5) as usize;
+            let label: String = node.name.chars().take(max_chars.max(1)).collect();
+            let _ = write!(
+                out,
+                "<text x=\"{tx:.2}\" y=\"{ty:.2}\" fill=\"#000\">{label}</text>",
+                tx = x + 3.0,
+                ty = y + Self::FLAME_ROW_HEIGHT - 6.0,
+                label = html_escape(&label),
+            );
+        }
+        let _ = write!(out, "</g>");
+
+        // Children are laid out left to right in a stable (name-sorted) order,
+        // each taking the share of the parent's width that its value really is.
+        let mut children: Vec<&FlameGraphNode> = node.children.values().collect();
+        children.sort_by(|a, b| a.name.cmp(&b.name));
+        let child_total: u64 = children.iter().map(|c| c.total_value).sum();
+        if child_total == 0 {
+            return;
+        }
+        let mut cursor = x;
+        for child in children {
+            let child_width = width * (child.total_value as f64 / child_total as f64);
+            Self::render_flame_node(out, child, cursor, depth + 1, child_width, root_total);
+            cursor += child_width;
+        }
+    }
+
+    /// Deterministic FNV-1a hash of a frame name, for stable colouring.
+    fn name_hash(name: &str) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in name.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash
     }
 
     /// Export as JSON
@@ -444,26 +560,137 @@ impl FlameGraphProfiler {
 
     // Private helper methods
 
+    /// Capture the REAL current call stack via [`std::backtrace::Backtrace`].
+    ///
+    /// `std` does not expose structured frames on stable, so the frames are
+    /// parsed out of the backtrace's textual form: each frame is a
+    /// `N: symbol` line optionally followed by an `at path:line[:col]` line.
+    /// Frames belonging to this module's own capture machinery are dropped so
+    /// the sample starts at the caller.
+    ///
+    /// Returns an error when the platform captured nothing (backtraces are
+    /// disabled or unsupported) rather than inventing a frame -- the previous
+    /// implementation returned one hardcoded frame,
+    /// `captured_function @ profiler.rs:1800`, so every sample in every flame
+    /// graph was the same fictional stack.
     fn capture_stack_trace(&self) -> Result<Vec<StackFrame>> {
-        // Simplified stack trace capture
-        // In a real implementation, this would use platform-specific APIs
-        Ok(vec![StackFrame {
-            function_name: "captured_function".to_string(),
-            module_name: Some("trustformers_debug".to_string()),
-            file_name: Some("profiler.rs".to_string()),
-            line_number: Some(1800),
-            address: None,
-        }])
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let frames = Self::parse_backtrace(&backtrace.to_string());
+        if frames.is_empty() {
+            anyhow::bail!(
+                "no stack frames could be captured on this platform (std::backtrace status: \
+                 {:?}); refusing to record a fabricated stack",
+                backtrace.status()
+            );
+        }
+        Ok(frames)
     }
 
+    /// Parse the textual form of a [`std::backtrace::Backtrace`] into frames.
+    ///
+    /// Split out from [`Self::capture_stack_trace`] so the parsing is testable
+    /// against a fixed input, independent of whatever the live stack happens
+    /// to be.
+    fn parse_backtrace(text: &str) -> Vec<StackFrame> {
+        let mut frames: Vec<StackFrame> = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("at ") {
+                // Location line: attach to the frame just pushed.
+                if let Some(frame) = frames.last_mut() {
+                    let mut parts = rest.rsplitn(3, ':');
+                    // `path:line:col` or `path:line`.
+                    let last = parts.next().unwrap_or_default();
+                    let middle = parts.next();
+                    let head = parts.next();
+                    match (head, middle, last.parse::<u32>()) {
+                        // path:line:col
+                        (Some(path), Some(line_no), Ok(_col)) => {
+                            frame.file_name = Some(path.to_string());
+                            frame.line_number = line_no.parse::<u32>().ok();
+                        },
+                        // path:line
+                        (None, Some(path), Ok(line_no)) => {
+                            frame.file_name = Some(path.to_string());
+                            frame.line_number = Some(line_no);
+                        },
+                        _ => frame.file_name = Some(rest.to_string()),
+                    }
+                }
+                continue;
+            }
+
+            // Frame line: `<index>: <symbol>`.
+            let Some((index, symbol)) = trimmed.split_once(": ") else {
+                continue;
+            };
+            if index.parse::<u32>().is_err() {
+                continue;
+            }
+            let symbol = symbol.trim();
+            if symbol.is_empty() {
+                continue;
+            }
+            // The module path is everything before the final `::segment`.
+            let module_name = symbol.rfind("::").map(|idx| symbol[..idx].to_string());
+            frames.push(StackFrame {
+                function_name: symbol.to_string(),
+                module_name,
+                file_name: None,
+                line_number: None,
+                address: None,
+            });
+        }
+
+        // Drop this crate's own capture frames so the sample begins at the
+        // caller of `sample_current_stack`.
+        let first_caller = frames
+            .iter()
+            .position(|f| {
+                !f.function_name.contains("std::backtrace")
+                    && !f.function_name.contains("Backtrace")
+                    && !f.function_name.contains("capture_stack_trace")
+                    && !f.function_name.contains("parse_backtrace")
+            })
+            .unwrap_or(0);
+        frames.split_off(first_caller)
+    }
+
+    /// A real, stable per-thread identifier.
+    ///
+    /// `std::thread::ThreadId` is opaque on stable, so this hands out dense
+    /// ids from a process-wide counter, one per thread, cached in thread-local
+    /// storage. Two samples from the same thread always share an id and two
+    /// different threads never do -- which is exactly what a flame graph needs,
+    /// and what the previous hardcoded `1` could not provide.
     fn get_current_thread_id(&self) -> u64 {
-        // Simplified thread ID - would use thread::current().id() in practice
-        1
+        use std::cell::Cell;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_THREAD_ID: AtomicU64 = AtomicU64::new(1);
+        thread_local! {
+            static THREAD_ID: Cell<u64> = const { Cell::new(0) };
+        }
+
+        THREAD_ID.with(|slot| {
+            let existing = slot.get();
+            if existing != 0 {
+                return existing;
+            }
+            let assigned = NEXT_THREAD_ID.fetch_add(1, Ordering::Relaxed);
+            slot.set(assigned);
+            assigned
+        })
     }
 
+    /// Which CPU the sample was taken on.
+    ///
+    /// Always `None`: reading the current CPU needs a platform-specific call
+    /// (`sched_getcpu` on Linux, `GetCurrentProcessorNumber` on Windows, no
+    /// stable equivalent on macOS) and this crate is Pure Rust with no FFI.
+    /// It used to return `Some(0)`, i.e. "every sample ran on CPU 0".
     fn get_current_cpu_id(&self) -> Option<u32> {
-        // Would query current CPU ID in practice
-        Some(0)
+        None
     }
 
     fn merge_sample_into_tree(&self, node: &mut FlameGraphNode, sample: &FlameGraphSample) {
@@ -996,6 +1223,140 @@ mod flame_graph_profiler_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Wave 6c debug-sweep2: real stack capture and real SVG ------------
+
+    #[test]
+    fn parse_backtrace_extracts_real_frames_and_locations() {
+        let text = "   0: std::backtrace::Backtrace::force_capture\n                    \x20            at /rustc/lib/backtrace.rs:10:5\n                    \x20  1: my_crate::my_module::my_function\n                    \x20            at src/lib.rs:42:9\n                    \x20  2: main\n";
+        let frames = FlameGraphProfiler::parse_backtrace(text);
+        // The std::backtrace frame is dropped as capture machinery.
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(frames[0].function_name, "my_crate::my_module::my_function");
+        assert_eq!(
+            frames[0].module_name.as_deref(),
+            Some("my_crate::my_module")
+        );
+        assert_eq!(frames[0].file_name.as_deref(), Some("src/lib.rs"));
+        assert_eq!(frames[0].line_number, Some(42));
+        assert_eq!(frames[1].function_name, "main");
+        assert_eq!(frames[1].line_number, None);
+        // The old capture returned exactly one fictional frame.
+        assert!(frames.iter().all(|f| f.function_name != "captured_function"));
+    }
+
+    #[test]
+    fn parse_backtrace_returns_nothing_for_unparseable_text() {
+        assert!(FlameGraphProfiler::parse_backtrace("").is_empty());
+        assert!(FlameGraphProfiler::parse_backtrace("disabled backtrace").is_empty());
+    }
+
+    #[test]
+    fn sample_current_stack_captures_this_test_function() {
+        let mut profiler = FlameGraphProfiler::new(FlameGraphConfig::default());
+        profiler.sample_current_stack(1_000).expect("a live stack must be capturable");
+        let sample = profiler.samples.last().expect("one sample");
+        assert!(!sample.stack.is_empty());
+        // A real capture names real symbols, not a single fixed placeholder.
+        assert!(
+            sample.stack.iter().all(|f| f.function_name != "captured_function"),
+            "{:?}",
+            sample.stack
+        );
+        // CPU id is honestly absent rather than a fabricated 0.
+        assert_eq!(sample.cpu_id, None);
+        assert!(sample.thread_id > 0, "a real dense thread id is assigned");
+    }
+
+    #[test]
+    fn thread_ids_are_stable_per_thread_and_distinct_across_threads() {
+        let profiler = FlameGraphProfiler::new(FlameGraphConfig::default());
+        let mine = profiler.get_current_thread_id();
+        assert_eq!(
+            mine,
+            profiler.get_current_thread_id(),
+            "stable within a thread"
+        );
+        let other = std::thread::spawn(move || {
+            let p = FlameGraphProfiler::new(FlameGraphConfig::default());
+            p.get_current_thread_id()
+        })
+        .join()
+        .expect("thread join");
+        assert_ne!(
+            mine, other,
+            "a different thread must get a different id (was always 1)"
+        );
+    }
+
+    #[test]
+    fn render_flame_svg_draws_one_rect_per_node_with_real_widths() {
+        let mut root = FlameGraphNode {
+            name: "root".to_string(),
+            value: 0,
+            delta: None,
+            children: HashMap::new(),
+            total_value: 100,
+            self_value: 0,
+            percentage: 100.0,
+            color: None,
+            metadata: HashMap::new(),
+        };
+        for (name, value) in [("hot", 75_u64), ("cold", 25_u64)] {
+            root.children.insert(
+                name.to_string(),
+                FlameGraphNode {
+                    name: name.to_string(),
+                    value,
+                    delta: None,
+                    children: HashMap::new(),
+                    total_value: value,
+                    self_value: value,
+                    percentage: value as f64,
+                    color: None,
+                    metadata: HashMap::new(),
+                },
+            );
+        }
+
+        let svg = FlameGraphProfiler::render_flame_svg(&root);
+        assert!(svg.starts_with("<svg"), "must be a real SVG document");
+        assert_eq!(
+            svg.matches("<rect").count(),
+            3,
+            "root + two children:\n{svg}"
+        );
+        assert!(
+            svg.contains("root — 0.000ms (100.00%)"),
+            "real hover tooltip: {svg}"
+        );
+        assert!(
+            svg.contains("(75.00%)") && svg.contains("(25.00%)"),
+            "real shares: {svg}"
+        );
+        // "cold" sorts before "hot", so it is laid out first at x = 0 with a
+        // quarter of the width.
+        assert!(svg.contains("width=\"300.00\""), "25% of 1200px: {svg}");
+        assert!(svg.contains("width=\"900.00\""), "75% of 1200px: {svg}");
+    }
+
+    #[test]
+    fn flame_graph_frame_names_cannot_inject_markup() {
+        let root = FlameGraphNode {
+            name: "</svg><script>x</script>".to_string(),
+            value: 1,
+            delta: None,
+            children: HashMap::new(),
+            total_value: 1,
+            self_value: 1,
+            percentage: 100.0,
+            color: None,
+            metadata: HashMap::new(),
+        };
+        let svg = FlameGraphProfiler::render_flame_svg(&root);
+        assert!(!svg.contains("<script>"));
+        assert_eq!(svg.matches("</svg>").count(), 1);
+    }
 
     fn make_config() -> FlameGraphConfig {
         FlameGraphConfig {

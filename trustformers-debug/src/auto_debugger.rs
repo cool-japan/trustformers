@@ -556,17 +556,13 @@ class ResidualBlock(nn.Module):
             }
         }
 
-        // Batch size recommendations based on GPU utilization
-        if let Some(_profiler_report) = context.profiler_report {
-            // Simplified logic - in practice would analyze detailed metrics
-            recommendations.push(HyperparameterRecommendation {
-                parameter: "batch_size".to_string(),
-                current_value: None,
-                recommended_value: 32.0,
-                reason: "Optimize batch size for better GPU utilization".to_string(),
-                confidence: 0.6,
-            });
-        }
+        // No batch-size recommendation is emitted. It used to push a fixed
+        // `recommended_value: 32.0` with `confidence: 0.6` whenever a profiler
+        // report was merely PRESENT, without reading a single field of it --
+        // so every run of every model got the same advice at the same stated
+        // confidence. A real recommendation needs measured GPU utilization and
+        // memory headroom against the current batch size, none of which this
+        // context carries.
 
         recommendations
     }

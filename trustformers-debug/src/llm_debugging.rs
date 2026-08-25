@@ -721,8 +721,12 @@ pub struct LLMHealthReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthSummary {
-    pub score: f32,
-    pub status: HealthStatus,
+    /// Mean of the analyzer's recorded scores, or `None` when it has recorded
+    /// none -- either because nothing has been analysed yet, or because the
+    /// analyzer has no scorer at all (see [`HealthTracker::recent_scores`]).
+    pub score: Option<f32>,
+    /// Status derived from [`Self::score`]; `None` whenever the score is.
+    pub status: Option<HealthStatus>,
     pub trend: String,
     pub key_metrics: HashMap<String, f32>,
     pub issues: Vec<String>,
@@ -769,20 +773,20 @@ const HEALTH_TREND_WINDOW: usize = 20;
 /// is better) should record `1.0 - raw_score`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthTracker {
-    /// Score to report before any real call has been recorded (typically
-    /// the struct's pre-existing default metric value), so a health summary
-    /// requested before the first analysis call still reports a real (if
-    /// provisional) status rather than an arbitrary one.
-    initial_score: f32,
     /// The last [`HEALTH_TREND_WINDOW`] scores recorded via [`Self::record`],
     /// oldest first.
+    ///
+    /// Empty means *nothing has been analysed yet*, which every accessor
+    /// reports as `None`. There is deliberately no seed value: an analyzer
+    /// whose scorer does not exist (see [`AlignmentMonitor`], [`BiasDetector`],
+    /// [`ConversationAnalyzer`]) never records anything, and a seed would make
+    /// its health summary publish that seed forever as if it had been measured.
     recent_scores: VecDeque<f32>,
 }
 
 impl HealthTracker {
-    fn new(initial_score: f32) -> Self {
+    fn new() -> Self {
         Self {
-            initial_score,
             recent_scores: VecDeque::with_capacity(HEALTH_TREND_WINDOW),
         }
     }
@@ -795,19 +799,20 @@ impl HealthTracker {
         }
     }
 
-    /// Average of the recorded window, or [`Self::initial_score`] before
-    /// anything has been recorded.
-    fn average_score(&self) -> f32 {
+    /// Average of the recorded window; `None` until a real score has been
+    /// recorded.
+    fn average_score(&self) -> Option<f32> {
         if self.recent_scores.is_empty() {
-            self.initial_score
+            None
         } else {
-            self.recent_scores.iter().sum::<f32>() / self.recent_scores.len() as f32
+            Some(self.recent_scores.iter().sum::<f32>() / self.recent_scores.len() as f32)
         }
     }
 
-    /// Real [`HealthStatus`] derived from [`Self::average_score`].
-    fn status(&self) -> HealthStatus {
-        health_status_from_score(self.average_score())
+    /// Real [`HealthStatus`] derived from [`Self::average_score`]; `None`
+    /// until a real score has been recorded.
+    fn status(&self) -> Option<HealthStatus> {
+        self.average_score().map(health_status_from_score)
     }
 
     /// Real trend label: splits the recorded window in half and compares
@@ -989,7 +994,7 @@ impl SafetyAnalyzer {
                 average_response_safety: 1.0,
                 safety_trend: SafetyTrend::Stable,
             },
-            health: HealthTracker::new(1.0),
+            health: HealthTracker::new(),
         }
     }
 
@@ -1007,8 +1012,10 @@ impl SafetyAnalyzer {
         // `average_response_safety` -- these used to be frozen at their
         // `new()` defaults forever, since nothing ever wrote back to them.
         self.health.record(safety_score);
-        self.safety_metrics.overall_safety_score = self.health.average_score();
-        self.safety_metrics.average_response_safety = self.health.average_score();
+        if let Some(average) = self.health.average_score() {
+            self.safety_metrics.overall_safety_score = average;
+            self.safety_metrics.average_response_safety = average;
+        }
         self.safety_metrics.safety_trend = match self.health.trend_label().as_str() {
             "Improving" => SafetyTrend::Improving,
             "Declining" => SafetyTrend::Degrading,
@@ -1131,7 +1138,7 @@ impl FactualityChecker {
                 knowledge_gaps: vec![],
                 confidence_distribution: vec![],
             },
-            health: HealthTracker::new(0.8),
+            health: HealthTracker::new(),
         }
     }
 
@@ -1149,7 +1156,9 @@ impl FactualityChecker {
         // Real running history feeds `overall_factuality_score`, which used
         // to be frozen at its `new()` default (0.8) forever.
         self.health.record(factuality_score);
-        self.factuality_metrics.overall_factuality_score = self.health.average_score();
+        if let Some(average) = self.health.average_score() {
+            self.factuality_metrics.overall_factuality_score = average;
+        }
 
         Ok(FactualityAnalysisResult {
             factuality_score,
@@ -1257,7 +1266,7 @@ impl AlignmentMonitor {
                 alignment_trend: AlignmentTrend::Stable,
             },
             value_alignment_score: 0.85,
-            health: HealthTracker::new(0.85),
+            health: HealthTracker::new(),
         }
     }
 
@@ -1389,11 +1398,9 @@ impl BiasDetector {
                 bias_amplification: 0.08,
                 fairness_violations: 0,
             },
-            // `HealthTracker` always tracks a higher-is-healthier score;
-            // bias is lower-is-better, so it is seeded with the inverse of
-            // the initial `overall_bias_score`, matching the inversion
-            // `get_health_summary` already applied.
-            health: HealthTracker::new(1.0 - 0.1),
+            // `BiasDetector` has no bias scorer, so nothing is ever recorded
+            // here and the health summary is honestly absent.
+            health: HealthTracker::new(),
         }
     }
 
@@ -1470,7 +1477,7 @@ impl LLMPerformanceProfiler {
                 bottleneck_analysis: vec!["Memory bandwidth".to_string()],
                 resource_utilization_efficiency: 0.8,
             },
-            health: HealthTracker::new((100.0_f32 / 200.0).min(1.0)),
+            health: HealthTracker::new(),
         }
     }
 
@@ -1531,7 +1538,7 @@ impl ConversationAnalyzer {
                 context_window: Vec::new(),
                 attention_weights: Vec::new(),
             },
-            health: HealthTracker::new(0.9),
+            health: HealthTracker::new(),
         }
     }
 

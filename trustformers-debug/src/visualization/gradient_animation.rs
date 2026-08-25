@@ -114,10 +114,7 @@ impl GradientFlowAnimator {
     /// `gradients` maps a layer name to the flat gradient vector for that layer.
     pub fn record_step(&mut self, step: u64, gradients: &HashMap<String, Vec<f64>>) {
         // Compute global max norm across all layers to normalise `flow_intensity`.
-        let global_max_norm: f64 = gradients
-            .values()
-            .map(|g| l2_norm(g))
-            .fold(0.0_f64, f64::max);
+        let global_max_norm: f64 = gradients.values().map(|g| l2_norm(g)).fold(0.0_f64, f64::max);
 
         let mut layers: Vec<LayerGradientInfo> = gradients
             .iter()
@@ -163,29 +160,38 @@ impl GradientFlowAnimator {
 
     /// Export all frames to a JSON file.
     pub fn export_json(&self, path: &Path) -> Result<()> {
-        let json =
-            serde_json::to_string_pretty(&self.frames).context("failed to serialise gradient frames")?;
+        let json = serde_json::to_string_pretty(&self.frames)
+            .context("failed to serialise gradient frames")?;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create output directory: {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create output directory: {}", parent.display())
+            })?;
         }
-        std::fs::write(path, json)
-            .with_context(|| format!("failed to write gradient animation JSON: {}", path.display()))?;
+        std::fs::write(path, json).with_context(|| {
+            format!(
+                "failed to write gradient animation JSON: {}",
+                path.display()
+            )
+        })?;
         Ok(())
     }
 
     /// Export a CSV timeline: `step,layer,mean_abs_grad,max_abs_grad,grad_norm`.
     pub fn export_csv(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create output directory: {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create output directory: {}", parent.display())
+            })?;
         }
 
         let mut file = std::fs::File::create(path)
             .with_context(|| format!("failed to create CSV file: {}", path.display()))?;
 
-        writeln!(file, "step,layer,mean_abs_grad,max_abs_grad,grad_norm,is_vanishing,is_exploding")
-            .context("failed to write CSV header")?;
+        writeln!(
+            file,
+            "step,layer,mean_abs_grad,max_abs_grad,grad_norm,is_vanishing,is_exploding"
+        )
+        .context("failed to write CSV header")?;
 
         for frame in &self.frames {
             for layer in &frame.layers {
@@ -375,16 +381,16 @@ fn build_recommendations(
     match health {
         GradientHealth::Critical => {
             recs.push("CRITICAL: Training stability is severely compromised — halt training and diagnose before continuing.".to_string());
-        }
+        },
         GradientHealth::ProblemsDetected => {
             recs.push("Significant gradient issues detected. Review architecture depth and learning rate schedule.".to_string());
-        }
+        },
         GradientHealth::MinorIssues => {
             recs.push("Minor gradient issues detected. Monitor closely; intervention may not be required immediately.".to_string());
-        }
+        },
         GradientHealth::Healthy => {
             recs.push("Gradients appear healthy — no immediate action required.".to_string());
-        }
+        },
     }
 
     recs
@@ -423,7 +429,11 @@ mod tests {
             let grads = simple_grads(&["layer_a"], 0.1);
             animator.record_step(i, &grads);
         }
-        assert_eq!(animator.frames().len(), 3, "rolling window should cap at max_frames");
+        assert_eq!(
+            animator.frames().len(),
+            3,
+            "rolling window should cap at max_frames"
+        );
     }
 
     #[test]

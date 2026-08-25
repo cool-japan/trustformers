@@ -17,7 +17,12 @@ pub struct IoProfile {
     pub bytes_transferred: usize,
     pub duration: Duration,
     pub bandwidth_mb_s: f64,
-    pub queue_time: Duration,
+    /// How long the operation waited in the device queue before starting.
+    ///
+    /// Always `None` from [`IoMonitor`]: it observes only the start and end of
+    /// each operation, never the wait behind other requests. It used to be
+    /// `queue_depth * 10ms`, an invented per-slot service time.
+    pub queue_time: Option<Duration>,
     pub device_type: IoDeviceType,
 }
 
@@ -160,11 +165,17 @@ impl IoMonitor {
 
             Some(IoProfile {
                 operation_type: operation.operation_type,
-                file_path: None, // Would be filled in practice
+                // The recorded operation carries no path; callers that know one
+                // set it on the returned profile.
+                file_path: None,
                 bytes_transferred,
                 duration,
                 bandwidth_mb_s,
-                queue_time: Duration::from_millis(self.io_queue_depth as u64 * 10), // Simplified
+                // No real queue-wait measurement is available: the monitor sees
+                // only start/end of the operation, never how long it waited
+                // behind others. This used to be `queue_depth * 10ms`, an
+                // invented per-slot service time published as a measurement.
+                queue_time: None,
                 device_type,
             })
         } else {

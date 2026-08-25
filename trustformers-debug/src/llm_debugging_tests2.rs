@@ -174,14 +174,11 @@ fn test_llm_performance_profiler_default() {
 fn test_llm_performance_profiler_health_summary() {
     let profiler = LLMPerformanceProfiler::new();
     let summary = profiler.get_health_summary();
-    assert!(summary.score > 0.0 && summary.score <= 1.0);
-    // A fresh profiler's initial score is 100 tokens/s against a 200
-    // tokens/s reference ceiling -- 0.5, a real mid-range score, which
-    // `health_status_from_score` correctly buckets as `Fair`. The old
-    // implementation asserted `Good` here only because `status` was
-    // hardcoded to `HealthStatus::Good` unconditionally, regardless of
-    // `score`.
-    assert!(matches!(summary.status, HealthStatus::Fair));
+    // A profiler that has profiled nothing has no health score at all. The
+    // tracker used to be seeded with the `new()` default throughput
+    // (100/200 = 0.5) and published that as a measured `Fair`.
+    assert_eq!(summary.score, None, "nothing profiled yet => no score");
+    assert_eq!(summary.status, None);
     assert_eq!(
         summary.trend, "Unknown (insufficient history)",
         "must honestly report no trend history before any profile_response() call, not the \
@@ -215,16 +212,16 @@ async fn test_llm_performance_profiler_health_summary_reacts_to_real_calls() {
     }
 
     let summary = profiler.get_health_summary();
-    // Window is [0.75, 0.75, 0.05, 0.05] (150/200, 150/200, 10/200,
-    // 10/200) -- average 0.4, well under the `new()` default of 0.5.
+    // Window is [0.75, 0.75, 0.05, 0.05] (150/200, 150/200, 10/200, 10/200)
+    // -- average 0.4, a real measurement of the real calls.
+    let score = summary.score.expect("four real profile_response calls were recorded");
     assert!(
-        summary.score < 0.5,
-        "score must move toward the real low-throughput calls, not stay frozen at 0.5: {}",
-        summary.score
+        score < 0.5,
+        "score must reflect the real low-throughput calls, not a seed: {score}"
     );
     assert!(matches!(
         summary.status,
-        HealthStatus::Critical | HealthStatus::Poor
+        Some(HealthStatus::Critical) | Some(HealthStatus::Poor)
     ));
     assert_eq!(
         summary.trend, "Declining",
@@ -276,7 +273,11 @@ fn test_conversation_analyzer_health_summary() {
     let config = LLMDebugConfig::default();
     let analyzer = ConversationAnalyzer::new(&config);
     let summary = analyzer.get_health_summary();
-    assert!(summary.score > 0.0);
+    // `ConversationAnalyzer` has no dialog-quality scorer, so it never records
+    // anything and its health summary is permanently, honestly absent. It used
+    // to be seeded with 0.9 and published that as a measured score.
+    assert_eq!(summary.score, None);
+    assert_eq!(summary.status, None);
 }
 
 #[test]

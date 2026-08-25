@@ -202,16 +202,23 @@ impl EnvironmentalMonitor {
             energy_consumption: energy_measurement.energy_kwh,
             cost_usd: cost_analysis.total_cost_usd,
             efficiency_metrics: EnergyEfficiencyMetrics {
-                operations_per_kwh: 1.0 / energy_measurement.energy_kwh, // Inverse of energy per operation
-                flops_per_watt: 1000.0 / energy_measurement.power_watts, // Approximate FLOPS per watt
+                // Work-per-energy needs a real work count. `1.0 / energy_kwh`
+                // asserted "exactly one operation was performed" and
+                // `1000.0 / power_watts` asserted a flat 1000 FLOP/s workload;
+                // both were published as measurements.
+                operations_per_kwh: None,
+                flops_per_watt: None,
                 model_energy_efficiency: efficiency_analysis.efficiency_score,
                 training_energy_efficiency: efficiency_analysis.efficiency_score,
                 inference_energy_efficiency: efficiency_analysis.efficiency_score,
+                // Reference baselines do not exist here; the previous values
+                // were the session's own efficiency score multiplied by
+                // assumed 1.5x / 1.2x factors and re-labelled as comparisons.
                 comparative_efficiency: ComparativeEfficiency {
-                    vs_cpu_only: efficiency_analysis.efficiency_score * 1.5, // Assume 1.5x better than CPU
-                    vs_previous_generation: efficiency_analysis.efficiency_score * 1.2, // Assume 1.2x better than previous gen
-                    vs_cloud_baseline: efficiency_analysis.efficiency_score,
-                    efficiency_percentile: efficiency_analysis.efficiency_score * 100.0, // Convert to percentile
+                    vs_cpu_only: None,
+                    vs_previous_generation: None,
+                    vs_cloud_baseline: None,
+                    efficiency_percentile: None,
                 },
             },
             recommendations,
@@ -306,7 +313,7 @@ impl EnvironmentalMonitor {
 
     /// Generate comprehensive environmental impact report
     pub async fn generate_environmental_report(
-        &self,
+        &mut self,
         report_type: ReportType,
     ) -> Result<EnvironmentalReport> {
         self.reporting_engine.generate_environmental_report(report_type).await
@@ -719,7 +726,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_environmental_report_generation() {
-        let monitor = EnvironmentalMonitor::new(EnvironmentalConfig::default());
+        let mut monitor = EnvironmentalMonitor::new(EnvironmentalConfig::default());
 
         let report = monitor
             .generate_environmental_report(ReportType::Summary)

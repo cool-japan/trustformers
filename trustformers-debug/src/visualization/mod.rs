@@ -6,6 +6,15 @@
 //! - `types` - Basic visualization types, enums, and data structures
 //! - Additional modules to be created as needed for terminal, video, etc.
 
+// `ascii_tools` and `gradient_animation` are real, fully tested renderers that
+// were never declared here, so neither compiled nor ran: 1357 lines and 42
+// tests were silently dead, and `ascii_tools`' own doc example
+// (`use trustformers_debug::visualization::ascii_tools::AsciiLossPlotter;`)
+// could not resolve. They are deliberately NOT glob re-exported: `ascii_tools`
+// defines its own `AttentionVisualizer`, which would collide with the
+// crate-root [`crate::attention_visualizer::AttentionVisualizer`].
+pub mod ascii_tools;
+pub mod gradient_animation;
 pub mod modern_plotting;
 pub mod svg_render;
 pub mod types;

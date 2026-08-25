@@ -155,17 +155,26 @@ impl CarbonFootprintTracker {
             .unwrap_or(30.0) // Global average fallback
     }
 
-    /// Calculate scope 3 emissions (infrastructure, manufacturing)
+    /// ESTIMATE of scope 3 (embodied) emissions from energy use.
+    ///
+    /// `infrastructure * energy + MANUFACTURING_AMORTIZATION_KG_CO2_PER_KWH *
+    /// energy`. Both terms are amortisation coefficients, not measurements: the
+    /// crate has no bill of materials, no device lifetime and no facility PUE.
+    /// Treat the result as an order-of-magnitude estimate under the stated
+    /// coefficient, not a reportable scope 3 figure.
     fn calculate_scope3_emissions(&self, energy_kwh: f64) -> f64 {
-        // Simplified scope 3 calculation based on energy usage
         let infrastructure_emissions =
             self.emission_factors.infrastructure_kg_co2_per_hour * energy_kwh;
-
-        // Add manufacturing amortization (very simplified)
-        let manufacturing_amortization = 0.001; // kg CO2 per kWh
-
-        infrastructure_emissions + (manufacturing_amortization * energy_kwh)
+        infrastructure_emissions + (Self::MANUFACTURING_AMORTIZATION_KG_CO2_PER_KWH * energy_kwh)
     }
+
+    /// Assumed embodied-manufacturing carbon amortised over each kWh of use.
+    ///
+    /// An order-of-magnitude placeholder coefficient, NOT a sourced figure:
+    /// real embodied carbon depends on the device, its manufacturing region and
+    /// its assumed lifetime, none of which this crate knows. Callers reporting
+    /// externally must substitute their own.
+    const MANUFACTURING_AMORTIZATION_KG_CO2_PER_KWH: f64 = 0.001;
 
     /// Update cumulative emissions
     fn update_cumulative_emissions(&mut self, measurement: &CarbonMeasurement) {
@@ -256,19 +265,28 @@ impl CarbonFootprintTracker {
         Ok(avg_emissions_per_hour * hours_ahead as f64)
     }
 
-    /// Optimize scheduling for lower carbon intensity
+    /// Rule-of-thumb hour of day likely to have the lowest grid carbon
+    /// intensity in `region`.
+    ///
+    /// This is a STATED HEURISTIC, not a search over data: a grid with a
+    /// majority-renewable mix is assumed to be cleanest around midday when
+    /// solar output peaks (hour 14), and any other grid in the small hours when
+    /// demand is lowest (hour 2). The crate holds only a single scalar carbon
+    /// intensity per region -- no hourly time series to actually minimise over
+    /// -- so `duration_hours` cannot influence the answer and is ignored.
+    ///
+    /// Returns `None` for a region with no known renewable share.
     pub fn find_low_carbon_window(&self, region: &str, _duration_hours: u32) -> Option<u32> {
-        // Simplified low-carbon window finding
-        // In a real implementation, this would use time-based carbon intensity data
-        let _base_intensity = self.get_carbon_intensity(region);
+        /// Hour assumed cleanest on a majority-renewable (solar-heavy) grid.
+        const SOLAR_PEAK_HOUR: u32 = 14;
+        /// Hour assumed cleanest on a demand-driven grid.
+        const OVERNIGHT_LOW_DEMAND_HOUR: u32 = 2;
 
-        // Find the hour with lowest expected carbon intensity (simplified)
         let renewable_pct = self.get_renewable_percentage(region);
-
         if renewable_pct > 50.0 {
-            Some(14) // Afternoon when solar is strong
+            Some(SOLAR_PEAK_HOUR)
         } else {
-            Some(2) // Early morning when demand is low
+            Some(OVERNIGHT_LOW_DEMAND_HOUR)
         }
     }
 

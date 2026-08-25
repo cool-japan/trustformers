@@ -296,7 +296,8 @@ impl BehaviorAnalyzer {
                 let sensitivity_score = gradient.abs();
                 let gradient_magnitude = gradient.abs();
 
-                // Simulate perturbation impact (would normally require model re-evaluation)
+                // First-order (Taylor) estimate from the real gradient; see
+                // `estimate_perturbation_impact` for its error bound.
                 let perturbation_impact = self.estimate_perturbation_impact(gradient, dim);
 
                 sensitivities.push(InputSensitivity {
@@ -322,9 +323,18 @@ impl BehaviorAnalyzer {
         Ok(sensitivities)
     }
 
-    /// Estimate perturbation impact (simplified version)
+    /// First-order estimate of `|f(x + eps*e_i) - f(x)|` for a perturbation of
+    /// size [`BehaviorAnalysisConfig::perturbation_magnitude`] along dimension
+    /// `i`.
+    ///
+    /// This is the exact first-order Taylor term `|df/dx_i| * eps`, computed
+    /// from the real recorded input gradient. It is an *approximation* of the
+    /// true impact with error `O(eps^2 * |d2f/dx_i^2|)`, so it is accurate for
+    /// small `eps` and understates the impact wherever the model is strongly
+    /// curved along that dimension. Measuring the true impact would require
+    /// re-evaluating the model at the perturbed input, which this analyzer --
+    /// which receives gradients, not a model handle -- cannot do.
     fn estimate_perturbation_impact(&self, gradient: f32, _dimension: usize) -> f32 {
-        // Simplified estimation: perturbation impact is proportional to gradient magnitude
         gradient.abs() * self.config.perturbation_magnitude
     }
 
@@ -588,7 +598,11 @@ impl BehaviorAnalyzer {
 
     /// Perform correlation analysis
     async fn perform_correlation_analysis(&self) -> Result<CorrelationAnalysis> {
-        // For simplification, we'll analyze correlations between input gradients
+        // Correlations between input gradients stand in for feature
+        // interactions: two inputs whose gradients move together influence the
+        // output together. This is a real correlation of real gradients, not a
+        // second-derivative (Hessian) interaction term, which would need
+        // double backpropagation the analyzer does not receive.
         let gradient_vectors: Vec<&Vec<f32>> = self.input_gradients.values().collect();
 
         if gradient_vectors.len() < 2 {

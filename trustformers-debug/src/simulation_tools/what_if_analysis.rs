@@ -39,8 +39,13 @@ pub struct Scenario {
     pub features: HashMap<String, f64>,
     /// Model prediction for this scenario
     pub prediction: f64,
-    /// Prediction confidence
-    pub confidence: f64,
+    /// Prediction confidence.
+    ///
+    /// `None` from [`super::analyzer::SimulationAnalyzer`]: the model function
+    /// it drives returns a bare scalar prediction with no uncertainty, and each
+    /// scenario is evaluated once. It used to be a flat `0.8` for every
+    /// scenario.
+    pub confidence: Option<f64>,
     /// Changed features from base scenario
     pub changed_features: Vec<FeatureChange>,
     /// Distance from base scenario
@@ -148,8 +153,9 @@ pub struct CounterfactualInsight {
     pub required_changes: Vec<FeatureChange>,
     /// Predicted outcome
     pub predicted_outcome: f64,
-    /// Confidence in prediction
-    pub confidence: f64,
+    /// Confidence in the counterfactual, inherited from the scenario it came
+    /// from; `None` when the scenario carried none.
+    pub confidence: Option<f64>,
     /// Implementation feasibility
     pub feasibility: ImplementationFeasibility,
 }

@@ -281,8 +281,10 @@ impl SustainabilityAdvisor {
     async fn get_regional_optimization_recommendation(
         &self,
     ) -> Result<Option<SustainabilityRecommendation>> {
-        // This would be customized based on current region configuration
-        // For now, return a general recommendation
+        // Region-independent advice: the analyzer holds no per-region
+        // configuration to tailor it with, so the same recommendation is
+        // returned for every deployment rather than one dressed up as
+        // region-specific.
         Ok(Some(SustainabilityRecommendation {
             category: RecommendationCategory::Sustainability,
             priority: RecommendationPriority::Medium,

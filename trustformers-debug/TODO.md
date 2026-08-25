@@ -156,9 +156,12 @@ builder.write_to_file(&path)?;
 
 - [x] **Export Formats**
   - GraphViz (DOT)
-  - Netron (ONNX)
+  - Netron (JSON graph — Netron opens it directly)
   - TensorBoard graph
   - Custom JSON format
+  - **Not implemented:** real ONNX protobuf. `NetronExporter::export` with
+    `ExportFormat::Onnx` returns a structured error naming the missing protobuf
+    encoder. It previously wrote JSON bytes to the caller's `.onnx` path.
 
 - [x] **Features**
   - Node annotations (shape, dtype, device)
@@ -174,7 +177,7 @@ let viz = GraphVisualizer::new()?;
 
 // Visualize model
 viz.visualize_model(&model, "model.dot")?;
-viz.export_to_netron(&model, "model.onnx")?;
+viz.export_to_netron(&model, "model.json")?; // Netron reads the JSON graph
 
 // Open in browser
 viz.serve_interactive(&model, 8080)?;
@@ -661,6 +664,55 @@ let job_id = manager.start_export(
 
 ---
 
+## Wave 6c honesty sweep (2026-08-25) — behaviour changes to be aware of
+
+A crate-wide triage of every remaining "placeholder / simplified / would be /
+for now / simulated" marker replaced fabricated values with real computations or
+honest absences. The user-visible consequences:
+
+- **Real implementations added.** `DebugVisualizer` now renders real SVG
+  (axes/polylines/binned bars/colour-mapped cells) and returns the path it wrote;
+  `TensorInspector` spectral analysis uses a real `nalgebra` SVD (real numerical
+  rank, real 2-norm condition number, Roy–Vetterli effective rank);
+  `regression_detector` uses the exact Student-t distribution;
+  `FlameGraphProfiler` captures real stacks via `std::backtrace` and renders a
+  real inline SVG flame graph; `simulation_tools` FGSM/PGD are real
+  finite-difference gradient attacks with L-infinity projection;
+  `model_diagnostics::AdvancedAnalytics` does real PCA on the correlation matrix;
+  `Profiler` reads real process RSS/CPU via `sysinfo`; `WeightAnalyzer` computes
+  real 64-bin Shannon entropy.
+- **Many published fields became `Option`.** Where a value could not be measured
+  it is now `None` instead of a constant: LLM alignment/bias/dialog scores and
+  `HealthSummary::{score,status}`, `GradientFlow::{gradient_max,gradient_min,
+  dead_neurons_ratio,active_neurons_ratio}`, per-layer memory throughout
+  `gradient_debugger::performance_tracking`, `CpuBottleneckAnalysis` PMU
+  counters, `MemorySnapshot` memory figures, `IoProfile::queue_time`,
+  environmental `EnergyEfficiencyMetrics`/`ComparativeEfficiency`,
+  `KernelOptimizationSummaryReport::overall_optimization_score`,
+  `TeamMetrics` peak day / growth rate, `LayerLRRecommendation::confidence`,
+  `Scenario::confidence`, `CriticalGradientPath::optimization_potential`.
+- **Some calls now refuse instead of pretending.** `ExportFormat::Onnx`
+  (netron), `ExportFormat::MessagePack` (realtime dashboard), raster/video
+  `ImageFormat`s in `DebugVisualizer`, `AdvancedMLDebugger::analyze_model_sensitivity`,
+  the C&W/DeepFool/UAP/Boundary adversarial methods, and every
+  `ErrorRecoverySystem` strategy except notification (which really emits) —
+  each returns a structured error or `success: false` naming exactly what is
+  missing.
+- **Renames for accuracy.** `KernelOptimizationAnalyzer::new_stub` →
+  `new_empty`; `MLPredictor`/`MLPrediction` → `WindowDispersionScorer`/
+  `WindowDispersionScore` (nothing was ever trained); `WebSocketServer` →
+  `DashboardEndpoint` with a real bounded update queue
+  (`InteractiveDashboard::drain_pending_updates`) replacing a no-op
+  `broadcast_update`; `SpectralAnalysis::eigenvalues` → `singular_values`;
+  `InformationContent::{effective_rank,compression_ratio}` →
+  `{value_distribution_perplexity,distinct_value_fraction}`;
+  `HallucinationAnalysisResult::hallucination_probability` → `hedging_signal`.
+- **`VisualizationConfig::default()` now uses `ImageFormat::SVG`** (was `PNG`,
+  which the default Pure-Rust feature set cannot encode, so every default-config
+  plot call would now error).
+
+---
+
 ## Development Guidelines
 
 ### Code Standards
@@ -690,7 +742,7 @@ cargo run --example interactive_debug
 
 ---
 
-**Last Updated:** 2026-07-09 - v0.2.1 Development
+**Last Updated:** 2026-08-25 - v0.2.1 Development
 **Status:** Alpha - core features implemented, API may change
-**Tests:** ~899 (100% pass rate)
+**Tests:** 1622 (100% pass rate)
 **Tools:** Profiling, flame graphs, visualization (Plotters/Ratatui/TensorBoard), analysis, interpretability (SHAP/LIME/attribution/counterfactual/attention), simulation & robustness testing, guided debugger, tutorial mode, AI code analysis, VS Code integration, Excel/.xlsx (real OOXML), Perfetto/Tracy export, lock-free ring buffer, SSE streaming dashboard

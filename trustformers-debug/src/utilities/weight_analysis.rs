@@ -564,3 +564,55 @@ impl WeightAnalyzer {
             .sum()
     }
 }
+
+#[cfg(test)]
+mod entropy_tests {
+    use super::*;
+
+    /// `compute_entropy` used to return `log2(std_dev)`, which is negative for
+    /// any spread below 1.0 (then clamped to 0), unbounded above, and blind to
+    /// the shape of the distribution.
+    #[test]
+    fn entropy_is_zero_for_a_constant_layer() {
+        let weights = vec![0.25_f32; 512];
+        assert_eq!(WeightAnalyzer::compute_entropy(&weights), 0.0);
+    }
+
+    #[test]
+    fn entropy_is_maximal_for_a_uniform_spread() {
+        // 64 values, one per bucket: entropy = log2(64) = 6 bits.
+        let weights: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
+        let entropy = WeightAnalyzer::compute_entropy(&weights);
+        assert!(
+            (entropy - 6.0).abs() < 1e-4,
+            "expected log2(64) = 6, got {entropy}"
+        );
+    }
+
+    #[test]
+    fn entropy_separates_concentrated_from_spread_distributions() {
+        // Both have the SAME tiny std_dev scale, so the old log2(std_dev)
+        // implementation reported 0.0 for each; real entropy tells them apart.
+        let concentrated: Vec<f32> = (0..256).map(|i| if i < 250 { 0.0 } else { 0.001 }).collect();
+        let spread: Vec<f32> = (0..256).map(|i| (i % 64) as f32 * 0.0001).collect();
+        let e_concentrated = WeightAnalyzer::compute_entropy(&concentrated);
+        let e_spread = WeightAnalyzer::compute_entropy(&spread);
+        assert!(
+            e_spread > e_concentrated,
+            "spread ({e_spread}) must exceed concentrated ({e_concentrated})"
+        );
+        assert!(
+            e_concentrated > 0.0,
+            "two occupied buckets is non-zero entropy"
+        );
+        assert!(e_spread <= 6.0 + 1e-6, "bounded by log2(ENTROPY_BINS)");
+    }
+
+    #[test]
+    fn entropy_ignores_non_finite_weights() {
+        let weights = vec![f32::NAN, 0.0, 1.0, f32::INFINITY];
+        let entropy = WeightAnalyzer::compute_entropy(&weights);
+        assert!(entropy > 0.0 && entropy.is_finite(), "got {entropy}");
+        assert_eq!(WeightAnalyzer::compute_entropy(&[f32::NAN]), 0.0);
+    }
+}

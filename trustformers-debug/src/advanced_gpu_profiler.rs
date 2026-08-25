@@ -1143,7 +1143,7 @@ impl Default for MemoryAccessPattern {
     }
 }
 
-// Implementation stubs for remaining structures
+// Constructors and helpers for the remaining structures.
 
 /// This crate has no pure-Rust API to query a real GPU's memory capacity
 /// (a real query needs vendor FFI -- CUDA/ROCm/Metal -- kept out of the

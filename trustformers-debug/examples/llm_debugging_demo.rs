@@ -206,24 +206,24 @@ async fn main() -> Result<()> {
     );
     println!("   Component Health:");
     println!(
-        "     Safety: {:.2} ({:?})",
-        health_report.safety_health.score, health_report.safety_health.status
+        "     Safety: {}",
+        format_component_health(&health_report.safety_health)
     );
     println!(
-        "     Factuality: {:.2} ({:?})",
-        health_report.factuality_health.score, health_report.factuality_health.status
+        "     Factuality: {}",
+        format_component_health(&health_report.factuality_health)
     );
     println!(
-        "     Alignment: {:.2} ({:?})",
-        health_report.alignment_health.score, health_report.alignment_health.status
+        "     Alignment: {}",
+        format_component_health(&health_report.alignment_health)
     );
     println!(
-        "     Bias: {:.2} ({:?})",
-        health_report.bias_health.score, health_report.bias_health.status
+        "     Bias: {}",
+        format_component_health(&health_report.bias_health)
     );
     println!(
-        "     Performance: {:.2} ({:?})",
-        health_report.performance_health.score, health_report.performance_health.status
+        "     Performance: {}",
+        format_component_health(&health_report.performance_health)
     );
     println!(
         "   Critical Issues: {}",
@@ -419,4 +419,14 @@ async fn demonstrate_macros() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Render a component's health summary, distinguishing "not measured" from a
+/// real score. Analyzers without a scoring model (alignment, bias, dialog
+/// quality) report `None` rather than a stand-in number.
+fn format_component_health(summary: &trustformers_debug::llm_debugging::HealthSummary) -> String {
+    match (summary.score, summary.status.as_ref()) {
+        (Some(score), Some(status)) => format!("{score:.2} ({status:?}) trend={}", summary.trend),
+        _ => "not measured (no scoring model for this component)".to_string(),
+    }
 }

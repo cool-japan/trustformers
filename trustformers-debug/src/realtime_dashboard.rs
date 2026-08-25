@@ -932,10 +932,13 @@ impl RealtimeDashboard {
                 Ok(csv_data.into_bytes())
             },
             ExportFormat::MessagePack => {
-                // Would use rmp_serde for MessagePack serialization
-                // For now, return JSON as fallback
-                let json_data = serde_json::to_string(&data)?;
-                Ok(json_data.into_bytes())
+                // Refuse rather than hand back JSON bytes labelled MessagePack:
+                // a caller that feeds those to a MessagePack decoder gets a
+                // parse failure, or worse, silently misreads them.
+                Err(anyhow::anyhow!(
+                    "MessagePack export is not implemented: trustformers-debug links no \
+                     MessagePack encoder. Use ExportFormat::Json or ExportFormat::CSV."
+                ))
             },
         }
     }
@@ -1454,6 +1457,21 @@ mod realtime_dashboard_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn messagepack_export_is_refused_rather_than_returning_json_bytes() {
+        let dashboard = RealtimeDashboard::new(DashboardConfig::default());
+        let err = dashboard
+            .export_dashboard_data(ExportFormat::MessagePack, None)
+            .await
+            .expect_err("MessagePack must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("not implemented"), "{msg}");
+        assert!(
+            msg.contains("MessagePack encoder"),
+            "must name what is missing: {msg}"
+        );
+    }
     use futures::StreamExt;
     use std::time::Duration;
 

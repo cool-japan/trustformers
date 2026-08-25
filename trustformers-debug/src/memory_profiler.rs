@@ -162,6 +162,10 @@ pub struct AllocationPattern {
     pub examples: Vec<AllocationRecord>,
 }
 
+/// An allocation freed within this window of being made counts as
+/// short-lived for churn detection.
+const SHORT_LIVED_THRESHOLD: Duration = Duration::from_secs(1);
+
 /// Type of allocation pattern
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PatternType {
@@ -906,10 +910,11 @@ impl MemoryProfiler {
         })
     }
 
+    /// Detect allocation churn: allocations that were freed within
+    /// [`SHORT_LIVED_THRESHOLD`] of being made.
     fn detect_churn_pattern(&self) -> Result<AllocationPattern> {
-        // Simplified churn detection
         let allocations = self.allocations.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let short_lived_count = allocations
+        let short_lived: Vec<AllocationRecord> = allocations
             .values()
             .filter(|record| {
                 if let (Some(_freed_at), false) = (record.freed_at, record.freed) {
@@ -917,7 +922,7 @@ impl MemoryProfiler {
                 } else if record.freed {
                     if let Some(freed_at) = record.freed_at {
                         freed_at.duration_since(record.timestamp).unwrap_or(Duration::from_secs(0))
-                            < Duration::from_secs(1)
+                            < SHORT_LIVED_THRESHOLD
                     } else {
                         false
                     }
@@ -925,7 +930,9 @@ impl MemoryProfiler {
                     false
                 }
             })
-            .count();
+            .cloned()
+            .collect();
+        let short_lived_count = short_lived.len();
 
         let total_count = allocations.len();
         let churn_ratio = if total_count > 0 {
@@ -946,7 +953,14 @@ impl MemoryProfiler {
                 "Consider object pooling for frequently allocated objects".to_string(),
                 "Reduce temporary object creation in hot paths".to_string(),
             ],
-            examples: vec![], // Simplified for now
+            // Real short-lived allocation records, the largest first, so the
+            // examples point at the churn worth fixing. This was an empty vec.
+            examples: {
+                let mut examples = short_lived;
+                examples.sort_by_key(|record| std::cmp::Reverse(record.size));
+                examples.truncate(3);
+                examples
+            },
         })
     }
 
@@ -993,7 +1007,10 @@ impl MemoryProfiler {
             confidence: 0.8,
             impact_score: fragmentation.fragmentation_ratio,
             recommendations: fragmentation.recommendations,
-            examples: vec![], // Simplified for now
+            // Fragmentation is a property of the free-space layout between
+            // allocations, not of any individual allocation, so there is no
+            // per-record example to point at.
+            examples: Vec::new(),
         })
     }
 }
@@ -1159,6 +1176,47 @@ impl Ord for LeakSeverity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Wave 6c debug-sweep2 -------------------------------------------
+
+    #[test]
+    fn churn_pattern_carries_real_short_lived_allocation_examples() {
+        let profiler = MemoryProfiler::new(MemoryProfilingConfig::default());
+        let now = std::time::SystemTime::now();
+        {
+            let mut allocations = profiler.allocations.lock().unwrap_or_else(|p| p.into_inner());
+            for (index, size) in [(0_usize, 4096_usize), (1, 64), (2, 1024)] {
+                let id = Uuid::new_v4();
+                allocations.insert(
+                    id,
+                    AllocationRecord {
+                        id,
+                        size,
+                        timestamp: now,
+                        stack_trace: Vec::new(),
+                        allocation_type: AllocationType::Tensor,
+                        freed: true,
+                        freed_at: Some(now + Duration::from_millis(10)),
+                        tags: vec![format!("alloc_{index}")],
+                    },
+                );
+            }
+        }
+
+        let pattern = profiler.detect_churn_pattern().expect("pattern");
+        // Was an unconditional empty vec.
+        assert_eq!(
+            pattern.examples.len(),
+            3,
+            "all three short-lived allocations qualify"
+        );
+        assert_eq!(pattern.examples[0].size, 4096, "largest first");
+        assert!(pattern.examples.windows(2).all(|w| w[0].size >= w[1].size));
+        assert!(
+            (pattern.impact_score - 1.0).abs() < 1e-9,
+            "every allocation churned"
+        );
+    }
     use tokio;
 
     #[tokio::test(flavor = "multi_thread")]

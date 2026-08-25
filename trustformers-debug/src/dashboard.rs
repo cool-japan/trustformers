@@ -752,7 +752,7 @@ pub struct InteractiveDashboard {
     model_comparator: ModelComparator,
     hyperparameter_explorer: HyperparameterExplorer,
     dashboard_state: DashboardState,
-    websocket_server: Option<WebSocketServer>,
+    websocket_server: Option<DashboardEndpoint>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -774,10 +774,37 @@ pub enum DisplayMode {
 
 /// WebSocket server for real-time dashboard updates
 #[derive(Debug)]
-pub struct WebSocketServer {
+/// Endpoint configuration plus the queue of dashboard updates waiting to be
+/// delivered to clients.
+///
+/// It is **not** a WebSocket server: nothing binds `port` and no protocol
+/// handshake happens here. [`InteractiveDashboard::update`] queues each metrics
+/// snapshot; whatever transport the embedding application uses drains the queue
+/// with [`InteractiveDashboard::drain_pending_updates`] and delivers them.
+pub struct DashboardEndpoint {
+    /// Port the embedding application intends to serve on.
     port: u16,
+    /// Client identifiers the embedding application has registered.
     connected_clients: Arc<Mutex<Vec<String>>>,
+    /// Metrics snapshots queued since the last drain, oldest first, capped at
+    /// [`MAX_PENDING_DASHBOARD_UPDATES`].
+    pending_updates: Arc<Mutex<VecDeque<DashboardMetrics>>>,
 }
+
+impl DashboardEndpoint {
+    /// Port the embedding application intends to serve on.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Client identifiers registered by the embedding application.
+    pub fn connected_clients(&self) -> Vec<String> {
+        self.connected_clients.lock().map(|clients| clients.clone()).unwrap_or_default()
+    }
+}
+
+/// Most queued dashboard updates retained before the oldest are dropped.
+const MAX_PENDING_DASHBOARD_UPDATES: usize = 1000;
 
 impl InteractiveDashboard {
     /// Create new interactive dashboard
@@ -801,23 +828,42 @@ impl InteractiveDashboard {
     pub async fn start(&mut self, port: Option<u16>) -> Result<()> {
         let port = port.unwrap_or(8080);
 
-        self.websocket_server = Some(WebSocketServer {
+        self.websocket_server = Some(DashboardEndpoint {
             port,
             connected_clients: Arc::new(Mutex::new(Vec::new())),
+            pending_updates: Arc::new(Mutex::new(VecDeque::new())),
         });
 
-        tracing::info!("Interactive dashboard started on port {}", port);
+        // Deliberately not "started on port {port}": no socket is bound here.
+        tracing::info!(
+            port,
+            "interactive dashboard activated; updates will be queued for the embedding \
+             application to deliver"
+        );
         Ok(())
+    }
+
+    /// Take every dashboard update queued since the last call, oldest first.
+    ///
+    /// Returns an empty vector when the dashboard has not been started.
+    pub fn drain_pending_updates(&self) -> Vec<DashboardMetrics> {
+        let Some(endpoint) = self.websocket_server.as_ref() else {
+            return Vec::new();
+        };
+        endpoint
+            .pending_updates
+            .lock()
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default()
     }
 
     /// Update dashboard with new metrics
     pub fn update(&mut self, metrics: DashboardMetrics) {
         self.training_monitor.update_metrics(metrics.clone());
 
-        // Broadcast to connected clients if WebSocket server is running
-        if let Some(_ws_server) = &self.websocket_server {
-            self.broadcast_update(metrics);
-        }
+        // Queue the snapshot for whatever transport the embedding application
+        // uses; see `drain_pending_updates`.
+        self.queue_update(metrics);
     }
 
     /// Get current dashboard snapshot
@@ -852,9 +898,21 @@ impl InteractiveDashboard {
         Ok(())
     }
 
-    fn broadcast_update(&self, _metrics: DashboardMetrics) {
-        // In a real implementation, this would send updates to WebSocket clients
-        tracing::debug!("Broadcasting dashboard update to connected clients");
+    /// Queue one metrics snapshot for delivery, dropping the oldest once the
+    /// queue reaches [`MAX_PENDING_DASHBOARD_UPDATES`].
+    ///
+    /// This replaces `broadcast_update`, which sent nothing at all while
+    /// logging "Broadcasting dashboard update to connected clients".
+    fn queue_update(&self, metrics: DashboardMetrics) {
+        let Some(endpoint) = self.websocket_server.as_ref() else {
+            return;
+        };
+        if let Ok(mut queue) = endpoint.pending_updates.lock() {
+            queue.push_back(metrics);
+            while queue.len() > MAX_PENDING_DASHBOARD_UPDATES {
+                queue.pop_front();
+            }
+        }
     }
 }
 
@@ -1048,6 +1106,43 @@ impl InteractiveDashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Wave 6c debug-sweep2: real update queue, no fake broadcast --------
+
+    #[tokio::test]
+    async fn dashboard_updates_are_really_queued_for_delivery() {
+        let config = DebugConfig::default();
+        let mut dashboard = InteractiveDashboard::new(&config);
+        // Nothing is queued before the dashboard is started.
+        dashboard.update(make_metrics_simple());
+        assert!(dashboard.drain_pending_updates().is_empty());
+
+        dashboard.start(Some(9_999)).await.expect("start");
+        dashboard.update(make_metrics_simple());
+        dashboard.update(make_metrics_simple());
+
+        let drained = dashboard.drain_pending_updates();
+        assert_eq!(drained.len(), 2, "both updates must really be retained");
+        assert!(
+            dashboard.drain_pending_updates().is_empty(),
+            "draining must consume the queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_pending_update_queue_is_bounded() {
+        let config = DebugConfig::default();
+        let mut dashboard = InteractiveDashboard::new(&config);
+        dashboard.start(None).await.expect("start");
+        for _ in 0..(MAX_PENDING_DASHBOARD_UPDATES + 50) {
+            dashboard.update(make_metrics_simple());
+        }
+        assert_eq!(
+            dashboard.drain_pending_updates().len(),
+            MAX_PENDING_DASHBOARD_UPDATES,
+            "the oldest updates must be dropped, not accumulated without bound"
+        );
+    }
 
     fn make_config() -> DebugConfig {
         DebugConfig::default()

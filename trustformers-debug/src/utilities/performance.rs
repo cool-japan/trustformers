@@ -407,16 +407,24 @@ mod memory_profiler_tests {
     #[test]
     fn current_memory_usage_reports_a_real_non_zero_rss() {
         // The old `get_current_memory_usage` returned a hardcoded 0.
-        match SystemMemoryProfiler::current_memory_usage() {
-            Some(bytes) => assert!(
-                bytes > 0,
-                "a live process must have non-zero RSS, got {bytes} (the old placeholder was 0)"
-            ),
-            None => {
-                // Acceptable only as an honest absence on a platform whose
-                // process table does not list us; must never be a fake zero.
-            },
-        }
+        let reading = SystemMemoryProfiler::current_memory_usage();
+        // On every platform this crate is tested on, `sysinfo` lists our own
+        // PID, so a `None` here is a real regression, not an acceptable
+        // absence.
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        let bytes = reading.expect("sysinfo must list this process on a tier-1 target");
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        let Some(bytes) = reading
+        else {
+            return;
+        };
+        assert!(
+            bytes > 0,
+            "a live process must have non-zero RSS, got {bytes} (the old placeholder was 0)"
+        );
+        // A test binary is comfortably over 1 MiB resident; a fabricated
+        // constant would not scale with the real process.
+        assert!(bytes > 1024 * 1024, "implausibly small RSS: {bytes} bytes");
     }
 
     #[test]

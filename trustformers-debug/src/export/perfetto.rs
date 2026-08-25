@@ -132,6 +132,11 @@ impl PerfettoTrace {
         self.events.push(event);
     }
 
+    /// The events in the trace, in insertion order.
+    pub fn events(&self) -> &[PerfettoEvent] {
+        &self.events
+    }
+
     /// Returns the number of events in the trace.
     pub fn len(&self) -> usize {
         self.events.len()

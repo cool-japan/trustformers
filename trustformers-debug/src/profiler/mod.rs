@@ -235,14 +235,25 @@ impl Profiler {
         });
     }
 
-    /// Take a memory usage snapshot
+    /// Take a real memory usage snapshot of this process via `sysinfo`.
+    ///
+    /// Every field used to be a hardcoded `0`, so the whole snapshot series
+    /// read as "this process never allocated anything".
     pub fn take_memory_snapshot(&mut self) {
-        // Simplified memory tracking - in practice would use system APIs
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_memory(),
+        );
+        let process = system.process(pid);
+
         let snapshot = MemorySnapshot {
             timestamp: chrono::Utc::now(),
-            heap_allocated: 0, // Would get from system
-            heap_used: 0,
-            stack_size: 0,
+            process_rss_bytes: process.map(|p| p.memory() as usize),
+            process_virtual_bytes: process.map(|p| p.virtual_memory() as usize),
+            // No GPU driver is linked into this crate.
             gpu_allocated: None,
             gpu_used: None,
         };
@@ -457,32 +468,84 @@ impl Profiler {
         }
     }
 
-    /// Analyze CPU bottlenecks
+    /// Analyse CPU bottlenecks from this profiler's own recorded layer
+    /// timings plus real process CPU usage from `sysinfo`.
+    ///
+    /// Hardware counters (context switches, cache misses, IPC, branch
+    /// mispredictions) are honestly `None`: reading them needs PMU access this
+    /// Pure-Rust crate does not have. They used to be published as the
+    /// constants 1000 / 500 / 2.5 / 100, alongside a fixed `hot_functions`
+    /// list naming `tensor_multiply` and `gradient_computation` regardless of
+    /// what had actually been profiled, and a fixed `bottleneck_score` of 0.6.
+    ///
+    /// Returns an empty vector when nothing has been profiled yet.
     pub fn analyze_cpu_bottlenecks(&mut self) -> Vec<CpuBottleneckAnalysis> {
-        // Simplified CPU bottleneck analysis
-        // In practice, this would use system profiling APIs
+        // Real per-layer totals from the recorded forward/backward times.
+        let mut totals: Vec<(String, Duration, usize)> = self
+            .layer_profiles
+            .values()
+            .map(|profile| {
+                let total: Duration = profile
+                    .forward_times()
+                    .iter()
+                    .chain(profile.backward_times().iter())
+                    .copied()
+                    .sum();
+                let calls = profile.forward_times().len() + profile.backward_times().len();
+                (profile.layer_name.clone(), total, calls)
+            })
+            .filter(|(_, _, calls)| *calls > 0)
+            .collect();
+
+        if totals.is_empty() {
+            return Vec::new();
+        }
+
+        totals.sort_by_key(|(_, total, _)| std::cmp::Reverse(*total));
+        let grand_total: Duration = totals.iter().map(|(_, d, _)| *d).sum();
+        let grand_total_secs = grand_total.as_secs_f64();
+
+        let hot_functions: Vec<HotFunction> = totals
+            .iter()
+            .take(10)
+            .map(|(name, total, calls)| HotFunction {
+                function_name: name.clone(),
+                self_time_percentage: if grand_total_secs > 0.0 {
+                    total.as_secs_f64() / grand_total_secs * 100.0
+                } else {
+                    0.0
+                },
+                call_count: *calls,
+                avg_time_per_call: *total / (*calls).max(1) as u32,
+            })
+            .collect();
+
+        // Share of all recorded time spent in the single hottest layer.
+        let bottleneck_score = if grand_total_secs > 0.0 {
+            hot_functions.first().map(|f| f.self_time_percentage / 100.0)
+        } else {
+            None
+        };
+
+        let pid_raw = std::process::id();
+        let pid = sysinfo::Pid::from_u32(pid_raw);
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_cpu(),
+        );
+        let cpu_usage_percent = system.process(pid).map(|p| p.cpu_usage() as f64);
+
         let analysis = CpuBottleneckAnalysis {
-            thread_id: 0, // Use 0 as placeholder since thread::current().id().as_u64() is unstable
-            cpu_usage: 0.75, // Simplified
-            context_switches: 1000,
-            cache_misses: 500,
-            instructions_per_cycle: 2.5,
-            branch_mispredictions: 100,
-            hot_functions: vec![
-                HotFunction {
-                    function_name: "tensor_multiply".to_string(),
-                    self_time_percentage: 25.0,
-                    call_count: 1000,
-                    avg_time_per_call: Duration::from_micros(250),
-                },
-                HotFunction {
-                    function_name: "gradient_computation".to_string(),
-                    self_time_percentage: 20.0,
-                    call_count: 500,
-                    avg_time_per_call: Duration::from_micros(400),
-                },
-            ],
-            bottleneck_score: 0.6,
+            process_id: pid_raw,
+            cpu_usage_percent,
+            context_switches: None,
+            cache_misses: None,
+            instructions_per_cycle: None,
+            branch_mispredictions: None,
+            hot_functions,
+            bottleneck_score,
         };
 
         self.cpu_bottleneck_analysis.push(analysis.clone());
@@ -757,9 +820,12 @@ impl Profiler {
             &self.memory_snapshots
         };
 
-        if recent_snapshots.len() >= 5 {
-            let initial_memory = recent_snapshots[0].heap_allocated;
-            let final_memory = recent_snapshots.last().map(|s| s.heap_allocated).unwrap_or(0);
+        // Only snapshots that carry a real RSS reading can show growth.
+        let measured: Vec<usize> =
+            recent_snapshots.iter().filter_map(|s| s.process_rss_bytes).collect();
+        if measured.len() >= 5 {
+            let initial_memory = measured[0];
+            let final_memory = measured.last().copied().unwrap_or(0);
 
             if final_memory > initial_memory * 2 {
                 let mut metrics = HashMap::new();
@@ -870,8 +936,15 @@ impl Profiler {
             return MemoryEfficiencyAnalysis::default();
         }
 
-        let memory_values: Vec<usize> =
-            self.memory_snapshots.iter().map(|snapshot| snapshot.heap_allocated).collect();
+        let memory_values: Vec<usize> = self
+            .memory_snapshots
+            .iter()
+            .filter_map(|snapshot| snapshot.process_rss_bytes)
+            .collect();
+        if memory_values.is_empty() {
+            // Snapshots exist but none carried a real reading.
+            return MemoryEfficiencyAnalysis::default();
+        }
 
         let max_memory = memory_values.iter().max().copied().unwrap_or(0);
         let min_memory = memory_values.iter().min().copied().unwrap_or(0);
@@ -1464,13 +1537,69 @@ mod tests {
         assert_eq!(summary.total_bytes_transferred, 0);
     }
 
+    /// Rewritten for Wave 6c: this used to assert `hot_functions.len() == 2`,
+    /// which only held because the two entries were the hardcoded literals
+    /// `tensor_multiply` and `gradient_computation` -- present no matter what
+    /// (or whether anything) had been profiled.
     #[test]
-    fn test_profiler_analyze_cpu_bottlenecks() {
+    fn test_profiler_analyze_cpu_bottlenecks_reports_nothing_before_profiling() {
         let config = make_config();
         let mut profiler = Profiler::new(&config);
+        assert!(
+            profiler.analyze_cpu_bottlenecks().is_empty(),
+            "nothing has been profiled, so there is no bottleneck to report"
+        );
+    }
+
+    #[test]
+    fn test_profiler_analyze_cpu_bottlenecks_ranks_real_recorded_layers() {
+        let config = make_config();
+        let mut profiler = Profiler::new(&config);
+        profiler.record_layer_execution(
+            "slow_layer",
+            "linear",
+            Duration::from_millis(90),
+            None,
+            0,
+            0,
+        );
+        profiler.record_layer_execution(
+            "fast_layer",
+            "linear",
+            Duration::from_millis(10),
+            None,
+            0,
+            0,
+        );
+
         let result = profiler.analyze_cpu_bottlenecks();
-        assert!(!result.is_empty());
-        assert_eq!(result[0].hot_functions.len(), 2);
+        assert_eq!(result.len(), 1);
+        let analysis = &result[0];
+        assert_eq!(analysis.process_id, std::process::id());
+        assert_eq!(
+            analysis.hot_functions.len(),
+            2,
+            "exactly the two layers that were really recorded"
+        );
+        assert_eq!(
+            analysis.hot_functions[0].function_name, "slow_layer",
+            "hottest first"
+        );
+        assert!(
+            (analysis.hot_functions[0].self_time_percentage - 90.0).abs() < 1.0,
+            "90ms of 100ms is 90%, got {}",
+            analysis.hot_functions[0].self_time_percentage
+        );
+        assert!(
+            (analysis.bottleneck_score.expect("a score once something is profiled") - 0.9).abs()
+                < 0.01
+        );
+        // PMU counters are not readable from Pure Rust; they must be absent,
+        // not the old constants 1000 / 500 / 2.5 / 100.
+        assert_eq!(analysis.context_switches, None);
+        assert_eq!(analysis.cache_misses, None);
+        assert_eq!(analysis.instructions_per_cycle, None);
+        assert_eq!(analysis.branch_mispredictions, None);
     }
 
     #[test]

@@ -134,8 +134,13 @@ pub struct CriticalGradientPath {
     pub path_length: usize,
     pub total_flow_strength: f64,
     pub bottleneck_layers: Vec<String>,
+    /// Share of the path's layers classified as bottlenecks, in `[0, 1]`.
+    /// Previously the constant `0.8`.
     pub criticality_score: f64,
-    pub optimization_potential: f64,
+    /// Mean shortfall of the path's edge flow-consistency from `1.0`, i.e. how
+    /// much consistency is left to gain; `None` for a path with no edges.
+    /// Previously the constant `0.6`.
+    pub optimization_potential: Option<f64>,
 }
 
 /// Region where gradients are vanishing
@@ -456,7 +461,11 @@ impl GradientFlowVisualizer {
             let node_type = self.classify_node_type(flow);
             let gradient_strength = flow.gradient_magnitudes.iter().sum::<f64>()
                 / flow.gradient_magnitudes.len() as f64;
-            let connectivity = layer_flows.len(); // Simplified
+            // Every layer is treated as connected to every other, because no
+            // real layer topology is available here (see the edge construction
+            // below): `connectivity` is therefore the same for every node and
+            // carries no per-layer information.
+            let connectivity = layer_flows.len();
             let influence_score = gradient_strength * flow.flow_consistency;
 
             nodes.push(FlowNode {
@@ -468,8 +477,15 @@ impl GradientFlowVisualizer {
             });
         }
 
-        // Create edges (simplified - would need actual layer connectivity information)
-        let layer_names: Vec<String> = layer_flows.keys().cloned().collect();
+        // Edges chain the layers in NAME ORDER, which is an assumption, not
+        // measured topology: `GradientDebugger` records per-layer statistics
+        // keyed by name and never learns which layer feeds which. Name order is
+        // right for the usual `layer_0`, `layer_1`, ... naming and wrong for
+        // any other. It is at least deterministic -- this used to iterate a
+        // `HashMap`, so the "network" was re-wired differently on every run of
+        // the same data.
+        let mut layer_names: Vec<String> = layer_flows.keys().cloned().collect();
+        layer_names.sort();
         for i in 0..layer_names.len().saturating_sub(1) {
             let from_layer = &layer_names[i];
             let to_layer = &layer_names[i + 1];
@@ -555,13 +571,15 @@ impl GradientFlowVisualizer {
     ) -> Vec<CriticalGradientPath> {
         let mut paths = Vec::new();
 
-        // Simplified path identification - would use graph algorithms in practice
+        // The network is a single chain (see `build_gradient_flow_network`), so
+        // there is exactly one path through it and no path SEARCH to perform.
+        // What is real here is the path's composition and its aggregate flow.
         if network.nodes.len() < 2 {
             return paths;
         }
 
         let path_layers: Vec<String> = network.nodes.iter().map(|n| n.layer_name.clone()).collect();
-        let total_flow_strength = network.edges.iter().map(|e| e.flow_strength).sum();
+        let total_flow_strength: f64 = network.edges.iter().map(|e| e.flow_strength).sum();
         let bottleneck_layers: Vec<String> = network
             .nodes
             .iter()
@@ -569,14 +587,28 @@ impl GradientFlowVisualizer {
             .map(|n| n.layer_name.clone())
             .collect();
 
+        // Real criticality: the share of this path's nodes that are
+        // bottlenecks. Previously the constant `0.8`.
+        let criticality_score = bottleneck_layers.len() as f64 / network.nodes.len() as f64;
+        // Real headroom: the mean shortfall of each edge's flow consistency
+        // from a perfectly consistent 1.0, i.e. how much consistency there is
+        // left to gain. Previously the constant `0.6`.
+        let optimization_potential = if network.edges.is_empty() {
+            None
+        } else {
+            let mean_consistency = network.edges.iter().map(|e| e.flow_consistency).sum::<f64>()
+                / network.edges.len() as f64;
+            Some((1.0 - mean_consistency).clamp(0.0, 1.0))
+        };
+
         paths.push(CriticalGradientPath {
             path_id: "main_path".to_string(),
             path_length: path_layers.len(),
             layers: path_layers,
             total_flow_strength,
             bottleneck_layers,
-            criticality_score: 0.8, // Simplified
-            optimization_potential: 0.6,
+            criticality_score,
+            optimization_potential,
         });
 
         paths

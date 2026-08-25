@@ -213,8 +213,21 @@ pub struct EnergyMeasurement {
 /// Energy efficiency metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnergyEfficiencyMetrics {
-    pub operations_per_kwh: f64,
-    pub flops_per_watt: f64,
+    /// Model operations completed per kilowatt-hour.
+    ///
+    /// `None` unless a caller reports a real operation count via
+    /// [`super::energy_monitoring::EnergyMonitor::record_operations`]: the
+    /// monitor samples power, not work, so it cannot know how many operations
+    /// an interval covered. It used to assume a flat 1000 operations per power
+    /// sample.
+    pub operations_per_kwh: Option<f64>,
+    /// Floating-point operations per watt.
+    ///
+    /// `None` unless a caller reports real FLOPs via
+    /// [`super::energy_monitoring::EnergyMonitor::record_flops`]. It used to be
+    /// derived from `utilization * 1e12`, i.e. an assumed 1 TFLOP/s peak for
+    /// whatever device happened to be running.
+    pub flops_per_watt: Option<f64>,
     pub model_energy_efficiency: f64, // Operations per joule
     pub training_energy_efficiency: f64,
     pub inference_energy_efficiency: f64,
@@ -223,11 +236,23 @@ pub struct EnergyEfficiencyMetrics {
 
 /// Comparative efficiency benchmarks
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// This system's energy efficiency relative to reference points.
+///
+/// Every field is `None` unless a caller supplies the reference it is measured
+/// against: this crate observes one machine and holds no database of CPU-only,
+/// previous-generation or cloud baselines, and no population to rank against.
+/// The fields used to carry `vs_previous_generation: 1.2`, `vs_cloud_baseline:
+/// 1.1` and a percentile computed as `flops_per_watt / 1e11` -- three invented
+/// comparisons published as measurements.
 pub struct ComparativeEfficiency {
-    pub vs_cpu_only: f64,
-    pub vs_previous_generation: f64,
-    pub vs_cloud_baseline: f64,
-    pub efficiency_percentile: f64, // Where this system ranks
+    /// Ratio against a CPU-only baseline the caller supplied.
+    pub vs_cpu_only: Option<f64>,
+    /// Ratio against a previous-generation baseline the caller supplied.
+    pub vs_previous_generation: Option<f64>,
+    /// Ratio against a cloud baseline the caller supplied.
+    pub vs_cloud_baseline: Option<f64>,
+    /// Percentile rank within a population the caller supplied.
+    pub efficiency_percentile: Option<f64>,
 }
 
 /// Efficiency improvement opportunity

@@ -233,8 +233,10 @@ impl ModelDiagnostics {
         let training_dynamics = self.training_analyzer.analyze_training_dynamics();
         let alerts = self.alert_manager.get_active_alerts().to_vec();
 
-        // Generate auto-debugging analysis
-        let auto_debugging_results = None; // Simplified for now
+        // Auto-debugging is an async analysis (`AutoDebugger::analyze`); this
+        // is the SYNC report path, so it carries none. Use
+        // `generate_report()` for a report that includes it.
+        let auto_debugging_results = None;
 
         // Generate analytics report
         let analytics_report = self.analytics_engine.generate_analytics_report().ok();
