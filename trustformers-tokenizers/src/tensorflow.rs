@@ -1113,9 +1113,19 @@ impl TensorFlowUtils {
         inputs
     }
 
-    /// Export batch to TensorFlow SavedModel format (conceptual)
-    pub fn export_to_saved_model_format(batch: &TensorFlowBatch) -> Result<String> {
-        // In a real implementation, this would create actual TensorFlow SavedModel files
+    /// Serialize a batch's serving input signature (names, shapes, dtypes --
+    /// see [`Self::create_serving_signature`]) to pretty-printed JSON.
+    ///
+    /// This is *not* a TensorFlow SavedModel export: a real SavedModel is a
+    /// directory of protobuf files (`saved_model.pb`, a `variables/`
+    /// checkpoint, optional `assets/`) written by TensorFlow's own C++
+    /// SavedModel writer, which this pure-Rust, FFI-free crate does not
+    /// link (and has no from-scratch protobuf encoder for). What this
+    /// function actually produces -- the input signature as JSON -- is
+    /// useful on its own for inspecting or hand-authoring a serving
+    /// signature, but callers expecting real SavedModel files must export
+    /// them from an actual TensorFlow installation.
+    pub fn export_serving_signature_as_json(batch: &TensorFlowBatch) -> Result<String> {
         let signature = Self::create_serving_signature(batch);
         serde_json::to_string_pretty(&signature)
             .map_err(|e| anyhow!("Failed to serialize signature: {}", e))
@@ -1229,6 +1239,25 @@ mod tests {
         let batch = tf_tokenizer.encode_to_tensors("hello").expect("Operation failed in test");
         assert_eq!(batch.batch_size(), 1);
         assert!(batch.attention_mask.is_some());
+    }
+
+    /// Regression: this used to be named `export_to_saved_model_format` while
+    /// only ever producing the serving-signature JSON, never real SavedModel
+    /// protobuf files. Locks in that the renamed function still round-trips
+    /// through `create_serving_signature`'s own keys.
+    #[test]
+    fn export_serving_signature_as_json_contains_the_real_signature_keys() {
+        let tokenizer = create_test_char_tokenizer();
+        let tf_tokenizer = TensorFlowTokenizer::from_tokenizer(tokenizer);
+        let batch = tf_tokenizer.encode_to_tensors("hello").expect("encode must succeed");
+
+        let json = TensorFlowUtils::export_serving_signature_as_json(&batch)
+            .expect("signature serialization must succeed");
+
+        let parsed: HashMap<String, HashMap<String, String>> =
+            serde_json::from_str(&json).expect("output must be valid JSON");
+        assert!(parsed.contains_key("input_ids"));
+        assert_eq!(parsed, TensorFlowUtils::create_serving_signature(&batch));
     }
 
     #[test]

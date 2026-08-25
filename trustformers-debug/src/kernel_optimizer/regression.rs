@@ -49,12 +49,26 @@ pub struct BaselineProfile {
     pub confidence_interval: (Duration, Duration),
 }
 
+/// Summary statistics of a kernel's baseline execution-time samples.
+///
+/// **Canonical unit: seconds, as `f64`.** These used to be `std::time::Duration`,
+/// which quantizes to whole nanoseconds -- so the same measurements expressed
+/// on a different time scale produced different published statistics, and a
+/// microsecond-scale kernel's standard deviation could round-trip to `0 ns`,
+/// driving the Welch t-statistic to infinity and its p-value to exactly 0.
+/// `Duration` is still used for the human-facing latency fields on
+/// [`BaselineProfile`] and [`RegressionAlert`]; nothing that feeds the
+/// statistics goes through it any more.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceDistribution {
-    pub mean: Duration,
-    pub std_dev: Duration,
-    pub percentiles: HashMap<u8, Duration>, // 50th, 90th, 95th, 99th percentiles
-    pub outlier_threshold: Duration,
+    /// Arithmetic mean of the baseline samples, in seconds.
+    pub mean_secs: f64,
+    /// Sample standard deviation of the baseline samples, in seconds.
+    pub std_dev_secs: f64,
+    /// 50th, 90th, 95th and 99th percentiles of the baseline samples, in seconds.
+    pub percentiles: HashMap<u8, f64>,
+    /// `mean + 3 * std_dev`, in seconds.
+    pub outlier_threshold_secs: f64,
     /// Number of real samples the distribution was estimated from --
     /// required for the Welch's t-test comparison in
     /// [`PerformanceRegressionDetector::check_regression`] /
@@ -96,15 +110,15 @@ pub enum RegressionSeverity {
 pub struct RegressionThresholds {
     /// Minimum magnitude (fraction, e.g. `0.05` = 5%) for a statistically
     /// significant slowdown to count as a regression at all -- the entry
-    /// gate checked by [`super::analysis::detect_regression`], not a
+    /// gate checked by `super::analysis::detect_regression`, not a
     /// [`RegressionSeverity`] bucket boundary (see
-    /// [`super::analysis::classify_severity`]).
+    /// `super::analysis::classify_severity`).
     pub minor_threshold: f64,
     pub moderate_threshold: f64,
     pub major_threshold: f64,
     /// Retained for API/config completeness (a caller may reasonably
     /// expect a "critical" knob alongside the other three), but not
-    /// currently consumed by [`super::analysis::classify_severity`]:
+    /// currently consumed by `super::analysis::classify_severity`:
     /// with 4 severities and 4 fields, 3 boundaries already fully
     /// partition the magnitude axis into 4 buckets once
     /// `minor_threshold` is spoken for as the entry gate above, so this
@@ -126,8 +140,15 @@ pub struct StatisticalAnalyzer {
 pub struct StatisticalTest {
     pub test_name: String,
     pub test_type: TestType,
+    /// Alpha the test was judged at (`1 - confidence_level`).
     pub significance_level: f64,
-    pub power: f64,
+    /// Observed (post-hoc) power of the test -- see
+    /// `super::analysis::observed_power` -- or `None` when it is not
+    /// computable from the recorded statistic.
+    ///
+    /// This field was called `power` and was set to `1.0 - p_value`, which is
+    /// the confidence in the observed result, not `P(reject H0 | H1 true)`.
+    pub observed_power: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,7 +186,7 @@ pub enum PerformanceTrend {
 pub struct BaselineComparison {
     /// Percentage difference of the recent sample's mean vs the baseline
     /// mean (positive = slower). Real per-comparison value, computed from
-    /// [`analysis::compare_to_baseline`]'s Welch's t-test.
+    /// `analysis::compare_to_baseline`'s Welch's t-test.
     pub current_vs_baseline: f64,
     /// `1.0 - p_value` of the same Welch's t-test (higher = more
     /// significant a change was detected). Not a fixed confidence-level
@@ -239,8 +260,8 @@ impl PerformanceRegressionDetector {
         }
 
         analysis::compare_to_baseline(
-            baseline.performance_distribution.mean.as_secs_f64(),
-            baseline.performance_distribution.std_dev.as_secs_f64(),
+            baseline.performance_distribution.mean_secs,
+            baseline.performance_distribution.std_dev_secs,
             baseline.performance_distribution.sample_count,
             &recent,
         )
@@ -286,11 +307,16 @@ impl PerformanceRegressionDetector {
             return Ok(());
         };
 
+        let alpha = 1.0 - self.alert_thresholds.confidence_level;
         self.statistical_analyzer.statistical_tests.push(StatisticalTest {
             test_name: format!("Welch's t-test ({kernel_name})"),
             test_type: TestType::TTest,
-            significance_level: 1.0 - self.alert_thresholds.confidence_level,
-            power: 1.0 - test_outcome.p_value,
+            significance_level: alpha,
+            observed_power: analysis::observed_power(
+                test_outcome.t_statistic,
+                test_outcome.degrees_of_freedom,
+                alpha,
+            ),
         });
 
         let baseline = self
@@ -577,6 +603,160 @@ mod tests {
             "a recent variance >= 3x baseline must still be Volatile, got {:?}",
             check.performance_trend
         );
+    }
+
+    /// The published Welch statistics must depend only on the *shape* of the
+    /// measurements, never on the unit they happen to be expressed in.
+    ///
+    /// `PerformanceDistribution.{mean,std_dev}` used to be `Duration`, which
+    /// quantizes to whole nanoseconds. Feeding the same relative samples in at
+    /// second, millisecond and microsecond scale therefore produced three
+    /// different p-values, and at microsecond scale the standard deviation
+    /// round-tripped to `0 ns`, collapsing the p-value to exactly 0.0.
+    #[test]
+    fn test_welch_statistics_are_invariant_to_the_time_unit() {
+        // Deliberately not round numbers: a Duration round-trip has to lose
+        // something for the assertion to bite.
+        const BASELINE: [f64; 10] = [
+            1.031, 0.987, 1.004, 1.019, 0.973, 1.011, 0.996, 1.027, 0.981, 1.008,
+        ];
+        const RECENT: [f64; 8] = [1.137, 1.152, 1.129, 1.161, 1.143, 1.156, 1.134, 1.148];
+
+        let p_at_scale = |scale: f64| -> f64 {
+            let baseline_samples: Vec<f64> = BASELINE.iter().map(|v| v * scale).collect();
+            let recent_samples: Vec<f64> = RECENT.iter().map(|v| v * scale).collect();
+            let baseline = analysis::establish_baseline("k", &baseline_samples);
+            let outcome = analysis::compare_to_baseline(
+                baseline.performance_distribution.mean_secs,
+                baseline.performance_distribution.std_dev_secs,
+                baseline.performance_distribution.sample_count,
+                &recent_samples,
+            )
+            .expect("both windows have enough real samples");
+            outcome.p_value
+        };
+
+        let seconds = p_at_scale(1.0);
+        let millis = p_at_scale(1e-3);
+        let micros = p_at_scale(1e-6);
+
+        assert!(seconds > 0.0 && seconds < 1.0, "sanity: got {seconds}");
+        assert!(
+            (millis - seconds).abs() < 1e-9,
+            "millisecond scale must give the same p-value: {millis} vs {seconds}"
+        );
+        assert!(
+            (micros - seconds).abs() < 1e-9,
+            "microsecond scale must give the same p-value: {micros} vs {seconds}"
+        );
+        assert!(
+            micros > 0.0,
+            "a microsecond-scale std_dev must not collapse to zero"
+        );
+    }
+
+    /// A far-tail comparison must report the real (tiny) p-value rather than
+    /// underflowing to exactly 0.0, which `2 * (1 - cdf(|t|))` does.
+    #[test]
+    fn test_far_tail_p_value_does_not_underflow_to_zero() {
+        let baseline_samples: Vec<f64> =
+            (0..40).map(|i| 1.0 + if i % 2 == 0 { 0.001 } else { -0.001 }).collect();
+        let recent_samples: Vec<f64> =
+            (0..40).map(|i| 1.5 + if i % 2 == 0 { 0.001 } else { -0.001 }).collect();
+        let baseline = analysis::establish_baseline("k", &baseline_samples);
+        let outcome = analysis::compare_to_baseline(
+            baseline.performance_distribution.mean_secs,
+            baseline.performance_distribution.std_dev_secs,
+            baseline.performance_distribution.sample_count,
+            &recent_samples,
+        )
+        .expect("both windows have enough real samples");
+
+        assert!(
+            outcome.t_statistic.abs() > 100.0,
+            "sanity: got t={}",
+            outcome.t_statistic
+        );
+        assert!(
+            outcome.p_value > 0.0,
+            "an enormous but finite t-statistic has a tiny, non-zero p-value; got exactly 0.0"
+        );
+        assert!(
+            outcome.p_value < 1e-30,
+            "and it must still be tiny: {}",
+            outcome.p_value
+        );
+    }
+
+    /// `StatisticalTest.power` used to be `1 - p_value`. Observed power is a
+    /// different quantity, and the recorded test must carry the real one.
+    #[test]
+    fn test_recorded_statistical_test_reports_observed_power_not_one_minus_p() {
+        let mut detector = PerformanceRegressionDetector::new().expect("new ok");
+        for _ in 0..analysis::MIN_BASELINE_SAMPLES {
+            detector.check_regression("k", &profile(0.001)).expect("check ok");
+        }
+        // A clearly slower recent window, with a little jitter so the recent
+        // variance is real.
+        for i in 0..(analysis::MIN_COMPARISON_SAMPLES + 4) {
+            let jitter = if i % 2 == 0 { 1.0e-6 } else { -1.0e-6 };
+            detector.check_regression("k", &profile(0.0015 + jitter)).expect("check ok");
+        }
+
+        let test = detector
+            .statistical_analyzer
+            .statistical_tests
+            .last()
+            .expect("a comparison must have been recorded");
+        let power = test.observed_power.expect("a finite t-statistic yields a power");
+        assert!(
+            (0.0..=1.0).contains(&power),
+            "power must be a probability, got {power}"
+        );
+        assert!(
+            (test.significance_level - 0.05).abs() < 1e-9,
+            "alpha comes from the configured confidence level"
+        );
+
+        // A huge effect saturates both quantities at 1.0, so the
+        // power-is-not-1-minus-p separation is asserted on a closed-form case
+        // in `test_observed_power_is_not_one_minus_p`.
+    }
+
+    /// Closed form: at exactly the critical value the two-sided test rejects
+    /// half the time, so observed power is ~0.5 -- while `1 - p` is ~0.95.
+    #[test]
+    fn test_observed_power_is_not_one_minus_p() {
+        // t = t_crit(df=20, alpha=0.05) = 2.085963...
+        let t = 2.085_963_447_265_837;
+        let df = 20.0;
+        let alpha = 0.05;
+
+        let power = analysis::observed_power(t, df, alpha).expect("computable");
+        assert!(
+            (power - 0.5).abs() < 1e-3,
+            "at the critical value the noncentral-t power is ~0.5, got {power}"
+        );
+
+        let p =
+            trustformers_core::statistics::student_t_two_sided_p_value(t, df).expect("computable");
+        assert!(
+            (p - alpha).abs() < 1e-9,
+            "sanity: t is the alpha critical value, p={p}"
+        );
+        assert!(
+            ((1.0 - p) - power).abs() > 0.4,
+            "1 - p = {} is a different quantity from power = {power}",
+            1.0 - p
+        );
+
+        // A far larger effect really is near-certain to be detected.
+        let strong = analysis::observed_power(8.0, df, alpha).expect("computable");
+        assert!(strong > 0.99, "got {strong}");
+        // And degenerate inputs are refused rather than invented.
+        assert_eq!(analysis::observed_power(f64::NAN, df, alpha), None);
+        assert_eq!(analysis::observed_power(t, 0.0, alpha), None);
+        assert_eq!(analysis::observed_power(t, df, 0.0), None);
     }
 
     #[test]

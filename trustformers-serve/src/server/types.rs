@@ -83,6 +83,10 @@ pub struct TrustformerServer {
     /// one is installed with [`TrustformerServer::with_openai_backend`]. They are
     /// never allowed to answer with placeholder text.
     pub(crate) openai_router: crate::openai_compat::OpenAiApiRouter,
+    /// Background host-resource sampler backing `/admin/stats`' measured
+    /// fields; see [`super::system_stats::HostSampler`] for why this reads
+    /// a cached sample instead of measuring fresh per request.
+    pub(crate) host_sampler: Arc<super::system_stats::HostSampler>,
 }
 impl TrustformerServer {
     /// Get batching service
@@ -162,6 +166,7 @@ impl TrustformerServer {
             model_manager,
             request_counter: Arc::new(AtomicU64::new(0)),
             openai_router: crate::openai_compat::OpenAiApiRouter::new(Vec::new()),
+            host_sampler: Arc::new(super::system_stats::HostSampler::new()),
         }
     }
 
@@ -221,32 +226,41 @@ impl TrustformerServer {
     pub fn uptime_seconds(&self) -> f64 {
         self.startup_time.elapsed().as_secs_f64()
     }
-    /// Measured host metrics.
-    ///
-    /// Every field is read from `sysinfo`; a disk figure that cannot be measured
-    /// is reported as `-1.0` rather than as a plausible percentage.
-    ///
-    /// `active_connections` counts the work this process is genuinely driving
-    /// right now (streaming requests in flight plus async jobs being processed).
-    /// Use [`TrustformerServer::system_health_info`] for the fuller picture that
-    /// also includes live SSE/WebSocket connections.
-    pub fn get_system_metrics(&self) -> SystemHealthInfo {
-        let snapshot = super::system_stats::measure_host();
-        SystemHealthInfo {
-            cpu_usage: snapshot.cpu_percent,
-            memory_usage: snapshot.memory_percent,
-            disk_usage: snapshot.disk_percent.unwrap_or(-1.0),
-            active_connections: self.in_flight_work_count(),
-        }
-    }
-
     /// Measured host metrics including live streaming connections.
+    ///
+    /// Reads the same background [`super::system_stats::HostSampler`] as
+    /// `/admin/stats` (`server::functions::get_stats`) rather than measuring
+    /// fresh: this backs both `/health/detailed` and the GraphQL
+    /// `detailedHealth` query, either of which liveness/readiness probes or
+    /// dashboards can hit every few seconds, so it must answer without
+    /// paying `sysinfo`'s real measurement latency on the request path (see
+    /// the sampler's doc comment for why that latency has no upper bound
+    /// under host load).
+    ///
+    /// `cpu_usage`, `memory_usage`, and `disk_usage` are `None` (`null` on
+    /// the wire) exactly when the corresponding reading is not available --
+    /// mirroring the honest-null convention `/admin/stats` already uses for
+    /// this same background sample, rather than a sentinel a client could
+    /// mistake for a real measurement. That happens in two distinct cases,
+    /// both real and neither bounded to a fixed sub-second window (the
+    /// window before the sampler's first completed sample depends on
+    /// current host load, which is precisely what makes measuring fresh on
+    /// every request untenable): before the background sampler's first
+    /// sample has landed, all three are `None`; once a sample exists,
+    /// `disk_usage` alone can still be `None` if no mounted filesystem could
+    /// be matched to the working directory. The reading returned is always
+    /// the latest *completed* sample, not necessarily a current one -- see
+    /// [`super::system_stats::HostSampler`] for the refresh cadence and for
+    /// what happens when a background refresh itself fails (the previous
+    /// reading is kept rather than being overwritten with a fabricated
+    /// value).
     pub async fn system_health_info(&self) -> SystemHealthInfo {
-        let snapshot = super::system_stats::measure_host_async().await;
+        self.host_sampler.ensure_started(super::system_stats::DEFAULT_SAMPLE_INTERVAL);
+        let snapshot = self.host_sampler.current().map(|sample| sample.snapshot);
         SystemHealthInfo {
-            cpu_usage: snapshot.cpu_percent,
-            memory_usage: snapshot.memory_percent,
-            disk_usage: snapshot.disk_percent.unwrap_or(-1.0),
+            cpu_usage: snapshot.map(|s| s.cpu_percent),
+            memory_usage: snapshot.map(|s| s.memory_percent),
+            disk_usage: snapshot.and_then(|s| s.disk_percent),
             active_connections: self.active_connection_count().await,
         }
     }
@@ -595,12 +609,19 @@ pub struct StatsResponse {
     pub(crate) resource_usage: serde_json::Value,
     pub(crate) server_stats: serde_json::Value,
 }
-/// System health information
+/// System health information.
+///
+/// `cpu_usage`, `memory_usage`, and `disk_usage` are `null` on the wire
+/// whenever the corresponding reading is not available -- see
+/// [`TrustformerServer::system_health_info`] for exactly which cases that
+/// covers and why. `active_connections` is always populated: it is counted
+/// live from this process's own request-tracking state, not `sysinfo`, so
+/// it carries no "unmeasured" case.
 #[derive(Debug, Serialize, utoipa::ToSchema, async_graphql::SimpleObject)]
 pub struct SystemHealthInfo {
-    pub cpu_usage: f64,
-    pub memory_usage: f64,
-    pub disk_usage: f64,
+    pub cpu_usage: Option<f64>,
+    pub memory_usage: Option<f64>,
+    pub disk_usage: Option<f64>,
     pub active_connections: usize,
 }
 /// Model load response
@@ -940,5 +961,36 @@ mod router_tests {
         assert!(paths.contains(&"/v1/completions"));
         assert!(paths.contains(&"/v1/embeddings"));
         assert!(paths.contains(&"/v1/models"));
+    }
+}
+
+#[cfg(test)]
+mod system_health_info_tests {
+    use super::*;
+
+    /// Regression: before the background `HostSampler` has completed its
+    /// first measurement, `system_health_info` must report the unmeasured
+    /// fields as `None` (serialized as JSON `null`), never a sentinel like
+    /// `0.0`/`-1.0` that a client could mistake for a real reading. A fresh
+    /// server's sampler cannot have completed `measure_host`'s two
+    /// `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`-apart CPU samples in the time
+    /// between construction and this immediate call, so the cold window is
+    /// genuinely exercised here, not simulated.
+    #[tokio::test]
+    async fn reports_none_before_the_first_sample_lands() {
+        let server = TrustformerServer::new(ServerConfig::default());
+        let info = server.system_health_info().await;
+        assert!(
+            info.cpu_usage.is_none(),
+            "cpu_usage must be None before any background sample has completed"
+        );
+        assert!(
+            info.memory_usage.is_none(),
+            "memory_usage must be None before any background sample has completed"
+        );
+        assert!(
+            info.disk_usage.is_none(),
+            "disk_usage must be None before any background sample has completed"
+        );
     }
 }

@@ -21,6 +21,24 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// Assumed compute-cost retention when fusing two instructions, used by
+/// `JitCompiler::create_fused_instruction`.
+///
+/// This is an unvalidated modelling assumption, not a measurement: nothing
+/// in this crate profiles fused kernels against their unfused originals, so
+/// there is no real per-opcode-pair savings data to differentiate this by.
+/// It intentionally stays a single, clearly-labelled constant rather than a
+/// per-pattern table dressed up with invented numbers — see
+/// `kernel_fusion::FusionPattern::expected_speedup` for what a *real*
+/// differentiated table looks like once such data exists.
+const ASSUMED_FUSION_COMPUTE_RETENTION: f64 = 0.7; // i.e. an assumed 30% compute saving
+
+/// Assumed memory-cost retention when fusing two instructions, used by
+/// `JitCompiler::create_fused_instruction`. Same caveat as
+/// `ASSUMED_FUSION_COMPUTE_RETENTION`: an unvalidated modelling assumption,
+/// not a measurement.
+const ASSUMED_FUSION_MEMORY_RETENTION: f64 = 0.8; // i.e. an assumed 20% memory saving
+
 /// JIT compiler for dynamic compilation of computation graphs
 pub struct JitCompiler {
     config: CompilerConfig,
@@ -677,8 +695,9 @@ impl JitCompiler {
             inputs: inst1.inputs.clone(),
             outputs: inst2.outputs.clone(),
             attributes: fused_attributes,
-            compute_cost: inst1.compute_cost + inst2.compute_cost * 0.7, // Assume 30% savings from fusion
-            memory_cost: (inst1.memory_cost + inst2.memory_cost) * 0.8, // Assume 20% memory savings
+            compute_cost: inst1.compute_cost
+                + inst2.compute_cost * ASSUMED_FUSION_COMPUTE_RETENTION,
+            memory_cost: (inst1.memory_cost + inst2.memory_cost) * ASSUMED_FUSION_MEMORY_RETENTION,
         })
     }
 
@@ -693,10 +712,15 @@ impl JitCompiler {
         }
     }
 
-    /// Evaluate a constant instruction at compile time
+    /// Evaluate a constant instruction at compile time.
+    ///
+    /// Real, not a placeholder: performs the actual `f64` addition/
+    /// multiplication when both operands are present as literal `const_a`/
+    /// `const_b` string attributes. Its scope is intentionally narrow —
+    /// `Add` and `Mul` only, and only when both operands were already folded
+    /// to literal attributes upstream — so it returns `None` (no crash, no
+    /// guess) for every other opcode or missing/unparsable operand.
     fn evaluate_constant_instruction(&self, instruction: &IRInstruction) -> Option<String> {
-        // Simple constant evaluation for demonstration
-        // In a real implementation, this would perform actual computation
         match instruction.opcode {
             IROpcode::Add
                 if instruction.attributes.contains_key("const_a")
@@ -1031,6 +1055,122 @@ mod tests {
         assert_eq!(instruction.opcode, IROpcode::MatMul);
         assert_eq!(instruction.inputs.len(), 2);
         assert_eq!(instruction.outputs.len(), 1);
+    }
+
+    /// Locks in the real behavior `evaluate_constant_instruction`'s doc
+    /// comment now documents (it used to describe itself as a "demonstration"
+    /// even though it already performed real arithmetic): computes real
+    /// sums/products from literal operands, and refuses -- `None`, never a
+    /// guess -- for anything outside that narrow, documented scope.
+    #[test]
+    fn test_evaluate_constant_instruction_computes_real_values_and_refuses_the_rest() {
+        let compiler = JitCompiler::new(&CompilerConfig::default()).expect("construction failed");
+
+        let mut attrs = HashMap::new();
+        attrs.insert("const_a".to_string(), "3".to_string());
+        attrs.insert("const_b".to_string(), "4".to_string());
+        let add = IRInstruction {
+            id: 0,
+            opcode: IROpcode::Add,
+            inputs: vec![],
+            outputs: vec![],
+            attributes: attrs,
+            compute_cost: 1.0,
+            memory_cost: 1.0,
+        };
+        assert_eq!(
+            compiler.evaluate_constant_instruction(&add),
+            Some("7".to_string())
+        );
+
+        let mul = IRInstruction {
+            opcode: IROpcode::Mul,
+            ..add.clone()
+        };
+        assert_eq!(
+            compiler.evaluate_constant_instruction(&mul),
+            Some("12".to_string())
+        );
+
+        // Different literal operands must produce a different real result,
+        // not a value independent of the input.
+        let mut other_attrs = HashMap::new();
+        other_attrs.insert("const_a".to_string(), "10".to_string());
+        other_attrs.insert("const_b".to_string(), "5".to_string());
+        let other_add = IRInstruction {
+            attributes: other_attrs,
+            ..add.clone()
+        };
+        assert_eq!(
+            compiler.evaluate_constant_instruction(&other_add),
+            Some("15".to_string())
+        );
+
+        // No literal operands present: refuses rather than guessing.
+        let unresolved = IRInstruction {
+            attributes: HashMap::new(),
+            ..add.clone()
+        };
+        assert_eq!(compiler.evaluate_constant_instruction(&unresolved), None);
+
+        // An opcode this narrow evaluator does not implement: refuses.
+        let sub = IRInstruction {
+            opcode: IROpcode::Sub,
+            ..add
+        };
+        assert_eq!(compiler.evaluate_constant_instruction(&sub), None);
+    }
+
+    /// `create_fused_instruction`'s cost formula is real (it scales with the
+    /// two real input instructions' own costs); only the retention factors
+    /// are an assumption, now named and documented rather than bare magic
+    /// numbers. This pins the documented formula and proves the output still
+    /// varies with input.
+    #[test]
+    fn test_create_fused_instruction_uses_documented_assumed_retention_factors() {
+        let compiler = JitCompiler::new(&CompilerConfig::default()).expect("construction failed");
+
+        let inst1 = IRInstruction {
+            id: 0,
+            opcode: IROpcode::Add,
+            inputs: vec![],
+            outputs: vec![],
+            attributes: HashMap::new(),
+            compute_cost: 10.0,
+            memory_cost: 10.0,
+        };
+        let inst2 = IRInstruction {
+            id: 1,
+            opcode: IROpcode::ReLU,
+            inputs: vec![],
+            outputs: vec![],
+            attributes: HashMap::new(),
+            compute_cost: 20.0,
+            memory_cost: 20.0,
+        };
+
+        let fused = compiler
+            .create_fused_instruction(&inst1, &inst2)
+            .expect("fusion must succeed for a supported opcode pair");
+
+        assert!(
+            (fused.compute_cost - (10.0 + 20.0 * ASSUMED_FUSION_COMPUTE_RETENTION)).abs() < 1e-9
+        );
+        assert!((fused.memory_cost - (10.0 + 20.0) * ASSUMED_FUSION_MEMORY_RETENTION).abs() < 1e-9);
+
+        // Different input costs must produce a different fused cost: the
+        // constants are calibration factors on real per-instruction data,
+        // not a fixed output regardless of input.
+        let inst2_heavier = IRInstruction {
+            compute_cost: 200.0,
+            memory_cost: 200.0,
+            ..inst2
+        };
+        let fused_heavier = compiler
+            .create_fused_instruction(&inst1, &inst2_heavier)
+            .expect("fusion must succeed");
+        assert_ne!(fused.compute_cost, fused_heavier.compute_cost);
+        assert_ne!(fused.memory_cost, fused_heavier.memory_cost);
     }
 
     #[test]

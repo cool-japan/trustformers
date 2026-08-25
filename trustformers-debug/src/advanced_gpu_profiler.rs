@@ -106,7 +106,7 @@ pub struct MemoryUsageStats {
 pub struct MemoryFragmentationSnapshot {
     pub timestamp: DateTime<Utc>,
     pub device_id: i32,
-    /// Capacity this pool was configured with -- see [`GpuMemoryPool`]'s
+    /// Capacity this pool was configured with -- see `GpuMemoryPool`'s
     /// own doc comment for how that number is obtained (this crate has no
     /// pure-Rust GPU memory query API).
     pub total_memory: usize,
@@ -199,7 +199,7 @@ pub struct MemoryPressureSnapshot {
     /// Real change in HOST OS swap usage (bytes, signed -- positive means
     /// swap grew) since the previous snapshot, read via `sysinfo`
     /// (already a workspace dependency; see
-    /// [`AdvancedGpuMemoryProfiler::last_used_swap_bytes`]). `None` only
+    /// `AdvancedGpuMemoryProfiler::last_used_swap_bytes`). `None` only
     /// for the very first snapshot, when there is no previous reading to
     /// diff against. This is deliberately HOST-wide, not
     /// `device_id`-scoped: no GPU vendor exposes a per-device "swap"
@@ -237,7 +237,7 @@ pub struct CrossDeviceTransfer {
     pub bandwidth_achieved: f64,
     /// Whether this transfer used peer-to-peer DMA. `None` when unknown:
     /// this crate has no pure-Rust API to query real GPU P2P capability
-    /// (see [`AdvancedGpuMemoryProfiler::detect_p2p_capability`]) -- never
+    /// (see `AdvancedGpuMemoryProfiler::detect_p2p_capability`) -- never
     /// a guessed `true`.
     pub p2p_enabled: Option<bool>,
     pub timestamp: SystemTime,

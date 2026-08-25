@@ -1002,37 +1002,76 @@ impl HealthChecker {
         })
     }
 
+    /// Real trends over the last 10 recorded assessments.
+    ///
+    /// All four series are compared the same way (see [`Self::series_trend`]).
+    /// Only `overall_trend` used to be computed: `stability_trend`,
+    /// `convergence_trend` and `overfitting_trend` were the literal
+    /// `Trend::Stable` no matter how badly any of them was actually moving,
+    /// even though `training_stability_index`, `convergence_probability` and
+    /// `overfitting_risk` are all recorded per assessment.
     fn analyze_health_trends(&self) -> HealthTrends {
         if self.health_assessments.len() < 5 {
             return HealthTrends::default();
         }
 
-        let recent_scores: Vec<f64> = self
-            .health_assessments
-            .iter()
-            .rev()
-            .take(10)
-            .map(|a| a.overall_health_score)
-            .collect();
+        // Newest first, matching the original window.
+        let recent: Vec<&HealthAssessment> =
+            self.health_assessments.iter().rev().take(10).collect();
 
-        let first_half_avg = recent_scores[recent_scores.len() / 2..].iter().sum::<f64>()
-            / (recent_scores.len() - recent_scores.len() / 2) as f64;
-        let second_half_avg = recent_scores[..recent_scores.len() / 2].iter().sum::<f64>()
-            / (recent_scores.len() / 2) as f64;
-
-        let trend = if second_half_avg > first_half_avg * 1.05 {
-            Trend::Improving
-        } else if second_half_avg < first_half_avg * 0.95 {
-            Trend::Degrading
-        } else {
-            Trend::Stable
+        let series = |extract: &dyn Fn(&HealthAssessment) -> f64| -> Vec<f64> {
+            recent.iter().map(|a| extract(a)).collect()
         };
 
         HealthTrends {
-            overall_trend: trend,
-            stability_trend: Trend::Stable, // Simplified
-            convergence_trend: Trend::Stable,
-            overfitting_trend: Trend::Stable,
+            overall_trend: Self::series_trend(&series(&|a| a.overall_health_score)),
+            stability_trend: Self::series_trend(&series(&|a| a.training_stability_index)),
+            convergence_trend: Self::series_trend(&series(&|a| a.convergence_probability)),
+            // Risk is inverted: rising risk is a degrading trend.
+            overfitting_trend: Self::series_trend(&series(&|a| {
+                -Self::overfitting_risk_level(&a.overfitting_risk)
+            })),
+        }
+    }
+
+    /// Ordinal level of an [`OverfittingRisk`], so a categorical series can be
+    /// trended like the numeric ones.
+    fn overfitting_risk_level(risk: &OverfittingRisk) -> f64 {
+        match risk {
+            OverfittingRisk::None => 0.0,
+            OverfittingRisk::Low => 1.0,
+            OverfittingRisk::Medium => 2.0,
+            OverfittingRisk::High => 3.0,
+            OverfittingRisk::Severe => 4.0,
+        }
+    }
+
+    /// Compare the mean of the newer half of a newest-first series against the
+    /// mean of the older half, with a 5% relative dead-band.
+    ///
+    /// A series whose older half averages exactly zero cannot be compared
+    /// relatively, so it falls back to an absolute comparison against the same
+    /// dead-band expressed in absolute terms.
+    fn series_trend(newest_first: &[f64]) -> Trend {
+        let mid = newest_first.len() / 2;
+        if mid == 0 || newest_first.len() - mid == 0 {
+            return Trend::Stable;
+        }
+        let newer_avg = newest_first[..mid].iter().sum::<f64>() / mid as f64;
+        let older_avg = newest_first[mid..].iter().sum::<f64>() / (newest_first.len() - mid) as f64;
+
+        const RELATIVE_DEAD_BAND: f64 = 0.05;
+        let band = if older_avg == 0.0 {
+            RELATIVE_DEAD_BAND
+        } else {
+            older_avg.abs() * RELATIVE_DEAD_BAND
+        };
+        if newer_avg > older_avg + band {
+            Trend::Improving
+        } else if newer_avg < older_avg - band {
+            Trend::Degrading
+        } else {
+            Trend::Stable
         }
     }
 
@@ -1114,20 +1153,40 @@ impl HealthChecker {
         suggestions
     }
 
+    /// Change in this run's health figures since its first recorded
+    /// assessment.
+    ///
+    /// The reference is the earliest [`HealthAssessment`] -- the only thing on
+    /// hand that is measured in the same units. [`PerformanceBaseline`] (set
+    /// via [`Self::set_baseline`]) holds loss/accuracy/training-time/memory,
+    /// none of which are health-score units; requiring it to be set preserves
+    /// the previous gating, but its numbers deliberately do not appear here.
+    ///
+    /// The previous body ignored the baseline entirely (it bound it as
+    /// `_baseline`) and subtracted the literals `0.8`, `0.7` and `0.6` --
+    /// invented reference values that made every comparison a fixed offset of
+    /// the current assessment.
     fn compare_with_baseline(&self) -> Option<BaselineComparison> {
-        if let (Some(_baseline), Some(current)) =
-            (&self.performance_baseline, self.health_assessments.last())
-        {
-            Some(BaselineComparison {
-                health_score_change: current.overall_health_score - 0.8, // Simplified baseline score
-                stability_change: current.training_stability_index - 0.7,
-                convergence_change: current.convergence_probability - 0.6,
-                improvement_percentage: ((current.overall_health_score - 0.8) / 0.8 * 100.0)
-                    .max(-100.0),
-            })
-        } else {
-            None
+        self.performance_baseline.as_ref()?;
+        let reference = self.health_assessments.first()?;
+        let current = self.health_assessments.last()?;
+        if self.health_assessments.len() < 2 {
+            // Only one assessment: it is its own reference, so there is no
+            // change to report.
+            return None;
         }
+
+        let health_score_change = current.overall_health_score - reference.overall_health_score;
+        Some(BaselineComparison {
+            health_score_change,
+            stability_change: current.training_stability_index - reference.training_stability_index,
+            convergence_change: current.convergence_probability - reference.convergence_probability,
+            improvement_percentage: if reference.overall_health_score == 0.0 {
+                0.0
+            } else {
+                (health_score_change / reference.overall_health_score * 100.0).max(-100.0)
+            },
+        })
     }
 
     fn generate_health_summary(&self) -> String {

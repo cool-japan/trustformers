@@ -329,6 +329,65 @@ mod tests {
         );
     }
 
+    /// Regression: `benchmark_optimizer`'s memory figure used to come from
+    /// `estimate_memory_usage(after) - estimate_memory_usage(before)`, a
+    /// function of parameter *shapes* alone that never depended on the
+    /// optimizer or the step -- so the delta was always exactly `0.0` for
+    /// every optimizer. It must now be a real, positive reading of the
+    /// optimizer's actual allocated state.
+    #[test]
+    fn benchmark_optimizer_reports_real_nonzero_state_memory_for_a_stateful_optimizer() {
+        let validator = PerformanceValidator::new();
+        let scenario = BenchmarkScenario {
+            name: "tiny".to_string(),
+            parameter_sizes: vec![8],
+            batch_size: 1,
+            iterations: 3,
+        };
+
+        for (name, optimizer_type) in [
+            ("Adam", OptimizerType::Adam),
+            ("AdamW", OptimizerType::AdamW),
+            ("SGD", OptimizerType::SGD),
+            ("AveragedAdam", OptimizerType::AveragedAdam),
+            ("Lion", OptimizerType::Lion),
+        ] {
+            let result = validator
+                .benchmark_optimizer(name, optimizer_type, &scenario)
+                .unwrap_or_else(|e| panic!("benchmark_optimizer({name}) failed: {e}"));
+            let bytes = result
+                .avg_memory_usage
+                .unwrap_or_else(|| panic!("{name} must report real state memory, got None"));
+            assert!(
+                bytes > 0,
+                "{name} must have allocated non-zero state after {} real steps, got 0",
+                scenario.iterations
+            );
+        }
+    }
+
+    /// `LAMB` has no public accessor for its internal moment buffers (it
+    /// doesn't implement `StatefulOptimizer`), so it honestly cannot report
+    /// state memory -- `None`, not a fabricated number.
+    #[test]
+    fn benchmark_optimizer_reports_none_state_memory_for_lamb() {
+        let validator = PerformanceValidator::new();
+        let scenario = BenchmarkScenario {
+            name: "tiny".to_string(),
+            parameter_sizes: vec![8],
+            batch_size: 1,
+            iterations: 3,
+        };
+
+        let result = validator
+            .benchmark_optimizer("LAMB", OptimizerType::LAMB, &scenario)
+            .expect("benchmark_optimizer failed");
+        assert_eq!(
+            result.avg_memory_usage, None,
+            "LAMB exposes no state-memory accessor; this must stay honestly None"
+        );
+    }
+
     #[test]
     fn test_test_data_creation() {
         let parameters = create_test_parameters(vec![10, 20]).expect("Operation failed in test");
@@ -354,7 +413,7 @@ mod tests {
             min_step_time: Duration::from_millis(11),
             max_step_time: Duration::from_millis(13),
             throughput: 800.0,
-            avg_memory_usage: 100.0,
+            avg_memory_usage: Some(100),
             statistical_metrics: None,
         };
 

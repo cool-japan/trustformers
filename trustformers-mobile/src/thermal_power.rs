@@ -973,32 +973,67 @@ fn read_android_temperature() -> Result<f32> {
     // enumeration. No zone readable at all -- absent thermal class, every
     // zone permission-denied -- is a structured error, never a fabricated
     // fallback.
+    //
+    // The actual parse-and-filter logic lives in the target-independent,
+    // pure `hottest_plausible_temperature` below so it is unit-tested on
+    // every host this crate builds on (this function's body only compiles
+    // under `target_os = "android"`, which no CI/dev host here is) --
+    // this wrapper stays thin: read the files, hand the raw contents to
+    // the pure function.
     use std::fs;
 
     const MAX_THERMAL_ZONES: u32 = 64;
-    // The kernel reports implausible sentinel values (e.g. -1 or 0) for an
-    // unpopulated zone; -40..200 C comfortably bounds every real silicon
-    // reading without accepting those sentinels.
-    const PLAUSIBLE_MILLIDEGREES: std::ops::RangeInclusive<i64> = -40_000..=200_000;
 
-    let hottest_millidegrees: Option<i64> = (0..MAX_THERMAL_ZONES)
+    let raw_readings: Vec<String> = (0..MAX_THERMAL_ZONES)
         .filter_map(|zone| {
             fs::read_to_string(format!("/sys/class/thermal/thermal_zone{zone}/temp")).ok()
         })
-        .filter_map(|contents| contents.trim().parse::<i64>().ok())
-        .filter(|millidegrees| PLAUSIBLE_MILLIDEGREES.contains(millidegrees))
-        .max();
+        .collect();
 
-    hottest_millidegrees.map(|m| m as f32 / 1000.0).ok_or_else(|| {
-        TrustformersError::runtime_error(
-            format!(
-                "no readable /sys/class/thermal/thermal_zone*/temp sensor (checked zones 0-{})",
-                MAX_THERMAL_ZONES - 1
+    hottest_plausible_temperature(raw_readings.iter().map(String::as_str))
+}
+
+/// Parse raw `/sys/class/thermal/thermal_zone*/temp` contents (one integer
+/// millidegrees-Celsius reading per already-read zone file) and report the
+/// hottest physically plausible one, in Celsius. Pure and target-independent
+/// -- it takes the already-read file contents rather than touching the
+/// filesystem, so unlike [`read_android_temperature`] (which only compiles
+/// under `#[cfg(target_os = "android")]`) this is unit-tested on every host.
+///
+/// Excludes the kernel's two unpopulated-zone sentinels, `0` and `-1`,
+/// *explicitly* rather than by narrowing the plausible range: both values
+/// fall inside the otherwise-real silicon range (-40..=200 C), so a reader
+/// that only checked range membership would accept them as genuine
+/// readings. Trade-off, deliberately accepted: a sysfs zone reporting
+/// *exactly* `0` or `-1` millidegrees is overwhelmingly the kernel
+/// sentinel for "unpopulated", not a true zero-millidegree measurement, so
+/// treating both as absent is the far more often-correct call -- at the
+/// cost of discarding the rare genuine reading that happens to land on
+/// exactly one of those two integers (e.g. a modem thermistor reading
+/// precisely -0.001 C would be kept; precisely -1 or 0 would not).
+fn hottest_plausible_temperature<'a>(
+    raw_zone_readings: impl Iterator<Item = &'a str>,
+) -> Result<f32> {
+    const PLAUSIBLE_MILLIDEGREES: std::ops::RangeInclusive<i64> = -40_000..=200_000;
+    const SENTINEL_MILLIDEGREES: [i64; 2] = [0, -1];
+
+    raw_zone_readings
+        .filter_map(|contents| contents.trim().parse::<i64>().ok())
+        .filter(|millidegrees| {
+            !SENTINEL_MILLIDEGREES.contains(millidegrees)
+                && PLAUSIBLE_MILLIDEGREES.contains(millidegrees)
+        })
+        .max()
+        .map(|m| m as f32 / 1000.0)
+        .ok_or_else(|| {
+            TrustformersError::runtime_error(
+                "no plausible thermal-zone reading: every input was unreadable, an \
+                 unpopulated-zone sentinel (0 or -1), or outside the physically plausible \
+                 -40..=200C range"
+                    .into(),
             )
-            .into(),
-        )
-        .into()
-    })
+            .into()
+        })
 }
 
 #[cfg(target_os = "ios")]
@@ -1602,6 +1637,84 @@ mod tests {
             scheduled.config.num_threads, 7,
             "the scheduled inference must carry the real caller config, not \
              MobileConfig::default()"
+        );
+    }
+
+    // --- Regression tests for the `hottest_plausible_temperature` sentinel bug ---
+    //
+    // `hottest_plausible_temperature` carries no `#[cfg(target_os = "android")]`
+    // (unlike `read_android_temperature`, which does and so never compiles on
+    // this host), which is the whole point: these tests exercise the real
+    // parse+filter chain natively, not through a mock.
+
+    #[test]
+    fn test_hottest_plausible_temperature_rejects_sentinel_only_input() {
+        // Every zone reporting the kernel's "unpopulated" sentinels (0 and
+        // -1 millidegrees) must be a structured error, never a fabricated
+        // `Ok(0.0)` -- the exact bug this test guards against: 0 and -1
+        // both sit inside the otherwise-plausible -40..=200C range, so a
+        // filter that only checked range membership silently accepted them
+        // and `temperature_to_state(0.0)` published a healthy thermal
+        // state synthesized from zero real sensors.
+        let result = hottest_plausible_temperature(["0", "-1", "0", "-1"].into_iter());
+        assert!(
+            result.is_err(),
+            "sentinel-only input (0/-1 on every zone) must not report a fabricated 0.0C \
+             reading, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_hottest_plausible_temperature_rejects_unreadable_and_out_of_range_input() {
+        // Unparseable garbage and a reading past the physically plausible
+        // upper bound must also be discarded, not just the two named
+        // sentinels -- an all-implausible input is exactly as unmeasured
+        // as an all-sentinel one.
+        let result = hottest_plausible_temperature(["garbage", "", "200001", "-40001"].into_iter());
+        assert!(
+            result.is_err(),
+            "unparseable and out-of-plausible-range-only input must not report a fabricated \
+             reading, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_hottest_plausible_temperature_reports_hottest_real_zone_among_mixed_input() {
+        // A realistic mixed scan: two sentinel zones, one unreadable/
+        // garbage zone, one out-of-range zone, and two genuinely plausible
+        // zones at different temperatures. The hottest genuinely plausible
+        // reading (45.678C from "45678") must win, with the noise ignored
+        // entirely -- not averaged in, not letting a sentinel or garbage
+        // zone suppress the real maximum.
+        let result = hottest_plausible_temperature(
+            ["0", "-1", "garbage", "200001", "32100", "45678"].into_iter(),
+        )
+        .expect("at least two genuinely plausible readings are present");
+        assert_eq!(
+            result, 45.678,
+            "must report the hottest real (non-sentinel, in-range) zone, not the sentinel, \
+             garbage, or out-of-range noise"
+        );
+    }
+
+    #[test]
+    fn test_hottest_plausible_temperature_keeps_genuine_sub_zero_reading_above_sentinel_band() {
+        // The documented trade-off: -1 is excluded as a sentinel, but a
+        // genuine cold reading elsewhere in the plausible sub-zero range
+        // (here -500 millidegrees, i.e. -0.5C) must still be accepted --
+        // the fix narrows out exactly the two sentinel integers, not the
+        // whole negative range.
+        let result = hottest_plausible_temperature(["-1", "-500"].into_iter())
+            .expect("a genuine sub-zero reading outside the sentinel band must be accepted");
+        assert_eq!(result, -0.5);
+    }
+
+    #[test]
+    fn test_hottest_plausible_temperature_empty_input_is_an_error() {
+        let result = hottest_plausible_temperature(std::iter::empty());
+        assert!(
+            result.is_err(),
+            "no readings at all must not fabricate a value"
         );
     }
 }

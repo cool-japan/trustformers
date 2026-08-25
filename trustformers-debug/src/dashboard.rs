@@ -131,9 +131,19 @@ impl TrainingMonitor {
         &self.active_alerts
     }
 
-    /// Clear resolved alerts
-    pub fn clear_alert(&mut self, _alert_type: AlertType) {
-        self.active_alerts.retain(|alert| !matches!(&alert.alert_type, _alert_type));
+    /// Drop every active alert whose [`AlertType`] equals `alert_type`,
+    /// leaving alerts of any other type in place.
+    ///
+    /// The previous body was
+    /// `retain(|alert| !matches!(&alert.alert_type, _alert_type))`. In
+    /// `matches!` the second operand is a *pattern*, and a bare identifier
+    /// there is an irrefutable binding rather than a comparison against the
+    /// parameter -- so the arm always matched, the negation was always
+    /// `false`, and the call cleared **all** alerts regardless of which type
+    /// was asked for. The `_` prefix additionally silenced the
+    /// unused-variable lint that would otherwise have exposed it.
+    pub fn clear_alert(&mut self, alert_type: AlertType) {
+        self.active_alerts.retain(|alert| alert.alert_type != alert_type);
     }
 
     /// Set custom alert thresholds
@@ -431,52 +441,73 @@ impl ModelComparator {
         }
     }
 
+    /// Relative difference in the configured `primary_metric` between the two
+    /// models, or `None` when it cannot be computed.
+    ///
+    /// `None` is returned when either model never recorded the metric, or when
+    /// the reference model's value is `0.0` (the relative difference would be
+    /// a division by zero). This used to return a bare `0.0` in exactly those
+    /// cases, which a caller could not tell apart from the genuine "both
+    /// models scored identically" answer.
     fn calculate_performance_difference(
         &self,
         model_a: &ModelMetrics,
         model_b: &ModelMetrics,
-    ) -> f64 {
+    ) -> Option<f64> {
         match self.comparison_config.primary_metric.as_str() {
             "loss" => {
-                if let (Some(loss_a), Some(loss_b)) = (model_a.final_loss, model_b.final_loss) {
-                    (loss_b - loss_a) / loss_a // Negative means model_a is better
-                } else {
-                    0.0
+                let (loss_a, loss_b) = (model_a.final_loss?, model_b.final_loss?);
+                if loss_a == 0.0 {
+                    return None;
                 }
+                Some((loss_b - loss_a) / loss_a) // Negative means model_a is better
             },
             "accuracy" => {
-                if let (Some(acc_a), Some(acc_b)) = (model_a.final_accuracy, model_b.final_accuracy)
-                {
-                    (acc_b - acc_a) / acc_a // Positive means model_b is better
-                } else {
-                    0.0
+                let (acc_a, acc_b) = (model_a.final_accuracy?, model_b.final_accuracy?);
+                if acc_a == 0.0 {
+                    return None;
                 }
+                Some((acc_b - acc_a) / acc_a) // Positive means model_b is better
             },
-            _ => 0.0,
+            // An unrecognised `primary_metric` names nothing this comparator
+            // can read, so there is no difference to report.
+            _ => None,
         }
     }
 
+    /// Mean of the relative training-time and model-size differences, or
+    /// `None` when either reference quantity is zero.
+    ///
+    /// A `ModelMetrics` built before training has run (or before the model
+    /// size is known) carries `training_time == Duration::ZERO` /
+    /// `model_size_mb == 0.0`; dividing by those produced `inf`/`NaN`, and the
+    /// only reason the old code did not surface them is that nothing checked.
+    /// Absence is now reported as absence.
     fn calculate_efficiency_difference(
         &self,
         model_a: &ModelMetrics,
         model_b: &ModelMetrics,
-    ) -> f64 {
+    ) -> Option<f64> {
+        let time_a = model_a.training_time.as_secs_f64();
+        if time_a == 0.0 || model_a.model_size_mb == 0.0 {
+            return None;
+        }
+
         // Compare training time efficiency
-        let time_diff =
-            model_b.training_time.as_secs_f64() / model_a.training_time.as_secs_f64() - 1.0;
+        let time_diff = model_b.training_time.as_secs_f64() / time_a - 1.0;
 
         // Compare model size efficiency
         let size_diff = model_b.model_size_mb / model_a.model_size_mb - 1.0;
 
         // Combined efficiency score (lower is better)
-        (time_diff + size_diff) / 2.0
+        Some((time_diff + size_diff) / 2.0)
     }
 
     /// Extract the recorded per-step samples of `comparison_config.primary_metric`
     /// ("loss" or "accuracy") from a model's real `metrics_history`, dropping
     /// steps where that metric was not recorded. An unrecognised
     /// `primary_metric` yields no samples (matching
-    /// [`Self::calculate_performance_difference`]'s own `_ => 0.0` fallback),
+    /// [`Self::calculate_performance_difference`]'s own `_ => None` arm),
     /// never a fabricated series.
     fn metric_samples(&self, model: &ModelMetrics) -> Vec<f64> {
         match self.comparison_config.primary_metric.as_str() {
@@ -511,12 +542,22 @@ impl ModelComparator {
         .map(|result| result.is_significant)
     }
 
+    /// Human-readable verdict derived from
+    /// [`Self::calculate_performance_difference`]. When that is `None` the
+    /// recommendation says so instead of claiming the models are equivalent
+    /// (which is what a `0.0` difference used to make it say).
     fn generate_recommendation(
         &self,
         model_a: &ModelMetrics,
         model_b: &ModelMetrics,
-        perf_diff: f64,
+        perf_diff: Option<f64>,
     ) -> String {
+        let Some(perf_diff) = perf_diff else {
+            return format!(
+                "Cannot compare {} and {}: the '{}' metric was not recorded for both models",
+                model_a.model_name, model_b.model_name, self.comparison_config.primary_metric
+            );
+        };
         if perf_diff.abs() < 0.01 {
             "Models perform similarly - choose based on other factors".to_string()
         } else if perf_diff < 0.0 {
@@ -958,11 +999,17 @@ pub struct ModelComparisonReport {
 pub struct ModelComparison {
     pub model_a_id: String,
     pub model_b_id: String,
-    pub performance_difference: f64,
-    pub efficiency_difference: f64,
+    /// Relative change in the configured `primary_metric` from `model_a` to
+    /// `model_b`, or `None` when at least one of them never recorded that
+    /// metric (or the reference value is zero) -- never a `0.0` standing in
+    /// for "nothing was measured".
+    pub performance_difference: Option<f64>,
+    /// Mean of the relative training-time and model-size changes, or `None`
+    /// when `model_a` has no recorded training time or model size.
+    pub efficiency_difference: Option<f64>,
     /// `Some(true)`/`Some(false)` from a real Welch's t-test over both
     /// models' recorded `primary_metric` samples (see
-    /// [`ModelComparator::test_statistical_significance`]), or `None` when
+    /// `ModelComparator::test_statistical_significance`), or `None` when
     /// there was not enough recorded history to run the test -- never a
     /// fabricated constant.
     pub statistical_significance: Option<bool>,
@@ -1476,8 +1523,124 @@ mod tests {
             parameter_count: 1000,
             model_size_mb: 10.0,
         };
-        let rec = comparator.generate_recommendation(&ma, &ma, 0.0);
+        let rec = comparator.generate_recommendation(&ma, &ma, Some(0.0));
         assert!(rec.contains("similarly"));
+    }
+
+    #[test]
+    fn test_model_comparator_recommendation_reports_missing_metric_not_similarity() {
+        // `None` means "the primary metric was never recorded", which must not
+        // be reported as "the two models perform similarly".
+        let comparator = ModelComparator::new();
+        let ma = ModelMetrics {
+            model_id: "a".to_string(),
+            model_name: "A".to_string(),
+            metrics_history: Vec::new(),
+            final_loss: None,
+            final_accuracy: None,
+            training_time: Duration::from_secs(100),
+            parameter_count: 1000,
+            model_size_mb: 10.0,
+        };
+        let rec = comparator.generate_recommendation(&ma, &ma, None);
+        assert!(!rec.contains("similarly"), "got {rec}");
+        assert!(rec.contains("not recorded"), "got {rec}");
+    }
+
+    #[test]
+    fn test_performance_difference_is_none_when_metric_never_recorded() {
+        let comparator = ModelComparator::new();
+        let unmeasured = ModelMetrics {
+            model_id: "a".to_string(),
+            model_name: "A".to_string(),
+            metrics_history: Vec::new(),
+            final_loss: None,
+            final_accuracy: None,
+            training_time: Duration::from_secs(100),
+            parameter_count: 1000,
+            model_size_mb: 10.0,
+        };
+        assert_eq!(
+            comparator.calculate_performance_difference(&unmeasured, &unmeasured),
+            None,
+            "no final loss on either side: absence, not a 0.0 tie"
+        );
+
+        let measured_a = model_with_loss_history("a", &[0.5]);
+        let measured_b = model_with_loss_history("b", &[0.4]);
+        let diff = comparator
+            .calculate_performance_difference(&measured_a, &measured_b)
+            .expect("both models recorded a final loss");
+        assert!(
+            (diff - (-0.2)).abs() < 1e-12,
+            "(0.4 - 0.5)/0.5 = -0.2, got {diff}"
+        );
+    }
+
+    #[test]
+    fn test_efficiency_difference_is_none_without_a_reference_scale() {
+        let comparator = ModelComparator::new();
+        let zeroed = ModelMetrics {
+            model_id: "a".to_string(),
+            model_name: "A".to_string(),
+            metrics_history: Vec::new(),
+            final_loss: Some(0.5),
+            final_accuracy: None,
+            training_time: Duration::ZERO,
+            parameter_count: 1000,
+            model_size_mb: 0.0,
+        };
+        assert_eq!(
+            comparator.calculate_efficiency_difference(&zeroed, &zeroed),
+            None,
+            "dividing by a zero reference used to yield NaN/inf, not a real ratio"
+        );
+
+        let a = model_with_loss_history("a", &[0.5]);
+        let mut b = model_with_loss_history("b", &[0.5]);
+        b.training_time = Duration::from_secs(150);
+        b.model_size_mb = 20.0;
+        let diff = comparator
+            .calculate_efficiency_difference(&a, &b)
+            .expect("both scales are non-zero");
+        // time 150/100 - 1 = 0.5, size 20/10 - 1 = 1.0, mean = 0.75
+        assert!((diff - 0.75).abs() < 1e-12, "got {diff}");
+    }
+
+    #[test]
+    fn test_clear_alert_removes_only_the_requested_alert_type() {
+        let config = DebugConfig::default();
+        let mut monitor = TrainingMonitor::new(&config);
+        for alert_type in [
+            AlertType::LossIncrease,
+            AlertType::MemoryOveruse,
+            AlertType::TrainingStalled,
+        ] {
+            monitor.active_alerts.push(TrainingAlert {
+                alert_type,
+                severity: AlertSeverity::Warning,
+                message: "test".to_string(),
+                timestamp: SystemTime::now(),
+                metric_value: 1.0,
+                threshold: 0.5,
+                suggested_action: "none".to_string(),
+            });
+        }
+        assert_eq!(monitor.get_active_alerts().len(), 3);
+
+        monitor.clear_alert(AlertType::MemoryOveruse);
+
+        // The old `matches!(x, _alert_type)` body cleared all three.
+        let remaining: Vec<&AlertType> =
+            monitor.get_active_alerts().iter().map(|a| &a.alert_type).collect();
+        assert_eq!(remaining.len(), 2, "only the MemoryOveruse alert may go");
+        assert!(remaining.contains(&&AlertType::LossIncrease));
+        assert!(remaining.contains(&&AlertType::TrainingStalled));
+        assert!(!remaining.contains(&&AlertType::MemoryOveruse));
+
+        // Clearing a type that is not present must be a no-op.
+        monitor.clear_alert(AlertType::GradientExplosion);
+        assert_eq!(monitor.get_active_alerts().len(), 2);
     }
 
     fn model_with_loss_history(model_id: &str, losses: &[f64]) -> ModelMetrics {

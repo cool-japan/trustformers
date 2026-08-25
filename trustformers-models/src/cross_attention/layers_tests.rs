@@ -156,28 +156,38 @@ mod tests {
         assert_eq!(output.output.shape(), vec![1, 5, 4]);
     }
 
-    /// DOCUMENTS a pre-existing defect, found while verifying the pooling fix above, that this
-    /// package's mission did not name and does not fix (see the final report for the full
-    /// analysis): `MultiHeadCrossAttention::forward` builds its per-head mask via
-    /// `mask.unsqueeze(1)?.broadcast_to(&[batch, num_heads, query_len, key_len])`, which assumes
-    /// a 3-D `[batch, query_len, key_len]` input mask (so the new axis lands between batch and
-    /// query_len). `create_attention_mask` -- this crate's own mask constructor, right in this
-    /// module -- produces a 2-D `[query_len, key_len]` mask with no batch dimension, so
-    /// `unsqueeze(1)` instead lands the new axis between query_len and key_len, producing
-    /// `[query_len, 1, key_len]`; broadcasting that against a 4-D target compares `query_len`
-    /// against `num_heads`, which fails whenever they differ (the overwhelmingly common case).
-    /// This is independent of hierarchical pooling: it reproduces on a single, non-hierarchical
-    /// `MultiHeadCrossAttention` with `num_heads != query_len`. It has stayed latent because no
-    /// forward-with-mask test previously existed anywhere in this module. This test locks in
-    /// that the failure is a clean `Result::Err` (the underlying `broadcast_to` returns
-    /// `Result`, never panics) and is *not* silently swallowed into a wrong-but-successful
-    /// result, pending a dedicated fix.
+    /// Regression: `MultiHeadCrossAttention::forward` used to build its per-head mask via
+    /// `mask.unsqueeze(1)?.broadcast_to(&[batch, num_heads, query_len, key_len])`, which
+    /// assumed a 3-D `[batch, query_len, key_len]` input mask (so the new axis lands between
+    /// batch and query_len). `create_attention_mask` -- this crate's own mask constructor,
+    /// right in this module -- produces a 2-D `[query_len, key_len]` mask with no batch
+    /// dimension, so `unsqueeze(1)` instead landed the new axis between query_len and key_len,
+    /// producing `[query_len, 1, key_len]`; broadcasting that against a 4-D target compared
+    /// `query_len` against `num_heads`, which errored whenever they differed (the
+    /// overwhelmingly common case, `num_heads = 2` and `query_len = 5` here).
+    ///
+    /// Now that `forward` rank-dispatches the mask before broadcasting, this must succeed --
+    /// and the test hand-verifies the *broadcast is correct*, not merely that it doesn't error:
+    /// with `bias: false` and all-zero query/key/value, every projected Q/K/V is exactly zero
+    /// (a zero vector times any weight matrix is zero), so every raw attention score is exactly
+    /// zero before masking. Adding the causal mask therefore leaves unmasked positions at
+    /// `0.0` and masked ones at `-inf`; softmax over a row with `i + 1` zeros and the rest
+    /// `-inf` is `1 / (i + 1)` on the zeros and `0.0` on the `-inf`s -- a closed-form
+    /// prediction, not an approximation.
     #[test]
-    fn test_multi_head_forward_with_2d_mask_and_mismatched_heads_errors_cleanly() {
+    fn test_multi_head_forward_with_2d_mask_broadcasts_correctly_across_mismatched_heads() {
         let config = CrossAttentionConfig {
             hidden_size: 4,
-            num_heads: 2, // != query_len below, which is what exposes the defect
+            num_heads: 2, // != query_len below, which is what exposed the defect
             bias: false,
+            // `forward` hardcodes `training: true` in its `scaled_dot_product_attention`
+            // call (see the "training flag - would be configurable" comment on the sibling
+            // `CrossAttention::forward`), so the crate's own default `attention_dropout:
+            // 0.1` would genuinely apply inverted dropout here (scaling surviving weights
+            // by `1 / (1 - 0.1)`), which breaks the hand-computed "softmax row sums to
+            // exactly 1" math below on more than an expected value across many samples.
+            // Zero it so this test's per-call assertions are deterministic.
+            attention_dropout: 0.0,
             ..CrossAttentionConfig::default()
         };
         let attn = MultiHeadCrossAttention::new(config).expect("construction must succeed");
@@ -185,13 +195,84 @@ mod tests {
         let query = Tensor::zeros(&[1, 5, 4]).expect("tensor");
         let key = Tensor::zeros(&[1, 5, 4]).expect("tensor");
         let value = Tensor::zeros(&[1, 5, 4]).expect("tensor");
-        let mask = create_attention_mask(5, 5, MaskType::None).expect("mask construction");
+        let mask = create_attention_mask(5, 5, MaskType::Causal).expect("mask construction");
 
-        let result = attn.forward(query, key, value, Some(mask));
-        assert!(
-            result.is_err(),
-            "a 2-D mask with num_heads != query_len must error cleanly, not silently mis-broadcast"
+        let output = attn.forward(query, key, value, Some(mask)).expect(
+            "a 2-D mask must broadcast correctly across all heads even when num_heads != query_len",
         );
+
+        let weights = output
+            .attention_weights
+            .expect("scaled_dot_product_attention always reports attention_weights");
+        let (batch, heads, q_len, k_len) = (1usize, 2usize, 5usize, 5usize);
+        assert_eq!(weights.shape(), vec![batch, heads, q_len, k_len]);
+
+        let data = weights.data_f32().expect("attention weights must be readable");
+        for b in 0..batch {
+            for h in 0..heads {
+                for i in 0..q_len {
+                    let row_start = ((b * heads + h) * q_len + i) * k_len;
+                    let row = &data[row_start..row_start + k_len];
+                    let row_sum: f32 = row.iter().sum();
+                    assert!(
+                        (row_sum - 1.0).abs() < 1e-4,
+                        "batch {b} head {h} query {i}: softmax row must sum to 1, got {row_sum} ({row:?})"
+                    );
+                    let expected_unmasked = 1.0 / (i + 1) as f32;
+                    for (j, &w) in row.iter().enumerate() {
+                        if j > i {
+                            assert!(
+                                w < 1e-6,
+                                "batch {b} head {h} query {i}: position {j} > {i} is causally \
+                                 masked and must carry ~0 weight, got {w}"
+                            );
+                        } else {
+                            assert!(
+                                (w - expected_unmasked).abs() < 1e-4,
+                                "batch {b} head {h} query {i}: unmasked position {j} must be \
+                                 uniform at {expected_unmasked}, got {w}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Regression: `HierarchicalCrossAttention::forward` used to pass the SAME
+    /// caller-supplied mask to every level unchanged while `current_key`/`current_value`
+    /// shrink via pooling between levels -- so by level 1 the mask's key axis (still the
+    /// original, larger `key_len`) no longer matched `current_key`'s pooled (smaller) length,
+    /// and `MultiHeadCrossAttention::forward` (inside each level) would fail to broadcast it.
+    /// Now the mask is pooled in lockstep with K/V via `pool_mask_key_axis`, so a
+    /// non-hierarchical-shaped 2-D mask must survive all `num_levels` levels.
+    #[test]
+    fn test_hierarchical_forward_with_2d_mask_pools_the_mask_key_axis_per_level() {
+        let config = CrossAttentionConfig {
+            hidden_size: 4,
+            num_heads: 2,
+            hierarchical_config: Some(HierarchicalAttentionConfig {
+                num_levels: 3,
+                pooling_factor: 2,
+                learnable_pooling: false,
+                aggregation_method: AggregationMethod::WeightedSum,
+            }),
+            bias: false,
+            ..CrossAttentionConfig::default()
+        };
+        let attn = HierarchicalCrossAttention::new(config).expect("construction must succeed");
+
+        // Level 0 key_len=8, level 1 key_len=4, level 2 key_len=2 (pooling_factor=2 each
+        // step): the mask's key axis must track every one of those or forward() errors.
+        let query = Tensor::zeros(&[1, 5, 4]).expect("tensor");
+        let key = Tensor::zeros(&[1, 8, 4]).expect("tensor");
+        let value = Tensor::zeros(&[1, 8, 4]).expect("tensor");
+        let mask = create_attention_mask(5, 8, MaskType::None).expect("mask construction");
+
+        let output = attn
+            .forward(query, key, value, Some(mask))
+            .expect("a 2-D mask must be pooled per level to track the shrinking key/value axis");
+        assert_eq!(output.output.shape(), vec![1, 5, 4]);
     }
 
     // --- Attention mask tests ---

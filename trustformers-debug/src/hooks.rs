@@ -303,7 +303,7 @@ impl HookManager {
     /// Report the current training loss for [`HookCondition::LossThreshold`]
     /// evaluation. Call this once per step before [`Self::execute_hooks`];
     /// without it, `LossThreshold` conditions never fire (see
-    /// [`Self::evaluate_condition`]).
+    /// `Self::evaluate_condition`).
     pub fn set_loss(&mut self, loss: f64) {
         self.current_loss = Some(loss);
     }
@@ -355,7 +355,7 @@ impl HookManager {
     /// whatever training loop is driving it -- it has no independent
     /// thread of control and therefore cannot itself halt that loop.
     /// What [`HookAction::PauseTraining`] truthfully *can* do, and does,
-    /// is set this flag to `true` (see [`Self::execute_action`]). For
+    /// is set this flag to `true` (see `Self::execute_action`). For
     /// "pause on hook" behaviour, the training loop must cooperate:
     ///
     ///  1. Once, after constructing the [`HookManager`], clone this flag

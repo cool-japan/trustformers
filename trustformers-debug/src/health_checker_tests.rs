@@ -402,3 +402,116 @@ fn test_health_recommendation_construction() {
     assert_eq!(rec.title, "Reduce learning rate");
     assert!(rec.expected_impact > 0.0);
 }
+
+// ── Wave 6d: real trends and a real baseline reference ───────────────────────
+
+/// `stability_trend` / `convergence_trend` / `overfitting_trend` used to be the
+/// literal `Trend::Stable` no matter how the underlying series moved.
+#[test]
+fn test_health_trends_are_computed_for_every_series_not_just_the_overall_score() {
+    let config = DebugConfig::default();
+    let mut checker = HealthChecker::new(&config);
+
+    // Ten assessments: overall score flat, stability clearly falling,
+    // convergence clearly rising, overfitting risk worsening.
+    for i in 0..10 {
+        let t = i as f64;
+        checker.health_assessments.push(HealthAssessment {
+            timestamp: SystemTime::now(),
+            overall_health_score: 0.5,
+            training_stability_index: 0.9 - 0.05 * t,
+            convergence_probability: 0.2 + 0.05 * t,
+            overfitting_risk: if i < 5 { OverfittingRisk::None } else { OverfittingRisk::High },
+            generalization_score: 0.5,
+            component_scores: ComponentHealthScores {
+                gradient_health: 0.5,
+                loss_health: 0.5,
+                accuracy_health: 0.5,
+                performance_health: 0.5,
+                memory_health: 0.5,
+                stability_health: 0.5,
+            },
+            health_status: HealthStatus::Fair,
+            alerts: Vec::new(),
+            recommendations: Vec::new(),
+        });
+    }
+
+    let trends = checker.analyze_health_trends();
+    assert!(
+        matches!(trends.overall_trend, Trend::Stable),
+        "a flat series really is stable, got {:?}",
+        trends.overall_trend
+    );
+    assert!(
+        matches!(trends.stability_trend, Trend::Degrading),
+        "stability fell from 0.9 to 0.45 and must not be reported as Stable, got {:?}",
+        trends.stability_trend
+    );
+    assert!(
+        matches!(trends.convergence_trend, Trend::Improving),
+        "got {:?}",
+        trends.convergence_trend
+    );
+    assert!(
+        matches!(trends.overfitting_trend, Trend::Degrading),
+        "risk rose from None to High, got {:?}",
+        trends.overfitting_trend
+    );
+}
+
+/// The baseline comparison used to subtract the literals 0.8 / 0.7 / 0.6.
+#[test]
+fn test_baseline_comparison_measures_change_against_the_first_real_assessment() {
+    let config = DebugConfig::default();
+    let mut checker = HealthChecker::new(&config);
+    let assessment = |score: f64, stability: f64, convergence: f64| HealthAssessment {
+        timestamp: SystemTime::now(),
+        overall_health_score: score,
+        training_stability_index: stability,
+        convergence_probability: convergence,
+        overfitting_risk: OverfittingRisk::Low,
+        generalization_score: 0.5,
+        component_scores: ComponentHealthScores {
+            gradient_health: 0.5,
+            loss_health: 0.5,
+            accuracy_health: 0.5,
+            performance_health: 0.5,
+            memory_health: 0.5,
+            stability_health: 0.5,
+        },
+        health_status: HealthStatus::Good,
+        alerts: Vec::new(),
+        recommendations: Vec::new(),
+    };
+
+    checker.health_assessments.push(assessment(0.4, 0.5, 0.3));
+    checker.health_assessments.push(assessment(0.6, 0.4, 0.9));
+
+    assert!(
+        checker.compare_with_baseline().is_none(),
+        "no declared PerformanceBaseline means no comparison"
+    );
+
+    checker.set_baseline(PerformanceBaseline {
+        baseline_loss: 1.0,
+        baseline_accuracy: 0.5,
+        baseline_training_time: Duration::from_secs(60),
+        baseline_memory_usage: 512.0,
+        established_at: SystemTime::now(),
+    });
+
+    let comparison = checker.compare_with_baseline().expect("two assessments and a baseline");
+    assert!(
+        (comparison.health_score_change - 0.2).abs() < 1e-9,
+        "0.6 - 0.4, not 0.6 - 0.8; got {}",
+        comparison.health_score_change
+    );
+    assert!((comparison.stability_change - (-0.1)).abs() < 1e-9);
+    assert!((comparison.convergence_change - 0.6).abs() < 1e-9);
+    assert!(
+        (comparison.improvement_percentage - 50.0).abs() < 1e-9,
+        "0.2 / 0.4 = 50%, got {}",
+        comparison.improvement_percentage
+    );
+}

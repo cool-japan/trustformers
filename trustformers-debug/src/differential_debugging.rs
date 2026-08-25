@@ -540,8 +540,15 @@ pub(crate) fn welch_t_test(
     }
 
     let t_dist = StudentsT::new(0.0, 1.0, degrees_of_freedom).ok()?;
-    // Two-tailed p-value: P(|T| >= |t_statistic|).
-    let p_value = 2.0 * (1.0 - t_dist.cdf(t_statistic.abs()));
+    // Two-tailed p-value: P(|T| >= |t_statistic|), from the workspace's own
+    // regularized-incomplete-beta implementation. `2 * (1 - statrs_cdf(|t|))`
+    // cancels catastrophically in the upper tail -- it reaches 3.7e-5 relative
+    // error by t=12, df=30 and underflows to exactly 0.0 at t=12, df=120
+    // (true p 2.78e-22).
+    let p_value = trustformers_core::statistics::student_t_two_sided_p_value(
+        t_statistic,
+        degrees_of_freedom,
+    )?;
 
     // Pooled std for Cohen's d (uses the simple average of the two
     // variances, the standard convention for an unequal-n effect size).
@@ -1289,8 +1296,15 @@ impl DifferentialDebugger {
         let mut significant = HashMap::new();
         for (model, &value) in values {
             let z = (value - mean) / std_dev;
-            // Two-tailed p-value: P(|Z| >= |z|).
-            let p_value = 2.0 * (1.0 - normal.cdf(z.abs()));
+            // Two-tailed p-value P(|Z| >= |z|): naive `2 * (1 - cdf)`
+            // cancels catastrophically for |z| ~ 9+, as the Student-t
+            // p-value above (:544-549) once did. No t-distribution DOF
+            // exists for a z-score (see this fn's doc comment), and
+            // `trustformers_core::statistics` has no normal-tail primitive
+            // to delegate to instead (adding one is outside this package's
+            // ownership this pass -- tracked as a follow-up). `sf` computes
+            // the tail directly via statrs' own `erfc`, unlike `cdf`.
+            let p_value = 2.0 * normal.sf(z.abs());
             significant.insert(model.clone(), p_value < self.config.significance_threshold);
             p_values.insert(model.clone(), p_value);
             effect_sizes.insert(model.clone(), z);
@@ -1921,5 +1935,63 @@ mod tests {
             },
             metadata: HashMap::new(),
         }
+    }
+
+    /// 99 models tied at 0.0 plus one outlier: gives an exact z = 9.9,
+    /// value-independent (mean/std_dev both scale with the outlier).
+    fn hundred_models_with_extreme_outlier() -> HashMap<String, f64> {
+        let mut values: HashMap<String, f64> = (0..99).map(|i| (format!("m{i}"), 0.0)).collect();
+        values.insert("outlier".to_string(), 1000.0);
+        values
+    }
+
+    /// Regression guard: the naive `2 * (1 - cdf)` form underflows to 0.0
+    /// at z = 9.9, though the true p is a tiny but real ~4.16e-23; `sf`
+    /// does not go through that subtraction.
+    #[test]
+    fn naive_statrs_cdf_subtraction_underflows_where_survival_function_does_not() {
+        use statrs::distribution::Normal;
+        use statrs::statistics::Statistics;
+
+        let values = hundred_models_with_extreme_outlier();
+        let samples: Vec<f64> = values.values().copied().collect();
+        let mean = samples.as_slice().mean();
+        let std_dev = samples.as_slice().variance().sqrt();
+        let z = (1000.0 - mean) / std_dev;
+        assert!((z - 9.9).abs() < 1e-6, "expected z ~= 9.9, got {z}");
+
+        let normal = Normal::new(0.0, 1.0).expect("standard normal is always valid");
+        let naive_p_value = 2.0 * (1.0 - normal.cdf(z.abs()));
+        assert_eq!(
+            naive_p_value, 0.0,
+            "expected the naive form to underflow to 0.0 at z = {z}"
+        );
+
+        let fixed_p_value = 2.0 * normal.sf(z.abs());
+        assert!(
+            fixed_p_value > 0.0 && fixed_p_value < 1e-20,
+            "expected a tiny nonzero p-value, got {fixed_p_value}"
+        );
+    }
+
+    /// Same scenario through the real code path, not the primitive.
+    #[test]
+    fn cross_model_metric_significance_reports_tiny_nonzero_p_for_extreme_outlier() {
+        let debugger = DifferentialDebugger::new(DifferentialDebuggingConfig::default());
+        let values = hundred_models_with_extreme_outlier();
+
+        let (p_values, _effect_sizes, significant, _mean_std) = debugger
+            .cross_model_metric_significance(&values)
+            .expect(">= 3 models with nonzero variance must produce a result");
+
+        let outlier_p = p_values["outlier"];
+        assert!(
+            outlier_p > 0.0 && outlier_p < 1e-20,
+            "expected a tiny nonzero p, got {outlier_p}"
+        );
+        assert!(
+            significant["outlier"],
+            "p-value {outlier_p} must be flagged significant"
+        );
     }
 }

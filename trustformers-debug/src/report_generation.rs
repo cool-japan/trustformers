@@ -263,7 +263,7 @@ impl ReportGenerator {
     }
 
     /// Add model architecture data (real per-layer parameter counts, shapes,
-    /// ...). Without this, [`Self::generate_architecture_section`] reports
+    /// ...). Without this, `Self::generate_architecture_section` reports
     /// each layer's parameter count as `N/A` -- an honest absence, not a
     /// fabricated number -- rather than guessing.
     pub fn with_architecture_data(mut self, data: ArchitectureAnalysisReport) -> Self {

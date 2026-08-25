@@ -102,7 +102,9 @@ pub fn create_sparse_mask(
     pattern: SparsePattern,
 ) -> Result<Tensor> {
     match pattern {
-        SparsePattern::Random => create_random_sparse_mask(query_len, key_len, sparsity_ratio),
+        SparsePattern::Random { connections, seed } => {
+            create_random_sparse_mask(query_len, key_len, sparsity_ratio, connections, seed)
+        },
         SparsePattern::Block(block_size) => {
             create_block_sparse_mask(query_len, key_len, block_size)
         },
@@ -114,8 +116,17 @@ pub fn create_sparse_mask(
 /// Sparse attention patterns
 #[derive(Debug, Clone)]
 pub enum SparsePattern {
-    /// Random sparse connections
-    Random,
+    /// Random sparse connections, deterministic given `seed`.
+    ///
+    /// When `connections` is `Some(k)`, every query row keeps exactly `k`
+    /// randomly chosen keys (bounded random attention, e.g. BigBird-style).
+    /// When `None`, every cell is kept independently with probability
+    /// `1 - sparsity_ratio` (the ratio [`create_sparse_mask`] was called
+    /// with).
+    Random {
+        connections: Option<usize>,
+        seed: u64,
+    },
     /// Block-based sparse connections
     Block(usize),
     /// Strided sparse connections
@@ -124,25 +135,57 @@ pub enum SparsePattern {
     TopK(usize),
 }
 
+/// Builds a genuinely random (seeded, reproducible) sparse attention mask.
+///
+/// `connections = Some(k)`: each query row keeps exactly `min(k, key_len)`
+/// keys, chosen without replacement via a partial Fisher-Yates shuffle --
+/// the standard bounded-random-attention pattern (BigBird's "random"
+/// component). `connections = None`: each cell is kept independently with
+/// probability `1 - sparsity_ratio` (a Bernoulli mask). Either way, the same
+/// `seed` (with the same `query_len`/`key_len`/`sparsity_ratio`/
+/// `connections`) always reproduces the same mask -- this replaced a fixed
+/// `(i + j) % 10` stripe pattern that was identical on every call and never
+/// read `connections` at all.
 fn create_random_sparse_mask(
     query_len: usize,
     key_len: usize,
     sparsity_ratio: f32,
+    connections: Option<usize>,
+    seed: u64,
 ) -> Result<Tensor> {
-    let mut mask = vec![vec![f32::NEG_INFINITY; key_len]; query_len];
-    let keep_ratio = 1.0 - sparsity_ratio;
+    let mut rng = fastrand::Rng::with_seed(seed);
+    let mut mask = vec![f32::NEG_INFINITY; query_len * key_len];
 
-    for (i, row) in mask.iter_mut().enumerate() {
-        for (j, val) in row.iter_mut().enumerate() {
-            // Simplified random selection - in practice would use proper RNG
-            if (i + j) % 10 < (keep_ratio * 10.0) as usize {
-                *val = 0.0;
+    match connections {
+        Some(k) => {
+            let k = k.min(key_len);
+            let mut candidates: Vec<usize> = (0..key_len).collect();
+            for i in 0..query_len {
+                // Partial Fisher-Yates: after this loop, candidates[..k] is
+                // a uniformly random k-subset of 0..key_len, in random
+                // order. Re-shuffled per row so each query gets its own
+                // random subset rather than every row sharing one.
+                for a in 0..k {
+                    let b = a + rng.usize(0..(key_len - a));
+                    candidates.swap(a, b);
+                }
+                let row_start = i * key_len;
+                for &j in &candidates[..k] {
+                    mask[row_start + j] = 0.0;
+                }
             }
-        }
+        },
+        None => {
+            let keep_prob = (1.0 - sparsity_ratio).clamp(0.0, 1.0);
+            for cell in &mut mask {
+                if rng.f32() < keep_prob {
+                    *cell = 0.0;
+                }
+            }
+        },
     }
 
-    let flattened: Vec<f32> = mask.into_iter().flatten().collect();
-    Tensor::from_vec(flattened, &[query_len, key_len])
+    Tensor::from_vec(mask, &[query_len, key_len])
 }
 
 fn create_block_sparse_mask(query_len: usize, key_len: usize, block_size: usize) -> Result<Tensor> {
@@ -457,6 +500,57 @@ pub fn pool_tensor(tensor: Tensor, pooling_factor: usize, method: PoolingMethod)
              HierarchicalAttentionConfig::learnable_pooling). Use PoolingMethod::Average or \
              PoolingMethod::Max with this function instead of silently substituting one of them.",
         )),
+    }
+}
+
+/// Downsamples an additive attention mask's key axis to track pooled K/V.
+///
+/// `HierarchicalCrossAttention` shrinks `current_key`/`current_value`'s
+/// sequence axis by `pooling_factor` between levels (via [`pool_tensor`]
+/// with [`PoolingMethod::Average`]); a caller-supplied mask's key axis does
+/// not shrink on its own, so without this, the next level's
+/// `MultiHeadCrossAttention::forward` tries to broadcast a stale,
+/// larger-than-`key_len` mask against the now-smaller key/value tensors.
+///
+/// Reuses [`pool_tensor`] with [`PoolingMethod::Average`] itself (the same
+/// pooling the K/V tensors go through, so the two end up with identical
+/// pooled lengths, both `seq_len.div_ceil(pooling_factor)`), by reshaping
+/// the mask so its key axis plays the role of `pool_tensor`'s `seq_len`
+/// axis. This is also the conservative combination for a `0.0`/`-inf`
+/// additive mask: a window pools to `f32::NEG_INFINITY` (masked) as soon as
+/// ANY position inside it was masked, and only stays `0.0` (visible) when
+/// every position in the window was -- `NEG_INFINITY` is absorbing under
+/// averaging with any finite number of finite addends (`0.0` is the only
+/// other value ever present here, so there is no `inf - inf = NaN` risk).
+///
+/// Accepts a 2-D `[query_len, key_len]` or 3-D `[batch, query_len, key_len]`
+/// mask -- the two shapes [`MultiHeadCrossAttention`](super::layers::MultiHeadCrossAttention)'s
+/// `forward` itself accepts; other ranks are refused.
+pub fn pool_mask_key_axis(mask: Tensor, pooling_factor: usize) -> Result<Tensor> {
+    let shape = mask.shape();
+    match shape.len() {
+        2 => {
+            let (query_len, key_len) = (shape[0], shape[1]);
+            // Each query row becomes an independent "batch" element; the
+            // key axis becomes the "seq_len" being pooled; a dummy
+            // "hidden"=1 axis satisfies `pool_tensor`'s
+            // [batch, seq_len, hidden] contract unchanged.
+            let reshaped = mask.reshape(&[query_len, key_len, 1])?;
+            let pooled = pool_tensor(reshaped, pooling_factor, PoolingMethod::Average)?;
+            let pooled_key_len = pooled.shape()[1];
+            pooled.reshape(&[query_len, pooled_key_len])
+        },
+        3 => {
+            let (batch, query_len, key_len) = (shape[0], shape[1], shape[2]);
+            let reshaped = mask.reshape(&[batch * query_len, key_len, 1])?;
+            let pooled = pool_tensor(reshaped, pooling_factor, PoolingMethod::Average)?;
+            let pooled_key_len = pooled.shape()[1];
+            pooled.reshape(&[batch, query_len, pooled_key_len])
+        },
+        other => Err(invalid_input(format!(
+            "pool_mask_key_axis expects a 2-D [query_len, key_len] or 3-D \
+             [batch, query_len, key_len] mask, got a {other}-D shape {shape:?}"
+        ))),
     }
 }
 
@@ -1082,5 +1176,234 @@ mod pooling_and_interpolation_tests {
     fn test_interpolate_tensor_rejects_zero_target_length() {
         let input = seq_tensor(&[1.0, 2.0, 3.0]);
         assert!(interpolate_tensor(input, 0, InterpolationMethod::Linear).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sparse_mask_and_mask_pooling_tests {
+    use super::*;
+
+    fn count_unmasked(data: &[f32]) -> usize {
+        data.iter().filter(|&&v| v == 0.0).count()
+    }
+
+    /// The default `SparsePattern::Random` config (`connections: None`) keeps
+    /// each cell independently with probability `1 - sparsity_ratio`. Over a
+    /// large grid the empirical keep fraction must land near that
+    /// probability -- a loose bound (this is one seeded, deterministic draw,
+    /// not a statistical claim about the RNG), but nowhere near what a
+    /// broken implementation (e.g. all-kept, all-masked, or a fixed stripe
+    /// with a very different ratio) could produce.
+    #[test]
+    fn random_mask_without_connections_keeps_close_to_the_target_ratio() {
+        let (query_len, key_len) = (100, 100);
+        let sparsity_ratio = 0.3;
+        let mask = create_sparse_mask(
+            query_len,
+            key_len,
+            sparsity_ratio,
+            SparsePattern::Random {
+                connections: None,
+                seed: 7,
+            },
+        )
+        .expect("mask construction");
+        let data = mask.data().expect("tensor data");
+        let kept = count_unmasked(&data);
+        let expected = (query_len * key_len) as f32 * (1.0 - sparsity_ratio);
+        assert!(
+            (kept as f32 - expected).abs() < expected * 0.15,
+            "kept {kept} of {} cells, expected close to {expected}",
+            query_len * key_len
+        );
+    }
+
+    /// Regression: the mask used to be `(i + j) % 10 < (keep_ratio * 10.0)
+    /// as usize` -- a fixed diagonal stripe, identical on every call
+    /// regardless of seed. This compares directly against that exact old
+    /// formula (same `keep_ratio`, so density alone can't distinguish them)
+    /// and requires the new, real implementation to disagree with it on at
+    /// least one cell.
+    #[test]
+    fn random_mask_is_not_the_old_fixed_diagonal_stripe() {
+        let (query_len, key_len) = (20, 20);
+        let sparsity_ratio = 0.3;
+        let mask = create_sparse_mask(
+            query_len,
+            key_len,
+            sparsity_ratio,
+            SparsePattern::Random {
+                connections: None,
+                seed: 42,
+            },
+        )
+        .expect("mask construction");
+        let data = mask.data().expect("tensor data");
+
+        let keep_ratio = 1.0 - sparsity_ratio;
+        let mut differs = false;
+        for i in 0..query_len {
+            for j in 0..key_len {
+                let old_stripe_kept = (i + j) % 10 < (keep_ratio * 10.0) as usize;
+                let new_kept = data[i * key_len + j] == 0.0;
+                if old_stripe_kept != new_kept {
+                    differs = true;
+                }
+            }
+        }
+        assert!(
+            differs,
+            "the new mask must not reproduce the old fixed stripe pattern"
+        );
+    }
+
+    /// The same seed (with the same shape/ratio/connections) must always
+    /// reproduce the exact same mask.
+    #[test]
+    fn random_mask_is_deterministic_for_a_fixed_seed() {
+        let pattern = || SparsePattern::Random {
+            connections: None,
+            seed: 123,
+        };
+        let first = create_sparse_mask(16, 16, 0.4, pattern()).expect("first mask");
+        let second = create_sparse_mask(16, 16, 0.4, pattern()).expect("second mask");
+        assert_eq!(
+            first.data().expect("data"),
+            second.data().expect("data"),
+            "the same seed must reproduce the exact same mask"
+        );
+    }
+
+    /// A different seed must (verified empirically for these two seeds)
+    /// produce a different mask -- otherwise `seed` would be decorative.
+    #[test]
+    fn random_mask_differs_for_a_different_seed() {
+        let first = create_sparse_mask(
+            16,
+            16,
+            0.4,
+            SparsePattern::Random {
+                connections: None,
+                seed: 1,
+            },
+        )
+        .expect("first mask");
+        let second = create_sparse_mask(
+            16,
+            16,
+            0.4,
+            SparsePattern::Random {
+                connections: None,
+                seed: 2,
+            },
+        )
+        .expect("second mask");
+        assert_ne!(
+            first.data().expect("data"),
+            second.data().expect("data"),
+            "different seeds must (for these two, verified) produce different masks"
+        );
+    }
+
+    /// `connections = Some(k)` must keep EXACTLY `k` keys per query row, not
+    /// an approximate fraction -- and must actually read `random_connections`
+    /// at all, which the old `(i + j) % 10` formula never did.
+    #[test]
+    fn random_mask_with_connections_keeps_exactly_k_per_row() {
+        let (query_len, key_len, k) = (10, 50, 7);
+        let mask = create_sparse_mask(
+            query_len,
+            key_len,
+            0.9, // sparsity_ratio is ignored when `connections` is Some
+            SparsePattern::Random {
+                connections: Some(k),
+                seed: 99,
+            },
+        )
+        .expect("mask construction");
+        let data = mask.data().expect("tensor data");
+
+        for i in 0..query_len {
+            let row = &data[i * key_len..(i + 1) * key_len];
+            let kept = count_unmasked(row);
+            assert_eq!(kept, k, "row {i} must keep exactly {k} keys, got {kept}");
+        }
+    }
+
+    /// `connections` larger than `key_len` must clamp to `key_len` (keep
+    /// everything) rather than panicking or under/over-shooting.
+    #[test]
+    fn random_mask_with_connections_larger_than_key_len_keeps_everything() {
+        let (query_len, key_len) = (4, 5);
+        let mask = create_sparse_mask(
+            query_len,
+            key_len,
+            0.9,
+            SparsePattern::Random {
+                connections: Some(100),
+                seed: 5,
+            },
+        )
+        .expect("mask construction");
+        let data = mask.data().expect("tensor data");
+        assert_eq!(count_unmasked(&data), query_len * key_len);
+    }
+
+    // -- pool_mask_key_axis --
+
+    /// Hand-computed: seq_len=5, pooling_factor=2 -> windows [0,1] [2,3] [4].
+    /// `NEG_INFINITY` is absorbing under averaging with any finite addends
+    /// (only `0.0` and `NEG_INFINITY` ever appear in an additive mask), so a
+    /// window pools to masked iff ANY position in it was masked.
+    #[test]
+    fn pool_mask_key_axis_2d_matches_hand_computed_values() {
+        let neg_inf = f32::NEG_INFINITY;
+        #[rustfmt::skip]
+        let mask = Tensor::from_vec(
+            vec![
+                0.0,     0.0,     neg_inf, 0.0,     neg_inf, // row 0
+                neg_inf, neg_inf, neg_inf, 0.0,     0.0,     // row 1
+            ],
+            &[2, 5],
+        )
+        .expect("tensor construction");
+
+        let pooled = pool_mask_key_axis(mask, 2).expect("pooling must succeed");
+        assert_eq!(pooled.shape(), vec![2, 3]);
+        let data = pooled.data().expect("tensor data");
+        // row 0: [0,0]->0.0, [-inf,0]->-inf, [-inf]->-inf
+        assert_eq!(data[0], 0.0);
+        assert!(data[1].is_infinite() && data[1] < 0.0);
+        assert!(data[2].is_infinite() && data[2] < 0.0);
+        // row 1: [-inf,-inf]->-inf, [-inf,0]->-inf, [0]->0.0
+        assert!(data[3].is_infinite() && data[3] < 0.0);
+        assert!(data[4].is_infinite() && data[4] < 0.0);
+        assert_eq!(data[5], 0.0);
+    }
+
+    #[test]
+    fn pool_mask_key_axis_3d_pools_each_batch_and_row_independently() {
+        let neg_inf = f32::NEG_INFINITY;
+        // shape [batch=2, query_len=1, key_len=4]; batch 0 all-visible,
+        // batch 1 all-masked -- pooling must not mix them.
+        let mask = Tensor::from_vec(
+            vec![0.0, 0.0, 0.0, 0.0, neg_inf, neg_inf, neg_inf, neg_inf],
+            &[2, 1, 4],
+        )
+        .expect("tensor construction");
+
+        let pooled = pool_mask_key_axis(mask, 2).expect("pooling must succeed");
+        assert_eq!(pooled.shape(), vec![2, 1, 2]);
+        let data = pooled.data().expect("tensor data");
+        assert_eq!(&data[0..2], &[0.0, 0.0]);
+        assert!(data[2].is_infinite() && data[2] < 0.0);
+        assert!(data[3].is_infinite() && data[3] < 0.0);
+    }
+
+    #[test]
+    fn pool_mask_key_axis_rejects_other_ranks() {
+        let mask =
+            Tensor::from_vec(vec![0.0, 0.0, 0.0, 0.0], &[2, 2, 1, 1]).expect("tensor construction");
+        assert!(pool_mask_key_axis(mask, 2).is_err());
     }
 }

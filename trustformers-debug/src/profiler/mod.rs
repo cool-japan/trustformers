@@ -55,6 +55,15 @@ pub struct Profiler {
     memory_tracker: Arc<Mutex<MemoryTracker>>,
     gpu_profiler: Option<GpuProfiler>,
     io_monitor: IoMonitor,
+    /// Long-lived `sysinfo` handle kept solely so that process CPU usage has a
+    /// previous sample to be a delta against. `sysinfo` computes
+    /// `Process::cpu_usage` between two consecutive refreshes of the *same*
+    /// `System`; a freshly constructed one therefore always reports `0.0`.
+    cpu_sampler: sysinfo::System,
+    /// When [`Self::cpu_sampler`] last refreshed the process. A second sample
+    /// is only meaningful once at least [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`]
+    /// has elapsed.
+    last_cpu_sample: Instant,
 }
 
 #[derive(Debug)]
@@ -88,6 +97,21 @@ impl LayerProfile {
     }
 }
 
+/// Refresh only this process's CPU accounting on `system`.
+///
+/// Factored out so [`Profiler::new`]'s priming sample and
+/// [`Profiler::sample_process_cpu_usage`]'s measuring sample are provably the
+/// same operation on the same `System` -- which is the whole requirement for
+/// `sysinfo`'s CPU delta to be meaningful.
+fn refresh_own_process_cpu(system: &mut sysinfo::System) {
+    let pid = sysinfo::Pid::from_u32(std::process::id());
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_cpu(),
+    );
+}
+
 impl Profiler {
     /// Create a new profiler
     pub fn new(config: &DebugConfig) -> Self {
@@ -108,6 +132,12 @@ impl Profiler {
             memory_tracker: Arc::new(Mutex::new(MemoryTracker::new())),
             gpu_profiler: GpuProfiler::new().ok(),
             io_monitor: IoMonitor::new(),
+            cpu_sampler: {
+                let mut system = sysinfo::System::new();
+                refresh_own_process_cpu(&mut system);
+                system
+            },
+            last_cpu_sample: Instant::now(),
         }
     }
 
@@ -468,6 +498,31 @@ impl Profiler {
         }
     }
 
+    /// Take the second half of a two-sample process CPU measurement.
+    ///
+    /// `sysinfo` derives `Process::cpu_usage` from the CPU time consumed
+    /// between two refreshes of the same `System`; the first sample was taken
+    /// in [`Profiler::new`]. Refreshing a brand-new `System` once -- what this
+    /// code used to do -- can only ever report `0.0`, because there is no
+    /// earlier sample to subtract.
+    ///
+    /// Returns `None` when less than [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`]
+    /// has passed since the previous sample (the platform counters have not
+    /// advanced enough for the quotient to mean anything) or when the process
+    /// cannot be read at all. It never blocks the caller waiting for that
+    /// interval: the other in-repo sampling sites can afford
+    /// `thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL)` because they are dedicated
+    /// samplers, whereas this one runs inside report generation.
+    fn sample_process_cpu_usage(&mut self) -> Option<f64> {
+        if self.last_cpu_sample.elapsed() < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+            return None;
+        }
+        refresh_own_process_cpu(&mut self.cpu_sampler);
+        self.last_cpu_sample = Instant::now();
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        self.cpu_sampler.process(pid).map(|p| p.cpu_usage() as f64)
+    }
+
     /// Analyse CPU bottlenecks from this profiler's own recorded layer
     /// timings plus real process CPU usage from `sysinfo`.
     ///
@@ -528,14 +583,7 @@ impl Profiler {
         };
 
         let pid_raw = std::process::id();
-        let pid = sysinfo::Pid::from_u32(pid_raw);
-        let mut system = sysinfo::System::new();
-        system.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::Some(&[pid]),
-            true,
-            sysinfo::ProcessRefreshKind::nothing().with_cpu(),
-        );
-        let cpu_usage_percent = system.process(pid).map(|p| p.cpu_usage() as f64);
+        let cpu_usage_percent = self.sample_process_cpu_usage();
 
         let analysis = CpuBottleneckAnalysis {
             process_id: pid_raw,
@@ -1600,6 +1648,74 @@ mod tests {
         assert_eq!(analysis.cache_misses, None);
         assert_eq!(analysis.instructions_per_cycle, None);
         assert_eq!(analysis.branch_mispredictions, None);
+    }
+
+    /// Regression test for the single-refresh `sysinfo` bug: the previous
+    /// implementation built a fresh `System`, refreshed it once and read
+    /// `cpu_usage()`, which is a delta against a previous refresh that did not
+    /// exist -- so it could only ever report `Some(0.0)` no matter how much
+    /// CPU the process was burning.
+    #[test]
+    fn test_profiler_cpu_usage_is_a_real_two_sample_measurement() {
+        let config = make_config();
+        let mut profiler = Profiler::new(&config);
+        profiler.record_layer_execution("burner", "linear", Duration::from_millis(10), None, 0, 0);
+
+        // Burn CPU on this thread for longer than sysinfo's minimum sampling
+        // interval, then measure. Retried a few times so a scheduler hiccup on
+        // a loaded machine cannot fail the run; the old code failed all
+        // attempts by construction.
+        let mut observed = None;
+        for _ in 0..5 {
+            let burn_until = Instant::now() + sysinfo::MINIMUM_CPU_UPDATE_INTERVAL * 2;
+            let mut spin: u64 = 0;
+            while Instant::now() < burn_until {
+                spin = spin.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            }
+            assert_ne!(
+                spin,
+                u64::MAX,
+                "keep the busy loop from being optimised out"
+            );
+
+            let analysis = profiler.analyze_cpu_bottlenecks();
+            assert_eq!(analysis.len(), 1);
+            if let Some(cpu) = analysis[0].cpu_usage_percent {
+                if cpu > 0.0 {
+                    observed = Some(cpu);
+                    break;
+                }
+            }
+        }
+        let cpu = observed
+            .expect("a process that spent ~400ms in a busy loop must report non-zero CPU usage");
+        assert!(cpu.is_finite(), "got {cpu}");
+    }
+
+    /// The documented honest-absence half of the same contract: asked again
+    /// before the platform counters can have moved, the profiler reports
+    /// `None` rather than a meaningless quotient.
+    #[test]
+    fn test_profiler_cpu_usage_is_none_before_the_minimum_sampling_interval() {
+        let config = make_config();
+        let constructed_at = Instant::now();
+        let mut profiler = Profiler::new(&config);
+        profiler.record_layer_execution("layer", "linear", Duration::from_millis(1), None, 0, 0);
+        // Self-checking rather than clock-dependent: only assert the absence
+        // if the interval really was too short. A scheduler stall between
+        // `Profiler::new` and this call would otherwise flip the result on a
+        // loaded machine.
+        let before = Instant::now();
+        let analysis = profiler.analyze_cpu_bottlenecks();
+        let elapsed_since_construction = before.duration_since(constructed_at);
+        assert_eq!(analysis.len(), 1);
+        if elapsed_since_construction < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+            assert_eq!(
+                analysis[0].cpu_usage_percent, None,
+                "only {elapsed_since_construction:?} has passed since the priming sample \
+                 taken in Profiler::new, which is below the minimum sampling interval"
+            );
+        }
     }
 
     #[test]

@@ -105,7 +105,12 @@ pub struct TeamMetrics {
     /// Comments posted today
     pub comments_today: usize,
     /// Average response time (in minutes)
-    pub avg_response_time: f64,
+    /// Mean time between a request and its response, in minutes.
+    ///
+    /// Always `None`: see `TeamDashboard::calculate_avg_response_time` --
+    /// nothing here records the paired events such an average needs. It used
+    /// to be the constant `15.0`.
+    pub avg_response_time: Option<f64>,
     /// Collaboration score
     pub collaboration_score: f64,
     /// Top contributors
@@ -693,9 +698,11 @@ impl TeamDashboard {
             .count()
     }
 
-    fn calculate_avg_response_time(&self) -> f64 {
-        // Simplified calculation - would need more sophisticated tracking
-        15.0 // 15 minutes average response time
+    /// Always `None`: computing an average response time needs paired
+    /// request/response events, and this dashboard records neither. It used to
+    /// report a flat `15.0` minutes for every team, every week.
+    fn calculate_avg_response_time(&self) -> Option<f64> {
+        None
     }
 
     fn count_activities_by_type(&self, activities: &[&ActivityEvent]) -> HashMap<String, usize> {
@@ -824,7 +831,7 @@ impl Default for TeamMetrics {
             reports_today: 0,
             annotations_today: 0,
             comments_today: 0,
-            avg_response_time: 0.0,
+            avg_response_time: None,
             collaboration_score: 0.0,
             top_contributors: Vec::new(),
             activity_trends: ActivityTrends {

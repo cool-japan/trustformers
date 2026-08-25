@@ -171,23 +171,53 @@ impl InterpretabilityAnalyzer {
             predictions.push(perturbed_prediction);
         }
         let mut local_coefficients = HashMap::new();
-        let mut feature_importance = Vec::new();
         for feature_name in &feature_names {
             let coeff = self.calculate_local_coefficient(feature_name, &local_data, &predictions);
             local_coefficients.insert(feature_name.clone(), coeff);
-            feature_importance.push(FeatureImportance {
-                feature_name: feature_name.clone(),
-                importance_score: coeff.abs(),
-                confidence_interval: (coeff - 0.1, coeff + 0.1),
-                p_value: 0.05,
-                stability: 0.8,
-            });
         }
+        // Real goodness-of-fit for the surrogate these coefficients describe,
+        // measured against the perturbation predictions themselves.
+        let fit = crate::interpretability::lime::fit_local_surrogate(
+            &feature_names,
+            &local_data,
+            &predictions,
+            &local_coefficients,
+        );
+        let feature_importance: Vec<FeatureImportance> = feature_names
+            .iter()
+            .map(|feature_name| {
+                let stats = fit.coefficient_stats.get(feature_name).copied().unwrap_or_default();
+                FeatureImportance {
+                    feature_name: feature_name.clone(),
+                    importance_score: local_coefficients
+                        .get(feature_name)
+                        .copied()
+                        .unwrap_or(0.0)
+                        .abs(),
+                    standard_error: stats.standard_error,
+                    confidence_interval: stats.confidence_interval,
+                    p_value: stats.p_value,
+                    // No repeated independent LIME runs are performed, so
+                    // there is nothing to measure stability across.
+                    stability: None,
+                }
+            })
+            .collect();
+        // Coverage of the perturbation sampler: how many draws actually
+        // perturbed something. With a 0.3 per-feature probability, a draw
+        // that changes nothing is a real and reasonably common outcome.
+        let perturbed_draws =
+            perturbation_results.iter().filter(|p| !p.perturbed_features.is_empty()).count();
+        let neighborhood_coverage = if perturbation_results.is_empty() {
+            0.0
+        } else {
+            perturbed_draws as f64 / perturbation_results.len() as f64
+        };
         let result = LimeAnalysisResult {
             timestamp: Utc::now(),
             local_coefficients,
             feature_names,
-            local_r_squared: 0.75,
+            local_r_squared: fit.r_squared,
             intercept: original_prediction,
             feature_importance,
             perturbation_analysis: PerturbationAnalysis {
@@ -198,16 +228,15 @@ impl InterpretabilityAnalyzer {
                     .map(|p| (p - original_prediction).powi(2))
                     .sum::<f64>()
                     / predictions.len() as f64,
-                neighborhood_coverage: 0.8,
+                neighborhood_coverage,
                 influential_perturbations: perturbation_results.into_iter().take(10).collect(),
             },
             neighborhood_stats: NeighborhoodStats {
-                mean_prediction: predictions.iter().sum::<f64>() / predictions.len() as f64,
-                std_prediction: 0.1,
-                density: 0.5,
+                mean_prediction: fit.mean_prediction,
+                std_prediction: fit.std_prediction,
+                density: None,
                 correlation_matrix: HashMap::new(),
             },
-            local_fidelity: 0.85,
         };
         self.lime_results.push(result.clone());
         Ok(result)

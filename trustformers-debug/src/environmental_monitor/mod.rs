@@ -42,6 +42,15 @@ pub enum EnvironmentalMonitorError {
          intensity or energy prices without one"
     )]
     NotConfigured,
+    /// A region with no registered grid carbon intensity cannot be turned into
+    /// emissions figures. The tracker used to substitute an invented "global
+    /// average" of 500 gCO2/kWh (and 30% renewables) and report the result as
+    /// that region's own.
+    #[error(
+        "no carbon intensity registered for region '{region}' (see \
+         CarbonFootprintTracker::update_carbon_intensity); refusing to invent one"
+    )]
+    UnknownRegion { region: String },
 }
 
 /// Supplies real carbon-intensity and energy-price forecasts for
@@ -158,9 +167,12 @@ impl EnvironmentalMonitor {
             device_id: "session".to_string(),
             power_watts: energy_kwh * 1000.0 / session_info.duration_hours, // Convert back to watts
             energy_kwh,
-            utilization: 0.8, // Assume 80% utilization
+            // A session report carries no device utilization reading: the
+            // session-level API only knows duration and energy. Absent, not
+            // assumed.
+            utilization: None,
             temperature: None,
-            efficiency_ratio: 1.0,
+            efficiency_ratio: None,
         };
 
         // Calculate carbon footprint
@@ -241,22 +253,25 @@ impl EnvironmentalMonitor {
     /// [`energy_monitoring::EnergyConsumptionMonitor::record_measurement`]):
     /// a real, per-measurement efficiency ratio and (when the caller
     /// supplied one) a real device temperature. Before any measurement has
-    /// been recorded, `efficiency_ratio` is honestly `0.0` and
-    /// `temperature_celsius` is `None` -- never the old hardcoded `0.87` /
-    /// `Some(75.0)`.
+    /// been recorded -- or when the last one carried no utilization reading to
+    /// evaluate the power model against -- `efficiency_ratio` and
+    /// `temperature_celsius` are honestly `None`, never the old hardcoded
+    /// `0.87` / `Some(75.0)`. `co2_emissions_kg` is `None` when the configured
+    /// region has no registered carbon intensity.
     pub async fn get_real_time_metrics(&self) -> Result<RealTimeEnvironmentalMetrics> {
         let current_power = self.energy_monitor.get_current_consumption();
         let carbon_intensity = self.carbon_tracker.get_carbon_intensity(&self.config.region);
 
         let latest_measurement = self.energy_monitor.get_consumption_history().last();
-        let efficiency_ratio = latest_measurement.map(|m| m.efficiency_ratio).unwrap_or(0.0);
+        let efficiency_ratio = latest_measurement.and_then(|m| m.efficiency_ratio);
         let temperature_celsius = latest_measurement.and_then(|m| m.temperature);
 
         Ok(RealTimeEnvironmentalMetrics {
             timestamp: std::time::SystemTime::now(),
             current_power_watts: current_power,
             energy_consumed_kwh: current_power / 1000.0, // Convert to kWh for 1 hour
-            co2_emissions_kg: (current_power / 1000.0) * carbon_intensity / 1000.0,
+            co2_emissions_kg: carbon_intensity
+                .map(|intensity| (current_power / 1000.0) * intensity / 1000.0),
             efficiency_ratio,
             temperature_celsius,
         })
@@ -389,10 +404,21 @@ impl EnvironmentalMonitor {
         })
     }
 
+    /// Carbon cost of `energy_kwh` at a stated carbon price.
+    ///
+    /// Fails with [`EnvironmentalMonitorError::UnknownRegion`] when the
+    /// configured region has no registered carbon intensity, rather than
+    /// costing the energy against an invented one.
     async fn calculate_carbon_cost(&self, energy_kwh: f64) -> Result<f64> {
-        // Simplified carbon pricing (varies by region and policy)
+        // Stated carbon price, not a measurement: real pricing varies by
+        // region and policy and this crate has no price feed.
         let carbon_price_per_ton = 50.0; // USD per ton CO2
-        let carbon_intensity = self.carbon_tracker.get_carbon_intensity(&self.config.region);
+        let carbon_intensity = self
+            .carbon_tracker
+            .get_carbon_intensity(&self.config.region)
+            .ok_or_else(|| EnvironmentalMonitorError::UnknownRegion {
+                region: self.config.region.clone(),
+            })?;
         let co2_tons = (energy_kwh * carbon_intensity / 1000.0) / 1000.0;
 
         Ok(co2_tons * carbon_price_per_ton)
@@ -607,7 +633,10 @@ mod tests {
 
         let metrics = monitor.get_real_time_metrics().await.expect("async operation failed");
         assert!(metrics.current_power_watts >= 0.0); // Changed to >= to allow 0.0 on fresh monitor
-        assert!(metrics.efficiency_ratio > 0.0);
+        assert!(
+            metrics.efficiency_ratio.is_some_and(|r| r > 0.0),
+            "a recorded measurement with a real utilization reading yields a real ratio"
+        );
 
         // Regression: the old implementation always returned
         // `Some(75.0)` regardless of what was actually recorded. The real
@@ -620,14 +649,75 @@ mod tests {
     }
 
     /// Regression test: before any measurement has ever been recorded,
-    /// `efficiency_ratio` and `temperature_celsius` must be honest zero /
-    /// absence -- never the old hardcoded `0.87` / `Some(75.0)`.
+    /// `efficiency_ratio` and `temperature_celsius` must be honestly absent --
+    /// never the old hardcoded `0.87` / `Some(75.0)`, and no longer the `0.0`
+    /// that reads as "maximally inefficient" rather than "not measured".
     #[tokio::test]
     async fn test_real_time_metrics_honest_before_any_measurement() {
         let monitor = EnvironmentalMonitor::new(EnvironmentalConfig::default());
         let metrics = monitor.get_real_time_metrics().await.expect("async operation failed");
-        assert_eq!(metrics.efficiency_ratio, 0.0);
+        assert_eq!(metrics.efficiency_ratio, None);
         assert_eq!(metrics.temperature_celsius, None);
+    }
+
+    /// A session measurement carries no utilization reading, so nothing
+    /// downstream may invent one -- `record_session` used to stamp every
+    /// measurement with `utilization: 0.8`, which produced a published
+    /// `efficiency_lost_percentage` of exactly 20.0% and a "GPU
+    /// underutilization" bottleneck for every session ever recorded.
+    #[tokio::test]
+    async fn test_recorded_session_reports_no_utilization_rather_than_assuming_one() {
+        let mut monitor = EnvironmentalMonitor::new(EnvironmentalConfig::default());
+        let report = monitor
+            .record_session(SessionInfo {
+                session_id: "s1".to_string(),
+                session_type: MeasurementType::Training,
+                start_time: std::time::SystemTime::now(),
+                duration_hours: 1.0,
+                workload_description: "test".to_string(),
+                region: "US-West".to_string(),
+                estimated_energy_kwh: 2.5,
+            })
+            .await
+            .expect("US-West has a registered carbon intensity");
+
+        assert_eq!(report.energy_measurement.utilization, None);
+        assert_eq!(report.energy_measurement.efficiency_ratio, None);
+        let bottlenecks = monitor
+            .efficiency_analyzer
+            .identify_efficiency_bottlenecks(&report.energy_measurement)
+            .await
+            .expect("bottleneck analysis should succeed");
+        assert!(
+            !bottlenecks.iter().any(|b| b.contains("underutilization")),
+            "a bottleneck must not be derived from a utilization nothing measured: {bottlenecks:?}"
+        );
+    }
+
+    /// A region with no registered carbon intensity must be refused, not
+    /// costed against an invented 500 gCO2/kWh "global average".
+    #[tokio::test]
+    async fn test_unknown_region_is_refused_rather_than_given_a_fallback_intensity() {
+        let mut monitor = EnvironmentalMonitor::new(EnvironmentalConfig {
+            region: "Atlantis".to_string(),
+            ..EnvironmentalConfig::default()
+        });
+        let err = monitor
+            .record_session(SessionInfo {
+                session_id: "s2".to_string(),
+                session_type: MeasurementType::Inference,
+                start_time: std::time::SystemTime::now(),
+                duration_hours: 1.0,
+                workload_description: "test".to_string(),
+                region: "Atlantis".to_string(),
+                estimated_energy_kwh: 1.0,
+            })
+            .await
+            .expect_err("no intensity is registered for 'Atlantis'");
+        assert!(
+            err.to_string().contains("Atlantis"),
+            "the refusal must name the region: {err}"
+        );
     }
 
     /// A [`ForecastSource`] mock that returns fixed, clearly-labeled

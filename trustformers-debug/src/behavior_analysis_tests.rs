@@ -389,3 +389,44 @@ async fn test_behavior_recommendation_generated_for_high_dead_neurons() {
     // With 100% dead neurons, recommendations should be non-empty
     assert!(!report.recommendations.is_empty() || report.dead_neurons.len() > 2);
 }
+
+// ── Wave 6d: real correlation inference ──────────────────────────────────────
+
+/// Every reported correlation pair used to carry the literal `p_value: 0.01`.
+#[test]
+fn test_correlation_p_value_is_computed_from_r_and_sample_count() {
+    // r = 0.5 with n = 12 -> t = 0.5 * sqrt(10 / 0.75) = 1.8257, df = 10.
+    let p = correlation_p_value(0.5, 12).expect("estimable");
+    assert!(
+        (p - 0.0979).abs() < 1e-3,
+        "two-sided p for t=1.8257 on 10 df is ~0.0979, got {p}"
+    );
+
+    // The same correlation over more samples is more significant -- the old
+    // constant could not express that at all.
+    let p_more = correlation_p_value(0.5, 60).expect("estimable");
+    assert!(p_more < p, "{p_more} must be smaller than {p}");
+
+    // A stronger correlation at the same n is more significant too.
+    let p_stronger = correlation_p_value(0.9, 12).expect("estimable");
+    assert!(p_stronger < p, "{p_stronger} must be smaller than {p}");
+
+    // And a zero correlation is maximally unsurprising.
+    let p_zero = correlation_p_value(0.0, 12).expect("estimable");
+    assert!((p_zero - 1.0).abs() < 1e-6, "got {p_zero}");
+}
+
+#[test]
+fn test_correlation_p_value_is_absent_when_not_estimable() {
+    assert_eq!(
+        correlation_p_value(0.5, 2),
+        None,
+        "no residual degrees of freedom"
+    );
+    assert_eq!(
+        correlation_p_value(1.0, 30),
+        None,
+        "|r| = 1 makes the statistic diverge"
+    );
+    assert_eq!(correlation_p_value(-1.0, 30), None);
+}

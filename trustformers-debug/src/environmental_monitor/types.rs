@@ -205,9 +205,22 @@ pub struct EnergyMeasurement {
     pub device_id: String,
     pub power_watts: f64,
     pub energy_kwh: f64,
-    pub utilization: f64,
+    /// Device utilization in `0.0..=1.0` as reported by the caller of
+    /// [`super::energy_monitoring::EnergyConsumptionMonitor::record_measurement`],
+    /// or `None` when the measurement came from a path that has no utilization
+    /// reading at all.
+    ///
+    /// [`super::EnvironmentalMonitor::record_session`] is such a path: it built
+    /// its measurement with a literal `utilization: 0.8, // Assume 80%
+    /// utilization`, which then flowed into idle detection, a published
+    /// `efficiency_lost_percentage` of exactly 20.0%, a "GPU underutilization"
+    /// bottleneck and the CSV export -- all from a number nothing measured.
+    pub utilization: Option<f64>,
     pub temperature: Option<f64>,
-    pub efficiency_ratio: f64,
+    /// Ratio of the device's modelled power at this utilization to the power
+    /// actually drawn; `None` when [`Self::utilization`] is, since the model
+    /// cannot be evaluated without it.
+    pub efficiency_ratio: Option<f64>,
 }
 
 /// Energy efficiency metrics
@@ -216,7 +229,7 @@ pub struct EnergyEfficiencyMetrics {
     /// Model operations completed per kilowatt-hour.
     ///
     /// `None` unless a caller reports a real operation count via
-    /// [`super::energy_monitoring::EnergyMonitor::record_operations`]: the
+    /// [`super::energy_monitoring::EnergyConsumptionMonitor::record_operations`]: the
     /// monitor samples power, not work, so it cannot know how many operations
     /// an interval covered. It used to assume a flat 1000 operations per power
     /// sample.
@@ -224,7 +237,7 @@ pub struct EnergyEfficiencyMetrics {
     /// Floating-point operations per watt.
     ///
     /// `None` unless a caller reports real FLOPs via
-    /// [`super::energy_monitoring::EnergyMonitor::record_flops`]. It used to be
+    /// [`super::energy_monitoring::EnergyConsumptionMonitor::record_flops_per_second`]. It used to be
     /// derived from `utilization * 1e12`, i.e. an assumed 1 TFLOP/s peak for
     /// whatever device happened to be running.
     pub flops_per_watt: Option<f64>,
@@ -415,8 +428,15 @@ pub struct RealTimeEnvironmentalMetrics {
     pub timestamp: std::time::SystemTime,
     pub current_power_watts: f64,
     pub energy_consumed_kwh: f64,
-    pub co2_emissions_kg: f64,
-    pub efficiency_ratio: f64,
+    /// `None` when the configured region has no known carbon intensity --
+    /// the figure used to be computed against an invented 500 gCO2/kWh
+    /// "global average fallback".
+    pub co2_emissions_kg: Option<f64>,
+    /// Efficiency ratio of the most recent recorded measurement; `None` when
+    /// nothing has been recorded, or when that measurement carried no
+    /// utilization reading to evaluate the power model against. It used to
+    /// fall back to `0.0`, which reads as "maximally inefficient".
+    pub efficiency_ratio: Option<f64>,
     pub temperature_celsius: Option<f64>,
 }
 

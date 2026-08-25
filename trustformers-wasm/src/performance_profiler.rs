@@ -1072,6 +1072,15 @@ impl PerformanceProfiler {
                 self.adaptive_optimizer.adaptation_history.remove(0);
             }
 
+            // Unlike `start_operation`/`end_operation`/`sample_resources`
+            // (which already require wasm32 for `js_sys::Date::now()`),
+            // this function takes its timestamp as a plain parameter and
+            // is otherwise pure — so it is exercised by a native honesty
+            // regression test (`test_apply_adaptive_optimization_records_
+            // no_fabricated_improvement`). `console::log_1` itself needs
+            // a real browser/JS host, so it is gated here rather than
+            // aborting that test off wasm32.
+            #[cfg(target_arch = "wasm32")]
             web_sys::console::log_1(
                 &format!(
                     "🤖 Adaptive optimization: {old_strategy:?} -> {new_strategy:?} (trigger: {trigger_metric})"

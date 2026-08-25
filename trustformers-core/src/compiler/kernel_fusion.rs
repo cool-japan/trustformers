@@ -18,6 +18,39 @@ use crate::errors::TrustformersError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// How many times the graph's average per-node memory cost a fusion group's
+/// *own* nodes may reasonably cost, used by
+/// `KernelFusion::check_memory_constraints`.
+///
+/// `GraphNode::memory_cost` has no fixed real-world unit — it is whatever
+/// scale the graph's producer used — so comparing it against a fixed
+/// absolute number (the old `1000.0`) would be a comparison against an
+/// undefined scale. Comparing it against a multiple of the *same graph's*
+/// average per-node cost, scaled by the group's own node count, keeps the
+/// comparison meaningful regardless of that scale: a group of ordinarily-
+/// priced nodes always passes, however small the surrounding graph is,
+/// while a group whose combined cost is disproportionate to what that many
+/// average-priced nodes would cost is flagged. (A flat fraction of the
+/// graph's *total* was tried first and rejected: every fusion pattern in
+/// `initialize_patterns` below is 2-6 nodes, so on any graph under roughly
+/// a dozen nodes -- the common case, including every test graph in this
+/// module -- a real pattern match already accounts for a large share of
+/// the graph, and a "% of total" rule silently disabled fusion for it.)
+/// This is still an unvalidated modelling assumption, not a measurement:
+/// no in-tree profiling backs the exact multiple.
+const FUSION_GROUP_MEMORY_HEADROOM: f64 = 4.0;
+
+/// Assumed memory-cost retention when combining a fusion group's nodes into
+/// one fused node, used by `KernelFusion::create_fused_node`.
+///
+/// An unvalidated modelling assumption, not a measurement: nothing in this
+/// crate profiles fused kernels against their unfused originals, so there is
+/// no real per-pattern memory-savings data to differentiate this by (unlike
+/// `FusionPattern::expected_speedup` below, which *is* a real per-pattern
+/// table). It intentionally stays a single, clearly-labelled constant rather
+/// than a per-pattern table dressed up with invented numbers.
+const ASSUMED_FUSION_MEMORY_RETENTION: f64 = 0.8; // i.e. an assumed 20% memory saving
+
 /// Kernel fusion engine for automatic operation fusion
 pub struct KernelFusion {
     config: CompilerConfig,
@@ -348,8 +381,18 @@ impl KernelFusion {
             .map(|node| node.memory_cost)
             .sum();
 
-        // Simple heuristic: don't fuse if total memory exceeds threshold
-        let memory_threshold = 1000.0; // Arbitrary threshold
+        // Relative to the graph's own average per-node memory cost, not a
+        // fixed absolute number -- see `FUSION_GROUP_MEMORY_HEADROOM`.
+        let graph_total_memory: f64 = graph.nodes.iter().map(|node| node.memory_cost).sum();
+        if graph_total_memory <= 0.0 {
+            // No cost data to judge against (e.g. a front-end that never
+            // populated `memory_cost`): the constraint has no evidence to
+            // reject on, so it abstains rather than failing closed.
+            return Ok(true);
+        }
+        let average_node_memory = graph_total_memory / graph.nodes.len().max(1) as f64;
+        let memory_threshold =
+            average_node_memory * group.nodes.len() as f64 * FUSION_GROUP_MEMORY_HEADROOM;
         Ok(total_memory < memory_threshold)
     }
 
@@ -405,7 +448,7 @@ impl KernelFusion {
 
         // Apply fusion benefit
         let optimized_compute_cost = total_compute_cost / group.estimated_benefit;
-        let optimized_memory_cost = total_memory_cost * 0.8; // Assume 20% memory reduction
+        let optimized_memory_cost = total_memory_cost * ASSUMED_FUSION_MEMORY_RETENTION;
 
         Ok(GraphNode {
             id: first_node.id, // Will be updated when inserted
@@ -726,5 +769,129 @@ mod tests {
         let fused_node = result.expect("operation failed in test");
         assert!(fused_node.op_type.contains("Fused"));
         assert!(fused_node.compute_cost < 80.0); // Should be less than sum due to fusion benefit
+    }
+
+    fn add_node(graph: &mut ComputationGraph, id: usize, op_type: &str, memory_cost: f64) {
+        graph.add_node(GraphNode {
+            id,
+            op_type: op_type.to_string(),
+            attributes: HashMap::new(),
+            input_shapes: vec![],
+            output_shapes: vec![vec![4]],
+            compute_cost: 1.0,
+            memory_cost,
+        });
+    }
+
+    /// Regression test: `check_memory_constraints` compared a fusion group's
+    /// memory cost against a fixed absolute `1000.0`, meaningless against
+    /// `memory_cost`'s undefined unit. A first fix (percentage of the
+    /// graph's total) traded that for a check that rejected almost every
+    /// realistic small fusion, because every pattern here is 2-6 nodes and
+    /// small graphs are the common case (see
+    /// `test_apply_fusion_still_fuses_a_real_pattern_in_a_small_graph`
+    /// below, which is what caught it). It now scales with the group's own
+    /// node count against the graph's average per-node cost, so an
+    /// ordinarily-priced group is allowed regardless of graph size, while a
+    /// group whose combined cost is disproportionate to what that many
+    /// average-priced nodes should cost is rejected.
+    #[test]
+    fn test_check_memory_constraints_is_graph_relative_not_a_fixed_number() {
+        let config = CompilerConfig::default();
+        let fusion = KernelFusion::new(&config).expect("construction failed");
+
+        let group = FusionGroup {
+            nodes: vec![0, 1],
+            pattern: "test".to_string(),
+            fusion_type: FusionType::ElementWise,
+            estimated_benefit: 1.5,
+        };
+
+        // A small graph where every node, including the group's, costs the
+        // same: an ordinarily-priced group must be allowed no matter how
+        // small the graph around it is.
+        let mut uniform_graph = ComputationGraph::new();
+        add_node(&mut uniform_graph, 0, "Add", 10.0);
+        add_node(&mut uniform_graph, 1, "Add", 10.0);
+        let allowed_in_uniform_graph =
+            fusion.check_memory_constraints(&group, &uniform_graph).expect("check failed");
+        assert!(
+            allowed_in_uniform_graph,
+            "a 2-node group costing the same as every other node in the graph must be allowed"
+        );
+
+        // A graph of many cheap nodes plus one pair (the group) that costs
+        // wildly more than the rest: the group is disproportionate to the
+        // graph's typical node cost and should be rejected.
+        let mut skewed_graph = ComputationGraph::new();
+        add_node(&mut skewed_graph, 0, "Add", 500.0);
+        add_node(&mut skewed_graph, 1, "Add", 500.0);
+        for id in 2..12 {
+            add_node(&mut skewed_graph, id, "Add", 1.0);
+        }
+        let allowed_in_skewed_graph =
+            fusion.check_memory_constraints(&group, &skewed_graph).expect("check failed");
+        assert!(
+            !allowed_in_skewed_graph,
+            "a group costing 1000 against 10 other nodes costing 1.0 each is disproportionate \
+             and should be rejected"
+        );
+
+        assert_ne!(
+            allowed_in_uniform_graph, allowed_in_skewed_graph,
+            "the verdict must vary with graph content, not stay constant"
+        );
+
+        // No cost data at all (e.g. a front-end that never populated
+        // `memory_cost`): the constraint has no evidence to reject on, so it
+        // must abstain (allow) rather than fail closed on a 0.0 < 0.0 threshold.
+        let mut zero_cost_graph = ComputationGraph::new();
+        add_node(&mut zero_cost_graph, 0, "Add", 0.0);
+        add_node(&mut zero_cost_graph, 1, "Add", 0.0);
+        let allowed_with_zero_cost =
+            fusion.check_memory_constraints(&group, &zero_cost_graph).expect("check failed");
+        assert!(
+            allowed_with_zero_cost,
+            "a graph with no memory cost data must not be rejected on evidence it doesn't have"
+        );
+    }
+
+    /// Regression test for the memory-constraint fix above: prove, end to
+    /// end through `apply_fusion` (not `check_memory_constraints` in
+    /// isolation), that a real fusion pattern in a small, realistically
+    /// small graph still actually fuses. An early version of the
+    /// graph-relative fix compared a group's cost against a flat percentage
+    /// of the graph's total; since every pattern below is 2-6 nodes, that
+    /// silently disabled fusion on any graph under roughly a dozen nodes,
+    /// which is the common case, including every other graph in this test
+    /// module.
+    #[test]
+    fn test_apply_fusion_still_fuses_a_real_pattern_in_a_small_graph() {
+        let config = CompilerConfig::default();
+        let mut fusion = KernelFusion::new(&config).expect("construction failed");
+
+        // Matches the "ActivationFusion" pattern (Linear -> ReLU) from
+        // `initialize_patterns`, with the same node-cost scale
+        // `test_create_fused_node` above uses (tens, not thousands) -- a
+        // graph containing nothing but the pattern itself, the minimal case.
+        let mut graph = ComputationGraph::new();
+        add_node(&mut graph, 0, "Linear", 25.0);
+        add_node(&mut graph, 1, "ReLU", 15.0);
+        graph.add_edge(crate::compiler::GraphEdge {
+            from: 0,
+            to: 1,
+            output_idx: 0,
+            input_idx: 0,
+            shape: vec![4],
+            dtype: "f32".to_string(),
+        });
+
+        let result = fusion.apply_fusion(&mut graph).expect("fusion must succeed");
+        assert!(
+            result.fused_operations > 0,
+            "a real, hardware-compatible, sufficiently-beneficial pattern in a small graph must \
+             still be fused -- got 0 fused operations"
+        );
+        assert!(result.applied_patterns.contains(&"ActivationFusion".to_string()));
     }
 }

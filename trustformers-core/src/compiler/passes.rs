@@ -53,6 +53,63 @@ impl ConstantFoldingPass {
             constant_values: HashMap::new(),
         }
     }
+
+    /// True for arithmetic ops this pass knows how to fold once their inputs
+    /// are all known to be constant.
+    fn is_foldable_op(op_type: &str) -> bool {
+        matches!(op_type, "Add" | "Mul" | "Sub" | "Div")
+    }
+
+    /// Nodes whose value is knowable at compile time: literal constant
+    /// producers (op_type `"Constant"`, or an explicit `constant = "true"`
+    /// attribute), plus any foldable arithmetic node whose inputs all trace
+    /// back, transitively, to one -- found by propagating to a fixed point
+    /// (capped at 10 iterations, matching `apply`'s original loop bound, so
+    /// a pathological graph cannot loop unboundedly). Shared by `apply`
+    /// (which tags the result) and `estimate_benefit` (which only reads it),
+    /// so the two can never disagree.
+    fn find_constant_nodes(&self, graph: &ComputationGraph) -> HashSet<usize> {
+        let mut constants = HashSet::new();
+        for (i, node) in graph.nodes.iter().enumerate() {
+            if node.op_type == "Constant"
+                || node.attributes.get("constant").is_some_and(|v| v == "true")
+            {
+                constants.insert(i);
+            }
+        }
+
+        let mut iterations = 0;
+        while iterations < 10 {
+            // Limit iterations to prevent infinite loops
+            let mut new_constants = HashSet::new();
+
+            for (i, node) in graph.nodes.iter().enumerate() {
+                if constants.contains(&i) || !Self::is_foldable_op(&node.op_type) {
+                    continue;
+                }
+
+                let mut input_edges = graph.edges.iter().filter(|edge| edge.to == i).peekable();
+                // A node with no inputs at all has nothing constant feeding
+                // it; `all()` on an empty iterator is vacuously true, so this
+                // must be checked explicitly rather than folded into it.
+                if input_edges.peek().is_none() {
+                    continue;
+                }
+                if input_edges.all(|edge| constants.contains(&edge.from)) {
+                    new_constants.insert(i);
+                }
+            }
+
+            if new_constants.is_empty() {
+                break;
+            }
+
+            constants.extend(new_constants);
+            iterations += 1;
+        }
+
+        constants
+    }
 }
 
 impl OptimizationPass for ConstantFoldingPass {
@@ -68,59 +125,21 @@ impl OptimizationPass for ConstantFoldingPass {
         &mut self,
         graph: &mut ComputationGraph,
     ) -> Result<PassResult, crate::errors::TrustformersError> {
-        let mut changed = false;
-        let mut folded_ops = 0;
-        let removed_nodes = 0;
+        let constants = self.find_constant_nodes(graph);
+        let folded_ops = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, node)| constants.contains(i) && Self::is_foldable_op(&node.op_type))
+            .count();
+        let changed = folded_ops > 0;
 
-        // Find constant nodes
-        let mut constants = HashSet::new();
-        for (i, node) in graph.nodes.iter().enumerate() {
-            if node.op_type == "Constant"
-                || node.attributes.get("constant").is_some_and(|v| v == "true")
-            {
-                constants.insert(i);
-            }
-        }
-
-        // Propagate constants through simple operations
-        let mut iterations = 0;
-        while iterations < 10 {
-            // Limit iterations to prevent infinite loops
-            let mut new_constants = HashSet::new();
-
-            for (i, node) in graph.nodes.iter().enumerate() {
-                if constants.contains(&i) {
-                    continue;
-                }
-
-                // Check if all inputs are constants
-                let input_nodes: Vec<usize> =
-                    graph.edges.iter().filter(|edge| edge.to == i).map(|edge| edge.from).collect();
-
-                if !input_nodes.iter().all(|&input| constants.contains(&input)) {
-                    continue;
-                }
-
-                match node.op_type.as_str() {
-                    "Add" | "Mul" | "Sub" | "Div" => {
-                        // Mark as foldable
-                        new_constants.insert(i);
-                        folded_ops += 1;
-                        changed = true;
-                    },
-                    _ => {},
-                }
-            }
-
-            if new_constants.is_empty() {
-                break;
-            }
-
-            constants.extend(new_constants);
-            iterations += 1;
-        }
-
-        // Remove redundant constant operations (simplified)
+        // Tag constant-valued nodes rather than remove them: this pass has
+        // no expression evaluator (it tracks *which* nodes are provably
+        // constant, never their actual value), so it cannot synthesize a
+        // literal replacement node and safely delete the originals without
+        // corrupting whatever consumes them. A later pass that can compute
+        // and splice in real values is expected to act on the "folded" tag.
         for &constant_id in &constants {
             if let Some(node) = graph.get_node_mut(constant_id) {
                 node.attributes.insert("folded".to_string(), "true".to_string());
@@ -129,8 +148,7 @@ impl OptimizationPass for ConstantFoldingPass {
 
         let mut stats = HashMap::new();
         stats.insert("folded_operations".to_string(), folded_ops as f64);
-        stats.insert("removed_nodes".to_string(), removed_nodes as f64);
-        stats.insert("iterations".to_string(), iterations as f64);
+        stats.insert("constant_nodes_total".to_string(), constants.len() as f64);
 
         Ok(PassResult {
             changed,
@@ -139,24 +157,30 @@ impl OptimizationPass for ConstantFoldingPass {
         })
     }
 
+    /// Real estimate: runs the same fixed-point constant-propagation `apply`
+    /// uses, read-only, and weights each newly-foldable node by its declared
+    /// `compute_cost` -- the fraction of the graph's total compute cost that
+    /// folding could eliminate. Empty graphs, and graphs with zero total
+    /// compute cost, report 0.0 (not NaN).
     fn estimate_benefit(
         &self,
         graph: &ComputationGraph,
     ) -> Result<f64, crate::errors::TrustformersError> {
-        let mut potential_folds = 0;
-
-        for node in &graph.nodes {
-            match node.op_type.as_str() {
-                "Add" | "Mul" | "Sub" | "Div" => {
-                    // Simple heuristic: benefit is proportional to compute cost
-                    potential_folds += 1;
-                },
-                _ => {},
-            }
+        let total_compute_cost: f64 = graph.nodes.iter().map(|node| node.compute_cost).sum();
+        if total_compute_cost <= 0.0 {
+            return Ok(0.0);
         }
 
-        // Estimate as percentage of compute cost that could be eliminated
-        Ok((potential_folds as f64 / graph.nodes.len().max(1) as f64) * 0.1)
+        let constants = self.find_constant_nodes(graph);
+        let foldable_compute_cost: f64 = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, node)| constants.contains(i) && Self::is_foldable_op(&node.op_type))
+            .map(|(_, node)| node.compute_cost)
+            .sum();
+
+        Ok(foldable_compute_cost / total_compute_cost)
     }
 }
 
@@ -785,6 +809,99 @@ mod tests {
 
         let benefit = pass.estimate_benefit(&graph);
         assert!(benefit.is_ok());
+    }
+
+    /// Regression test: `estimate_benefit` counted every `Add`/`Mul`/`Sub`/
+    /// `Div` node regardless of whether its inputs were actually constant,
+    /// then multiplied by an unexplained `0.1`, disagreeing with `apply`'s
+    /// real constant-propagation logic right above it. It now shares that
+    /// propagation (`find_constant_nodes`) and weights by real
+    /// `compute_cost`, matching its own "percentage of compute cost that
+    /// could be eliminated" doc comment instead of contradicting it. Also
+    /// covers the `removed_nodes` stat, which was hardcoded to `0` (`apply`
+    /// never removes a node) and has been dropped rather than kept
+    /// permanently zero.
+    #[test]
+    fn test_constant_folding_estimate_benefit_is_input_dependent_and_cost_weighted() {
+        let pass = ConstantFoldingPass::new();
+
+        // MatMul -> Add, no constants anywhere: nothing is foldable.
+        let no_constants = create_test_graph();
+        let no_fold_benefit = pass.estimate_benefit(&no_constants).expect("estimate failed");
+        assert_eq!(no_fold_benefit, 0.0);
+
+        // Constant(cost 1) -> Add(cost 9) -> MatMul(cost 90): the Add is
+        // genuinely foldable (its only input traces to a literal constant);
+        // the MatMul is not (wrong op type for this pass), even though its
+        // own input is now known constant.
+        let mut with_constant = ComputationGraph::new();
+        with_constant.add_node(GraphNode {
+            id: 0,
+            op_type: "Constant".to_string(),
+            attributes: HashMap::new(),
+            input_shapes: vec![],
+            output_shapes: vec![vec![1]],
+            compute_cost: 1.0,
+            memory_cost: 1.0,
+        });
+        with_constant.add_node(GraphNode {
+            id: 1,
+            op_type: "Add".to_string(),
+            attributes: HashMap::new(),
+            input_shapes: vec![vec![1]],
+            output_shapes: vec![vec![1]],
+            compute_cost: 9.0,
+            memory_cost: 1.0,
+        });
+        with_constant.add_node(GraphNode {
+            id: 2,
+            op_type: "MatMul".to_string(),
+            attributes: HashMap::new(),
+            input_shapes: vec![vec![1]],
+            output_shapes: vec![vec![1]],
+            compute_cost: 90.0,
+            memory_cost: 1.0,
+        });
+        with_constant.add_edge(GraphEdge {
+            from: 0,
+            to: 1,
+            output_idx: 0,
+            input_idx: 0,
+            shape: vec![1],
+            dtype: "f32".to_string(),
+        });
+        with_constant.add_edge(GraphEdge {
+            from: 1,
+            to: 2,
+            output_idx: 0,
+            input_idx: 0,
+            shape: vec![1],
+            dtype: "f32".to_string(),
+        });
+
+        let fold_benefit = pass.estimate_benefit(&with_constant).expect("estimate failed");
+        assert_ne!(
+            no_fold_benefit, fold_benefit,
+            "estimate must vary with graph content"
+        );
+        assert!(
+            (fold_benefit - 0.09).abs() < 1e-9,
+            "expected the foldable Add's 9.0 compute cost / 100.0 total compute cost, got {fold_benefit}"
+        );
+
+        // `apply` must report exactly the node(s) the estimate credited, and
+        // must not publish a fabricated always-zero `removed_nodes`.
+        let mut pass = ConstantFoldingPass::new();
+        let mut graph_to_mutate = with_constant.clone();
+        let result = pass.apply(&mut graph_to_mutate).expect("apply failed");
+        assert_eq!(result.stats["folded_operations"], 1.0);
+        assert_eq!(result.stats["constant_nodes_total"], 2.0);
+        assert!(
+            !result.stats.contains_key("removed_nodes"),
+            "removed_nodes always reported 0 regardless of what happened, because apply never \
+             removes a node; publishing it was a fabricated claim, so it must be gone rather \
+             than kept permanently zero"
+        );
     }
 
     #[test]

@@ -3,8 +3,9 @@ use super::config::{
     HierarchicalAttentionConfig, SparseAttentionConfig,
 };
 use super::utils::{
-    create_sparse_mask, pool_tensor, reshape_for_multihead, reshape_from_multihead,
-    scaled_dot_product_attention, CrossAttentionOutput, PoolingMethod, SparsePattern,
+    create_sparse_mask, pool_mask_key_axis, pool_tensor, reshape_for_multihead,
+    reshape_from_multihead, scaled_dot_product_attention, CrossAttentionOutput, PoolingMethod,
+    SparsePattern,
 };
 use trustformers_core::{
     errors::{invalid_config, tensor_op_error, Result},
@@ -133,16 +134,44 @@ impl MultiHeadCrossAttention {
         let k = reshape_for_multihead(k, self.config.num_heads, self.head_dim)?;
         let v = reshape_for_multihead(v, self.config.num_heads, self.head_dim)?;
 
-        // Expand mask for multiple heads if provided
-        let mask = if let Some(mask) = mask {
-            Some(mask.unsqueeze(1)?.broadcast_to(&[
-                batch_size,
-                self.config.num_heads,
-                query_len,
-                key_len,
-            ])?)
-        } else {
-            None
+        // Expand mask for multiple heads if provided. Accepted ranks:
+        //  - 2-D `[query_len, key_len]`: this crate's own
+        //    `create_attention_mask`/`create_sparse_mask` shape, with no
+        //    batch or head axis -- insert both before broadcasting.
+        //  - 3-D `[batch_size, query_len, key_len]`: per-batch, shared
+        //    across heads -- insert the head axis before broadcasting.
+        //  - 4-D `[batch_size, heads_or_1, query_len, key_len]`: already
+        //    fully shaped (or head-broadcastable); broadcast as-is.
+        // An earlier version always inserted the new axis at position 1,
+        // which is only correct for the 3-D case: on a 2-D mask it landed
+        // between query_len and key_len instead of before query_len,
+        // comparing query_len against num_heads during `broadcast_to` and
+        // erroring (or silently mis-broadcasting) whenever they differ.
+        let mask = match mask {
+            Some(mask) => {
+                let expanded = match mask.ndim() {
+                    2 => mask.unsqueeze(0)?.unsqueeze(0)?,
+                    3 => mask.unsqueeze(1)?,
+                    4 => mask,
+                    other => {
+                        return Err(tensor_op_error(
+                            "cross-attention mask expansion",
+                            format!(
+                                "mask must be 2-D [query_len, key_len], 3-D \
+                                 [batch, query_len, key_len], or 4-D \
+                                 [batch, heads, query_len, key_len]; got a {other}-D mask"
+                            ),
+                        ));
+                    },
+                };
+                Some(expanded.broadcast_to(&[
+                    batch_size,
+                    self.config.num_heads,
+                    query_len,
+                    key_len,
+                ])?)
+            },
+            None => None,
         };
 
         // Compute attention
@@ -200,7 +229,10 @@ impl SparseCrossAttention {
 
         // Create sparse mask
         let sparse_pattern = match self.sparse_config.pattern {
-            crate::cross_attention::config::SparsePattern::Random => SparsePattern::Random,
+            crate::cross_attention::config::SparsePattern::Random => SparsePattern::Random {
+                connections: self.sparse_config.random_connections,
+                seed: self.sparse_config.seed,
+            },
             crate::cross_attention::config::SparsePattern::Block => {
                 SparsePattern::Block(self.sparse_config.block_size.unwrap_or(64))
             },
@@ -285,6 +317,7 @@ impl HierarchicalCrossAttention {
         let mut level_outputs = Vec::new();
         let mut current_key = key;
         let mut current_value = value;
+        let mut current_mask = mask;
 
         for level in 0..self.hierarchical_config.num_levels {
             // Apply attention at current level
@@ -292,7 +325,7 @@ impl HierarchicalCrossAttention {
                 query.clone(),
                 current_key.clone(),
                 current_value.clone(),
-                mask.clone(),
+                current_mask.clone(),
             )?;
 
             level_outputs.push(attn_output.output);
@@ -303,6 +336,12 @@ impl HierarchicalCrossAttention {
 
                 current_key = pool_tensor(current_key, pooling_factor, PoolingMethod::Average)?;
                 current_value = pool_tensor(current_value, pooling_factor, PoolingMethod::Average)?;
+                // The mask's key axis must track K/V's pooled length: see
+                // `pool_mask_key_axis`'s doc for why this uses the same
+                // pooling as K/V above.
+                current_mask = current_mask
+                    .map(|mask| pool_mask_key_axis(mask, pooling_factor))
+                    .transpose()?;
 
                 // Apply learnable pooling if configured
                 if self.hierarchical_config.learnable_pooling && level < self.pooling_layers.len() {

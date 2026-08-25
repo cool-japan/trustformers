@@ -1,7 +1,7 @@
 //! WebSocket / SSE streaming dashboard.
 //!
 //! Provides a lightweight real-time event-streaming server that pushes
-//! [`DashboardEvent`]s to connected HTTP clients via *Server-Sent Events*
+//! `DashboardEvent`s to connected HTTP clients via *Server-Sent Events*
 //! (SSE) over plain TCP, without requiring any third-party web framework.
 //!
 //! # Why SSE instead of WebSockets?
@@ -13,8 +13,8 @@
 //!
 //! # Modules
 //!
-//! - [`websocket`] — The streaming event server and supporting types.
-//! - [`metrics`] — Typed training-metrics message enum, metric history, and
+//! - `websocket` — The streaming event server and supporting types.
+//! - `metrics` — Typed training-metrics message enum, metric history, and
 //!   the extended in-process dashboard server.
 
 pub mod metrics;

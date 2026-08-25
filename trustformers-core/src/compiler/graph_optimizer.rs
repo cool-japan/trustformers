@@ -360,42 +360,23 @@ impl OptimizationPass for ConstantFoldingPass {
     }
 
     fn apply(&mut self, graph: &mut ComputationGraph) -> Result<PassResult, TrustformersError> {
-        let mut changed = false;
-        let mut folded_count = 0;
         let mut stats = HashMap::new();
 
-        // Find nodes that only depend on constants
-        let mut constant_nodes = HashSet::new();
-        let mut nodes_to_remove = Vec::new();
+        let foldable = self.find_foldable_nodes(graph);
+        let folded_count = foldable.len();
+        let changed = folded_count > 0;
 
-        for (i, node) in graph.nodes.iter().enumerate() {
-            if self.is_constant_operation(&node.op_type) {
-                constant_nodes.insert(i);
-
-                // Check if all inputs are constants
-                let incoming_edges: Vec<_> =
-                    graph.edges.iter().filter(|edge| edge.to == i).collect();
-
-                let all_inputs_constant =
-                    incoming_edges.iter().all(|edge| constant_nodes.contains(&edge.from));
-
-                if all_inputs_constant && self.can_fold_operation(&node.op_type) {
-                    // Mark for folding
-                    nodes_to_remove.push(i);
-                    folded_count += 1;
-                    changed = true;
-                }
-            }
-        }
-
-        // Remove folded nodes (simplified - in practice we'd replace with constant values)
-        for &node_id in nodes_to_remove.iter().rev() {
-            if node_id < graph.nodes.len() {
-                graph.nodes.remove(node_id);
-                // Remove associated edges
-                graph.edges.retain(|edge| edge.from != node_id && edge.to != node_id);
-                // Update edge indices
-                update_edge_indices_after_removal(&mut graph.edges, node_id);
+        // Tag newly-foldable nodes rather than delete them. This pass has no
+        // expression evaluator (it only tracks *which* nodes are provably
+        // constant, never their actual value), so it cannot synthesize a
+        // literal replacement node; deleting a folded node here without one
+        // would silently drop the input edge of whatever consumes it,
+        // corrupting the graph. Tagging (matching `passes::ConstantFoldingPass`'s
+        // convention) leaves physical removal to a pass that can safely do
+        // it, e.g. dead-code elimination once nothing reads the tag.
+        for &node_id in &foldable {
+            if let Some(node) = graph.get_node_mut(node_id) {
+                node.attributes.insert("constant_folded".to_string(), "true".to_string());
             }
         }
 
@@ -413,15 +394,12 @@ impl OptimizationPass for ConstantFoldingPass {
         })
     }
 
+    /// Real estimate: runs the same fixed-point constant-propagation `apply`
+    /// uses to decide what to tag, read-only, and reports the foldable count
+    /// as a fraction of the graph. Empty graphs report 0.0 (not NaN).
     fn estimate_benefit(&self, graph: &ComputationGraph) -> Result<f64, TrustformersError> {
-        let constant_ops = graph
-            .nodes
-            .iter()
-            .filter(|node| self.is_constant_operation(&node.op_type))
-            .count();
-
-        // Benefit is proportional to number of constant operations
-        Ok(constant_ops as f64 / graph.nodes.len() as f64)
+        let foldable = self.find_foldable_nodes(graph);
+        Ok(foldable.len() as f64 / graph.nodes.len().max(1) as f64)
     }
 }
 
@@ -435,6 +413,57 @@ impl ConstantFoldingPass {
             op_type,
             "Add" | "Mul" | "Sub" | "Div" | "Reshape" | "Transpose"
         )
+    }
+
+    /// Nodes whose value is knowable at compile time: every `can_fold_operation`
+    /// node (arithmetic/layout op) whose inputs all trace back, transitively,
+    /// to `is_constant_operation` producers. Found by propagating to a fixed
+    /// point, bounded by the node count so a pathological graph cannot loop
+    /// unboundedly. Excludes the seed constant-producer nodes themselves —
+    /// they have nothing to fold, they *are* the constants. Shared by `apply`
+    /// (which tags the result) and `estimate_benefit` (which only counts it),
+    /// so the two can never disagree.
+    fn find_foldable_nodes(&self, graph: &ComputationGraph) -> HashSet<usize> {
+        let mut constant_nodes: HashSet<usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| self.is_constant_operation(&node.op_type))
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut foldable = HashSet::new();
+
+        for _ in 0..graph.nodes.len().min(64) {
+            let mut newly_constant = Vec::new();
+            for (i, node) in graph.nodes.iter().enumerate() {
+                if constant_nodes.contains(&i) || !self.can_fold_operation(&node.op_type) {
+                    continue;
+                }
+
+                let mut incoming = graph.edges.iter().filter(|edge| edge.to == i).peekable();
+                // A node with no inputs at all has nothing constant feeding
+                // it; `all()` on an empty iterator is vacuously true, so this
+                // must be checked explicitly rather than folded in below.
+                if incoming.peek().is_none() {
+                    continue;
+                }
+                if incoming.all(|edge| constant_nodes.contains(&edge.from)) {
+                    newly_constant.push(i);
+                }
+            }
+
+            if newly_constant.is_empty() {
+                break;
+            }
+
+            for i in newly_constant {
+                constant_nodes.insert(i);
+                foldable.insert(i);
+            }
+        }
+
+        foldable
     }
 }
 
@@ -465,10 +494,58 @@ impl OptimizationPass for DeadCodeEliminationPass {
     }
 
     fn apply(&mut self, graph: &mut ComputationGraph) -> Result<PassResult, TrustformersError> {
-        let mut changed = false;
-        let mut removed_count = 0;
         let mut stats = HashMap::new();
 
+        let nodes_to_remove = self.find_dead_nodes(graph);
+        let removed_count = nodes_to_remove.len();
+        let changed = removed_count > 0;
+
+        // Remove nodes and update graph
+        for &node_id in nodes_to_remove.iter().rev() {
+            if node_id < graph.nodes.len() {
+                graph.nodes.remove(node_id);
+                graph.edges.retain(|edge| edge.from != node_id && edge.to != node_id);
+
+                // Update edge indices
+                update_edge_indices_after_removal(&mut graph.edges, node_id);
+            }
+        }
+
+        self.nodes_removed += removed_count;
+        stats.insert("nodes_removed".to_string(), removed_count as f64);
+        stats.insert("total_nodes_removed".to_string(), self.nodes_removed as f64);
+
+        Ok(PassResult {
+            changed,
+            stats,
+            metadata: HashMap::new(),
+        })
+    }
+
+    /// Real benefit estimate: runs the exact same reverse-reachability walk
+    /// `apply` uses to decide what to delete, but read-only, and reports the
+    /// dead-node count as a fraction of the graph. Because `find_dead_nodes`
+    /// is the single source of truth for both methods, this can never predict
+    /// a different outcome than `apply` actually produces. Empty graphs
+    /// report 0.0 (not NaN).
+    fn estimate_benefit(&self, graph: &ComputationGraph) -> Result<f64, TrustformersError> {
+        let dead_count = self.find_dead_nodes(graph).len();
+        Ok(dead_count as f64 / graph.nodes.len().max(1) as f64)
+    }
+}
+
+impl DeadCodeEliminationPass {
+    fn is_output_node(&self, node: &GraphNode) -> bool {
+        node.attributes.contains_key("output")
+            || node.op_type == "Output"
+            || node.op_type == "Return"
+    }
+
+    /// Indices of nodes unreachable by reverse DFS from the graph's outputs
+    /// (nodes with no outgoing edge, or explicitly marked as an output /
+    /// return). Shared by `apply` (which deletes them) and `estimate_benefit`
+    /// (which only counts them) so the two can never disagree.
+    fn find_dead_nodes(&self, graph: &ComputationGraph) -> Vec<usize> {
         // Find output nodes (nodes with no outgoing edges)
         let mut has_outgoing = vec![false; graph.nodes.len()];
         for edge in &graph.edges {
@@ -497,50 +574,11 @@ impl OptimizationPass for DeadCodeEliminationPass {
             }
         }
 
-        // Remove unreachable nodes
-        let mut nodes_to_remove = Vec::new();
-        for (i, &is_reachable) in reachable.iter().enumerate() {
-            if !is_reachable {
-                nodes_to_remove.push(i);
-                removed_count += 1;
-                changed = true;
-            }
-        }
-
-        // Remove nodes and update graph
-        for &node_id in nodes_to_remove.iter().rev() {
-            if node_id < graph.nodes.len() {
-                graph.nodes.remove(node_id);
-                graph.edges.retain(|edge| edge.from != node_id && edge.to != node_id);
-
-                // Update edge indices
-                update_edge_indices_after_removal(&mut graph.edges, node_id);
-            }
-        }
-
-        self.nodes_removed += removed_count;
-        stats.insert("nodes_removed".to_string(), removed_count as f64);
-        stats.insert("total_nodes_removed".to_string(), self.nodes_removed as f64);
-
-        Ok(PassResult {
-            changed,
-            stats,
-            metadata: HashMap::new(),
-        })
-    }
-
-    fn estimate_benefit(&self, graph: &ComputationGraph) -> Result<f64, TrustformersError> {
-        // Simple heuristic: assume some percentage of nodes might be dead
-        let estimated_dead_nodes = graph.nodes.len() as f64 * 0.1; // 10% assumption
-        Ok(estimated_dead_nodes / graph.nodes.len() as f64)
-    }
-}
-
-impl DeadCodeEliminationPass {
-    fn is_output_node(&self, node: &GraphNode) -> bool {
-        node.attributes.contains_key("output")
-            || node.op_type == "Output"
-            || node.op_type == "Return"
+        reachable
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &is_reachable)| (!is_reachable).then_some(i))
+            .collect()
     }
 }
 
@@ -598,8 +636,14 @@ impl OptimizationPass for CommonSubexpressionEliminationPass {
                     changed = true;
                 }
 
-                // Remove duplicate nodes (mark for removal)
-                // In practice, we'd remove them and update indices
+                // The duplicate nodes themselves are left in `graph.nodes`,
+                // untouched and untagged: redirecting their outgoing edges
+                // above is what makes them dead (nothing downstream still
+                // reads their output). Splicing them out here would need the
+                // same index-shifting care `DeadCodeEliminationPass::apply`
+                // takes; a following DCE pass is expected to do that once it
+                // can tell a same-signature duplicate apart from a real
+                // output (see that pass's reachability rule).
             }
         }
 
@@ -626,7 +670,8 @@ impl OptimizationPass for CommonSubexpressionEliminationPass {
         let potential_duplicates =
             op_counts.values().map(|&count| count.saturating_sub(1)).sum::<usize>() as f64;
 
-        Ok(potential_duplicates / graph.nodes.len() as f64)
+        // `.max(1)` keeps an empty graph at a defined 0.0 instead of NaN.
+        Ok(potential_duplicates / graph.nodes.len().max(1) as f64)
     }
 }
 
@@ -694,8 +739,17 @@ impl OptimizationPass for MemoryLayoutOptimizationPass {
         })
     }
 
-    fn estimate_benefit(&self, _graph: &ComputationGraph) -> Result<f64, TrustformersError> {
-        Ok(0.05) // Conservative estimate
+    /// Real estimate: reuses the same `analyze_memory_patterns` scan `apply`
+    /// already runs (and publishes as `memory_efficiency_score` /
+    /// `cache_friendly_ops`), expressed as the fraction of the graph's nodes
+    /// that are memory-intensive but not yet laid out cache-friendly. Varies
+    /// with the graph; 0.0 when nothing memory-intensive is present.
+    fn estimate_benefit(&self, graph: &ComputationGraph) -> Result<f64, TrustformersError> {
+        let memory_analysis = self.analyze_memory_patterns(graph);
+        let improvable_ops = memory_analysis
+            .total_memory_ops
+            .saturating_sub(memory_analysis.cache_friendly_ops);
+        Ok(improvable_ops as f64 / graph.nodes.len().max(1) as f64)
     }
 }
 
@@ -741,11 +795,17 @@ impl MemoryLayoutOptimizationPass {
 struct MemoryAnalysis {
     efficiency_score: f64,
     cache_friendly_ops: usize,
-    #[allow(dead_code)]
     total_memory_ops: usize,
 }
 
-/// Operation reordering pass
+/// Operation reordering pass.
+///
+/// NOT YET IMPLEMENTED: `apply` performs no reordering and unconditionally
+/// reports `changed: false` for every graph. `estimate_benefit` reports the
+/// true benefit of running this pass today, which is exactly 0.0 — not a
+/// placeholder guess. That keeps the pipeline's `estimated_benefit < 0.01`
+/// gate (see `GraphOptimizer::optimize`) skipping it honestly instead of
+/// running a no-op and publishing a fabricated benefit number for it.
 pub struct OperationReorderingPass;
 
 impl Default for OperationReorderingPass {
@@ -766,10 +826,11 @@ impl OptimizationPass for OperationReorderingPass {
     }
 
     fn description(&self) -> &str {
-        "Reorder operations for better parallelization"
+        "Not yet implemented: intended to reorder operations for better parallelization"
     }
 
     fn apply(&mut self, _graph: &mut ComputationGraph) -> Result<PassResult, TrustformersError> {
+        // Not yet implemented: no reordering is performed.
         Ok(PassResult {
             changed: false,
             stats: HashMap::new(),
@@ -778,11 +839,20 @@ impl OptimizationPass for OperationReorderingPass {
     }
 
     fn estimate_benefit(&self, _graph: &ComputationGraph) -> Result<f64, TrustformersError> {
-        Ok(0.03)
+        // `apply` above is a true no-op for every input, so the honest
+        // benefit of running it is 0.0, not an invented nonzero guess.
+        Ok(0.0)
     }
 }
 
-/// Loop optimization pass
+/// Loop optimization pass.
+///
+/// NOT YET IMPLEMENTED: this compiler's `ComputationGraph` is a DAG of tensor
+/// operations with no loop constructs (see `analysis::GraphAnalyzer::analyze_loops`,
+/// which refuses for the same reason), so `apply` has nothing to optimize and
+/// unconditionally reports `changed: false`. `estimate_benefit` reports the
+/// true current benefit, 0.0, so the pipeline's benefit gate skips it rather
+/// than running a no-op under a fabricated nonzero score.
 pub struct LoopOptimizationPass;
 
 impl Default for LoopOptimizationPass {
@@ -803,10 +873,11 @@ impl OptimizationPass for LoopOptimizationPass {
     }
 
     fn description(&self) -> &str {
-        "Optimize loops and reduce redundant computations"
+        "Not yet implemented: the graph IR has no loop constructs to optimize"
     }
 
     fn apply(&mut self, _graph: &mut ComputationGraph) -> Result<PassResult, TrustformersError> {
+        // Not yet implemented: no loop constructs exist in this IR to act on.
         Ok(PassResult {
             changed: false,
             stats: HashMap::new(),
@@ -815,11 +886,19 @@ impl OptimizationPass for LoopOptimizationPass {
     }
 
     fn estimate_benefit(&self, _graph: &ComputationGraph) -> Result<f64, TrustformersError> {
-        Ok(0.02)
+        // `apply` above is a true no-op for every input, so the honest
+        // benefit of running it is 0.0, not an invented nonzero guess.
+        Ok(0.0)
     }
 }
 
-/// Advanced optimization pass
+/// Advanced optimization pass.
+///
+/// NOT YET IMPLEMENTED: placeholder for future techniques; `apply` performs
+/// no transformation and unconditionally reports `changed: false`.
+/// `estimate_benefit` reports the true current benefit, 0.0, so the
+/// pipeline's benefit gate skips it rather than running a no-op under a
+/// fabricated nonzero score.
 pub struct AdvancedOptimizationPass;
 
 impl Default for AdvancedOptimizationPass {
@@ -840,10 +919,11 @@ impl OptimizationPass for AdvancedOptimizationPass {
     }
 
     fn description(&self) -> &str {
-        "Advanced optimization techniques"
+        "Not yet implemented: reserved for future advanced optimization techniques"
     }
 
     fn apply(&mut self, _graph: &mut ComputationGraph) -> Result<PassResult, TrustformersError> {
+        // Not yet implemented: no transformation is performed.
         Ok(PassResult {
             changed: false,
             stats: HashMap::new(),
@@ -852,14 +932,39 @@ impl OptimizationPass for AdvancedOptimizationPass {
     }
 
     fn estimate_benefit(&self, _graph: &ComputationGraph) -> Result<f64, TrustformersError> {
-        Ok(0.01)
+        // `apply` above is a true no-op for every input, so the honest
+        // benefit of running it is 0.0, not an invented nonzero guess.
+        Ok(0.0)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::CompilerConfig;
+    use crate::compiler::{CompilerConfig, GraphEdge};
+
+    fn node(id: usize, op_type: &str) -> GraphNode {
+        GraphNode {
+            id,
+            op_type: op_type.to_string(),
+            attributes: HashMap::new(),
+            input_shapes: Vec::new(),
+            output_shapes: vec![vec![4, 4]],
+            compute_cost: 10.0,
+            memory_cost: 10.0,
+        }
+    }
+
+    fn edge(from: usize, to: usize) -> GraphEdge {
+        GraphEdge {
+            from,
+            to,
+            output_idx: 0,
+            input_idx: 0,
+            shape: vec![4, 4],
+            dtype: "f32".to_string(),
+        }
+    }
 
     #[test]
     fn test_graph_optimizer_creation() {
@@ -896,5 +1001,195 @@ mod tests {
         assert_eq!(stats.edge_count, 0);
         assert_eq!(stats.total_compute_cost, 0.0);
         assert_eq!(stats.total_memory_cost, 0.0);
+    }
+
+    // -- De-fabrication regression tests -----------------------------------
+    //
+    // Each of these previously returned a constant regardless of graph
+    // content (see the module's git history / Wave 6d report). They now
+    // compute the estimate from the graph, so these tests prove: (a) two
+    // different graphs produce different estimates, and (b) an empty graph
+    // reports a defined 0.0 rather than NaN.
+
+    #[test]
+    fn test_dead_code_elimination_estimate_benefit_empty_graph_is_zero_not_nan() {
+        let pass = DeadCodeEliminationPass::new();
+        let graph = ComputationGraph::new();
+        let benefit = pass.estimate_benefit(&graph).expect("estimate must succeed");
+        assert_eq!(
+            benefit, 0.0,
+            "empty graph must report a defined 0.0, not NaN"
+        );
+    }
+
+    #[test]
+    fn test_dead_code_elimination_estimate_benefit_matches_apply_and_is_input_dependent() {
+        let pass = DeadCodeEliminationPass::new();
+
+        // A single node with no edges at all is (by this pass's own reverse-
+        // reachability rule) auto-classified as a graph output, so nothing
+        // is dead.
+        let mut all_live = ComputationGraph::new();
+        all_live.add_node(node(0, "Add"));
+        let live_benefit = pass.estimate_benefit(&all_live).expect("estimate must succeed");
+        assert_eq!(live_benefit, 0.0);
+
+        // Nodes 0 and 1 reference only each other (0 -> 1 -> 0): neither is
+        // a sink (each has an outgoing edge) and neither is reachable from
+        // node 2, the graph's one true output (no edges at all), so both are
+        // genuinely dead -- a real, if unusual, DCE scenario (a causally
+        // isolated component), not a contrived input.
+        let mut with_dead_component = ComputationGraph::new();
+        with_dead_component.add_node(node(0, "Add"));
+        with_dead_component.add_node(node(1, "Mul"));
+        with_dead_component.add_node(node(2, "Sub"));
+        with_dead_component.add_edge(edge(0, 1));
+        with_dead_component.add_edge(edge(1, 0));
+
+        let dead_benefit =
+            pass.estimate_benefit(&with_dead_component).expect("estimate must succeed");
+        assert_ne!(
+            live_benefit, dead_benefit,
+            "estimate must vary with graph content, not stay constant"
+        );
+        assert!(
+            (dead_benefit - 2.0 / 3.0).abs() < 1e-9,
+            "expected 2 of 3 nodes dead, got {dead_benefit}"
+        );
+
+        // The estimate must correspond exactly to what `apply` actually
+        // removes -- the whole point of sharing `find_dead_nodes` between
+        // the two methods instead of guessing independently.
+        let mut pass = DeadCodeEliminationPass::new();
+        let mut graph_to_mutate = with_dead_component.clone();
+        let result = pass.apply(&mut graph_to_mutate).expect("apply must succeed");
+        assert_eq!(result.stats["nodes_removed"], 2.0);
+        assert_eq!(graph_to_mutate.nodes.len(), 1);
+    }
+
+    #[test]
+    fn test_constant_folding_estimate_benefit_is_input_dependent_and_honest_on_no_op() {
+        let pass = ConstantFoldingPass::new();
+
+        // No constants anywhere: nothing is foldable.
+        let mut no_constants = ComputationGraph::new();
+        no_constants.add_node(node(0, "MatMul"));
+        no_constants.add_node(node(1, "Add"));
+        no_constants.add_edge(edge(0, 1));
+        let no_fold_benefit = pass.estimate_benefit(&no_constants).expect("estimate must succeed");
+        assert_eq!(no_fold_benefit, 0.0);
+
+        // Constant -> Add: the Add's only input traces back to a literal
+        // constant, so it is genuinely foldable.
+        let mut with_constant = ComputationGraph::new();
+        with_constant.add_node(node(0, "Constant"));
+        with_constant.add_node(node(1, "Add"));
+        with_constant.add_edge(edge(0, 1));
+        let fold_benefit = pass.estimate_benefit(&with_constant).expect("estimate must succeed");
+
+        assert_ne!(
+            no_fold_benefit, fold_benefit,
+            "estimate must vary with graph content, not stay constant"
+        );
+        assert!(
+            fold_benefit > 0.0,
+            "graph with a real foldable node must report nonzero benefit"
+        );
+
+        // `apply` on the same graph must actually tag exactly the node the
+        // estimate credited, proving the two do not disagree.
+        let mut pass = ConstantFoldingPass::new();
+        let mut graph_to_mutate = with_constant.clone();
+        let result = pass.apply(&mut graph_to_mutate).expect("apply must succeed");
+        assert_eq!(result.stats["constants_folded"], 1.0);
+        assert_eq!(
+            graph_to_mutate.nodes[1].attributes.get("constant_folded").map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn test_memory_layout_estimate_benefit_is_input_dependent() {
+        let pass = MemoryLayoutOptimizationPass::new();
+
+        // Only cache-friendly, non-memory-intensive ops: nothing to improve.
+        let mut cache_friendly = ComputationGraph::new();
+        cache_friendly.add_node(node(0, "Add"));
+        cache_friendly.add_node(node(1, "ReLU"));
+        let friendly_benefit =
+            pass.estimate_benefit(&cache_friendly).expect("estimate must succeed");
+        assert_eq!(friendly_benefit, 0.0);
+
+        // A MatMul is memory-intensive and not cache-friendly: real headroom.
+        let mut with_matmul = ComputationGraph::new();
+        with_matmul.add_node(node(0, "MatMul"));
+        let matmul_benefit = pass.estimate_benefit(&with_matmul).expect("estimate must succeed");
+
+        assert_ne!(
+            friendly_benefit, matmul_benefit,
+            "estimate must vary with graph content, not stay constant"
+        );
+        assert!(matmul_benefit > 0.0);
+    }
+
+    #[test]
+    fn test_maximum_level_skips_unimplemented_passes_but_still_runs_real_ones() {
+        let config = CompilerConfig {
+            optimization_level: OptimizationLevel::Maximum,
+            ..CompilerConfig::default()
+        };
+        let mut optimizer = GraphOptimizer::new(&config).expect("optimizer construction failed");
+
+        // Constant -> MatMul: gives ConstantFolding and MemoryLayoutOptimization
+        // real, nonzero benefit so the test is not vacuous, while every
+        // acyclic graph gives DeadCodeElimination and CommonSubexpression
+        // nothing to do -- none of that affects the assertion below, which
+        // is specifically about the three not-yet-implemented passes.
+        let mut graph = ComputationGraph::new();
+        graph.add_node(node(0, "Constant"));
+        graph.add_node(node(1, "MatMul"));
+        graph.add_edge(edge(0, 1));
+
+        let result = optimizer.optimize(graph).expect("optimize must succeed");
+        let names: Vec<&str> = result.pass_results.iter().map(|r| r.pass_name.as_str()).collect();
+
+        assert!(
+            !names.is_empty(),
+            "expected at least one real pass to clear the benefit gate, got none: {names:?}"
+        );
+
+        for unimplemented_pass in [
+            "OperationReordering",
+            "LoopOptimization",
+            "AdvancedOptimization",
+        ] {
+            assert!(
+                !names.contains(&unimplemented_pass),
+                "{unimplemented_pass} is not yet implemented (apply is a true no-op); it must \
+                 report 0.0 benefit and be skipped by the pipeline's benefit gate rather than \
+                 appear in pass_results: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unimplemented_passes_report_honest_zero_benefit() {
+        let mut graph = ComputationGraph::new();
+        graph.add_node(node(0, "MatMul"));
+        graph.add_node(node(1, "Add"));
+        graph.add_edge(edge(0, 1));
+
+        assert_eq!(
+            OperationReorderingPass::new().estimate_benefit(&graph).expect("ok"),
+            0.0
+        );
+        assert_eq!(
+            LoopOptimizationPass::new().estimate_benefit(&graph).expect("ok"),
+            0.0
+        );
+        assert_eq!(
+            AdvancedOptimizationPass::new().estimate_benefit(&graph).expect("ok"),
+            0.0
+        );
     }
 }

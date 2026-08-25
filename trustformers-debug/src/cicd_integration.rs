@@ -14,7 +14,7 @@ use crate::{DebugConfig, DebugReport, DebugSession};
 /// Errors from attempting to deliver a CI/CD notification.
 ///
 /// Distinguishes *why* nothing was sent (never silently -- see
-/// [`CICDIntegration::send_notifications`]) from a genuine transport
+/// `CICDIntegration::send_notifications`) from a genuine transport
 /// failure once delivery was actually attempted.
 #[derive(Debug, thiserror::Error)]
 pub enum NotificationError {

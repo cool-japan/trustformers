@@ -66,7 +66,7 @@ pub struct TensorComparison {
     pub cosine_similarity: f64,
     /// Pearson correlation between the two tensors' real element-wise
     /// values. `None` when it cannot be honestly computed -- see
-    /// [`TensorInspector::compute_correlation`] for why that is currently
+    /// `TensorInspector::compute_correlation` for why that is currently
     /// always the case (this crate only retains [`TensorStats`] summaries,
     /// not raw tensor data, once a tensor has been inspected).
     pub correlation: Option<f64>,
@@ -505,7 +505,7 @@ impl TensorInspector {
     /// `gradients`, when supplied, must be the real gradient tensor for
     /// `tensor` (same element count) and is used to compute a real
     /// `stability_metrics.gradient_stability` (see
-    /// [`Self::compute_stability_metrics`]). Without it, `gradient_stability`
+    /// `Self::compute_stability_metrics`). Without it, `gradient_stability`
     /// is honestly `None` rather than a fabricated constant.
     pub fn perform_advanced_analysis<T>(
         &self,

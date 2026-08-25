@@ -94,10 +94,24 @@ pub struct DeviceCapabilityAssessment {
     pub supported_quantization: Vec<MobileQuantizationScheme>,
     /// Thermal headroom (0.0-1.0)
     pub thermal_headroom: f32,
-    /// Battery level (0.0-1.0)
-    pub battery_level: f32,
-    /// Power constraints
-    pub power_constrained: bool,
+    /// Battery level (0.0-1.0). `None` when the platform cannot report a
+    /// real battery reading (`PowerInfo::battery_level` is `None` on every
+    /// target this crate has a live reader for today outside Android/
+    /// Linux -- see `device_info.rs`'s honest `(None, None, None)` battery
+    /// stub). Unlike `thermal_headroom` above, there is no principled
+    /// neutral percentage to substitute: a fabricated 50% would be
+    /// silently treated as a measurement by anything that reads this
+    /// field. **Breaking change**: this field was `f32` (fabricated via
+    /// `unwrap_or(50)`) before this fix.
+    pub battery_level: Option<f32>,
+    /// Whether the device is power-constrained (low, unmeasured battery
+    /// and not charging). `None` for the same reason as `battery_level`:
+    /// this is derived entirely from the battery reading, so "battery is
+    /// unmeasured" and "battery is known and above 30%" are genuinely
+    /// different states that a bare `bool` cannot distinguish. **Breaking
+    /// change**: this field was `bool` (fabricated via `unwrap_or(50)`)
+    /// before this fix.
+    pub power_constrained: Option<bool>,
 }
 
 /// Configuration recommendation
@@ -621,9 +635,24 @@ impl IntelligentConfigOptimizer {
             npu_available: device_info.npu_info.is_some(),
             supported_quantization,
             thermal_headroom: thermal_score,
-            battery_level: device_info.power_info.battery_level.unwrap_or(50) as f32 / 100.0,
-            power_constrained: !device_info.power_info.is_charging
-                && device_info.power_info.battery_level.unwrap_or(50) < 30,
+            // Previously `device_info.power_info.battery_level.unwrap_or(50)` --
+            // a fabricated 50% battery published as fact whenever the real
+            // `Option<u8>` reading was `None` (every non-Android/Linux
+            // target today). Skip the battery-derived signals entirely
+            // when unmeasured rather than inventing a midpoint: unlike
+            // `thermal_score`'s `ThermalState::Unknown => 0.5` above
+            // (a genuine "assume typical" choice, documented as
+            // reporting-only and consumed nowhere that changes a
+            // decision), a 50% battery reading would be silently trusted
+            // by any future caller of this field as a real measurement,
+            // and "battery unmeasured" and "battery is known and healthy"
+            // are not the same state a single number can represent
+            // honestly.
+            battery_level: device_info.power_info.battery_level.map(|level| level as f32 / 100.0),
+            power_constrained: device_info
+                .power_info
+                .battery_level
+                .map(|level| !device_info.power_info.is_charging && level < 30),
         })
     }
 
@@ -1027,5 +1056,73 @@ mod tests {
 
         let tuned_config = optimizer.auto_tune();
         assert!(tuned_config.is_ok());
+    }
+
+    /// Regression guard for the previous `battery_level.unwrap_or(50)`
+    /// fabrication: an unmeasured battery reading (`PowerInfo::battery_level
+    /// == None`, the honest state on every non-Android/Linux target today)
+    /// must skip the battery-derived signals entirely -- `None` on both
+    /// fields -- never synthesize a 50% reading nothing measured.
+    #[test]
+    fn test_assess_device_capabilities_battery_none_skips_fabricated_signals() {
+        let mut device_info = create_test_device_info();
+        device_info.power_info.battery_level = None;
+        device_info.power_info.is_charging = false;
+
+        let assessment = IntelligentConfigOptimizer::assess_device_capabilities(&device_info)
+            .expect("assessment must succeed even with an unmeasured battery");
+
+        assert_eq!(
+            assessment.battery_level, None,
+            "an unmeasured battery must not be reported as a fabricated 50%"
+        );
+        assert_eq!(
+            assessment.power_constrained, None,
+            "power-constrained status is derived entirely from the battery reading, so it \
+             must also be unmeasured (None), not a fabricated true/false"
+        );
+    }
+
+    /// When the battery *is* measured, the derived signals must be the
+    /// real computed values, not a coincidental match with the old 50%
+    /// fallback -- picks a level (20%) on the opposite side of both the
+    /// old hardcoded 50 and the 30% `power_constrained` threshold from
+    /// the fallback, so a lingering `unwrap_or(50)` would fail this
+    /// assertion instead of accidentally passing it.
+    #[test]
+    fn test_assess_device_capabilities_battery_known_computes_real_signals() {
+        let mut device_info = create_test_device_info();
+        device_info.power_info.battery_level = Some(20);
+        device_info.power_info.is_charging = false;
+
+        let assessment = IntelligentConfigOptimizer::assess_device_capabilities(&device_info)
+            .expect("assessment must succeed with a known battery reading");
+
+        assert_eq!(
+            assessment.battery_level,
+            Some(0.2),
+            "a real 20% reading must be reported as 0.2, not the old fabricated 0.5"
+        );
+        assert_eq!(
+            assessment.power_constrained,
+            Some(true),
+            "20% and not charging must be reported as power-constrained"
+        );
+    }
+
+    /// A known, healthy, charging battery must report `power_constrained:
+    /// Some(false)` -- confirms the `Option` wrapping did not also flip
+    /// the underlying threshold/charging logic.
+    #[test]
+    fn test_assess_device_capabilities_known_healthy_battery_is_not_power_constrained() {
+        let mut device_info = create_test_device_info();
+        device_info.power_info.battery_level = Some(90);
+        device_info.power_info.is_charging = true;
+
+        let assessment = IntelligentConfigOptimizer::assess_device_capabilities(&device_info)
+            .expect("assessment must succeed with a known battery reading");
+
+        assert_eq!(assessment.battery_level, Some(0.9));
+        assert_eq!(assessment.power_constrained, Some(false));
     }
 }

@@ -128,14 +128,14 @@ impl LayerAnalyzer {
     }
 
     /// Record a real weight tensor (flattened) for a layer. Required before
-    /// [`Self::analyze_layer_weight_distribution`] can report anything.
+    /// `Self::analyze_layer_weight_distribution` can report anything.
     pub fn record_layer_weights(&mut self, layer_name: &str, weights: Vec<f64>) {
         self.layer_weights.insert(layer_name.to_string(), weights);
     }
 
     /// Record a real captured activation grid (e.g. `[batch][feature]`, or a
     /// spatial `[height][width]` slice) for a layer. Required before
-    /// [`Self::create_activation_heatmap`] can report anything.
+    /// `Self::create_activation_heatmap` can report anything.
     pub fn record_activation_grid(&mut self, layer_name: &str, grid: Vec<Vec<f64>>) {
         self.activation_grids.insert(layer_name.to_string(), grid);
     }
@@ -143,7 +143,7 @@ impl LayerAnalyzer {
     /// Record one real hidden-state sample (a batch of hidden-state vectors
     /// captured at one point in time/training) for a layer. Accumulates into
     /// that layer's history; required before
-    /// [`Self::analyze_layer_hidden_states`] can report anything.
+    /// `Self::analyze_layer_hidden_states` can report anything.
     pub fn record_hidden_state_sample(&mut self, layer_name: &str, hidden_states: Vec<Vec<f64>>) {
         let history = self.hidden_state_history.entry(layer_name.to_string()).or_default();
         let training_step = history.len();
@@ -160,7 +160,7 @@ impl LayerAnalyzer {
     /// `output_tokens` default to positional labels (`pos_0`, `pos_1`, ...)
     /// when not supplied -- a real (if generic) label derived from the
     /// matrix's own shape, never fabricated content. Required before
-    /// [`Self::create_attention_visualization`] can report anything.
+    /// `Self::create_attention_visualization` can report anything.
     pub fn record_attention_weights(
         &mut self,
         layer_name: &str,
@@ -435,7 +435,7 @@ impl LayerAnalyzer {
     /// samples (see [`Self::record_hidden_state_sample`]). A layer is
     /// omitted (never fabricated) when its sample count is too small for a
     /// statistically meaningful analysis -- see
-    /// [`Self::analyze_layer_hidden_states`].
+    /// `Self::analyze_layer_hidden_states`.
     pub fn analyze_hidden_states(&self) -> HashMap<String, HiddenStateAnalysis> {
         let mut analyses = HashMap::new();
 

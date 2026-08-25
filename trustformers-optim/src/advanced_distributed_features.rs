@@ -730,10 +730,22 @@ impl WorkloadPredictor {
     }
 }
 
-/// Simple trend analyzer
+/// Simple trend analyzer: fits a line to the most recent `update()`d values
+/// (by their position in the window, not wall-clock time -- see
+/// `sample_interval`) and extrapolates it forward.
 pub struct TrendAnalyzer {
     values: VecDeque<f32>,
     window_size: usize,
+    /// The cadence [`Self::update`] is assumed to be called at, used to
+    /// convert a [`Self::predict`] horizon into a number of window
+    /// positions: `steps_ahead = horizon / sample_interval`. This is a
+    /// documented assumption, not a measurement -- `update()` takes no
+    /// timestamp, so there is no real per-sample cadence to observe without
+    /// changing that signature. Configure it with
+    /// [`Self::with_sample_interval`] when the real cadence is known (e.g.
+    /// the caller's monitoring-loop period); the default is a generic
+    /// once-per-second assumption.
+    sample_interval: Duration,
 }
 
 impl Default for TrendAnalyzer {
@@ -743,11 +755,26 @@ impl Default for TrendAnalyzer {
 }
 
 impl TrendAnalyzer {
+    /// Samples required before [`Self::predict`] has a trend to report.
+    pub const MIN_SAMPLES: usize = 10;
+
     pub fn new() -> Self {
         Self {
             values: VecDeque::with_capacity(100),
             window_size: 50,
+            sample_interval: Duration::from_secs(1),
         }
+    }
+
+    /// Sets the assumed cadence [`Self::update`] is called at (see the
+    /// field doc on [`Self::sample_interval`]). Panics-free for any
+    /// positive `Duration`; a zero interval is rejected by
+    /// [`Self::predict`] instead (there is no sane "steps per zero
+    /// seconds" conversion).
+    #[must_use]
+    pub fn with_sample_interval(mut self, interval: Duration) -> Self {
+        self.sample_interval = interval;
+        self
     }
 
     pub fn update(&mut self, value: f32) {
@@ -757,9 +784,35 @@ impl TrendAnalyzer {
         }
     }
 
-    pub fn predict(&self, _horizon: Duration) -> Result<f32> {
-        if self.values.len() < 10 {
-            return Ok(0.75); // Default
+    /// Linear-regression trend extrapolation `horizon` into the future.
+    ///
+    /// Fits `value ~ slope * index + intercept` over the retained window
+    /// (`index` is each sample's position in the window, oldest = 0) and
+    /// extrapolates to `index = (window_len - 1) + horizon / sample_interval`
+    /// -- one window position per [`Self::sample_interval`], so a longer
+    /// horizon produces a genuinely different prediction instead of always
+    /// predicting "the next sample" regardless of how far ahead the caller
+    /// asked for.
+    ///
+    /// # Errors
+    ///
+    /// When fewer than [`Self::MIN_SAMPLES`] samples have been recorded, or
+    /// `sample_interval` is zero -- there is no honest trend, or no honest
+    /// horizon conversion, to report in either case.
+    pub fn predict(&self, horizon: Duration) -> Result<f32> {
+        if self.values.len() < Self::MIN_SAMPLES {
+            return Err(TrustformersError::invalid_state(format!(
+                "trend prediction needs at least {} samples, have {}",
+                Self::MIN_SAMPLES,
+                self.values.len()
+            )));
+        }
+        if self.sample_interval.is_zero() {
+            return Err(TrustformersError::invalid_state(
+                "TrendAnalyzer::sample_interval is zero; there is no sane number of \
+                 steps-ahead to convert a horizon into"
+                    .to_string(),
+            ));
         }
 
         // Simple linear trend calculation
@@ -775,9 +828,11 @@ impl TrendAnalyzer {
         let slope = (n * xy_sum - x_sum * y_sum) / (n * x2_sum - x_sum * x_sum);
         let intercept = (y_sum - slope * x_sum) / n;
 
-        // Predict for next point
-        let next_x = values.len() as f32;
-        let prediction = slope * next_x + intercept;
+        // Extrapolate `horizon` past the most recent sample, in units of
+        // `sample_interval`-sized steps.
+        let steps_ahead = horizon.as_secs_f32() / self.sample_interval.as_secs_f32();
+        let target_x = (values.len() - 1) as f32 + steps_ahead;
+        let prediction = slope * target_x + intercept;
 
         Ok(prediction)
     }
@@ -1699,6 +1754,143 @@ impl MLPerformanceModel {
             .sum::<f32>();
 
         Ok(prediction.max(0.0)) // Ensure non-negative prediction
+    }
+}
+
+// Kept as a small, separate inline module (rather than appended to the
+// larger split-out `mod tests` below) so this honesty-regression coverage
+// stays entirely inside the file it tests.
+#[cfg(test)]
+mod trend_analyzer_honesty_tests {
+    use super::*;
+
+    fn linear_trend(analyzer: &mut TrendAnalyzer, start: f32, step: f32, count: usize) {
+        for i in 0..count {
+            analyzer.update(start + step * i as f32);
+        }
+    }
+
+    /// Regression: `predict` used to return `Ok(0.75)` for fewer than 10
+    /// samples -- a plausible-looking utilization figure that was not
+    /// measured from anything. It must now refuse with a structured error.
+    #[test]
+    fn predict_below_min_samples_returns_a_structured_error_not_a_fabricated_constant() {
+        let mut analyzer = TrendAnalyzer::new();
+        for i in 0..(TrendAnalyzer::MIN_SAMPLES - 1) {
+            analyzer.update(i as f32);
+        }
+        let result = analyzer.predict(Duration::from_secs(1));
+        assert!(
+            result.is_err(),
+            "fewer than MIN_SAMPLES samples must refuse, not fabricate a value; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn predict_at_exactly_min_samples_succeeds() {
+        let mut analyzer = TrendAnalyzer::new();
+        linear_trend(&mut analyzer, 0.0, 0.1, TrendAnalyzer::MIN_SAMPLES);
+        assert!(analyzer.predict(Duration::from_secs(1)).is_ok());
+    }
+
+    /// Regression: `predict` used to ignore its `horizon` argument entirely
+    /// (always extrapolating exactly one sample ahead). A longer horizon
+    /// must now produce a genuinely different -- for a positive trend,
+    /// strictly larger -- prediction than a shorter one, fitted from the
+    /// SAME retained samples (no `update()` between the two `predict()`
+    /// calls, so only the horizon differs).
+    #[test]
+    fn predict_extrapolates_further_for_a_longer_horizon() {
+        let mut analyzer = TrendAnalyzer::new();
+        linear_trend(&mut analyzer, 0.0, 0.1, 20);
+
+        let near = analyzer.predict(Duration::from_secs(1)).expect("near prediction");
+        let far = analyzer.predict(Duration::from_secs(100)).expect("far prediction");
+
+        assert!(
+            far > near,
+            "a longer horizon must extrapolate further along a positive trend: \
+             near={near}, far={far}"
+        );
+    }
+
+    /// `with_sample_interval` is the documented conversion from a horizon to
+    /// "steps ahead"; doubling the interval and doubling the horizon must
+    /// land on the same number of steps ahead, and therefore the same
+    /// prediction.
+    #[test]
+    fn with_sample_interval_scales_the_horizon_conversion_consistently() {
+        let mut default_interval = TrendAnalyzer::new();
+        linear_trend(&mut default_interval, 0.0, 0.1, 20);
+        let baseline =
+            default_interval.predict(Duration::from_secs(5)).expect("baseline prediction");
+
+        let mut doubled_interval =
+            TrendAnalyzer::new().with_sample_interval(Duration::from_secs(2));
+        linear_trend(&mut doubled_interval, 0.0, 0.1, 20);
+        let scaled = doubled_interval.predict(Duration::from_secs(10)).expect("scaled prediction");
+
+        assert!(
+            (baseline - scaled).abs() < 1e-4,
+            "5s at a 1s interval and 10s at a 2s interval are both \"5 steps ahead\": \
+             baseline={baseline}, scaled={scaled}"
+        );
+    }
+
+    /// A zero `sample_interval` has no honest "steps per zero seconds"
+    /// conversion; it must refuse rather than divide by zero into an
+    /// infinite or NaN prediction.
+    #[test]
+    fn predict_with_zero_sample_interval_returns_a_structured_error() {
+        let mut analyzer = TrendAnalyzer::new().with_sample_interval(Duration::from_secs(0));
+        linear_trend(&mut analyzer, 0.0, 0.1, 20);
+        assert!(analyzer.predict(Duration::from_secs(1)).is_err());
+    }
+
+    fn utilization_metrics(value: f32) -> PerformanceMetrics {
+        PerformanceMetrics {
+            throughput: 100.0,
+            gpu_utilization: vec![value],
+            memory_usage: vec![0.5],
+            communication_overhead: 0.1,
+            compression_ratio: 1.0,
+            bandwidth_utilization: 100.0,
+            step_time: Duration::from_millis(10),
+        }
+    }
+
+    /// End-to-end: `WorkloadPredictor::predict_workload` combines the trend
+    /// (70%) and seasonal (30%) components and clamps to `[0, 1]`. This
+    /// confirms the trend fix survives that combination -- a realistic,
+    /// gently increasing utilization series (values stay within `[0, 1]`,
+    /// unlike the aggressive `0.0..1.9` series the direct `TrendAnalyzer`
+    /// tests above use) predicts a measurably different, still-unclamped
+    /// utilization for a longer horizon than a shorter one.
+    #[test]
+    fn workload_predictor_predicts_differently_for_different_horizons() {
+        let mut predictor = WorkloadPredictor::new();
+        for i in 0..WorkloadPredictor::MIN_SAMPLES {
+            predictor.update_metrics(&utilization_metrics(0.40 + 0.01 * i as f32));
+        }
+        assert!(predictor.can_predict());
+
+        let near = predictor
+            .predict_workload(Duration::from_secs(1))
+            .expect("near-horizon prediction");
+        let far = predictor
+            .predict_workload(Duration::from_secs(10))
+            .expect("far-horizon prediction");
+
+        assert!(
+            near < 1.0 && far < 1.0,
+            "both predictions must stay below the clamp boundary for this to be a \
+             meaningful comparison: near={near}, far={far}"
+        );
+        assert!(
+            far > near + 0.01,
+            "a longer horizon must predict measurably higher utilization along this \
+             increasing trend: near={near}, far={far}"
+        );
     }
 }
 

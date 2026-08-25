@@ -55,7 +55,14 @@ pub struct HardwareUtilization {
     pub compute_utilization: f64, // 0.0 to 1.0
     pub memory_utilization: f64,  // 0.0 to 1.0
     pub memory_bandwidth_utilization: f64,
-    pub cache_hit_rate_prediction: f64,
+    /// Predicted cache hit rate, when it can be predicted.
+    ///
+    /// Always `None` from static graph analysis: a hit rate is a property of
+    /// an actual memory hierarchy (associativity, working-set size, access
+    /// order at run time), and this analyser has no cache simulation model to
+    /// derive one from. It is `None` rather than a plausible-looking default
+    /// so a caller cannot mistake "not modelled" for "measured".
+    pub cache_hit_rate_prediction: Option<f64>,
     pub parallel_efficiency: f64,
 }
 
@@ -646,6 +653,22 @@ impl GraphAnalyzer {
         Ok((1.0 / (1.0 + coefficient_of_variation)).min(1.0))
     }
 
+    /// Typical total memory capacity for the configured target device.
+    ///
+    /// Not a measurement (this analyser never queries real hardware); it is
+    /// a small per-device-type table of representative capacities, used
+    /// consistently everywhere this analyser needs a capacity to compare a
+    /// graph's estimated footprint against. Shared by
+    /// `predict_hardware_utilization` and `simulate_memory_usage` so the two
+    /// can never silently disagree about which device's capacity applies.
+    fn available_memory_bytes(&self) -> f64 {
+        match self.hardware_target.device_type {
+            DeviceType::GPU => 16e9, // 16 GB typical GPU memory
+            DeviceType::CPU => 64e9, // 64 GB typical system memory
+            _ => 8e9,                // 8 GB default
+        }
+    }
+
     /// Predict hardware utilization
     fn predict_hardware_utilization(
         &self,
@@ -666,20 +689,15 @@ impl GraphAnalyzer {
 
         // Estimate memory utilization
         let estimated_memory = total_memory;
-        let available_memory = match self.hardware_target.device_type {
-            DeviceType::GPU => 16e9, // 16 GB typical GPU memory
-            DeviceType::CPU => 64e9, // 64 GB typical system memory
-            _ => 8e9,                // 8 GB default
-        };
-
-        let memory_utilization = (estimated_memory / available_memory).min(1.0);
+        let memory_utilization = (estimated_memory / self.available_memory_bytes()).min(1.0);
 
         // Estimate memory bandwidth utilization
         let memory_bandwidth_utilization =
             (total_memory / 1e9) / self.hardware_target.memory_bandwidth;
 
-        // Simple cache hit rate prediction
-        let cache_hit_rate_prediction = 0.8; // Assume 80% hit rate
+        // No cache simulation model is available from static graph analysis;
+        // see the field's doc comment on `HardwareUtilization`.
+        let cache_hit_rate_prediction = None;
 
         // Parallel efficiency estimation
         let parallelizable_ops = self.find_parallelizable_operations(graph)?.len();
@@ -725,7 +743,10 @@ impl GraphAnalyzer {
                 }
 
                 // Calculate memory pressure
-                let memory_pressure = total_memory as f64 / 16e9; // Assume 16GB capacity
+                // Same target-device capacity table `predict_hardware_utilization`
+                // uses, rather than a hardcoded capacity independent of
+                // `self.hardware_target`.
+                let memory_pressure = total_memory as f64 / self.available_memory_bytes();
 
                 let snapshot = MemorySnapshot {
                     operation_id: node_id,
@@ -1370,5 +1391,92 @@ mod tests {
             result.expect("operation failed in test").len(),
             graph.nodes.len()
         );
+    }
+
+    /// `available_memory_bytes` is the target-device capacity table shared by
+    /// `predict_hardware_utilization` and `simulate_memory_usage`. It must
+    /// vary by device type, not return one number for everything.
+    #[test]
+    fn test_available_memory_bytes_varies_by_device_type() {
+        let gpu = GraphAnalyzer::new(HardwareTarget {
+            device_type: DeviceType::GPU,
+            ..HardwareTarget::default()
+        });
+        let cpu = GraphAnalyzer::new(HardwareTarget {
+            device_type: DeviceType::CPU,
+            ..HardwareTarget::default()
+        });
+        let other = GraphAnalyzer::new(HardwareTarget {
+            device_type: DeviceType::TPU,
+            ..HardwareTarget::default()
+        });
+
+        assert_ne!(gpu.available_memory_bytes(), cpu.available_memory_bytes());
+        assert_ne!(cpu.available_memory_bytes(), other.available_memory_bytes());
+        assert_eq!(gpu.available_memory_bytes(), 16e9);
+        assert_eq!(cpu.available_memory_bytes(), 64e9);
+        assert_eq!(other.available_memory_bytes(), 8e9);
+    }
+
+    /// Regression test: `predict_hardware_utilization` published a fixed
+    /// `cache_hit_rate_prediction: 0.8` for every graph. There is no cache
+    /// simulation model behind that number, so it is now `None`.
+    #[test]
+    fn test_cache_hit_rate_prediction_is_honestly_absent() {
+        let hardware = HardwareTarget::default();
+        let analyzer = GraphAnalyzer::new(hardware);
+        let graph = create_test_graph();
+
+        let utilization = analyzer.predict_hardware_utilization(&graph).expect("prediction failed");
+        assert!(
+            utilization.cache_hit_rate_prediction.is_none(),
+            "no cache simulation model exists to back this field; a Some(_) would be fabricated"
+        );
+
+        // The Option must round-trip through serde like the rest of the
+        // struct (HardwareUtilization derives Serialize/Deserialize).
+        let json = serde_json::to_string(&utilization).expect("serialize failed");
+        let round_tripped: HardwareUtilization =
+            serde_json::from_str(&json).expect("deserialize failed");
+        assert!(round_tripped.cache_hit_rate_prediction.is_none());
+    }
+
+    /// Regression test: `simulate_memory_usage` divided by a hardcoded
+    /// `16e9` regardless of `self.hardware_target`, even though
+    /// `predict_hardware_utilization` (in the same impl block) already had a
+    /// real per-device-type capacity table. It now shares that table
+    /// (`available_memory_bytes`), so the same graph must report different
+    /// memory pressure against different target devices.
+    #[test]
+    fn test_simulate_memory_usage_reflects_target_device_capacity() {
+        let graph = create_test_graph();
+
+        let gpu_analyzer = GraphAnalyzer::new(HardwareTarget {
+            device_type: DeviceType::GPU,
+            ..HardwareTarget::default()
+        });
+        let cpu_analyzer = GraphAnalyzer::new(HardwareTarget {
+            device_type: DeviceType::CPU,
+            ..HardwareTarget::default()
+        });
+
+        let gpu_snapshots = gpu_analyzer.simulate_memory_usage(&graph).expect("simulation failed");
+        let cpu_snapshots = cpu_analyzer.simulate_memory_usage(&graph).expect("simulation failed");
+
+        assert_eq!(gpu_snapshots.len(), cpu_snapshots.len());
+        assert!(!gpu_snapshots.is_empty());
+        for (gpu_snap, cpu_snap) in gpu_snapshots.iter().zip(cpu_snapshots.iter()) {
+            assert_eq!(
+                gpu_snap.allocated_memory, cpu_snap.allocated_memory,
+                "same graph must produce the same real allocation regardless of target device"
+            );
+            assert!(
+                gpu_snap.memory_pressure > cpu_snap.memory_pressure,
+                "the same allocation must show higher pressure against the GPU's smaller \
+                 assumed capacity (16GB) than the CPU's larger one (64GB): gpu={}, cpu={}",
+                gpu_snap.memory_pressure,
+                cpu_snap.memory_pressure
+            );
+        }
     }
 }

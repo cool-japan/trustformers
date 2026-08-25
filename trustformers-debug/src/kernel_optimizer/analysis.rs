@@ -1049,17 +1049,12 @@ pub fn establish_baseline(kernel_name: &str, samples_secs: &[f64]) -> BaselinePr
         let rank = (p / 100.0 * (n - 1) as f64).round() as usize;
         sorted[rank.min(n - 1)]
     };
-    let percentiles: HashMap<u8, Duration> = [50u8, 90, 95, 99]
+    let percentiles: HashMap<u8, f64> = [50u8, 90, 95, 99]
         .iter()
-        .map(|&p| {
-            (
-                p,
-                Duration::from_secs_f64(percentile_secs(p as f64).max(0.0)),
-            )
-        })
+        .map(|&p| (p, percentile_secs(p as f64).max(0.0)))
         .collect();
 
-    let outlier_threshold = Duration::from_secs_f64((mean + 3.0 * std_dev).max(0.0));
+    let outlier_threshold_secs = (mean + 3.0 * std_dev).max(0.0);
 
     let confidence_interval = if n > 1 && std_dev > 0.0 {
         StudentsT::new(0.0, 1.0, n as f64 - 1.0)
@@ -1086,10 +1081,10 @@ pub fn establish_baseline(kernel_name: &str, samples_secs: &[f64]) -> BaselinePr
         kernel_name: kernel_name.to_string(),
         baseline_performance: Duration::from_secs_f64(mean.max(0.0)),
         performance_distribution: PerformanceDistribution {
-            mean: Duration::from_secs_f64(mean.max(0.0)),
-            std_dev: Duration::from_secs_f64(std_dev.max(0.0)),
+            mean_secs: mean.max(0.0),
+            std_dev_secs: std_dev.max(0.0),
             percentiles,
-            outlier_threshold,
+            outlier_threshold_secs,
             sample_count: n,
         },
         established_date: SystemTime::now(),
@@ -1215,8 +1210,17 @@ pub fn compare_to_baseline(
     }
 
     let t_dist = StudentsT::new(0.0, 1.0, degrees_of_freedom).ok()?;
-    // Two-tailed p-value: P(|T| >= |t_statistic|).
-    let p_value = 2.0 * (1.0 - t_dist.cdf(t_statistic.abs()));
+    // Two-tailed p-value: P(|T| >= |t_statistic|), from the workspace's own
+    // regularized-incomplete-beta implementation rather than
+    // `2 * (1 - statrs_cdf(|t|))`. The subtraction form loses every digit the
+    // CDF carries above 1 - 2^-53 and underflows to exactly 0.0 in the upper
+    // tail (measured: 0.0 at t=12, df=120, where the true p is 2.78e-22),
+    // which then propagates into `statistical_significance = 1 - p` as a
+    // fabricated perfect 1.0.
+    let p_value = trustformers_core::statistics::student_t_two_sided_p_value(
+        t_statistic,
+        degrees_of_freedom,
+    )?;
 
     let relative_change = if baseline_mean_secs != 0.0 {
         (recent_mean - baseline_mean_secs) / baseline_mean_secs
@@ -1289,6 +1293,45 @@ pub struct RegressionCheckOutcome {
     pub baseline_comparison: BaselineComparison,
     pub performance_trend: PerformanceTrend,
     pub new_alert: Option<RegressionAlert>,
+}
+
+/// Observed (post-hoc) statistical power of the two-sided t-test that produced
+/// `t_statistic` at `degrees_of_freedom`, tested at significance level `alpha`.
+///
+/// Power is `P(reject H0 | H1 true)`. Taking the observed effect as the
+/// alternative makes the non-centrality parameter equal to `|t_statistic|`, so
+/// with `t_crit` the two-sided critical value:
+///
+/// ```text
+/// power = P(T' > t_crit) + P(T' < -t_crit),  T' ~ noncentral-t(df, |t|)
+/// ```
+///
+/// which this approximates with the standard normal shift
+/// `Phi(|t| - t_crit) + Phi(-|t| - t_crit)` -- the usual normal approximation
+/// to the noncentral t, exact in the limit of large `df`.
+///
+/// Returns `None` when the inputs cannot support a test (non-finite `t`,
+/// non-positive `df`, `alpha` outside `(0, 1)`).
+///
+/// This replaces `power: 1.0 - p_value`, which is not statistical power: it is
+/// the confidence level of the observed result, the same quantity the sibling
+/// `significance_level` field describes from the other side.
+pub fn observed_power(t_statistic: f64, degrees_of_freedom: f64, alpha: f64) -> Option<f64> {
+    if !t_statistic.is_finite() || !degrees_of_freedom.is_finite() || degrees_of_freedom <= 0.0 {
+        return None;
+    }
+    if !(0.0..1.0).contains(&alpha) || alpha <= 0.0 {
+        return None;
+    }
+    let t_dist = StudentsT::new(0.0, 1.0, degrees_of_freedom).ok()?;
+    let t_crit = t_dist.inverse_cdf(1.0 - alpha / 2.0);
+    if !t_crit.is_finite() {
+        return None;
+    }
+    let lambda = t_statistic.abs();
+    let upper = trustformers_core::statistics::normal_cdf(lambda - t_crit);
+    let lower = trustformers_core::statistics::normal_cdf(-lambda - t_crit);
+    Some((upper + lower).clamp(0.0, 1.0))
 }
 
 /// Real regression decision from a [`BaselineTestOutcome`], using the

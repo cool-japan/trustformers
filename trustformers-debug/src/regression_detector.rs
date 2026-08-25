@@ -116,9 +116,19 @@ pub struct RegressionDetection {
     pub metric_type: MetricType,
     pub regression_type: RegressionType,
     pub severity: RegressionSeverity,
-    pub confidence: f64,
     pub degradation_percentage: f64,
-    pub statistical_significance: f64,
+    /// Two-sided p-value of the test that produced this detection, or `None`
+    /// when the detection method ran no statistical test at all.
+    ///
+    /// This replaces the pair `confidence` / `statistical_significance`, which
+    /// looked like two independent pieces of evidence and were not: the
+    /// window-dispersion branch published `1 - p` under *both* names, while
+    /// the trend branch published `p` under `statistical_significance` and
+    /// `1 - p` under `confidence` -- so the same field name carried opposite
+    /// quantities depending on which detector fired, and the change-point
+    /// branch filled both in with the invented constants `0.8` and `0.01`.
+    /// One field, one unambiguous quantity, `None` when nothing measured it.
+    pub p_value: Option<f64>,
     pub affected_period: (SystemTime, SystemTime),
     pub root_cause_analysis: RootCauseAnalysis,
     pub recommendations: Vec<String>,
@@ -876,9 +886,8 @@ impl RegressionDetector {
                     metric_type: metric_type.clone(),
                     regression_type: RegressionType::GradualDegradation,
                     severity,
-                    confidence: 1.0 - trend_result.significance,
                     degradation_percentage: trend_result.slope_change * 100.0,
-                    statistical_significance: trend_result.significance,
+                    p_value: Some(trend_result.significance),
                     affected_period: self.calculate_affected_period(series),
                     root_cause_analysis: self.analyze_root_causes(series, &filtered_values),
                     recommendations: self.generate_recommendations(
@@ -907,9 +916,13 @@ impl RegressionDetector {
                         metric_type: metric_type.clone(),
                         regression_type: RegressionType::StepChange,
                         severity: self.calculate_severity(degradation / 100.0),
-                        confidence: 0.8,
                         degradation_percentage: degradation,
-                        statistical_significance: 0.01, // High confidence for step changes
+                        // Change-point detection compares two window means
+                        // against `min_degradation_threshold`; it runs no
+                        // significance test, so there is no p-value to report.
+                        // The old code filled these in with the constants 0.8
+                        // and 0.01 ("High confidence for step changes").
+                        p_value: None,
                         affected_period: self.calculate_affected_period(series),
                         root_cause_analysis: self.analyze_root_causes(series, &filtered_values),
                         recommendations: self.generate_recommendations(
@@ -934,9 +947,8 @@ impl RegressionDetector {
                     metric_type: metric_type.clone(),
                     regression_type: RegressionType::ComplexRegression,
                     severity: score.severity,
-                    confidence: 1.0 - score.p_value,
                     degradation_percentage: score.degradation_percentage,
-                    statistical_significance: 1.0 - score.p_value,
+                    p_value: Some(score.p_value),
                     affected_period: self.calculate_affected_period(series),
                     root_cause_analysis: self.analyze_root_causes(series, &filtered_values),
                     recommendations: self.generate_recommendations(

@@ -623,7 +623,7 @@ impl ComputationGraph {
             }
         }
 
-        // Check for cycles (simplified)
+        // Check for cycles
         if self.has_cycles() {
             return Err(invalid_input("Graph contains cycles"));
         }
@@ -631,7 +631,7 @@ impl ComputationGraph {
         Ok(())
     }
 
-    /// Check if the graph has cycles (simplified DFS)
+    /// Check if the graph has cycles: standard visited + recursion-stack DFS.
     fn has_cycles(&self) -> bool {
         let mut visited = vec![false; self.nodes.len()];
         let mut rec_stack = vec![false; self.nodes.len()];

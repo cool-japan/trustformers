@@ -133,7 +133,7 @@ pub struct MemoryLeak {
     /// The real allocation timestamp (from the original
     /// [`AllocationRecord`]), not derived from `age_seconds` at report time
     /// -- so callers reconstructing an [`AllocationRecord`] from this leak
-    /// (e.g. [`MemoryProfiler::detect_leak_pattern`]'s `examples`) never
+    /// (e.g. `MemoryProfiler::detect_leak_pattern`'s `examples`) never
     /// have to fabricate "allocated just now".
     pub timestamp: SystemTime,
     pub allocation_type: AllocationType,
@@ -1235,8 +1235,12 @@ mod tests {
         // later call is sub-millisecond. 500ms was tuned for the old fake,
         // zero-cost placeholder and is no longer a realistic budget for real
         // work; several seconds of headroom keeps this a fast test while
-        // still catching an actual hang.
-        let test_result = tokio::time::timeout(Duration::from_secs(5), async {
+        // still catching an actual hang. Raised again from 5s to 60s after the
+        // 5s budget was observed to expire on a machine under heavy parallel
+        // build load (the same run took 5.0s idle and >43s at load average
+        // 16): this timeout is a hang guard, not a latency assertion, and a
+        // minute still fails fast on a real deadlock.
+        let test_result = tokio::time::timeout(Duration::from_secs(60), async {
             profiler.start().await?;
 
             // Record some allocations

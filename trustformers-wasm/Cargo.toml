@@ -67,9 +67,16 @@ shared-memory = []
 kernel-fusion = []
 async-executor = []
 indexeddb = []
-memory64 = []
-streaming-loader = []
-model-splitting = []
+# `storage/{memory64,streaming_loader,model_splitting}` are mounted at
+# `lib.rs` under `#[cfg(feature = "indexeddb")] pub mod storage;` (the
+# parent module lives in the `indexeddb` submodule tree, see
+# `storage/mod.rs`), so each of these three needs `indexeddb` reachable
+# or `pub use storage::*` fails to resolve `storage` at all when built
+# alone -- this is not "storage requires IndexedDB" in a design sense,
+# it is a real module-tree dependency that must be explicit.
+memory64 = ["indexeddb"]
+streaming-loader = ["indexeddb"]
+model-splitting = ["indexeddb"]
 react-components = []
 vue-components = []
 angular-components = []

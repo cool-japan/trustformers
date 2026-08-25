@@ -116,8 +116,14 @@ pub struct CpuProfile {
 pub struct CpuBottleneckAnalysis {
     /// Id of the process the reading belongs to (this process).
     pub process_id: u32,
-    /// Real CPU usage percentage of this process, from `sysinfo`; `None` when
-    /// the platform gave no reading. It used to be a hardcoded `0.75`.
+    /// Real CPU usage percentage of this process, measured by `sysinfo` as the
+    /// delta between two samples of the profiler's long-lived `System`.
+    ///
+    /// `None` when the platform gave no reading, or when fewer than
+    /// `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL` have elapsed since the previous
+    /// sample -- below that the counters have not advanced enough for the
+    /// quotient to mean anything. It used to be a hardcoded `0.75`, and then
+    /// (briefly) a single-refresh read that could only ever be `Some(0.0)`.
     pub cpu_usage_percent: Option<f64>,
     /// Voluntary + involuntary context switches.
     ///

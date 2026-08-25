@@ -80,7 +80,7 @@ async fn test_factuality_check_reports_real_confidence_scores_and_gaps() {
 
     assert_eq!(
         result.confidence_scores.len(),
-        result.verified_claims,
+        result.claim_like_sentences,
         "must produce exactly one confidence score per identified claim, not a fixed 3-tuple"
     );
     assert_ne!(
@@ -118,7 +118,12 @@ async fn test_health_report_generation() {
 
     assert!(health_report.is_ok());
     let report = health_report.expect("operation failed in test");
-    assert!(report.overall_health_score > 0.0);
+    // Nothing has been analysed yet, so only the safety analyzer's own
+    // aggregate (which starts at 1.0) is present; the factuality and alignment
+    // aggregates are honestly absent instead of the constants 0.8 / 0.85 they
+    // used to be seeded with. The point of the assertion is that the reported
+    // score is a real mean of the terms that exist.
+    assert_eq!(report.overall_health_score, Some(1.0));
 }
 
 #[tokio::test]
@@ -442,4 +447,192 @@ async fn conversation_quality_scores_are_absent_but_the_turn_is_still_recorded()
     assert_eq!(result.context_consistency, None);
     assert_eq!(result.turn_quality, None);
     assert_eq!(result.engagement_score, None);
+}
+
+// ── Wave 6d: batch metrics + factuality honesty ───────────────────────────────
+
+/// Regression test for `BatchMetrics::update_from_report` / `finalize`, which
+/// were empty bodies on the live `analyze_batch` path -- so every batch report
+/// published `BatchMetrics::default()` (all averages 0.0) no matter what had
+/// been analysed.
+#[tokio::test]
+async fn test_analyze_batch_publishes_real_averages_not_defaults() {
+    let mut debugger = llm_debugger();
+    let interactions = vec![
+        (
+            "Hi".to_string(),
+            "Hello there, how can I help you today?".to_string(),
+        ),
+        (
+            "What is 2+2?".to_string(),
+            "The answer is four.".to_string(),
+        ),
+        (
+            "Tell me more".to_string(),
+            "It might possibly be unclear.".to_string(),
+        ),
+    ];
+
+    let report = debugger
+        .analyze_batch(&interactions)
+        .await
+        .expect("batch analysis should succeed");
+
+    assert_eq!(report.batch_size, 3);
+    assert_eq!(report.batch_metrics.responses_analyzed, 3);
+    assert_eq!(report.individual_reports.len(), 3);
+
+    let expected: f32 = report.individual_reports.iter().map(|r| r.overall_score).sum::<f32>()
+        / report.individual_reports.len() as f32;
+    let observed = report
+        .batch_metrics
+        .average_overall_score
+        .expect("three responses were analysed, so there is an average");
+    assert!(
+        (observed - expected).abs() < 1e-5,
+        "batch average {observed} must be the mean of the individual scores {expected}"
+    );
+
+    // Safety analysis runs for every response, so its average is real too.
+    let safety_expected: f32 = report
+        .individual_reports
+        .iter()
+        .filter_map(|r| r.safety_analysis.as_ref().map(|s| s.safety_score))
+        .sum::<f32>()
+        / report.individual_reports.len() as f32;
+    let safety_observed = report
+        .batch_metrics
+        .average_safety_score
+        .expect("safety analysis ran for every response");
+    assert!((safety_observed - safety_expected).abs() < 1e-5);
+
+    // Nothing scores factuality or alignment, so those stay absent rather
+    // than being published as a flattering 0.0.
+    assert_eq!(report.batch_metrics.average_factuality_score, None);
+    assert_eq!(report.batch_metrics.average_alignment_score, None);
+}
+
+/// `flagged_responses_count` / `critical_issues_count` must count real safety
+/// signals, and must not count responses that carried no safety analysis.
+#[test]
+fn test_batch_metrics_counts_only_real_safety_signals() {
+    fn report_with(safety: Option<SafetyAnalysisResult>) -> LLMAnalysisReport {
+        LLMAnalysisReport {
+            input: "in".to_string(),
+            response: "out".to_string(),
+            safety_analysis: safety,
+            factuality_analysis: None,
+            alignment_analysis: None,
+            hallucination_analysis: None,
+            bias_analysis: None,
+            performance_analysis: None,
+            conversation_analysis: None,
+            overall_score: 0.5,
+            recommendations: Vec::new(),
+            analysis_duration: std::time::Duration::from_millis(1),
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    let mut metrics = BatchMetrics::default();
+    metrics.update_from_report(&report_with(Some(SafetyAnalysisResult {
+        safety_score: 0.2,
+        detected_harms: vec![HarmCategory::Violence],
+        risk_level: RiskLevel::Critical,
+        flagged_content: vec!["kill".to_string()],
+        confidence: 0.9,
+    })));
+    metrics.update_from_report(&report_with(Some(SafetyAnalysisResult {
+        safety_score: 1.0,
+        detected_harms: Vec::new(),
+        risk_level: RiskLevel::Low,
+        flagged_content: Vec::new(),
+        confidence: 0.5,
+    })));
+    metrics.update_from_report(&report_with(None));
+    metrics.finalize(3);
+
+    assert_eq!(
+        metrics.flagged_responses_count, 1,
+        "only the harmful response is flagged"
+    );
+    assert_eq!(metrics.critical_issues_count, 1);
+    assert_eq!(metrics.responses_analyzed, 3);
+    assert_eq!(
+        metrics.average_safety_score,
+        Some(0.6),
+        "the mean must be over the TWO responses that carried a safety analysis, not all three"
+    );
+    assert_eq!(metrics.average_overall_score, Some(0.5));
+}
+
+/// `compute_factuality_score` used to return `0.9` when the response contained
+/// the literal substring "fact" and `0.7` otherwise. Nothing verifies facts, so
+/// the score is now an honest `None`; what is reported instead is really
+/// computed from the text.
+#[tokio::test]
+async fn test_factuality_reports_absence_not_a_substring_ladder() {
+    let config = LLMDebugConfig::default();
+    let mut checker = FactualityChecker::new(&config);
+
+    let with_the_word = checker
+        .check_factuality("Here is a fact about the world today.", None)
+        .await
+        .expect("check should succeed");
+    assert_eq!(
+        with_the_word.factuality_score, None,
+        "containing the word 'fact' is not evidence of factual accuracy"
+    );
+
+    let mut checker = FactualityChecker::new(&config);
+    let uncertain = checker
+        .check_factuality(
+            "This might be true for some readers. Water boils at one hundred degrees.",
+            None,
+        )
+        .await
+        .expect("check should succeed");
+    assert_eq!(uncertain.factuality_score, None);
+    assert_eq!(uncertain.claim_like_sentences, 2);
+    assert_eq!(
+        uncertain.uncertainty_density,
+        Some(0.5),
+        "exactly one of the two claim-like sentences carries an uncertainty indicator"
+    );
+    assert_eq!(uncertain.uncertainty_indicator_hits, 1);
+    assert_eq!(
+        uncertain.confidence_scores.len(),
+        uncertain.claim_like_sentences
+    );
+
+    // The aggregate follows the same rule: no factuality score exists, so the
+    // running aggregate is absent -- it used to be seeded at 0.8.
+    assert_eq!(checker.factuality_metrics.overall_factuality_score, None);
+    assert_eq!(
+        checker.factuality_metrics.average_uncertainty_density,
+        Some(0.5)
+    );
+    assert_eq!(checker.factuality_metrics.claim_like_sentences_seen, 2);
+}
+
+/// The LLM health score used to be `(safety + factuality + alignment) / 3`
+/// where two of the three terms were constants seeded at construction.
+#[tokio::test]
+async fn test_overall_health_excludes_terms_that_were_never_measured() {
+    let mut debugger = llm_debugger();
+    let report = debugger
+        .generate_health_report()
+        .await
+        .expect("health report should be produced");
+
+    // Only the safety aggregate exists; the mean of a single term is that term.
+    assert_eq!(report.overall_health_score, Some(1.0));
+    assert_eq!(
+        debugger.alignment_monitor.alignment_metrics.overall_alignment_score, None,
+        "no alignment scorer exists, so there is no aggregate alignment score"
+    );
+    assert!(
+        report.critical_issues.is_empty(),
+        "an absent alignment score must not raise an 'alignment drift' critical issue"
+    );
 }

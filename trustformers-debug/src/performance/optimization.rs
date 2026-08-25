@@ -216,23 +216,43 @@ impl LowOverheadDebugSession {
         }
     }
 
-    /// Check if performance limits are exceeded
-    pub fn is_within_performance_limits(&self) -> bool {
+    /// Whether this process is inside the configured resource budget.
+    ///
+    /// `None` when nothing could be measured. Both inputs used to be hardcoded
+    /// (`0` MB and `0.0`%), so this method returned `true` unconditionally --
+    /// a "within limits" verdict backed by no measurement at all. Memory is now
+    /// a real RSS reading; CPU has no reading here (see
+    /// `Self::get_cpu_usage_percentage`), so the CPU half of the budget is
+    /// only enforced if and when one exists.
+    pub fn is_within_performance_limits(&self) -> Option<bool> {
         let metrics = self.get_performance_metrics();
-        metrics.memory_usage_mb <= self.performance_config.max_memory_mb
-            && metrics.cpu_usage_percentage <= self.performance_config.max_cpu_percentage
+        let memory_ok =
+            metrics.memory_usage_mb.map(|mb| mb <= self.performance_config.max_memory_mb);
+        let cpu_ok = metrics
+            .cpu_usage_percentage
+            .map(|pct| pct <= self.performance_config.max_cpu_percentage);
+        match (memory_ok, cpu_ok) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(true) && b.unwrap_or(true)),
+        }
     }
 
-    /// Get current memory usage in MB
-    fn get_memory_usage_mb(&self) -> usize {
-        // Simplified implementation - would use actual memory monitoring
-        0
+    /// Real resident-set size of this process in MiB, via the same `sysinfo`
+    /// reader [`crate::utilities::performance::SystemMemoryProfiler`] uses.
+    /// `None` when the platform does not list this process.
+    fn get_memory_usage_mb(&self) -> Option<usize> {
+        crate::utilities::performance::SystemMemoryProfiler::current_memory_usage()
+            .map(|bytes| bytes / (1024 * 1024))
     }
 
-    /// Get current CPU usage percentage
-    fn get_cpu_usage_percentage(&self) -> f32 {
-        // Simplified implementation - would use actual CPU monitoring
-        0.0
+    /// Always `None`: a process CPU percentage is a delta between two samples
+    /// of a long-lived `sysinfo::System`, and this optimizer owns no sampler
+    /// (its accessors take `&self`). It used to report a flat `0.0`, which
+    /// made every CPU budget check pass. See
+    /// [`crate::profiler::Profiler::analyze_cpu_bottlenecks`] for a type that
+    /// does keep the sampler needed to answer this.
+    fn get_cpu_usage_percentage(&self) -> Option<f32> {
+        None
     }
 }
 
@@ -533,8 +553,13 @@ pub struct ExportData {
 /// Performance metrics for monitoring
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
-    pub memory_usage_mb: usize,
-    pub cpu_usage_percentage: f32,
+    /// Real process RSS in MiB, or `None` when unreadable. Previously always
+    /// the literal `0`.
+    pub memory_usage_mb: Option<usize>,
+    /// Always `None` -- see
+    /// `LowOverheadDebugSession::get_cpu_usage_percentage`. Previously always
+    /// the literal `0.0`.
+    pub cpu_usage_percentage: Option<f32>,
     pub lazy_computations_pending: usize,
     pub incremental_updates_processed: usize,
     pub background_tasks_queued: usize,

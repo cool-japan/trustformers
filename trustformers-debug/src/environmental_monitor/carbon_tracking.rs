@@ -105,7 +105,11 @@ impl CarbonFootprintTracker {
         region: &str,
         measurement_type: MeasurementType,
     ) -> Result<CarbonMeasurement> {
-        let carbon_intensity = self.get_carbon_intensity(region);
+        let carbon_intensity = self.get_carbon_intensity(region).ok_or_else(|| {
+            super::EnvironmentalMonitorError::UnknownRegion {
+                region: region.to_string(),
+            }
+        })?;
         let co2_emissions_kg = (energy_kwh * carbon_intensity) / 1000.0; // Convert gCO2 to kg
 
         let scope2_emissions = co2_emissions_kg * self.emission_factors.pue_factor;
@@ -137,22 +141,39 @@ impl CarbonFootprintTracker {
         Ok(measurement)
     }
 
-    /// Get carbon intensity for a region
-    pub fn get_carbon_intensity(&self, region: &str) -> f64 {
-        self.carbon_intensity_db
-            .regional_intensities
-            .get(region)
-            .cloned()
-            .unwrap_or(500.0) // Global average fallback
+    /// Grid carbon intensity for `region` in gCO2/kWh, or `None` when this
+    /// tracker has no figure registered for it.
+    ///
+    /// This used to fall back to `500.0` ("Global average fallback") -- an
+    /// invented number returned as if it were that region's measured
+    /// intensity, and then multiplied into published emissions, costs and
+    /// real-time metrics. Register real intensities with
+    /// [`Self::set_carbon_intensity`] rather than relying on a default.
+    pub fn get_carbon_intensity(&self, region: &str) -> Option<f64> {
+        self.carbon_intensity_db.regional_intensities.get(region).copied()
     }
 
-    /// Get renewable energy percentage for a region
-    pub fn get_renewable_percentage(&self, region: &str) -> f64 {
+    /// Register (or replace) `region`'s grid carbon intensity in gCO2/kWh.
+    ///
+    /// Added alongside the removal of the invented 500 gCO2/kWh fallback: the
+    /// intensity map was private with no setter, so a caller hitting
+    /// [`super::EnvironmentalMonitorError::UnknownRegion`] had no supported way
+    /// to supply the figure the refusal asks for.
+    pub fn set_carbon_intensity(&mut self, region: impl Into<String>, gco2_per_kwh: f64) {
         self.carbon_intensity_db
-            .renewable_percentages
-            .get(region)
-            .cloned()
-            .unwrap_or(30.0) // Global average fallback
+            .regional_intensities
+            .insert(region.into(), gco2_per_kwh);
+    }
+
+    /// Register (or replace) `region`'s renewable share, as a percentage.
+    pub fn set_renewable_percentage(&mut self, region: impl Into<String>, percentage: f64) {
+        self.carbon_intensity_db.renewable_percentages.insert(region.into(), percentage);
+    }
+
+    /// Renewable share of `region`'s grid as a percentage, or `None` when no
+    /// figure is registered. Previously fell back to an invented `30.0`.
+    pub fn get_renewable_percentage(&self, region: &str) -> Option<f64> {
+        self.carbon_intensity_db.renewable_percentages.get(region).copied()
     }
 
     /// ESTIMATE of scope 3 (embodied) emissions from energy use.
@@ -282,7 +303,7 @@ impl CarbonFootprintTracker {
         /// Hour assumed cleanest on a demand-driven grid.
         const OVERNIGHT_LOW_DEMAND_HOUR: u32 = 2;
 
-        let renewable_pct = self.get_renewable_percentage(region);
+        let renewable_pct = self.get_renewable_percentage(region)?;
         if renewable_pct > 50.0 {
             Some(SOLAR_PEAK_HOUR)
         } else {
@@ -338,11 +359,31 @@ mod tests {
     #[test]
     fn test_carbon_intensity_lookup() {
         let config = EnvironmentalConfig::default();
-        let tracker = CarbonFootprintTracker::new(&config);
+        let mut tracker = CarbonFootprintTracker::new(&config);
 
-        assert_eq!(tracker.get_carbon_intensity("US-West"), 350.0);
-        assert_eq!(tracker.get_carbon_intensity("EU-North"), 200.0);
-        assert_eq!(tracker.get_carbon_intensity("Unknown"), 500.0); // Fallback
+        assert_eq!(tracker.get_carbon_intensity("US-West"), Some(350.0));
+        assert_eq!(
+            tracker.get_carbon_intensity("Atlantis"),
+            None,
+            "an unregistered region has no known intensity, not an invented 500"
+        );
+        assert_eq!(tracker.get_carbon_intensity("EU-North"), Some(200.0));
+        assert_eq!(
+            tracker.get_carbon_intensity("Unknown"),
+            None,
+            "an unregistered region reports absence, not the old 500.0 fallback"
+        );
+
+        // The refusal is actionable: a caller can supply the real figure.
+        tracker.set_carbon_intensity("Atlantis", 123.5);
+        assert_eq!(tracker.get_carbon_intensity("Atlantis"), Some(123.5));
+        tracker.set_renewable_percentage("Atlantis", 88.0);
+        assert_eq!(tracker.get_renewable_percentage("Atlantis"), Some(88.0));
+        let measurement = tracker
+            .record_emissions(2.0, "Atlantis", MeasurementType::Inference)
+            .expect("a registered region can be costed");
+        assert!((measurement.carbon_intensity_gco2_kwh - 123.5).abs() < 1e-9);
+        assert!((measurement.co2_emissions_kg - (2.0 * 123.5 / 1000.0)).abs() < 1e-9);
     }
 
     #[test]

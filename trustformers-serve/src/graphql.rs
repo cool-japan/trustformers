@@ -234,7 +234,11 @@ impl QueryRoot {
             timestamp: chrono::Utc::now().to_rfc3339(),
             version: crate::VERSION.to_string(),
             uptime_seconds: ctx.data::<GraphQLContext>()?.server.uptime_seconds(),
-            system_health: context.server.get_system_metrics(),
+            // Reads the same background `HostSampler` cache `/health/detailed`
+            // uses (`TrustformerServer::system_health_info`), instead of the
+            // blocking two-sysinfo-sample `measure_host()` this used to call
+            // synchronously from an async resolver.
+            system_health: context.server.system_health_info().await,
             services: service_health(&context.server, system_health.status.clone()).await,
         })
     }
@@ -620,9 +624,9 @@ mod tests {
             version: "1.0.0".to_string(),
             uptime_seconds: 100.0,
             system_health: SystemHealthInfo {
-                cpu_usage: 0.0,
-                memory_usage: 0.0,
-                disk_usage: 0.0,
+                cpu_usage: Some(0.0),
+                memory_usage: Some(0.0),
+                disk_usage: Some(0.0),
                 active_connections: 0,
             },
             services: ServiceHealthInfo {

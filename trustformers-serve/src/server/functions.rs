@@ -22,7 +22,7 @@ use sysinfo::System;
 
 use super::jobs::{run_job, JobState};
 use super::streams::run_stream;
-use super::system_stats::{disk_usage_percentage, measure_host_async};
+use super::system_stats::{self, disk_usage_percentage};
 use super::types::{
     AsyncInferenceRequest, AsyncInferenceResponse, BatchInferenceRequest, BatchInferenceResponse,
     DetailedHealthResponse, FailoverRequest, HealthResponse, InferenceRequest, InferenceResponse,
@@ -498,17 +498,42 @@ pub(super) async fn get_stats(
             )
         })
     };
-    // Measured process/host usage. `disk_percent` is null when the platform
-    // could not attribute the working directory to a filesystem.
-    let host = measure_host_async().await;
-    let resource_usage = serde_json::json!({
-        "process_memory_mb": host.process_memory_bytes as f64 / 1024.0 / 1024.0,
-        "system_memory_used_mb": host.used_memory_bytes as f64 / 1024.0 / 1024.0,
-        "system_memory_total_mb": host.total_memory_bytes as f64 / 1024.0 / 1024.0,
-        "memory_percent": host.memory_percent,
-        "cpu_percent": host.cpu_percent,
-        "disk_percent": host.disk_percent,
-    });
+    // Measured process/host usage, read from the long-lived background
+    // sampler rather than measured fresh on this request: a genuine
+    // measurement needs real syscalls (two `sysinfo` CPU samples
+    // `MINIMUM_CPU_UPDATE_INTERVAL` apart, process/disk enumeration) whose
+    // latency depends on how loaded the host is right now -- exactly when an
+    // admin most wants this endpoint to answer promptly. `ensure_started` is
+    // idempotent, so calling it on every request costs one atomic read after
+    // the first. `disk_percent` is null when the platform could not
+    // attribute the working directory to a filesystem; the whole object's
+    // numeric fields are null when no sample has landed yet -- never a
+    // fabricated zeroed reading.
+    state.host_sampler.ensure_started(system_stats::DEFAULT_SAMPLE_INTERVAL);
+    let resource_usage = match state.host_sampler.current() {
+        Some(sample) => {
+            let host = sample.snapshot;
+            serde_json::json!({
+                "process_memory_mb": host.process_memory_bytes as f64 / 1024.0 / 1024.0,
+                "system_memory_used_mb": host.used_memory_bytes as f64 / 1024.0 / 1024.0,
+                "system_memory_total_mb": host.total_memory_bytes as f64 / 1024.0 / 1024.0,
+                "memory_percent": host.memory_percent,
+                "cpu_percent": host.cpu_percent,
+                "disk_percent": host.disk_percent,
+                "sample_age_ms": sample.sampled_at.elapsed().as_millis() as u64,
+            })
+        },
+        None => serde_json::json!({
+            "process_memory_mb": null,
+            "system_memory_used_mb": null,
+            "system_memory_total_mb": null,
+            "memory_percent": null,
+            "cpu_percent": null,
+            "disk_percent": null,
+            "sample_age_ms": null,
+            "status": "no host measurement has completed yet",
+        }),
+    };
     let server_stats = serde_json::json!({
         "total_requests": state.total_requests(),
         "uptime_seconds": state.uptime_seconds(),

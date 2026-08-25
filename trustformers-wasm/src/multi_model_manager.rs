@@ -448,7 +448,7 @@ impl MultiModelManager {
 
         // Perform warmup if enabled
         if self.config.enable_model_warming {
-            self.warmup_model(model_id).await?;
+            self.warmup_model(model_id).await.map_err(|e| JsValue::from_str(&e))?;
         }
 
         Ok(())
@@ -681,20 +681,40 @@ impl MultiModelManager {
     /// `core::model::wasm_model::tests::test_forward_single_token_input_produces_finite_output`.
     /// A structured `Err` (never a panic or a silent no-op) when the
     /// model's session has no loaded weights to run.
-    fn run_warmup_forward_pass(model: &LoadedModel) -> Result<(), JsValue> {
+    ///
+    /// Pure (`String` error, no `JsValue`) for the same native-testability
+    /// reason as `resolve_model_architecture`/`require_loaded_model` in
+    /// `lib.rs`: constructing a `JsValue` — even a bare
+    /// `JsValue::from_str` — unconditionally panics on non-wasm32 targets
+    /// (there is no JS engine backing it there), which previously made
+    /// this function's own honesty regression tests abort the whole test
+    /// process (SIGABRT) instead of asserting anything. `JsValue`
+    /// conversion happens once, at the `#[wasm_bindgen]` boundary in
+    /// `load_model`, this function's only caller.
+    fn run_warmup_forward_pass(model: &LoadedModel) -> Result<(), String> {
         let wasm_model = model
             .session
             .as_ref()
             .and_then(crate::InferenceSession::loaded_model)
             .ok_or_else(|| {
-                JsValue::from_str(&format!(
+                format!(
                     "warmup_model: model '{}' has no loaded weights to warm up \
                      (its session has not finished loading a model)",
                     model.metadata.id
-                ))
+                )
             })?;
-        let warmup_input = crate::tensor::WasmTensor::zeros(vec![1, 1])?;
-        wasm_model.forward(&warmup_input)?;
+        // `WasmTensor::zeros`/`WasmModel::forward` are `JsValue`-erroring
+        // `#[wasm_bindgen]` APIs; their failure content cannot be
+        // inspected (even via `Debug`) without panicking off wasm32, so
+        // only a fixed, honest description is kept — never a fabricated
+        // or guessed message. Unreached by any current test (there is no
+        // way to construct a real loaded model without a JS/wasm32
+        // environment), unlike the "no loaded model" branch above.
+        let warmup_input = crate::tensor::WasmTensor::zeros(vec![1, 1])
+            .map_err(|_| "warmup_model: failed to allocate the warmup input tensor".to_string())?;
+        wasm_model
+            .forward(&warmup_input)
+            .map_err(|_| "warmup_model: the warmup forward pass failed".to_string())?;
         Ok(())
     }
 
@@ -714,11 +734,15 @@ impl MultiModelManager {
     /// is its only caller, always with the id it just registered, so
     /// this branch is unreachable in practice; it exists so that
     /// invariant is enforced, not assumed.
-    async fn warmup_model(&mut self, model_id: &str) -> Result<(), JsValue> {
+    ///
+    /// Pure (`String` error, no `JsValue`) — see
+    /// [`Self::run_warmup_forward_pass`] for why; `load_model` converts
+    /// to `JsValue` at its own `?` call site below.
+    async fn warmup_model(&mut self, model_id: &str) -> Result<(), String> {
         let Some(model) = self.models.iter_mut().find(|m| m.metadata.id == model_id) else {
-            return Err(JsValue::from_str(&format!(
+            return Err(format!(
                 "warmup_model: no loaded model with id '{model_id}'"
-            )));
+            ));
         };
 
         model.status = ModelStatus::WarmingUp;
@@ -743,7 +767,7 @@ impl MultiModelManager {
 
                 if let Some(ref mut logger) = self.debug_logger {
                     logger.warn(
-                        &format!("Warmup failed for model '{}': {e:?}", model.metadata.name),
+                        &format!("Warmup failed for model '{}': {e}", model.metadata.name),
                         "multi_model",
                     );
                 }

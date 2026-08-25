@@ -133,9 +133,9 @@ impl EnergyConsumptionMonitor {
             device_id: device_id.to_string(),
             power_watts,
             energy_kwh: updated_energy_kwh,
-            utilization,
+            utilization: Some(utilization),
             temperature,
-            efficiency_ratio,
+            efficiency_ratio: Some(efficiency_ratio),
         };
 
         self.consumption_history.push(measurement.clone());
@@ -374,14 +374,14 @@ impl EnergyConsumptionMonitor {
                 .as_secs();
 
             csv.push_str(&format!(
-                "{},{},{:.2},{:.6},{:.4},{},{:.4}\n",
+                "{},{},{:.2},{:.6},{},{},{}\n",
                 timestamp,
                 measurement.device_id,
                 measurement.power_watts,
                 measurement.energy_kwh,
-                measurement.utilization,
+                measurement.utilization.map_or(String::new(), |u| format!("{u:.4}")),
                 measurement.temperature.map_or("".to_string(), |t| format!("{:.1}", t)),
-                measurement.efficiency_ratio
+                measurement.efficiency_ratio.map_or(String::new(), |e| format!("{e:.4}"))
             ));
         }
 
@@ -452,7 +452,7 @@ mod tests {
 
         assert_eq!(measurement.device_id, "gpu-0");
         assert_eq!(measurement.power_watts, 200.0);
-        assert_eq!(measurement.utilization, 0.8);
+        assert_eq!(measurement.utilization, Some(0.8));
         assert_eq!(measurement.temperature, Some(65.0));
         assert_eq!(monitor.consumption_history.len(), 1);
     }

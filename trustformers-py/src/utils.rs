@@ -1,5 +1,6 @@
 //! Python bindings for utility functions
 
+use crate::errors::ConfigError;
 use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -246,12 +247,32 @@ impl PyConfig {
         Self::default()
     }
 
-    /// Load configuration from file
+    /// Load configuration from a JSON file.
+    ///
+    /// See [`parse_config_json`] for exactly how JSON values map onto the
+    /// string-only `data` store, and what counts as "invalid content".
+    /// Raises `trustformers.ConfigError` -- never returns a silently-empty
+    /// config -- when the file cannot be read (missing, unreadable, ...) or
+    /// its content is not a JSON object. There is no YAML path: this crate
+    /// has no YAML dependency (`trustformers-py/Cargo.toml` carries neither
+    /// `serde_yaml` nor `serde_yaml_ng`), and adding one is outside this
+    /// change's scope.
     #[staticmethod]
     fn from_file(path: String) -> PyResult<Self> {
-        // In a real implementation, this would load from JSON/YAML
+        let contents = std::fs::read_to_string(&path).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                ConfigError::new_err(format!("config file not found: '{path}'"))
+            } else {
+                ConfigError::new_err(format!("failed to read config file '{path}': {err}"))
+            }
+        })?;
+
+        let entries = parse_config_json(&path, &contents).map_err(ConfigError::new_err)?;
+
         let mut config = PyConfig::new();
-        config.set("loaded_from".to_string(), path);
+        for (key, value) in entries {
+            config.set(key, value);
+        }
         Ok(config)
     }
 
@@ -286,6 +307,74 @@ impl PyConfig {
 
     fn __repr__(&self) -> String {
         format!("Config(items={})", self.data.len())
+    }
+}
+
+/// Parse the text of a JSON config file into `(key, value)` string pairs.
+///
+/// `path` is used only to name the file in error messages -- this function
+/// does no I/O itself. A JSON string value is stored verbatim; every other
+/// JSON value (numbers, booleans, `null`, arrays, nested objects) is stored
+/// as its own JSON-serialized text, since [`PyConfig`]'s `data` map only
+/// ever holds strings (see [`PyConfig::get`]/[`PyConfig::set`]) -- this is
+/// an honest encoding of every value rather than silently dropping
+/// non-string fields or refusing them, but it is not fully reversible: a
+/// JSON string `"12"` and a JSON number `12` both end up stored as the Rust
+/// string `"12"`, so the original JSON type of a value is not recoverable
+/// from `PyConfig` alone.
+///
+/// Returns `Err` -- naming the file and the exact problem -- when
+/// `contents` is not valid JSON, or parses to something other than a JSON
+/// object at the top level (e.g. a bare array or scalar): both are "invalid
+/// content", not a missing/unreadable file (that is `from_file`'s own
+/// `ConfigError`, since it needs `path` on disk to distinguish "not found"
+/// from other I/O failures).
+///
+/// Split out from [`PyConfig::from_file`] for the same reason as
+/// [`no_seed_hook_message`]: it returns a plain `String` on failure instead
+/// of a `PyErr`, so the exact error text is unit-testable with a plain
+/// `cargo test` (constructing a `PyErr`'s `Display` output needs an
+/// initialized Python interpreter this crate's `cargo test` binary does not
+/// embed).
+fn parse_config_json(path: &str, contents: &str) -> Result<Vec<(String, String)>, String> {
+    let value: serde_json::Value = serde_json::from_str(contents).map_err(|err| {
+        format!(
+            "invalid JSON in config file '{path}' (line {}, column {}): {err}",
+            err.line(),
+            err.column(),
+        )
+    })?;
+
+    let object = value.as_object().ok_or_else(|| {
+        format!(
+            "config file '{path}' must contain a JSON object at the top level, found {}",
+            json_value_kind(&value),
+        )
+    })?;
+
+    let mut entries = Vec::with_capacity(object.len());
+    for (key, entry) in object {
+        let stored = match entry {
+            serde_json::Value::String(s) => s.clone(),
+            other => serde_json::to_string(other).map_err(|err| {
+                format!("config file '{path}': failed to serialize value for key '{key}': {err}")
+            })?,
+        };
+        entries.push((key.clone(), stored));
+    }
+    Ok(entries)
+}
+
+/// Human-readable label for a JSON value's kind, for [`parse_config_json`]'s
+/// error messages.
+fn json_value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
     }
 }
 
@@ -502,5 +591,163 @@ mod tests {
     #[test]
     fn is_cuda_available_is_honestly_false() {
         assert!(!is_cuda_available());
+    }
+
+    // ---- PyConfig::from_file: real JSON parsing, not the old path-recording stub ----
+
+    /// Unique temp file under `std::env::temp_dir()`, per the workspace's
+    /// test-file policy (mirrors `tokenizers.rs`'s `local_asset_tests::
+    /// temp_dir` helper, for a single file instead of a directory).
+    fn temp_config_file(name: &str, contents: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "trustformers-py-config-{name}-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let path = std::env::temp_dir().join(unique);
+        std::fs::write(&path, contents).expect("temp config file must be writable");
+        path
+    }
+
+    #[test]
+    fn from_file_parses_scalar_values_for_real() {
+        let path = temp_config_file(
+            "scalars",
+            r#"{"model_name": "gpt2", "num_layers": 12, "temperature": 0.7, "use_cache": true, "tokenizer": null}"#,
+        );
+        let config =
+            PyConfig::from_file(path.to_str().expect("utf-8 temp path").to_string())
+                .expect("valid JSON must parse");
+        assert_eq!(
+            config.get("model_name".to_string(), None).as_deref(),
+            Some("gpt2")
+        );
+        assert_eq!(
+            config.get("num_layers".to_string(), None).as_deref(),
+            Some("12")
+        );
+        assert_eq!(
+            config.get("temperature".to_string(), None).as_deref(),
+            Some("0.7")
+        );
+        assert_eq!(
+            config.get("use_cache".to_string(), None).as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            config.get("tokenizer".to_string(), None).as_deref(),
+            Some("null")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn from_file_serializes_nested_arrays_and_objects_as_json_text() {
+        let path = temp_config_file("nested", r#"{"layers": [1, 2, 3], "extra": {"a": 1}}"#);
+        let config =
+            PyConfig::from_file(path.to_str().expect("utf-8 temp path").to_string())
+                .expect("valid JSON must parse");
+        assert_eq!(
+            config.get("layers".to_string(), None).as_deref(),
+            Some("[1,2,3]")
+        );
+        assert_eq!(
+            config.get("extra".to_string(), None).as_deref(),
+            Some("{\"a\":1}")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn from_file_does_not_only_record_the_path_anymore() {
+        // Regression guard for the exact fabrication this replaces: the old
+        // implementation set only a "loaded_from" entry and nothing else,
+        // whatever the file actually contained.
+        let path = temp_config_file("regression", r#"{"real_key": "real_value"}"#);
+        let config =
+            PyConfig::from_file(path.to_str().expect("utf-8 temp path").to_string())
+                .expect("valid JSON must parse");
+        assert_eq!(
+            config.get("real_key".to_string(), None).as_deref(),
+            Some("real_value")
+        );
+        assert!(
+            config.get("loaded_from".to_string(), None).is_none(),
+            "must not still be the old path-recording stub"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn from_file_errs_on_missing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "trustformers-py-config-missing-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path); // ensure it really is absent
+        assert!(
+            PyConfig::from_file(path.to_str().expect("utf-8 temp path").to_string()).is_err(),
+            "a nonexistent config path must not silently produce an empty config"
+        );
+    }
+
+    #[test]
+    fn from_file_errs_on_invalid_json_syntax() {
+        let path = temp_config_file("bad-syntax", "{ not valid json ");
+        assert!(
+            PyConfig::from_file(path.to_str().expect("utf-8 temp path").to_string()).is_err(),
+            "malformed JSON must not silently produce an empty config"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn from_file_errs_on_non_object_top_level() {
+        let path = temp_config_file("array-top-level", "[1, 2, 3]");
+        assert!(
+            PyConfig::from_file(path.to_str().expect("utf-8 temp path").to_string()).is_err(),
+            "a JSON array at the top level must not silently produce an empty config"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- parse_config_json: exact message content, GIL-free ----
+
+    #[test]
+    fn parse_config_json_message_names_the_file_and_the_syntax_problem() {
+        let err = parse_config_json("cfg.json", "{ not valid json ").unwrap_err();
+        assert!(err.contains("invalid JSON"), "{err}");
+        assert!(err.contains("cfg.json"), "{err}");
+        assert!(err.contains("line"), "{err}");
+        assert!(err.contains("column"), "{err}");
+    }
+
+    #[test]
+    fn parse_config_json_message_names_the_offending_kind_for_array_top_level() {
+        let err = parse_config_json("cfg.json", "[1, 2, 3]").unwrap_err();
+        assert!(err.contains("an array"), "{err}");
+        assert!(err.contains("JSON object"), "{err}");
+    }
+
+    #[test]
+    fn parse_config_json_message_names_the_offending_kind_for_scalar_top_level() {
+        let err = parse_config_json("cfg.json", "42").unwrap_err();
+        assert!(err.contains("a number"), "{err}");
+    }
+
+    #[test]
+    fn parse_config_json_accepts_an_empty_object() {
+        assert_eq!(parse_config_json("cfg.json", "{}"), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn json_value_kind_labels_every_variant() {
+        assert_eq!(json_value_kind(&serde_json::Value::Null), "null");
+        assert_eq!(json_value_kind(&serde_json::json!(true)), "a boolean");
+        assert_eq!(json_value_kind(&serde_json::json!(1)), "a number");
+        assert_eq!(json_value_kind(&serde_json::json!("s")), "a string");
+        assert_eq!(json_value_kind(&serde_json::json!([1])), "an array");
+        assert_eq!(json_value_kind(&serde_json::json!({"a": 1})), "an object");
     }
 }

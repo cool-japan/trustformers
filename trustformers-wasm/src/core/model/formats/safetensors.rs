@@ -88,6 +88,112 @@ fn decode_to_f32(dtype: &str, bytes: &[u8]) -> Result<Vec<f32>, String> {
     }
 }
 
+/// One tensor's real byte range from [`safetensors_component_layout`]:
+/// `(tensor_name, absolute_start, absolute_end)`.
+pub type SafetensorsEntry = (String, usize, usize);
+
+/// Return type of [`safetensors_component_layout`]: `(header_end,
+/// entries)` — see that function's doc comment.
+pub type SafetensorsLayout = (usize, Vec<SafetensorsEntry>);
+
+/// Real per-tensor byte layout of a SafeTensors buffer, for callers that
+/// need genuine component boundaries (e.g. chunked-loading splitters)
+/// without paying for — or requiring — a full weight decode.
+///
+/// Returns `(header_end, entries)`: `header_end` is the absolute offset
+/// where the JSON header ends and tensor bytes begin (`8 + header_len`),
+/// and `entries` is `(tensor_name, absolute_start, absolute_end)` for
+/// every tensor, sorted by `absolute_start`. Unlike [`parse_safetensors`]
+/// this does not decode any tensor bytes to `f32` and does not restrict
+/// `dtype` to the float types this crate can run inference on — every
+/// dtype SafeTensors supports declares an exact byte range in
+/// `data_offsets`, which is all a byte-range layout needs. It still
+/// validates that each declared `dtype` is at least *recognized* (a
+/// symptom of header corruption if not) and that every offset is
+/// in-bounds and non-decreasing, so a malformed header is a descriptive
+/// `Err`, never a best-effort partial layout.
+pub fn safetensors_component_layout(data: &[u8]) -> Result<SafetensorsLayout, String> {
+    if !looks_like_safetensors(data) {
+        return Err(
+            "not a valid safetensors buffer: expected an 8-byte little-endian header length \
+             followed by a '{' at byte 8"
+                .to_string(),
+        );
+    }
+
+    let mut len_bytes = [0u8; 8];
+    len_bytes.copy_from_slice(&data[0..8]);
+    let header_len = u64::from_le_bytes(len_bytes) as usize;
+    let header_start = 8usize;
+    let header_end = header_start + header_len;
+    let body_start = header_end;
+
+    let header_json = std::str::from_utf8(&data[header_start..header_end])
+        .map_err(|e| format!("safetensors header is not valid UTF-8: {e}"))?;
+    let header: HashMap<String, Value> = serde_json::from_str(header_json)
+        .map_err(|e| format!("failed to parse safetensors JSON header: {e}"))?;
+
+    let body_len = data.len() - body_start;
+    let mut entries = Vec::with_capacity(header.len());
+
+    // Deterministic order, matching `parse_safetensors`.
+    let mut header_entries: Vec<(&String, &Value)> = header.iter().collect();
+    header_entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    for (name, info) in header_entries {
+        if name == "__metadata__" {
+            continue; // free-form string metadata, not a tensor
+        }
+
+        let obj = info
+            .as_object()
+            .ok_or_else(|| format!("safetensors entry '{name}' is not a JSON object"))?;
+
+        let dtype = obj
+            .get("dtype")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("safetensors entry '{name}' is missing a string 'dtype'"))?;
+        // Recognized-dtype check only (no decode): catches a corrupt
+        // header without requiring `dtype` to be one of the float types
+        // this crate can run inference on.
+        dtype_element_size(dtype)?;
+
+        let offsets = obj
+            .get("data_offsets")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("safetensors entry '{name}' is missing 'data_offsets'"))?;
+        if offsets.len() != 2 {
+            return Err(format!(
+                "safetensors entry '{name}' has {} data_offsets, expected exactly 2",
+                offsets.len()
+            ));
+        }
+        let start = offsets[0].as_u64().ok_or_else(|| {
+            format!("safetensors entry '{name}' has a non-integer data_offsets[0]")
+        })? as usize;
+        let end = offsets[1].as_u64().ok_or_else(|| {
+            format!("safetensors entry '{name}' has a non-integer data_offsets[1]")
+        })? as usize;
+
+        if end < start {
+            return Err(format!(
+                "safetensors entry '{name}' has end offset {end} before start offset {start}"
+            ));
+        }
+        if end > body_len {
+            return Err(format!(
+                "safetensors entry '{name}' data_offsets [{start}, {end}) exceed the buffer's \
+                 body length ({body_len} bytes available after the header)"
+            ));
+        }
+
+        entries.push((name.clone(), body_start + start, body_start + end));
+    }
+
+    entries.sort_by_key(|(_, start, _)| *start);
+    Ok((body_start, entries))
+}
+
 /// Parse a full SafeTensors buffer into named, shaped `f32` tensors.
 ///
 /// Every offset and shape is validated against the buffer bounds and
@@ -452,5 +558,129 @@ mod tests {
         assert_eq!(weights.len(), 1);
         assert_eq!(weights[0].0, "token_embeddings.weight");
         assert_eq!(weights[0].1.data(), values);
+    }
+
+    // -----------------------------------------------------------------
+    // `safetensors_component_layout`: real byte-range boundaries for
+    // chunked-loading splitters, independent of whether the tensor's
+    // dtype can be decoded to f32.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_safetensors_component_layout_matches_declared_offsets() {
+        let a: Vec<u8> = 1.0f32.to_le_bytes().to_vec();
+        let b: Vec<u8> = [2.0f32, 3.0f32].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let data = build_safetensors(&[
+            ("layer.a.weight", "F32", vec![1], a.clone()),
+            ("layer.b.weight", "F32", vec![2], b.clone()),
+        ]);
+
+        let (header_end, entries) =
+            safetensors_component_layout(&data).expect("valid safetensors buffer");
+
+        // header_end must be exactly where the tensor body starts: the
+        // buffer's own 8-byte length prefix plus the header it declares.
+        let mut len_bytes = [0u8; 8];
+        len_bytes.copy_from_slice(&data[0..8]);
+        let declared_header_len = u64::from_le_bytes(len_bytes) as usize;
+        assert_eq!(header_end, 8 + declared_header_len);
+
+        assert_eq!(entries.len(), 2);
+        let (name_a, start_a, end_a) = &entries[0];
+        assert_eq!(name_a, "layer.a.weight");
+        assert_eq!(end_a - start_a, a.len());
+        assert_eq!(*start_a, header_end); // first tensor starts right after the header
+        let (name_b, start_b, end_b) = &entries[1];
+        assert_eq!(name_b, "layer.b.weight");
+        assert_eq!(end_b - start_b, b.len());
+        assert_eq!(*start_b, *end_a); // contiguous, no gap
+
+        // The returned ranges must reproduce the exact original bytes.
+        assert_eq!(&data[*start_a..*end_a], &a[..]);
+        assert_eq!(&data[*start_b..*end_b], &b[..]);
+    }
+
+    #[test]
+    fn test_safetensors_component_layout_accepts_integer_dtype_that_parse_safetensors_rejects() {
+        // `parse_safetensors` must decode to f32 and so rejects non-float
+        // dtypes (see `test_parse_rejects_unsupported_dtype`); a pure byte
+        // *layout* has no such requirement — every dtype SafeTensors
+        // supports still declares an exact, real `data_offsets` range.
+        let data = build_safetensors(&[("position_ids", "I64", vec![4], vec![0u8; 32])]);
+
+        assert!(parse_safetensors(&data).is_err());
+
+        let (_, entries) =
+            safetensors_component_layout(&data).expect("layout must not require a float dtype");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "position_ids");
+        assert_eq!(entries[0].2 - entries[0].1, 32);
+    }
+
+    #[test]
+    fn test_safetensors_component_layout_sorted_by_byte_position_not_name() {
+        // Insert "zeta" first (occupies the earlier byte range) and
+        // "alpha" second (the later range) — alphabetically "alpha" <
+        // "zeta", but the returned order must follow physical layout.
+        let data = build_safetensors(&[
+            ("zeta", "F32", vec![1], 1.0f32.to_le_bytes().to_vec()),
+            ("alpha", "F32", vec![1], 2.0f32.to_le_bytes().to_vec()),
+        ]);
+
+        let (_, entries) = safetensors_component_layout(&data).expect("valid buffer");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "zeta", "earlier byte offset must sort first");
+        assert_eq!(entries[1].0, "alpha");
+        assert!(entries[0].1 < entries[1].1);
+    }
+
+    #[test]
+    fn test_safetensors_component_layout_skips_metadata_key() {
+        let data_with_meta = {
+            let mut data =
+                build_safetensors(&[("w", "F32", vec![1], 1.0f32.to_le_bytes().to_vec())]);
+            let mut len_bytes = [0u8; 8];
+            len_bytes.copy_from_slice(&data[0..8]);
+            let header_len = u64::from_le_bytes(len_bytes) as usize;
+            let mut header: serde_json::Map<String, Value> =
+                serde_json::from_slice(&data[8..8 + header_len]).unwrap();
+            let mut meta = serde_json::Map::new();
+            meta.insert("format".to_string(), Value::String("pt".to_string()));
+            header.insert("__metadata__".to_string(), Value::Object(meta));
+            let new_header_json = serde_json::to_vec(&Value::Object(header)).unwrap();
+            let mut rebuilt = Vec::new();
+            rebuilt.extend_from_slice(&(new_header_json.len() as u64).to_le_bytes());
+            rebuilt.extend_from_slice(&new_header_json);
+            rebuilt.extend_from_slice(&data[8 + header_len..]);
+            std::mem::swap(&mut data, &mut rebuilt);
+            data
+        };
+
+        let (_, entries) =
+            safetensors_component_layout(&data_with_meta).expect("valid buffer with metadata");
+        assert_eq!(
+            entries.len(),
+            1,
+            "the __metadata__ entry must not be treated as a tensor component"
+        );
+        assert_eq!(entries[0].0, "w");
+    }
+
+    #[test]
+    fn test_safetensors_component_layout_rejects_non_safetensors_data() {
+        let err = safetensors_component_layout(b"just some random bytes, not safetensors at all!!")
+            .expect_err("garbage input must not produce a fabricated layout");
+        assert!(err.contains("safetensors"));
+    }
+
+    #[test]
+    fn test_safetensors_component_layout_rejects_offsets_past_buffer_end() {
+        let header_json = br#"{"w":{"dtype":"F32","shape":[1000000],"data_offsets":[0,4000000]}}"#;
+        let mut data = Vec::new();
+        data.extend_from_slice(&(header_json.len() as u64).to_le_bytes());
+        data.extend_from_slice(header_json);
+        let err = safetensors_component_layout(&data)
+            .expect_err("out-of-bounds offsets must error, not a truncated fabricated range");
+        assert!(err.contains("exceed"));
     }
 }

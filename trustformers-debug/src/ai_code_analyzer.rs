@@ -6,7 +6,7 @@
 //! Despite the type name [`AICodeAnalyzer`] (kept for API stability), this is a
 //! **deterministic, rule-based static analyzer**: every finding comes from a
 //! fixed substring/pattern check against the literal source text (see
-//! [`AICodeAnalyzer::perform_deep_analysis`] and its sibling
+//! `AICodeAnalyzer::perform_deep_analysis` and its sibling
 //! `detect_*`/`generate_*` methods), not from any trained model or live
 //! inference call. There is no network access, no model weights, and no
 //! non-deterministic behavior -- calling it twice on the same input always

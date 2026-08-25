@@ -5,7 +5,13 @@
 //! substituting a plausible constant.
 
 use anyhow::{anyhow, Result};
+use parking_lot::RwLock;
 use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
 use sysinfo::{Disks, Pid, ProcessesToUpdate, System};
 
 /// A measured snapshot of host resource usage.
@@ -31,18 +37,115 @@ pub struct HostSnapshot {
 /// [`measure_host`] blocks for `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL` between
 /// its two CPU samples, which would park a tokio worker; async callers must use
 /// this wrapper.
+///
+/// This substitutes a zeroed snapshot when the underlying `spawn_blocking`
+/// task itself fails (join error, not a measurement error) so existing
+/// callers keep their current `HostSnapshot`-returning signature; a
+/// `total_memory_bytes == 0` reading is that failure; a real host is never
+/// reported that way. New callers that can represent absence directly
+/// should prefer [`measure_host_checked`], which returns `None` instead of
+/// synthesizing a value.
 pub async fn measure_host_async() -> HostSnapshot {
-    tokio::task::spawn_blocking(measure_host).await.unwrap_or_else(|e| {
-        tracing::error!("host measurement task failed: {}", e);
-        HostSnapshot {
-            cpu_percent: 0.0,
-            used_memory_bytes: 0,
-            total_memory_bytes: 0,
-            memory_percent: 0.0,
-            process_memory_bytes: 0,
-            disk_percent: None,
-        }
+    measure_host_checked().await.unwrap_or_else(|| HostSnapshot {
+        cpu_percent: 0.0,
+        used_memory_bytes: 0,
+        total_memory_bytes: 0,
+        memory_percent: 0.0,
+        process_memory_bytes: 0,
+        disk_percent: None,
     })
+}
+
+/// Take a live measurement of host and process resource usage, off the
+/// runtime, reporting `None` (rather than a fabricated zeroed reading) when
+/// the underlying blocking task could not complete.
+async fn measure_host_checked() -> Option<HostSnapshot> {
+    match tokio::task::spawn_blocking(measure_host).await {
+        Ok(snapshot) => Some(snapshot),
+        Err(e) => {
+            tracing::error!("host measurement task failed: {}", e);
+            None
+        },
+    }
+}
+
+/// A [`HostSnapshot`] together with when it was taken, so a stale reading is
+/// never presented as current.
+#[derive(Debug, Clone, Copy)]
+pub struct TimestampedSnapshot {
+    pub snapshot: HostSnapshot,
+    pub sampled_at: Instant,
+}
+
+/// The refresh cadence [`get_stats`](super::functions::get_stats) starts
+/// [`HostSampler`] with.
+pub const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// A live, continuously-refreshed sample of host resource usage, taken by a
+/// long-lived background task instead of freshly on every request.
+///
+/// Genuinely measuring host stats means real syscalls: two `sysinfo` CPU
+/// samples `MINIMUM_CPU_UPDATE_INTERVAL` apart, plus process and disk
+/// enumeration, whose latency depends on how loaded the host is right now --
+/// exactly when an admin most wants `/admin/stats` to answer promptly.
+/// `measure_host_async` already keeps that work off the async executor via
+/// `spawn_blocking`, but doing it fresh on every request to a hot admin
+/// endpoint still means every caller pays whatever that measurement costs
+/// *right now*, with no upper bound; under enough host load the wait can run
+/// to seconds, which is untenable for a status endpoint that other tests and
+/// tools expect to answer quickly regardless of host load.
+///
+/// `HostSampler` instead runs one background refresh loop per server
+/// instance; [`Self::current`] reads the latest completed sample without
+/// waiting on `sysinfo` at all. Before the first sample lands, it honestly
+/// returns `None` rather than a synthesized reading.
+#[derive(Debug, Clone, Default)]
+pub struct HostSampler {
+    latest: Arc<RwLock<Option<TimestampedSnapshot>>>,
+    started: Arc<AtomicBool>,
+}
+
+impl HostSampler {
+    /// Create a sampler with no background task running yet. Call
+    /// [`Self::ensure_started`] to begin refreshing it.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start the background refresh loop, if it is not already running.
+    ///
+    /// Idempotent and cheap to call unconditionally on every request: the
+    /// `swap` is a single atomic operation, and only the very first caller
+    /// actually spawns the loop. This is what lets the sampler start lazily
+    /// on first use rather than depending on being wired into every server
+    /// construction path (production `start()` and the test-only
+    /// `create_test_router()` both reach it this way, uniformly).
+    pub fn ensure_started(&self, interval: Duration) {
+        if self.started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let latest = Arc::clone(&self.latest);
+        tokio::spawn(async move {
+            loop {
+                if let Some(snapshot) = measure_host_checked().await {
+                    *latest.write() = Some(TimestampedSnapshot {
+                        snapshot,
+                        sampled_at: Instant::now(),
+                    });
+                }
+                // A failed sample is left as whatever the previous state was
+                // (absent, or the last real reading) rather than overwritten
+                // with a fabricated value; the loop simply tries again next
+                // interval.
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    /// The latest completed sample, if any has landed yet. Never blocks.
+    pub fn current(&self) -> Option<TimestampedSnapshot> {
+        *self.latest.read()
+    }
 }
 
 /// Take a live measurement of host and process resource usage.
@@ -213,6 +316,94 @@ mod tests {
         assert!(
             snapshot.process_memory_bytes > 0,
             "the test process must have a measurable resident size"
+        );
+    }
+
+    /// Regression: a `HostSampler` with no background loop started must
+    /// never synthesize a reading -- `current()` before `ensure_started` is
+    /// exactly the "no sample yet" case `/admin/stats` must render as null
+    /// fields, not as a fabricated zeroed snapshot.
+    #[tokio::test]
+    async fn host_sampler_reports_absent_before_first_sample() {
+        let sampler = HostSampler::new();
+        assert!(
+            sampler.current().is_none(),
+            "a sampler with no background loop running must not synthesize a reading"
+        );
+    }
+
+    /// Regression: once started, the sampler eventually carries a real,
+    /// freshly timestamped measurement -- the whole point of moving
+    /// measurement off the request path.
+    #[tokio::test]
+    async fn host_sampler_populates_after_starting() {
+        let sampler = HostSampler::new();
+        sampler.ensure_started(Duration::from_millis(50));
+        // The first sample still needs sysinfo's own two-sample CPU delay
+        // (`MINIMUM_CPU_UPDATE_INTERVAL`) on a background thread; poll with a
+        // generous window rather than pinning the test to that constant. The
+        // deadline itself is generous too (not the ~1s the measurement takes
+        // on an idle host): `measure_host` does real syscalls (process and
+        // disk enumeration) whose latency depends on host load, and a shared
+        // CI/dev box running many concurrent builds can genuinely take tens
+        // of seconds -- this loop is checking that a sample eventually
+        // lands, not bounding its latency (that is precisely what the
+        // sampler exists to keep off the request path; see the module doc).
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(sample) = sampler.current() {
+                assert!(
+                    sample.snapshot.total_memory_bytes > 0,
+                    "a real sample must have measured memory"
+                );
+                assert!(
+                    sample.sampled_at.elapsed() < Duration::from_secs(5),
+                    "a just-landed sample must not already read as stale"
+                );
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no sample landed within 60 seconds of starting the sampler"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Regression: calling `ensure_started` more than once (the expected
+    /// usage -- every `/admin/stats` request calls it) must not panic, and
+    /// must not prevent a sample from landing.
+    #[tokio::test]
+    async fn host_sampler_ensure_started_is_idempotent() {
+        let sampler = HostSampler::new();
+        for _ in 0..5 {
+            sampler.ensure_started(Duration::from_millis(50));
+        }
+        // See the generous-deadline note in `host_sampler_populates_after_starting`.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if sampler.current().is_some() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no sample landed within 60 seconds of starting the sampler repeatedly"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Regression: `measure_host_async` must keep substituting a detectable
+    /// zeroed snapshot only for its own join-failure case, never for a
+    /// genuine measurement -- existing callers outside this module key off
+    /// `total_memory_bytes == 0` to detect that failure (see
+    /// `crate::custom_metrics`), so a real host must never produce it.
+    #[tokio::test]
+    async fn measure_host_async_is_never_zeroed_on_the_happy_path() {
+        let snapshot = measure_host_async().await;
+        assert!(
+            snapshot.total_memory_bytes > 0,
+            "a real measurement must never look like the join-failure sentinel"
         );
     }
 }

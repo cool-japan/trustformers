@@ -60,6 +60,64 @@ use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Optimizer;
 
+/// A `benchmark_optimizer`-local extension of [`Optimizer`] that additionally
+/// exposes each optimizer's REAL allocated state memory (momentum/variance
+/// buffers, etc.), when the concrete optimizer type publishes one via
+/// [`crate::traits::StatefulOptimizer::memory_usage`].
+///
+/// [`StatefulOptimizer`](crate::traits::StatefulOptimizer) cannot be called
+/// through `dyn Optimizer` -- it carries associated types (`Config`,
+/// `State`), so it isn't `dyn`-safe, and `benchmark_optimizer` needs a single
+/// uniform type across every [`OptimizerType`] it cycles through. This
+/// trait re-exposes just the one number it needs, in bytes, so
+/// `create_optimizer_instance` can keep returning one `Box<dyn ..>` type.
+///
+/// The default is `None`: an optimizer kind that doesn't implement
+/// `StatefulOptimizer` (currently only [`LAMB`], whose moment buffers are
+/// private with no public accessor) has genuinely nothing to report here,
+/// so it is honestly `None` rather than a fabricated number.
+trait BenchmarkOptimizer: Optimizer {
+    fn state_memory_bytes(&self) -> Option<usize> {
+        None
+    }
+}
+
+impl BenchmarkOptimizer for Adam {
+    fn state_memory_bytes(&self) -> Option<usize> {
+        Some(crate::traits::StatefulOptimizer::memory_usage(self).total_bytes)
+    }
+}
+
+impl BenchmarkOptimizer for AdamW {
+    fn state_memory_bytes(&self) -> Option<usize> {
+        Some(crate::traits::StatefulOptimizer::memory_usage(self).total_bytes)
+    }
+}
+
+impl BenchmarkOptimizer for SGD {
+    fn state_memory_bytes(&self) -> Option<usize> {
+        Some(crate::traits::StatefulOptimizer::memory_usage(self).total_bytes)
+    }
+}
+
+impl BenchmarkOptimizer for AveragedAdam {
+    fn state_memory_bytes(&self) -> Option<usize> {
+        Some(crate::traits::StatefulOptimizer::memory_usage(self).total_bytes)
+    }
+}
+
+impl BenchmarkOptimizer for Lion {
+    fn state_memory_bytes(&self) -> Option<usize> {
+        Some(crate::traits::StatefulOptimizer::memory_usage(self).total_bytes)
+    }
+}
+
+// `LAMB` has no public state-memory accessor (its `exp_avg`/`exp_avg_sq`
+// buffers are private and it does not implement `StatefulOptimizer`), so it
+// uses the trait's default `None` -- an honest "cannot measure", not a
+// fabricated byte count.
+impl BenchmarkOptimizer for LAMB {}
+
 /// Comprehensive performance validation configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationConfig {
@@ -597,7 +655,6 @@ impl PerformanceValidator {
         scenario: &BenchmarkScenario,
     ) -> Result<OptimizerBenchmarkResult> {
         let mut step_times = Vec::new();
-        let mut memory_usage = Vec::new();
 
         // Create optimizer
         let mut optimizer = self.create_optimizer_instance(optimizer_type)?;
@@ -608,9 +665,6 @@ impl PerformanceValidator {
         for iteration in 0..scenario.iterations {
             // Create gradients for this iteration
             let gradients = create_benchmark_gradients(&scenario.parameter_sizes, iteration)?;
-
-            // Measure memory before step
-            let memory_before = self.estimate_memory_usage(&parameters, &optimizer)?;
 
             // Time the optimizer step
             let step_start = Instant::now();
@@ -626,10 +680,6 @@ impl PerformanceValidator {
 
             let step_time = step_start.elapsed();
             step_times.push(step_time);
-
-            // Measure memory after step
-            let memory_after = self.estimate_memory_usage(&parameters, &optimizer)?;
-            memory_usage.push(memory_after - memory_before);
         }
 
         // Compute statistics
@@ -637,7 +687,21 @@ impl PerformanceValidator {
         let min_step_time = step_times.iter().min().copied().unwrap_or(Duration::from_secs(0));
         let max_step_time = step_times.iter().max().copied().unwrap_or(Duration::from_secs(0));
 
-        let avg_memory = memory_usage.iter().sum::<usize>() as f64 / memory_usage.len() as f64;
+        // Real, measured state memory (see `BenchmarkOptimizer::state_memory_bytes`
+        // near the top of this file), read once after the run rather than
+        // as a per-iteration "before/after delta": every optimizer kind
+        // this can measure allocates its per-parameter state buffers
+        // (momentum/variance/...) on that parameter's first `update()`
+        // call and never resizes them again, since `scenario.parameter_sizes`
+        // is fixed for the whole run -- so the state footprint is already
+        // at steady state after iteration 0 and identical on every later
+        // iteration. There is nothing to average; a delta between two
+        // identical readings is always exactly zero regardless of the
+        // optimizer, which is what the previous shape-only
+        // `estimate_memory_usage` (computed from `parameters`, ignoring
+        // `optimizer` entirely) actually measured -- a mathematical
+        // certainty, not a benchmark result.
+        let state_memory_bytes = optimizer.state_memory_bytes();
 
         // Calculate throughput (parameters processed per second)
         let total_params: usize = scenario.parameter_sizes.iter().product();
@@ -669,7 +733,7 @@ impl PerformanceValidator {
             min_step_time,
             max_step_time,
             throughput,
-            avg_memory_usage: avg_memory,
+            avg_memory_usage: state_memory_bytes,
             statistical_metrics,
         })
     }
@@ -677,7 +741,7 @@ impl PerformanceValidator {
     fn create_optimizer_instance(
         &self,
         optimizer_type: OptimizerType,
-    ) -> Result<Box<dyn Optimizer>> {
+    ) -> Result<Box<dyn BenchmarkOptimizer>> {
         match optimizer_type {
             OptimizerType::Adam => Ok(Box::new(Adam::new(0.001, (0.9, 0.999), 1e-8, 0.0))),
             OptimizerType::AdamW => Ok(Box::new(AdamW::new(0.001, (0.9, 0.999), 1e-8, 0.01))),
@@ -692,25 +756,6 @@ impl PerformanceValidator {
             OptimizerType::LAMB => Ok(Box::new(LAMB::new(0.001, (0.9, 0.999), 1e-6, 0.01))),
             OptimizerType::Lion => Ok(Box::new(Lion::new(0.0001, (0.9, 0.99), 0.01))),
         }
-    }
-
-    fn estimate_memory_usage(
-        &self,
-        parameters: &HashMap<String, Tensor>,
-        _optimizer: &Box<dyn Optimizer>,
-    ) -> Result<usize> {
-        let mut total_memory = 0;
-
-        // Estimate parameter memory
-        for tensor in parameters.values() {
-            total_memory += tensor.memory_usage();
-        }
-
-        // Estimate optimizer state memory (simplified)
-        // In practice, would query actual optimizer state
-        let optimizer_overhead = total_memory * 2; // Assume 2x overhead for Adam-family optimizers
-
-        Ok(total_memory + optimizer_overhead)
     }
 
     fn analyze_performance_trends(&self, results: &mut PerformanceBenchmarkResults) -> Result<()> {
@@ -1436,7 +1481,18 @@ pub struct OptimizerBenchmarkResult {
     pub min_step_time: Duration,
     pub max_step_time: Duration,
     pub throughput: f64,
-    pub avg_memory_usage: f64,
+    /// The optimizer's real allocated state memory (bytes) at the end of
+    /// the run, from [`BenchmarkOptimizer::state_memory_bytes`]. `None`
+    /// when the optimizer kind exposes no such accessor (currently only
+    /// `LAMB`). Despite the field's name this is a single end-of-run
+    /// reading, not an average of varying samples: every optimizer kind
+    /// this can measure allocates its state buffers on first touch and
+    /// never resizes them again within one benchmark run (parameter shapes
+    /// are fixed), so there is nothing that actually varies to average. An
+    /// earlier version computed a before/after delta from parameter
+    /// *shapes* alone (ignoring the optimizer entirely), which was
+    /// therefore always exactly `0.0` regardless of which optimizer ran.
+    pub avg_memory_usage: Option<usize>,
     pub statistical_metrics: Option<StatisticalMetrics>,
 }
 

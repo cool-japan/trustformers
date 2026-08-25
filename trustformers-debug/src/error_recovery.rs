@@ -170,11 +170,31 @@ pub enum HealthStatus {
 /// Health metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthMetrics {
+    /// Errors recorded in the last five minutes, normalised by 100.
+    /// Genuinely recomputed by [`ErrorRecoverySystem::check_system_health`].
     pub error_rate: f64,
-    pub recovery_success_rate: f64,
-    pub average_response_time_ms: f64,
-    pub memory_health_score: f64,
-    pub stability_score: f64,
+    /// Fraction of the recovery attempts that finished in the last five
+    /// minutes and reported success, or `None` when none finished in that
+    /// window.
+    ///
+    /// This used to be seeded to `1.0` in
+    /// [`ErrorRecoverySystem::new`] -- a published 100% recovery rate before a
+    /// single error had been handled -- and only ever overwritten once a
+    /// recovery actually completed.
+    pub recovery_success_rate: Option<f64>,
+    /// Mean wall-clock duration of those same completed recovery attempts, in
+    /// milliseconds; `None` when none finished in the window.
+    ///
+    /// Renamed from `average_response_time_ms`, which nothing ever wrote to:
+    /// it stayed at its `0.0` seed for the lifetime of the system. It is
+    /// recovery time, not response time.
+    pub average_recovery_time_ms: Option<f64>,
+    /// Always `None`: nothing in this crate measures memory health, and there
+    /// is no defined scale for it. Previously seeded to `1.0` and never
+    /// updated, i.e. a permanent "perfectly healthy" verdict.
+    pub memory_health_score: Option<f64>,
+    /// Always `None`, for the same reason (previously a permanent `1.0`).
+    pub stability_score: Option<f64>,
 }
 
 /// Failsafe manager for critical situations
@@ -216,11 +236,13 @@ impl ErrorRecoverySystem {
                 component_health: HashMap::new(),
                 last_health_check: chrono::Utc::now(),
                 health_metrics: HealthMetrics {
+                    // Nothing has happened yet: zero errors really is a
+                    // measured zero, everything else is honestly absent.
                     error_rate: 0.0,
-                    recovery_success_rate: 1.0,
-                    average_response_time_ms: 0.0,
-                    memory_health_score: 1.0,
-                    stability_score: 1.0,
+                    recovery_success_rate: None,
+                    average_recovery_time_ms: None,
+                    memory_health_score: None,
+                    stability_score: None,
                 },
             },
             failsafe_manager: FailsafeManager {
@@ -411,11 +433,25 @@ impl ErrorRecoverySystem {
             })
             .collect::<Vec<_>>();
 
-        if !recent_recoveries.is_empty() {
+        if recent_recoveries.is_empty() {
+            // No completed recovery in the window: the previous figures are
+            // stale, and there is nothing to replace them with.
+            self.health_monitor.health_metrics.recovery_success_rate = None;
+            self.health_monitor.health_metrics.average_recovery_time_ms = None;
+        } else {
             let successful_recoveries =
                 recent_recoveries.iter().filter(|r| r.success.unwrap_or(false)).count();
             self.health_monitor.health_metrics.recovery_success_rate =
-                successful_recoveries as f64 / recent_recoveries.len() as f64;
+                Some(successful_recoveries as f64 / recent_recoveries.len() as f64);
+            // Real mean wall-clock recovery duration over the same window.
+            let total_ms: f64 = recent_recoveries
+                .iter()
+                .filter_map(|r| {
+                    r.end_time.map(|end| (end - r.start_time).num_milliseconds() as f64)
+                })
+                .sum();
+            self.health_monitor.health_metrics.average_recovery_time_ms =
+                Some(total_ms / recent_recoveries.len() as f64);
         }
 
         // Determine overall health
@@ -728,7 +764,9 @@ pub struct ErrorStatistics {
     pub total_errors: usize,
     pub error_type_counts: HashMap<ErrorType, usize>,
     pub severity_counts: HashMap<String, usize>,
-    pub recovery_success_rate: f64,
+    /// See [`HealthMetrics::recovery_success_rate`]: `None` when no recovery
+    /// attempt has completed recently, never a fabricated `1.0`.
+    pub recovery_success_rate: Option<f64>,
     pub circuit_breaker_state: CircuitState,
     pub system_health: HealthStatus,
 }
@@ -1047,8 +1085,68 @@ mod tests {
     fn test_health_metrics_initial_values() {
         let system = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
         let m = &system.health_monitor.health_metrics;
+        // A brand-new system has handled nothing. Zero errors is a real
+        // measurement; a 100% recovery rate is not -- this used to assert
+        // `recovery_success_rate == 1.0`, locking in a seeded fabrication.
         assert_eq!(m.error_rate, 0.0);
-        assert_eq!(m.recovery_success_rate, 1.0);
+        assert_eq!(m.recovery_success_rate, None);
+        assert_eq!(m.average_recovery_time_ms, None);
+        assert_eq!(m.memory_health_score, None);
+        assert_eq!(m.stability_score, None);
+    }
+
+    /// The rate must be a real quotient over the recovery attempts that
+    /// actually completed, and the mean recovery time a real mean -- not the
+    /// `1.0` / `0.0` the system used to be born with.
+    #[tokio::test]
+    async fn test_health_metrics_are_computed_from_real_recovery_outcomes() {
+        let mut system = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        let now = chrono::Utc::now();
+        for (success, millis) in [(true, 40i64), (true, 60), (false, 200)] {
+            system.recovery_history.push_back(RecoveryEvent {
+                id: Uuid::new_v4(),
+                error_id: Uuid::new_v4(),
+                strategy: RecoveryStrategy::Retry {
+                    max_attempts: 1,
+                    delay_ms: 0,
+                },
+                start_time: now - chrono::Duration::milliseconds(millis),
+                end_time: Some(now),
+                success: Some(success),
+                result_message: "test".to_string(),
+                attempts: 1,
+            });
+        }
+
+        system.check_system_health().await;
+        let m = &system.health_monitor.health_metrics;
+        let rate = m.recovery_success_rate.expect("three attempts completed in the window");
+        assert!(
+            (rate - 2.0 / 3.0).abs() < 1e-9,
+            "two of three succeeded, got {rate}"
+        );
+        let mean_ms = m.average_recovery_time_ms.expect("three attempts completed in the window");
+        assert!(
+            (mean_ms - 100.0).abs() < 5.0,
+            "(40+60+200)/3 = 100ms, got {mean_ms}"
+        );
+
+        // Unmeasurable scores stay absent even after a health check.
+        assert_eq!(m.memory_health_score, None);
+        assert_eq!(m.stability_score, None);
+    }
+
+    /// A health check with nothing in the recent window must clear the
+    /// figures rather than leave a stale rate standing as current evidence.
+    #[tokio::test]
+    async fn test_health_check_reports_absence_when_nothing_recovered_recently() {
+        let mut system = ErrorRecoverySystem::new(ErrorRecoveryConfig::default());
+        system.check_system_health().await;
+        assert_eq!(
+            system.health_monitor.health_metrics.recovery_success_rate,
+            None
+        );
+        assert_eq!(system.get_error_statistics().recovery_success_rate, None);
     }
 
     // ── async handle_error with open circuit breaker ──────────────────────

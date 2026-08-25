@@ -234,6 +234,32 @@ async fn test_admin_endpoints() {
     assert!(body["enable_metrics"].is_boolean());
 }
 
+/// Regression: `/admin/stats` used to measure host resource usage
+/// (`measure_host_async`, real `sysinfo` syscalls) fresh on every request,
+/// with no upper bound on how long that could take under host load. It now
+/// reads a cached sample from a long-lived background sampler instead, so a
+/// single call is expected to answer promptly regardless of host load.
+#[tokio::test]
+async fn test_admin_stats_answers_promptly() {
+    let server = create_test_server().await;
+    let started = std::time::Instant::now();
+    let admin_future = async {
+        let response = server.get("/admin/stats").await;
+        response.assert_status_ok();
+        let stats: Value = response.json();
+        assert!(stats["resource_usage"].is_object());
+    };
+    tokio::time::timeout(Duration::from_secs(2), admin_future)
+        .await
+        .expect("/admin/stats must not still be in flight after 2 seconds");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "/admin/stats took {:?}, which should be impossible now that it reads a \
+         cached sample instead of measuring host resource usage per request",
+        started.elapsed()
+    );
+}
+
 #[tokio::test]
 async fn test_graphql_endpoints() {
     let server = create_test_server().await;
@@ -771,6 +797,17 @@ async fn test_auth_metrics_interaction() {
 }
 
 /// Test interaction between streaming and monitoring services
+///
+/// Regression: `/admin/stats` used to measure host resource usage fresh on
+/// every request (`measure_host_async`, real `sysinfo` syscalls including a
+/// two-sample CPU delay); under host load that measurement has no upper
+/// bound, so this test could -- and did -- blow well past its own 5-second
+/// budget on this exact call. `/admin/stats` now reads a cached sample from
+/// a long-lived background sampler instead of measuring per request, so the
+/// call is expected to be fast at any host load. The sibling
+/// `test_isolated_streaming_monitoring` (isolated_integration_tests.rs)
+/// passes quickly but never exercises `/admin/stats`, so it could not have
+/// caught this.
 #[tokio::test]
 async fn test_streaming_monitoring_interaction() {
     // Add explicit test timeout
@@ -821,6 +858,11 @@ async fn test_streaming_monitoring_interaction() {
         let stats: Value = admin_response.json();
 
         assert!(stats["streaming_stats"].is_object());
+        // `resource_usage` stays a JSON object even before the background
+        // sampler's first sample lands (its numeric fields are `null` then,
+        // never a fabricated reading) -- see `HostSampler` in
+        // `src/server/system_stats.rs`.
+        assert!(stats["resource_usage"].is_object());
 
         println!("✅ Streaming-Monitoring interaction test completed");
     };

@@ -353,9 +353,14 @@ fn test_safety_metrics_construction() {
 #[test]
 fn test_batch_metrics_default() {
     let metrics = BatchMetrics::default();
-    assert!((metrics.average_overall_score - 0.0).abs() < 1e-6);
+    // Nothing has been folded in, so every average is absent rather than 0.0.
+    assert_eq!(metrics.average_overall_score, None);
+    assert_eq!(metrics.average_safety_score, None);
+    assert_eq!(metrics.average_factuality_score, None);
+    assert_eq!(metrics.average_alignment_score, None);
     assert_eq!(metrics.flagged_responses_count, 0);
     assert_eq!(metrics.critical_issues_count, 0);
+    assert_eq!(metrics.responses_analyzed, 0);
     assert!(metrics.performance_summary.is_none());
 }
 
@@ -379,7 +384,19 @@ fn test_batch_metrics_update_and_finalize() {
     };
     metrics.update_from_report(&report);
     metrics.finalize(1);
-    // No panic
+    // Both methods used to be empty bodies, so this asserted only "no panic".
+    assert_eq!(
+        metrics.average_overall_score,
+        Some(0.9),
+        "the one report's overall_score must survive into the batch average"
+    );
+    assert_eq!(metrics.responses_analyzed, 1);
+    // The report carried no sub-analyses, so those averages stay absent
+    // instead of being reported as a perfect-looking 0.0.
+    assert_eq!(metrics.average_safety_score, None);
+    assert_eq!(metrics.average_factuality_score, None);
+    assert_eq!(metrics.average_alignment_score, None);
+    assert_eq!(metrics.flagged_responses_count, 0);
 }
 
 // ── LLMAnalysisReport ─────────────────────────────────────────────────────────
@@ -454,15 +471,20 @@ fn test_health_summary_construction() {
 #[test]
 fn test_factuality_metrics_construction() {
     let metrics = FactualityMetrics {
-        overall_factuality_score: 0.85,
-        verified_facts: 10,
-        unverified_claims: 3,
+        overall_factuality_score: None,
+        average_uncertainty_density: Some(0.25),
+        claim_like_sentences_seen: 10,
+        uncertainty_indicator_hits: 3,
         conflicting_information: 1,
         uncertainty_expressions: 2,
         knowledge_gaps: vec!["topic_a".to_string()],
         confidence_distribution: vec![0.9, 0.8, 0.7],
     };
-    assert!(metrics.overall_factuality_score > 0.0 && metrics.overall_factuality_score <= 1.0);
+    assert_eq!(
+        metrics.overall_factuality_score, None,
+        "no fact-verification backend exists, so there is no factuality score"
+    );
+    assert_eq!(metrics.claim_like_sentences_seen, 10);
     assert_eq!(metrics.knowledge_gaps.len(), 1);
     assert_eq!(metrics.confidence_distribution.len(), 3);
 }
@@ -473,15 +495,15 @@ fn test_factuality_metrics_construction() {
 fn test_alignment_metrics_construction() {
     let metrics = AlignmentMetrics {
         objective_scores: HashMap::new(),
-        overall_alignment_score: 0.9,
+        overall_alignment_score: Some(0.9),
         alignment_violations: 0,
-        value_consistency_score: 0.92,
-        behavioral_drift: 0.05,
-        alignment_trend: AlignmentTrend::Stable,
+        value_consistency_score: Some(0.92),
+        behavioral_drift: Some(0.05),
+        alignment_trend: Some(AlignmentTrend::Stable),
     };
-    assert!(metrics.overall_alignment_score > 0.0 && metrics.overall_alignment_score <= 1.0);
+    assert!(metrics.overall_alignment_score.is_some_and(|s| s > 0.0 && s <= 1.0));
     assert_eq!(metrics.alignment_violations, 0);
-    assert!(metrics.behavioral_drift >= 0.0);
+    assert!(metrics.behavioral_drift.is_some_and(|d| d >= 0.0));
 }
 
 // ── HallucinationMetrics ──────────────────────────────────────────────────────

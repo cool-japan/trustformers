@@ -360,13 +360,36 @@ async fn test_optimized_debugging() -> Result<()> {
     // Start the session
     low_overhead_session.start().await?;
 
-    // Check performance metrics
+    // Check performance metrics. These assertions used to read
+    // `assert_eq!(metrics.memory_usage_mb, 0); // Simplified implementation
+    // returns 0`, i.e. they locked in the two hardcoded readings that made
+    // every budget check pass.
     let metrics = low_overhead_session.get_performance_metrics();
-    assert_eq!(metrics.memory_usage_mb, 0); // Simplified implementation returns 0
-    assert_eq!(metrics.cpu_usage_percentage, 0.0); // Simplified implementation returns 0
+    let memory_mb = metrics
+        .memory_usage_mb
+        .expect("sysinfo must list this process on a tier-1 target");
+    assert!(
+        memory_mb > 0,
+        "a live test process occupies more than a megabyte of RSS, got {memory_mb}"
+    );
+    assert_eq!(
+        metrics.cpu_usage_percentage, None,
+        "this optimizer owns no CPU sampler, so it must report absence rather than 0.0"
+    );
 
-    // Check performance limits
-    assert!(low_overhead_session.is_within_performance_limits());
+    // Check performance limits: a real verdict derived from the real reading.
+    // Deliberately NOT `assert!(...)` -- whether this test binary fits in the
+    // session's 100 MB budget depends on the machine, and the point is that the
+    // verdict now follows the measurement instead of being unconditionally
+    // `true`.
+    let within = low_overhead_session
+        .is_within_performance_limits()
+        .expect("at least the memory half of the budget is measurable");
+    assert_eq!(
+        within,
+        memory_mb <= 100,
+        "the verdict must agree with the real {memory_mb} MiB reading against the 100 MiB budget"
+    );
 
     Ok(())
 }

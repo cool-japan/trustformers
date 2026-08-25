@@ -6,7 +6,10 @@ mod tensorrt;
 mod tflite;
 
 pub use coreml::CoreMLParser;
-pub use safetensors::{parse_safetensors, ParsedTensor, SafeTensorsParser};
+pub use safetensors::{
+    looks_like_safetensors, parse_safetensors, safetensors_component_layout, ParsedTensor,
+    SafeTensorsParser,
+};
 pub use tensorrt::TensorRTParser;
 pub use tflite::TensorFlowLiteParser;
 

@@ -6,27 +6,39 @@
 //!
 //! # Honesty notes on what these analyzers actually do
 //!
-//! [`SafetyAnalyzer`] and [`FactualityChecker`] are **rule-based keyword
-//! heuristics** over the literal response text (see
-//! [`SafetyAnalyzer::find_harmful_keywords`] /
-//! [`FactualityChecker::compute_factuality_score`]) -- not trained safety
-//! classifiers or a real knowledge-base fact-check. Every `confidence` value
-//! they report is a real function of a measurable property of the match
-//! (e.g. how many distinct keyword categories fired), never a flat literal.
+//! [`SafetyAnalyzer`] is a **rule-based keyword heuristic** over the literal
+//! response text (see `SafetyAnalyzer::find_harmful_keywords`) -- not a
+//! trained safety classifier. Its `safety_score` and `confidence` are real
+//! functions of measurable properties of the match (which keyword categories
+//! fired, and how many), never flat literals.
 //!
-//! [`AlignmentMonitor`], [`BiasDetector`], [`HallucinationDetector`], and
-//! [`ConversationAnalyzer`]'s per-response scoring functions
-//! (`compute_alignment_score`, `assess_objectives`,
-//! `compute_overall_bias_score`, `analyze_bias_categories`,
-//! `compute_hallucination_probability`, `compute_context_consistency`,
-//! `assess_turn_quality`, `compute_engagement_score`) remain fixed-value
-//! placeholders pending real scoring models -- each is explicitly marked
-//! `NOTE:` at its definition. What every analyzer's [`HealthTracker`]-backed
-//! `get_health_summary` now guarantees, regardless of that, is that
-//! `status`/`trend` are a real, live function of whatever score the
-//! analyzer actually produced -- never the old hardcoded
-//! `HealthStatus::Good` / `"Stable"` that never changed no matter what was
-//! analyzed.
+//! [`FactualityChecker`] does **no fact-checking**: nothing in this crate
+//! queries a knowledge base, so
+//! [`FactualityAnalysisResult::factuality_score`] is always `None`. What it
+//! does report are deterministic properties of the text under names that say
+//! so -- `claim_like_sentences`, `uncertainty_indicator_hits` and their ratio
+//! [`FactualityAnalysisResult::uncertainty_density`].
+//!
+//! [`AlignmentMonitor`], [`BiasDetector`], [`HallucinationDetector`] and
+//! [`ConversationAnalyzer`] have **no per-response scorers at all**. The
+//! fixed-value scoring functions they used to carry were deleted rather than
+//! kept behind a `NOTE:`, and the scores they used to fabricate are now
+//! `Option` fields that stay `None`
+//! ([`AlignmentAnalysisResult::alignment_score`],
+//! [`ConversationAnalysisResult::turn_quality`], and so on). Scoring any of
+//! them for real needs a policy/preference model, which this crate does not
+//! ship.
+//!
+//! Consequently the aggregate views are `Option`s too:
+//! [`AlignmentMetrics::overall_alignment_score`] and
+//! [`FactualityMetrics::overall_factuality_score`] are `None` rather than the
+//! `0.85`/`0.8` they used to be seeded with, and
+//! [`LLMHealthReport::overall_health_score`] averages only the terms that
+//! exist. Every analyzer's [`HealthTracker`]-backed `get_health_summary`
+//! reports `status`/`trend` as a real, live function of whatever score that
+//! analyzer actually produced (`None` / `"Unknown (insufficient history)"`
+//! when it produced none) -- never the old hardcoded `HealthStatus::Good` /
+//! `"Stable"`.
 // reason: debug/profiling scaffolding — structs are constructed and their fields/methods
 // are retained for the data model, serialization completeness, and future consumers that
 // do not yet read every member. Consolidated from many item-level #[allow(dead_code)].
@@ -154,9 +166,19 @@ pub struct FactualityChecker {
 /// Metrics for tracking factual accuracy
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactualityMetrics {
-    pub overall_factuality_score: f32,
-    pub verified_facts: usize,
-    pub unverified_claims: usize,
+    /// Running mean of the per-response factuality scores. Always `None`
+    /// while [`FactualityAnalysisResult::factuality_score`] is `None`; it used
+    /// to be seeded at `0.8` before a single response had been checked.
+    pub overall_factuality_score: Option<f32>,
+    /// Running mean of [`FactualityAnalysisResult::uncertainty_density`] over
+    /// the responses that had at least one claim-like sentence.
+    pub average_uncertainty_density: Option<f32>,
+    /// Total claim-like sentences seen across all checked responses.
+    /// Previously called `verified_facts`; nothing verifies them.
+    pub claim_like_sentences_seen: usize,
+    /// Total uncertainty-indicator occurrences seen across all checked
+    /// responses. Previously called `unverified_claims`.
+    pub uncertainty_indicator_hits: usize,
     pub conflicting_information: usize,
     pub uncertainty_expressions: usize,
     pub knowledge_gaps: Vec<String>,
@@ -168,7 +190,6 @@ pub struct FactualityMetrics {
 pub struct AlignmentMonitor {
     alignment_objectives: Vec<AlignmentObjective>,
     alignment_metrics: AlignmentMetrics,
-    value_alignment_score: f32,
     health: HealthTracker,
 }
 
@@ -189,11 +210,22 @@ pub enum AlignmentObjective {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlignmentMetrics {
     pub objective_scores: HashMap<AlignmentObjective, f32>,
-    pub overall_alignment_score: f32,
+    /// Running aggregate alignment score, or `None` while nothing has produced
+    /// one. [`AlignmentMonitor::check_alignment`] cannot score alignment (no
+    /// policy/preference model ships with this crate), so in practice this
+    /// stays `None`. It used to be seeded to `0.85` at construction and never
+    /// updated, which made every consumer -- including the LLM health report
+    /// and its critical-issue thresholds -- read a constant as a measurement.
+    pub overall_alignment_score: Option<f32>,
     pub alignment_violations: usize,
-    pub value_consistency_score: f32,
-    pub behavioral_drift: f32,
-    pub alignment_trend: AlignmentTrend,
+    /// `None` for the same reason as [`Self::overall_alignment_score`]
+    /// (previously seeded to `0.9`).
+    pub value_consistency_score: Option<f32>,
+    /// `None` for the same reason (previously seeded to `0.1`).
+    pub behavioral_drift: Option<f32>,
+    /// `None` until at least two real alignment scores exist to compare
+    /// (previously seeded to [`AlignmentTrend::Stable`]).
+    pub alignment_trend: Option<AlignmentTrend>,
 }
 
 /// Trend in alignment scores over time
@@ -541,8 +573,11 @@ impl LLMDebugger {
             weight_sum += 0.3;
         }
 
-        if let Some(f) = factuality {
-            total_score += f.factuality_score * 0.3;
+        // Same rule as the alignment term below: only a real factuality score
+        // contributes. `FactualityChecker` currently never produces one, so
+        // this term drops out rather than folding in a stand-in.
+        if let Some(score) = factuality.as_ref().and_then(|f| f.factuality_score) {
+            total_score += score * 0.3;
             weight_sum += 0.3;
         }
 
@@ -577,8 +612,8 @@ impl LLMDebugger {
             }
         }
 
-        if let Some(f) = factuality {
-            if f.factuality_score < self.config.factuality_threshold {
+        if let Some(score) = factuality.as_ref().and_then(|f| f.factuality_score) {
+            if score < self.config.factuality_threshold {
                 recommendations
                     .push("Verify factual claims and consider knowledge base updates".to_string());
             }
@@ -595,19 +630,29 @@ impl LLMDebugger {
         recommendations
     }
 
-    /// Compute overall health score
-    /// Unweighted mean of the three analyzer-level aggregate scores.
+    /// Unweighted mean of the analyzer-level aggregate scores that actually
+    /// exist, or `None` when none of them does.
     ///
-    /// Each term is the analyzer's own running average, so this is only as
-    /// meaningful as the analyzers feeding it: `overall_alignment_score` is
-    /// never updated by [`AlignmentMonitor::check_alignment`] (no alignment
-    /// scorer exists), so it contributes whatever a caller last set on
-    /// `alignment_metrics`.
-    fn compute_overall_health(&self) -> f32 {
-        (self.safety_analyzer.safety_metrics.overall_safety_score
-            + self.factuality_checker.factuality_metrics.overall_factuality_score
-            + self.alignment_monitor.alignment_metrics.overall_alignment_score)
-            / 3.0
+    /// The previous version summed all three terms and divided by three
+    /// unconditionally. Two of those terms were not measurements:
+    /// `overall_alignment_score` was seeded to `0.85` and never updated (no
+    /// alignment scorer exists), and `overall_factuality_score` was seeded to
+    /// `0.8`. A caller therefore got a health score that was mostly two
+    /// constants no matter what had been analysed. Both are now `Option`s, and
+    /// an absent term is excluded from the mean instead of contributing a
+    /// stand-in value.
+    fn compute_overall_health(&self) -> Option<f32> {
+        let terms = [
+            Some(self.safety_analyzer.safety_metrics.overall_safety_score),
+            self.factuality_checker.factuality_metrics.overall_factuality_score,
+            self.alignment_monitor.alignment_metrics.overall_alignment_score,
+        ];
+        let present: Vec<f32> = terms.into_iter().flatten().collect();
+        if present.is_empty() {
+            None
+        } else {
+            Some(present.iter().sum::<f32>() / present.len() as f32)
+        }
     }
 
     /// Identify critical issues requiring immediate attention
@@ -624,8 +669,15 @@ impl LLMDebugger {
             });
         }
 
-        // Check alignment issues
-        if self.alignment_monitor.alignment_metrics.overall_alignment_score < 0.6 {
+        // Check alignment issues. Only a real score can raise this: the
+        // threshold used to be compared against a constant seeded at `0.85`,
+        // so it could never fire.
+        if self
+            .alignment_monitor
+            .alignment_metrics
+            .overall_alignment_score
+            .is_some_and(|score| score < 0.6)
+        {
             issues.push(CriticalIssue {
                 category: IssueCategory::Alignment,
                 severity: IssueSeverity::High,
@@ -684,30 +736,124 @@ pub struct BatchLLMAnalysisReport {
     pub analysis_timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+/// Running sum/count pair backing one of [`BatchMetrics`]' averages.
+///
+/// Kept per metric rather than per batch because a response may carry some
+/// sub-analyses and not others: averaging over the nominal batch size would
+/// silently divide a partial sum by a larger denominator.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct MeanAccumulator {
+    sum: f64,
+    count: usize,
+}
+
+impl MeanAccumulator {
+    fn push(&mut self, value: f32) {
+        self.sum += f64::from(value);
+        self.count += 1;
+    }
+
+    /// Mean of everything pushed so far, or `None` when nothing was.
+    fn mean(&self) -> Option<f32> {
+        if self.count == 0 {
+            None
+        } else {
+            Some((self.sum / self.count as f64) as f32)
+        }
+    }
+}
+
+/// Aggregate view of one [`LLMDebugger::analyze_batch`] run.
+///
+/// Every average is `Some` only if at least one analysed response actually
+/// carried the sub-analysis it summarises; a batch in which nothing produced
+/// (say) a safety analysis reports `average_safety_score: None` rather than
+/// `0.0`. Both `update_from_report` and `finalize` used to be empty bodies, so
+/// every field of every batch report published its `Default`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BatchMetrics {
-    pub average_overall_score: f32,
-    pub average_safety_score: f32,
-    pub average_factuality_score: f32,
-    pub average_alignment_score: f32,
+    /// Mean of every analysed response's `overall_score`.
+    pub average_overall_score: Option<f32>,
+    /// Mean `safety_score` over the responses that carried a safety analysis.
+    pub average_safety_score: Option<f32>,
+    /// Mean `factuality_score` over the responses that carried one. Currently
+    /// always `None`, because [`FactualityChecker`] has no fact-verification
+    /// backend and therefore never produces a factuality score -- see
+    /// [`FactualityAnalysisResult::factuality_score`].
+    pub average_factuality_score: Option<f32>,
+    /// Mean `alignment_score` over the responses that carried one. Currently
+    /// always `None` for the same class of reason -- see
+    /// [`AlignmentAnalysisResult::alignment_score`].
+    pub average_alignment_score: Option<f32>,
+    /// Number of responses whose safety analysis flagged content or detected a
+    /// harm category.
     pub flagged_responses_count: usize,
+    /// Number of responses whose safety analysis rated the risk
+    /// [`RiskLevel::Critical`].
     pub critical_issues_count: usize,
+    /// Number of responses folded in, set by [`Self::finalize`].
+    pub responses_analyzed: usize,
     pub performance_summary: Option<PerformanceAnalysisResult>,
+    #[serde(skip)]
+    overall_acc: MeanAccumulator,
+    #[serde(skip)]
+    safety_acc: MeanAccumulator,
+    #[serde(skip)]
+    factuality_acc: MeanAccumulator,
+    #[serde(skip)]
+    alignment_acc: MeanAccumulator,
 }
 
 impl BatchMetrics {
-    pub fn update_from_report(&mut self, _report: &LLMAnalysisReport) {
-        // Implementation would accumulate metrics from individual reports
+    /// Fold one per-response report into the running accumulators.
+    ///
+    /// Only sub-analyses that are actually present contribute; a `None`
+    /// sub-analysis (or a `None` score inside a present one) is skipped rather
+    /// than counted as a zero.
+    pub fn update_from_report(&mut self, report: &LLMAnalysisReport) {
+        self.overall_acc.push(report.overall_score);
+
+        if let Some(safety) = report.safety_analysis.as_ref() {
+            self.safety_acc.push(safety.safety_score);
+            if !safety.flagged_content.is_empty() || !safety.detected_harms.is_empty() {
+                self.flagged_responses_count += 1;
+            }
+            if safety.risk_level == RiskLevel::Critical {
+                self.critical_issues_count += 1;
+            }
+        }
+
+        if let Some(score) = report.factuality_analysis.as_ref().and_then(|f| f.factuality_score) {
+            self.factuality_acc.push(score);
+        }
+
+        if let Some(score) = report.alignment_analysis.as_ref().and_then(|a| a.alignment_score) {
+            self.alignment_acc.push(score);
+        }
+
+        if let Some(performance) = report.performance_analysis.as_ref() {
+            self.performance_summary = Some(performance.clone());
+        }
     }
 
-    pub fn finalize(&mut self, _batch_size: usize) {
-        // Implementation would compute final averages
+    /// Publish the averages computed from everything folded in so far.
+    ///
+    /// `batch_size` is recorded as [`Self::responses_analyzed`]; it is
+    /// deliberately *not* used as the divisor -- see `MeanAccumulator`.
+    pub fn finalize(&mut self, batch_size: usize) {
+        self.responses_analyzed = batch_size;
+        self.average_overall_score = self.overall_acc.mean();
+        self.average_safety_score = self.safety_acc.mean();
+        self.average_factuality_score = self.factuality_acc.mean();
+        self.average_alignment_score = self.alignment_acc.mean();
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMHealthReport {
-    pub overall_health_score: f32,
+    /// Mean of the analyzer aggregate scores that exist; `None` when none of
+    /// them has a real value yet. See `LLMDebugger::compute_overall_health`.
+    pub overall_health_score: Option<f32>,
     pub safety_health: HealthSummary,
     pub factuality_health: HealthSummary,
     pub alignment_health: HealthSummary,
@@ -723,7 +869,7 @@ pub struct LLMHealthReport {
 pub struct HealthSummary {
     /// Mean of the analyzer's recorded scores, or `None` when it has recorded
     /// none -- either because nothing has been analysed yet, or because the
-    /// analyzer has no scorer at all (see [`HealthTracker::recent_scores`]).
+    /// analyzer has no scorer at all (see `HealthTracker::recent_scores`).
     pub score: Option<f32>,
     /// Status derived from [`Self::score`]; `None` whenever the score is.
     pub status: Option<HealthStatus>,
@@ -880,9 +1026,29 @@ pub struct SafetyAnalysisResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactualityAnalysisResult {
-    pub factuality_score: f32,
-    pub verified_claims: usize,
-    pub unverified_claims: usize,
+    /// How factually correct the response is.
+    ///
+    /// Always `None`: deciding that requires checking claims against a
+    /// knowledge base, and this crate ships none (`fact_databases` names
+    /// "wikipedia"/"wikidata" but nothing queries them). It used to be a
+    /// two-valued ladder -- `0.9` if the response contained the literal
+    /// substring "fact", else `0.7`, docked 0.05 per uncertainty word -- which
+    /// measured nothing about the response's actual factual accuracy.
+    pub factuality_score: Option<f32>,
+    /// Number of claim-like sentences found: `.`-separated segments longer
+    /// than 10 characters. Nothing verifies them, which is why this is no
+    /// longer called `verified_claims`.
+    pub claim_like_sentences: usize,
+    /// Total occurrences of an uncertainty indicator
+    /// ("might"/"possibly"/"unclear"/"uncertain") in the response. Previously
+    /// called `unverified_claims`, which it never counted.
+    pub uncertainty_indicator_hits: usize,
+    /// Fraction of [`Self::claim_like_sentences`] that contain at least one
+    /// uncertainty indicator -- a real, reproducible property of the text
+    /// (`None` when the response has no claim-like sentence to divide by).
+    /// This is the honest signal that the old `factuality_score` was dressing
+    /// up as fact-checking.
+    pub uncertainty_density: Option<f32>,
     pub confidence_scores: Vec<f32>,
     pub knowledge_gaps: Vec<String>,
 }
@@ -1106,7 +1272,7 @@ impl SafetyAnalyzer {
         }
     }
 
-    /// Real health summary derived from [`Self::health`]'s running history
+    /// Real health summary derived from `Self::health`'s running history
     /// of [`Self::analyze_safety`] calls -- `status` and `trend` used to be
     /// hardcoded (`trend` via a `safety_trend` field that was set once at
     /// construction and never updated).
@@ -1130,9 +1296,10 @@ impl FactualityChecker {
                 .map(|s| s.to_string())
                 .collect(),
             factuality_metrics: FactualityMetrics {
-                overall_factuality_score: 0.8,
-                verified_facts: 0,
-                unverified_claims: 0,
+                overall_factuality_score: None,
+                average_uncertainty_density: None,
+                claim_like_sentences_seen: 0,
+                uncertainty_indicator_hits: 0,
                 conflicting_information: 0,
                 uncertainty_expressions: 0,
                 knowledge_gaps: vec![],
@@ -1142,28 +1309,37 @@ impl FactualityChecker {
         }
     }
 
+    /// Measure what is measurable about a response's factual standing.
+    ///
+    /// No claim is verified against anything, so `factuality_score` is an
+    /// honest `None`. What *is* computed -- claim-like sentence count,
+    /// uncertainty-indicator hits, and their ratio -- are deterministic
+    /// properties of the literal text and are reported under names that say so.
     pub async fn check_factuality(
         &mut self,
         response: &str,
         _context: Option<&[String]>,
     ) -> Result<FactualityAnalysisResult> {
-        let factuality_score = self.compute_factuality_score(response);
-        let verified_claims = self.count_verified_claims(response);
-        let unverified_claims = self.count_unverified_claims(response);
+        let claim_like_sentences = self.count_claim_like_sentences(response);
+        let uncertainty_indicator_hits = self.count_uncertainty_indicators(response);
+        let uncertainty_density = self.compute_uncertainty_density(response);
 
-        self.factuality_metrics.verified_facts += verified_claims;
-        self.factuality_metrics.unverified_claims += unverified_claims;
-        // Real running history feeds `overall_factuality_score`, which used
-        // to be frozen at its `new()` default (0.8) forever.
-        self.health.record(factuality_score);
-        if let Some(average) = self.health.average_score() {
-            self.factuality_metrics.overall_factuality_score = average;
+        self.factuality_metrics.claim_like_sentences_seen += claim_like_sentences;
+        self.factuality_metrics.uncertainty_indicator_hits += uncertainty_indicator_hits;
+        // The health window tracks the one real per-response measurement this
+        // checker produces. `overall_factuality_score` stays `None` because no
+        // factuality score is produced at all -- it used to be frozen at its
+        // `new()` default (0.8), then briefly fed by the substring ladder.
+        if let Some(density) = uncertainty_density {
+            self.health.record(density);
+            self.factuality_metrics.average_uncertainty_density = self.health.average_score();
         }
 
         Ok(FactualityAnalysisResult {
-            factuality_score,
-            verified_claims,
-            unverified_claims,
+            factuality_score: None,
+            claim_like_sentences,
+            uncertainty_indicator_hits,
+            uncertainty_density,
             // One real per-claim confidence value (see
             // `compute_claim_confidence_scores`), not the old fixed
             // 3-element `[0.8, 0.7, 0.9]` "Mock scores" regardless of how
@@ -1175,37 +1351,58 @@ impl FactualityChecker {
         })
     }
 
-    /// Rule-based heuristic (see module docs): docks the base score for
-    /// each uncertainty-indicator occurrence found, rather than the old
-    /// two-way `contains("fact")` switch that ignored uncertainty entirely.
-    fn compute_factuality_score(&self, response: &str) -> f32 {
-        let uncertainty_hits = self.count_unverified_claims(response);
-        let base: f32 = if response.contains("fact") { 0.9 } else { 0.7 };
-        (base - 0.05 * uncertainty_hits as f32).max(0.1)
+    /// Fraction of claim-like sentences carrying at least one uncertainty
+    /// indicator; `None` when there is no claim-like sentence to divide by.
+    ///
+    /// This replaces `compute_factuality_score`, which returned `0.9` when the
+    /// response contained the literal substring "fact" and `0.7` otherwise --
+    /// a two-valued switch on an English word, published as a factuality
+    /// measurement and averaged into the LLM health report.
+    fn compute_uncertainty_density(&self, response: &str) -> Option<f32> {
+        let claims: Vec<&str> = Self::claim_like_sentences(response).collect();
+        if claims.is_empty() {
+            return None;
+        }
+        let uncertain = claims
+            .iter()
+            .filter(|claim| {
+                let lower = claim.to_lowercase();
+                self.uncertainty_indicators.iter().any(|ind| lower.contains(ind.as_str()))
+            })
+            .count();
+        Some(uncertain as f32 / claims.len() as f32)
     }
 
-    fn count_verified_claims(&self, response: &str) -> usize {
-        // Simplified counting - would extract and verify actual claims
-        response.split('.').filter(|s| s.len() > 10).count()
+    /// The `.`-separated segments longer than 10 characters that the rest of
+    /// this checker treats as "a claim". Shared so the count, the confidence
+    /// list and the density can never disagree about what a claim is.
+    fn claim_like_sentences(response: &str) -> impl Iterator<Item = &str> {
+        response.split('.').filter(|s| s.len() > 10)
     }
 
-    fn count_unverified_claims(&self, response: &str) -> usize {
-        // Simplified counting - would identify unverifiable claims
+    /// Count of [`Self::claim_like_sentences`]. Named for what it does: it was
+    /// `count_verified_claims`, and nothing here verifies a claim.
+    fn count_claim_like_sentences(&self, response: &str) -> usize {
+        Self::claim_like_sentences(response).count()
+    }
+
+    /// Total occurrences of any configured uncertainty indicator. It was
+    /// `count_unverified_claims`, which is not what it counts.
+    fn count_uncertainty_indicators(&self, response: &str) -> usize {
         self.uncertainty_indicators
             .iter()
             .map(|indicator| response.matches(indicator).count())
             .sum()
     }
 
-    /// One real confidence value per sentence [`Self::count_verified_claims`]
-    /// treats as a "claim" (same `split('.')` + length-10 filter): lower for
+    /// One real confidence value per sentence
+    /// [`Self::count_claim_like_sentences`] treats as a "claim" (same
+    /// [`Self::claim_like_sentences`] filter): lower for
     /// sentences that also contain an uncertainty indicator, higher for
-    /// those that don't. Always exactly as long as `verified_claims` --
+    /// those that don't. Always exactly as long as `claim_like_sentences` --
     /// never the old fixed 3-element `[0.8, 0.7, 0.9]`.
     fn compute_claim_confidence_scores(&self, response: &str) -> Vec<f32> {
-        response
-            .split('.')
-            .filter(|claim| claim.len() > 10)
+        Self::claim_like_sentences(response)
             .map(|claim| {
                 let lower = claim.to_lowercase();
                 let has_uncertainty =
@@ -1234,7 +1431,7 @@ impl FactualityChecker {
             .collect()
     }
 
-    /// Real health summary derived from [`Self::health`]'s running
+    /// Real health summary derived from `Self::health`'s running
     /// history -- `status`/`trend` used to be hardcoded to
     /// `HealthStatus::Good` / `"Stable"` regardless of any actual score.
     pub fn get_health_summary(&self) -> HealthSummary {
@@ -1259,13 +1456,12 @@ impl AlignmentMonitor {
             ],
             alignment_metrics: AlignmentMetrics {
                 objective_scores: HashMap::new(),
-                overall_alignment_score: 0.85,
+                overall_alignment_score: None,
                 alignment_violations: 0,
-                value_consistency_score: 0.9,
-                behavioral_drift: 0.1,
-                alignment_trend: AlignmentTrend::Stable,
+                value_consistency_score: None,
+                behavioral_drift: None,
+                alignment_trend: None,
             },
-            value_alignment_score: 0.85,
             health: HealthTracker::new(),
         }
     }
@@ -1289,7 +1485,7 @@ impl AlignmentMonitor {
         })
     }
 
-    /// Real health summary derived from [`Self::health`]'s running
+    /// Real health summary derived from `Self::health`'s running
     /// history -- see [`SafetyAnalyzer::get_health_summary`].
     pub fn get_health_summary(&self) -> HealthSummary {
         HealthSummary {
@@ -1418,7 +1614,7 @@ impl BiasDetector {
         })
     }
 
-    /// Real health summary derived from [`Self::health`]'s running
+    /// Real health summary derived from `Self::health`'s running
     /// history -- see [`SafetyAnalyzer::get_health_summary`].
     pub fn get_health_summary(&self) -> HealthSummary {
         HealthSummary {
@@ -1505,7 +1701,7 @@ impl LLMPerformanceProfiler {
         })
     }
 
-    /// Real health summary derived from [`Self::health`]'s running
+    /// Real health summary derived from `Self::health`'s running
     /// history -- see [`SafetyAnalyzer::get_health_summary`].
     pub fn get_health_summary(&self) -> HealthSummary {
         HealthSummary {
@@ -1560,7 +1756,7 @@ impl ConversationAnalyzer {
         })
     }
 
-    /// Real health summary derived from [`Self::health`]'s running
+    /// Real health summary derived from `Self::health`'s running
     /// history -- see [`SafetyAnalyzer::get_health_summary`].
     pub fn get_health_summary(&self) -> HealthSummary {
         HealthSummary {

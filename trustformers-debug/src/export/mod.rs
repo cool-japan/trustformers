@@ -2,9 +2,9 @@
 //!
 //! # Modules
 //!
-//! - [`perfetto`] — Chrome/Perfetto trace-event JSON format.
-//! - [`tracy`] — Tracy offline CSV format.
-//! - [`unified`] — Unified exporter, `CsvExporter`, `JsonExporter`, and shared
+//! - `perfetto` — Chrome/Perfetto trace-event JSON format.
+//! - `tracy` — Tracy offline CSV format.
+//! - `unified` — Unified exporter, `CsvExporter`, `JsonExporter`, and shared
 //!   types (`TimingEvent`, `ExportFormat`, `ExportConfig`, `ProfilingTrace`).
 
 pub mod perfetto;

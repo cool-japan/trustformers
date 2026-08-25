@@ -108,7 +108,7 @@ fn set_memory(analyzer: &mut ComputationGraphAnalyzer, graph_id: Uuid, node_id: 
         .nodes
         .get_mut(node_id)
         .unwrap()
-        .memory_usage = bytes;
+        .memory_usage = Some(bytes);
 }
 
 fn set_flops(analyzer: &mut ComputationGraphAnalyzer, graph_id: Uuid, node_id: &str, flops: u64) {
@@ -119,7 +119,7 @@ fn set_flops(analyzer: &mut ComputationGraphAnalyzer, graph_id: Uuid, node_id: &
         .nodes
         .get_mut(node_id)
         .unwrap()
-        .flop_count = flops;
+        .flop_count = Some(flops);
 }
 
 fn set_exec_time(analyzer: &mut ComputationGraphAnalyzer, graph_id: Uuid, node_id: &str, us: u64) {
@@ -247,8 +247,8 @@ fn test_peak_memory_usage_preserves_leaf_nodes_even_as_a_dependency() {
                 operation_type: OperationType::Custom("X".to_string()),
                 input_shapes: vec![],
                 output_shapes: vec![],
-                flop_count: 0,
-                memory_usage: mem,
+                flop_count: Some(0),
+                memory_usage: Some(mem),
                 execution_time_us: None,
                 parameter_count: None,
                 topo_order: Some(topo),
@@ -687,8 +687,8 @@ fn test_memory_reuse_opportunity_never_includes_leaf_nodes() {
                 operation_type: OperationType::Custom("X".to_string()),
                 input_shapes: vec![],
                 output_shapes: vec![],
-                flop_count: 0,
-                memory_usage: mem,
+                flop_count: Some(0),
+                memory_usage: Some(mem),
                 execution_time_us: None,
                 parameter_count: None,
                 topo_order: Some(topo),
@@ -768,4 +768,118 @@ fn test_variable_lifetime_death_node_is_real_last_consumer_not_hashmap_order() {
     let mut usage = a_lifetime.usage_nodes.clone();
     usage.sort();
     assert_eq!(usage, vec!["b".to_string(), "c".to_string()]);
+}
+
+// ── Wave 6d: shape-driven estimates ──────────────────────────────────────────
+
+/// `create_graph` has no shapes to work with, so every shape-derived estimate
+/// must be absent. It used to publish `1_000_000` FLOPs for every MatMul,
+/// `1_024` bytes for every node and `Some(1_000_000)` parameters -- constants
+/// that no caller could distinguish from a measurement.
+#[test]
+fn test_create_graph_without_shapes_reports_absent_estimates() {
+    let mut analyzer = ComputationGraphAnalyzer::default();
+    let graph_id = analyzer
+        .create_graph(
+            "shapeless".to_string(),
+            vec![
+                ("x".to_string(), OperationType::MatMul, vec![]),
+                ("y".to_string(), OperationType::ReLU, vec!["x".to_string()]),
+            ],
+        )
+        .expect("graph creation should succeed");
+
+    let graph = analyzer.graphs.get(&graph_id).expect("graph exists");
+    for node in graph.nodes.values() {
+        assert_eq!(node.flop_count, None, "node {} FLOPs", node.id);
+        assert_eq!(node.memory_usage, None, "node {} memory", node.id);
+        assert_eq!(node.parameter_count, None, "node {} parameters", node.id);
+    }
+    assert_eq!(graph.metadata.estimated_flops, 0);
+    assert_eq!(graph.metadata.estimated_memory_usage, 0);
+}
+
+/// With real shapes the estimates are real arithmetic on those shapes.
+#[test]
+fn test_create_graph_with_shapes_computes_real_estimates() {
+    let mut analyzer = ComputationGraphAnalyzer::default();
+    let graph_id = analyzer
+        .create_graph_with_shapes(
+            "shaped".to_string(),
+            vec![
+                OperationSpec {
+                    node_id: "proj".to_string(),
+                    operation_type: OperationType::MatMul,
+                    dependencies: vec![],
+                    // [batch=8, in=16] x [in=16, out=32]
+                    input_shapes: vec![vec![8, 16], vec![16, 32]],
+                    output_shapes: vec![vec![8, 32]],
+                },
+                OperationSpec {
+                    node_id: "act".to_string(),
+                    operation_type: OperationType::ReLU,
+                    dependencies: vec!["proj".to_string()],
+                    input_shapes: vec![vec![8, 32]],
+                    output_shapes: vec![vec![8, 32]],
+                },
+                OperationSpec {
+                    node_id: "norm".to_string(),
+                    operation_type: OperationType::LayerNorm,
+                    dependencies: vec!["act".to_string()],
+                    input_shapes: vec![vec![8, 32]],
+                    output_shapes: vec![vec![8, 32]],
+                },
+            ],
+        )
+        .expect("graph creation should succeed");
+
+    let graph = analyzer.graphs.get(&graph_id).expect("graph exists");
+    let proj = graph.nodes.get("proj").expect("node exists");
+    assert_eq!(proj.flop_count, Some(2 * 8 * 16 * 32), "2*m*k*n");
+    assert_eq!(
+        proj.memory_usage,
+        Some((8 * 16 + 16 * 32) as u64 * 4),
+        "both operands, 4 bytes per f32 element"
+    );
+    assert_eq!(
+        proj.parameter_count,
+        Some(16 * 32),
+        "the weight matrix's elements"
+    );
+
+    let act = graph.nodes.get("act").expect("node exists");
+    assert_eq!(act.flop_count, Some(8 * 32));
+    assert_eq!(act.memory_usage, Some(8 * 32 * 4));
+    assert_eq!(act.parameter_count, None, "ReLU learns nothing");
+
+    let norm = graph.nodes.get("norm").expect("node exists");
+    assert_eq!(norm.flop_count, Some(8 * 32 * 5));
+    assert_eq!(
+        norm.parameter_count,
+        Some(2 * 32),
+        "one scale and one shift per feature"
+    );
+
+    // Two different MatMul sizes must not produce the same estimate, which the
+    // old constant fallback guaranteed they would.
+    let mut other = ComputationGraphAnalyzer::default();
+    let other_id = other
+        .create_graph_with_shapes(
+            "bigger".to_string(),
+            vec![OperationSpec {
+                node_id: "proj".to_string(),
+                operation_type: OperationType::MatMul,
+                dependencies: vec![],
+                input_shapes: vec![vec![8, 16], vec![16, 64]],
+                output_shapes: vec![vec![8, 64]],
+            }],
+        )
+        .expect("graph creation should succeed");
+    let bigger = other
+        .graphs
+        .get(&other_id)
+        .and_then(|g| g.nodes.get("proj"))
+        .expect("node exists");
+    assert_ne!(bigger.flop_count, proj.flop_count);
+    assert_ne!(bigger.parameter_count, proj.parameter_count);
 }

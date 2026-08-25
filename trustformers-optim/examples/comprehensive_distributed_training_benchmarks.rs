@@ -172,8 +172,36 @@ impl BenchmarkSuite {
     fn analyze_scaling_efficiency(&mut self) -> Result<()> {
         if let Some(baseline) = self.results.scaling_results.first() {
             let baseline_throughput = baseline.average_throughput;
+            // `average_throughput` comes from real GPU telemetry
+            // (`DistributedTrainingStats::average_throughput`); in an
+            // environment with none (no GPU hardware) that reading is
+            // honestly `0.0`, which would turn a naive `actual/baseline`
+            // ratio into `0.0/0.0 = NaN` (or `x/0.0 = inf` once real
+            // throughput but a zero baseline). Neither is a speedup
+            // measurement, so this prints and stores an explicit
+            // "unmeasured" state instead of a number that only *looks*
+            // computed. `result.scaling_efficiency` stays at its
+            // constructor default (`0.0`, "not yet computed" -- see
+            // `benchmark_scaling_performance`) rather than being set to a
+            // fabricated ratio.
+            let has_signal = |throughput: f32| throughput.is_finite() && throughput > 0.0;
+            let baseline_has_signal = has_signal(baseline_throughput);
 
             for result in &mut self.results.scaling_results {
+                // Same standard as `baseline_has_signal`: a `0.0` reading in
+                // this no-GPU-hardware environment is `enhanced_distributed_
+                // training.rs`'s honest "nothing to report" floor, not a
+                // measurement of zero throughput, so it must not be treated
+                // as `is_finite()`-but-usable and divided into an
+                // artificial "0.0x speedup (0.0% efficiency)" line.
+                if !baseline_has_signal || !has_signal(result.average_throughput) {
+                    println!(
+                        "   {}-GPU: unmeasured (no real throughput telemetry in this environment)",
+                        result.gpu_count
+                    );
+                    continue;
+                }
+
                 let theoretical_speedup = result.gpu_count as f32;
                 let actual_speedup = result.average_throughput / baseline_throughput;
                 result.scaling_efficiency = actual_speedup / theoretical_speedup;
@@ -339,12 +367,28 @@ impl BenchmarkSuite {
 
         println!("🏆 Optimizer Performance Ranking:");
         for (i, result) in sorted_results.iter().enumerate() {
+            // `final_throughput` is `0.0` (via `unwrap_or(0.0)` over an
+            // empty measurement) and `memory_efficiency` is `NaN` (`0.0/0`
+            // over an empty `memory_usage`) in exactly the same
+            // no-GPU-telemetry environment `analyze_scaling_efficiency`
+            // guards against above -- neither is a real reading, so label
+            // them instead of printing a number that looks measured.
+            let throughput_label = if result.final_throughput > 0.0 {
+                format!("{:.1} samples/sec", result.final_throughput)
+            } else {
+                "unmeasured samples/sec (no throughput telemetry)".to_string()
+            };
+            let memory_label = if result.memory_efficiency.is_finite() {
+                format!("{:.1}% memory", result.memory_efficiency * 100.0)
+            } else {
+                "unmeasured memory (no GPU telemetry in this environment)".to_string()
+            };
             println!(
-                "   {}. {}: {:.1} samples/sec, {:.1}% memory, {:.3} stability",
+                "   {}. {}: {}, {}, {:.3} stability",
                 i + 1,
                 result.optimizer_name,
-                result.final_throughput,
-                result.memory_efficiency * 100.0,
+                throughput_label,
+                memory_label,
                 result.stability_score
             );
         }
@@ -856,6 +900,12 @@ impl BenchmarkSuite {
         let mut scaling_events = Vec::new();
         let mut node_counts = Vec::new();
         let mut cost_metrics = Vec::new();
+        // One real reading per step of what every node reported that step
+        // (`simulated_metrics.gpu_utilization` below is `workload_intensity`
+        // repeated once per provisioned node, so this is exactly what the
+        // `AutoScaler` itself saw) -- a genuine, time-weighted average
+        // utilization over the run, not a fabricated constant.
+        let mut utilization_samples: Vec<f32> = Vec::with_capacity(benchmark_steps);
 
         for step in 1..=benchmark_steps {
             // Simulate varying workload
@@ -870,6 +920,7 @@ impl BenchmarkSuite {
                 bandwidth_utilization: 0.8,
                 step_time: Duration::from_millis((100.0 / workload_intensity) as u64),
             };
+            utilization_samples.push(workload_intensity);
 
             let decision = auto_scaler.update_and_scale(&simulated_metrics)?;
 
@@ -896,6 +947,10 @@ impl BenchmarkSuite {
         let avg_nodes = node_counts.iter().sum::<usize>() as f32 / node_counts.len() as f32;
         let total_cost = cost_metrics.iter().sum::<f32>();
         let scaling_responsiveness = scaling_events.len() as f32 / benchmark_steps as f32;
+        // `benchmark_steps` is the hard-coded loop bound above (50), so this
+        // is never empty; no unmeasured/`Option` case to handle here.
+        let resource_utilization =
+            utilization_samples.iter().sum::<f32>() / utilization_samples.len() as f32;
 
         // Calculate cost efficiency (lower cost per unit performance)
         let cost_efficiency = 1000.0 / (total_cost / benchmark_steps as f32); // samples per dollar
@@ -907,7 +962,7 @@ impl BenchmarkSuite {
             avg_nodes,
             scaling_responsiveness,
             cost_efficiency,
-            resource_utilization: 0.8, // Simplified
+            resource_utilization,
         })
     }
 

@@ -71,6 +71,13 @@ pub struct SparseAttentionConfig {
 
     /// Number of random connections for random sparse attention
     pub random_connections: Option<usize>,
+
+    /// Seed for the [`SparsePattern::Random`] mask's RNG. The same seed
+    /// (with the same query/key lengths, sparsity ratio, and
+    /// `random_connections`) always produces the same mask, so runs stay
+    /// reproducible; a different seed produces a different (still
+    /// genuinely random, not a fixed stripe) mask.
+    pub seed: u64,
 }
 
 /// Sparse attention patterns
@@ -190,6 +197,10 @@ impl Default for SparseAttentionConfig {
             sparsity_ratio: 0.1,
             block_size: Some(64),
             random_connections: Some(32),
+            // A fixed default keeps `SparseAttentionConfig::default()` (and
+            // therefore every mask built from an un-seeded config)
+            // reproducible run to run; set explicitly for a different mask.
+            seed: 0,
         }
     }
 }
